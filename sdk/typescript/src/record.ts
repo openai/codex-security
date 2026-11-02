@@ -4,7 +4,7 @@ import { isBoxedPrimitive, isDate, isProxy } from "node:util/types";
 export function canSnapshotWithoutGetters(
   input: unknown,
   allowSerializerPrototype = false,
-  observe?: (value: object) => void,
+  observe?: (value: object) => boolean | void,
 ): boolean {
   const seen = new Set<object>();
   const pending: unknown[] = [input];
@@ -13,7 +13,7 @@ export function canSnapshotWithoutGetters(
     if (!value || typeof value !== "object" || seen.has(value)) continue;
     seen.add(value);
     if (isProxy(value)) return false;
-    observe?.(value);
+    if (observe?.(value) === false) return false;
     if (isBoxedPrimitive(value) || ArrayBuffer.isView(value) || isDate(value))
       continue;
     const prototype: unknown = Object.getPrototypeOf(value);

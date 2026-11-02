@@ -554,10 +554,17 @@ test("file reader dispatches native lists, selected JSONL and gzip while preserv
         `/${repository}/code-scanning/12/`,
       );
     }
-    await writeFile(file, JSON.stringify([importedAlert(), []]));
+    const badAlert = { ...importedAlert(), repository: "example/other" };
+    await writeFile(file, JSON.stringify([importedAlert(), [], badAlert]));
     const legacyWithMalformedSibling = await readGitHubFindings(file);
     expect(legacyWithMalformedSibling.findings).toHaveLength(1);
-    expect(legacyWithMalformedSibling.excluded).toHaveLength(1);
+    expect(legacyWithMalformedSibling.excluded).toHaveLength(2);
+    expect(legacyWithMalformedSibling.excluded[1]).toEqual({
+      position: 3,
+      source_finding_id: badAlert.url,
+      reason:
+        "GitHub alert URL does not match the selected repository and alert.",
+    });
     for (const invalid of [
       JSON.stringify([alerts[0], importedAlert()]),
       '{"number":1',

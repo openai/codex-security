@@ -39,7 +39,7 @@ import {
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
-import { legacyGitHubFindings } from "./github-findings.js";
+import { previousReaderSelection } from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
@@ -60,10 +60,9 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
-  CloudEvidenceDepthError,
   validateImportRequest,
   validateExternalEvidence,
-  validateExternalEvidenceShape,
+  validatePreviousCloudEvidence,
   validateExternalReport,
   validateImportReceipt,
   validateRepositories,
@@ -459,10 +458,18 @@ export async function prepareNormalizedExternalPublication(
 }
 
 interface PublicationSelection extends ExternalPublicationInput {
-  original?: { parsed: ExternalFindings; identity: unknown };
+  original?: {
+    parsed: ExternalFindings;
+    identity: unknown;
+    wire: string;
+    hasBoxedScalars: boolean;
+  };
+
   potentialIds?: string[];
+  uncertainFindingIds?: string[];
+  knownFindings?: ExternalFindings["findings"];
   unprovenIdPrefixes?: string[];
-  freshLimitError?: Error;
+  freshError?: Error;
 }
 
 function ownData(value: unknown, key: string) {
@@ -485,7 +492,20 @@ function withDataProperty<T extends object>(
 
 // Native cloning discarded enumerable diagnostic fields. Recover its message
 // without reading the caller's stack getter or changing their report.
-function previousDiagnosticInput(input: ExternalFindings): ExternalFindings {
+const nativeDiagnosticPrototypes = new Set<unknown>([
+  Error.prototype,
+  EvalError.prototype,
+  RangeError.prototype,
+  ReferenceError.prototype,
+  SyntaxError.prototype,
+  TypeError.prototype,
+  URIError.prototype,
+]);
+
+function previousDiagnosticInput(
+  input: ExternalFindings,
+  nativeDiagnostics: Map<number, Error>,
+): ExternalFindings {
   const report = ownData(input, "report");
   const errors = ownData(report, "errors");
   if (!isRecord(report) || !Array.isArray(errors) || isProxy(errors))
@@ -500,7 +520,7 @@ function previousDiagnosticInput(input: ExternalFindings): ExternalFindings {
     const cause = Object.getOwnPropertyDescriptor(diagnostic, "cause");
     const name = Object.getOwnPropertyDescriptor(diagnostic, "name");
     if (
-      Object.getPrototypeOf(diagnostic) !== Error.prototype ||
+      !nativeDiagnosticPrototypes.has(Object.getPrototypeOf(diagnostic)) ||
       typeof message !== "string" ||
       (stack?.get && stack.get !== nativeErrorStackGetter) ||
       (name && typeof name.value !== "string") ||
@@ -509,6 +529,7 @@ function previousDiagnosticInput(input: ExternalFindings): ExternalFindings {
           !canSnapshotWithoutGetters(cause.value, true)))
     )
       return input;
+    nativeDiagnostics.set(index, diagnostic);
     (entries ??= Object.getOwnPropertyDescriptors(errors as object))[index] = {
       ...descriptor,
       value: { message },
@@ -524,8 +545,9 @@ function previousDiagnosticInput(input: ExternalFindings): ExternalFindings {
 // invoke caller code too, the original bytes cannot be observed independently.
 function previousNormalizedFindings(
   input: ExternalFindings,
+  nativeDiagnostics: Map<number, Error>,
 ): ExternalFindings | undefined {
-  input = previousDiagnosticInput(input);
+  input = previousDiagnosticInput(input, nativeDiagnostics);
   if (!canSnapshotWithoutGetters(input, true)) return;
   // Object spread skips a hidden report, but explicitly reading it could run a getter.
   const reportField = Object.getOwnPropertyDescriptor(input, "report");
@@ -536,111 +558,134 @@ function previousNormalizedFindings(
   return snapshot;
 }
 
-function normalizedPublicationInput(
-  input: ExternalFindings,
-): PublicationSelection {
-  let original: ExternalFindings | undefined;
-  try {
-    original = previousNormalizedFindings(input);
-  } catch {
-    /* A valid JSON export can contain an uncloneable value. */
-  }
-  let current: ExternalFindings;
-  let freshLimitError: Error | undefined;
-  try {
-    current = snapshotNormalizedFindings(input, undefined, "cloud");
-  } catch (error) {
-    if (!(error instanceof CloudEvidenceDepthError) || !original) throw error;
-    // Serialization stopped before the complete fresh selection was available.
-    // Only an independently validated original can recover an existing approval.
-    freshLimitError = error;
-    current = { read: original.read, findings: [], excluded: [] };
-  }
-  validateExternalReport(current.report);
-  const reader = !freshLimitError
-    ? legacyGitHubFindings(input, current)
-    : undefined;
-  if (reader) original = reader.snapshot;
-  try {
-    if (original) {
-      // The released SDK cloned the report separately, then detached each raw
-      // finding before Cloud validation defaulted its typed evidence in place.
-      for (const finding of original.findings)
-        if (finding.evidence.source_data !== undefined)
-          finding.evidence.source_data = structuredClone(
-            finding.evidence.source_data,
-          );
-      for (const finding of original.findings)
-        finding.evidence = freshLimitError
-          ? validateExternalEvidence(finding.evidence)
-          : validateExternalEvidenceShape(finding.evidence);
-    }
-  } catch {
-    if (freshLimitError) throw freshLimitError;
-    original = undefined;
-  }
-  const identities = new Set<string>();
-  for (const finding of current.findings) {
+function publicationIdentity(parsed: ExternalFindings) {
+  return parsed.report === undefined
+    ? parsed.findings
+    : { findings: parsed.findings, report: reportForJson(parsed.report) };
+}
+
+function validatePublicationFindings(
+  parsed: ExternalFindings,
+  validateEvidence: typeof validateExternalEvidence,
+) {
+  validateExternalReport(parsed.report);
+  const ids = new Set<string>();
+  for (const finding of parsed.findings) {
     const id = finding.source_finding_id;
     if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
       throw new CodexSecurityError(
         "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
       );
-    if (identities.has(id))
+    if (ids.has(id))
       throw new CodexSecurityError(
         `Duplicate source finding id ${JSON.stringify(id)}.`,
       );
-    identities.add(id);
-    try {
-      finding.evidence = validateExternalEvidence(finding.evidence);
-    } catch (error) {
+    ids.add(id);
+    finding.evidence = validateEvidence(finding.evidence);
+  }
+}
+
+function historicalPublication(
+  native: ExternalFindings | undefined,
+): PublicationSelection["original"] {
+  if (!native) return;
+  try {
+    // Older SDKs detached all raw records before Cloud validation added defaults.
+    for (const finding of native.findings)
+      if (finding.evidence.source_data !== undefined)
+        finding.evidence.source_data = structuredClone(
+          finding.evidence.source_data,
+        );
+    validatePublicationFindings(native, validatePreviousCloudEvidence);
+    const identity = publicationIdentity(native);
+    let hasBoxedScalars = false;
+    const wire = canonicalJson(identity, undefined, (value) => {
+      if (!isBoxedPrimitive(value)) return false;
+      hasBoxedScalars = true;
+      return true;
+    });
+    return { parsed: native, identity, wire, hasBoxedScalars };
+  } catch {
+    // The caller may export valid JSON even if the native candidate cannot be
+    // validated or hashed, for example when an unused row property holds a BigInt.
+    return;
+  }
+}
+
+function normalizedPublicationInput(
+  input: ExternalFindings,
+): PublicationSelection {
+  const nativeDiagnostics = new Map<number, Error>();
+  let native: ExternalFindings | undefined;
+  try {
+    native = previousNormalizedFindings(input, nativeDiagnostics);
+  } catch {
+    /* A valid JSON export can contain an uncloneable value. */
+  }
+  let current: ExternalFindings;
+  let freshError: Error | undefined;
+  try {
+    current = snapshotNormalizedFindings(input, undefined, "cloud");
+  } catch (error) {
+    if (!(error instanceof Error) || !native?.findings.length) throw error;
+    freshError = error;
+    current = { read: native.read, findings: [], excluded: [] };
+  }
+  if (native && nativeDiagnostics.size) {
+    const historical = native.report!["errors"] as Error[];
+    const exported = current.report?.["errors"];
+    for (const [index, source] of nativeDiagnostics) {
+      const diagnostic: unknown = Array.isArray(exported) && exported[index];
+      // The released native clone discarded enumerable scanner fields, but its
+      // SDK report retained the error, stack and cause. Use only detached errors
+      // after the fresh export, so an optional capture cannot run a stack hook.
       if (
-        !(error instanceof Error) ||
-        (error.message !== "Evidence exceeds the Cloud limit of 256 KiB." &&
-          error.message !==
-            "Evidence exceeds the Cloud JSON depth limit of 20.") ||
-        !original
-      )
-        throw error;
-      // A previous normalized SDK input can contain a Buffer whose captured
-      // request fits even when the fresh Buffer JSON exceeds the limit.
-      const prior = original.findings.find(
-        (row) => row.source_finding_id === id,
-      );
-      if (!prior || wireJson(prior.evidence) === wireJson(finding.evidence))
-        throw error;
-      try {
-        validateExternalEvidence(prior.evidence);
-      } catch {
-        throw error;
+        !isNativeError(diagnostic) ||
+        Object.getPrototypeOf(diagnostic) !== Object.getPrototypeOf(source) ||
+        diagnostic.message !== historical[index]!.message
+      ) {
+        if (freshError) throw freshError;
+        native = undefined;
+        break;
       }
-      freshLimitError = error;
+      historical[index] = structuredClone(diagnostic);
     }
   }
-  function identityOf(parsed: ExternalFindings) {
-    return parsed.report === undefined
-      ? parsed.findings
-      : {
-          findings: parsed.findings,
-          report: reportForJson(parsed.report),
-        };
+  const reader = freshError
+    ? undefined
+    : previousReaderSelection(input, current);
+  if (reader) native = reader.snapshot;
+  const original = historicalPublication(native);
+  try {
+    validatePublicationFindings(current, validateExternalEvidence);
+  } catch (error) {
+    if (!(error instanceof Error) || !original?.parsed.findings.length)
+      throw error;
+    freshError = error;
   }
-  const identity = identityOf(current);
+  if (freshError) {
+    if (!original) throw freshError;
+    // Only the old selection can be reviewed when fresh validation failed.
+    current = { read: original.parsed.read, findings: [], excluded: [] };
+  }
+  const identity = publicationIdentity(current);
   return {
     current,
     legacy: current,
     currentIdentity: identity,
-    freshLimitError,
     legacyIdentity: identity,
-    ...(original
-      ? { original: { parsed: original, identity: identityOf(original) } }
-      : {}),
+    original,
+    freshError,
     unprovenIdPrefixes: reader?.unprovenIdPrefixes,
+    uncertainFindingIds: reader?.uncertainFindingIds,
+    knownFindings: reader?.knownFindings,
     potentialIds:
       reader?.sourceFindingIds ??
       (original
         ? undefined
-        : current.findings.map((row) => row.source_finding_id)),
+        : (native?.findings ?? current.findings).map(
+            (row) => row.source_finding_id,
+          )),
   };
 }
 
@@ -718,6 +763,7 @@ async function preparePublicationInput(
     !parsed.findings.length &&
     !input.original?.parsed.findings.length &&
     !input.potentialIds?.length &&
+    !input.uncertainFindingIds?.length &&
     !input.unprovenIdPrefixes?.length
   )
     noFindings();
@@ -831,12 +877,8 @@ async function preparePublicationInput(
   const freshKey = scopeKey(currentIdentity, true);
   const original = input.original;
   const originalIdentity = original?.identity ?? currentIdentity;
-  let hasBoxedScalars = false;
-  const originalWire = canonicalJson(originalIdentity, undefined, (value) => {
-    if (!isBoxedPrimitive(value)) return false;
-    hasBoxedScalars = true;
-    return true;
-  });
+  const hasBoxedScalars = original?.hasBoxedScalars ?? false;
+  const originalWire = original?.wire ?? wireJson(currentIdentity);
   const changedCapture = original && originalWire !== wireJson(currentIdentity);
   const originalKey =
     changedCapture || hasBoxedScalars
@@ -877,7 +919,7 @@ async function preparePublicationInput(
       }
     }
   }
-  if (input.freshLimitError && !historicalOnly) throw input.freshLimitError;
+  if (input.freshError && !historicalOnly) throw input.freshError;
   const inputDigest = hash("sha256", wireJson(currentIdentity));
   const legacyInputDigest =
     currentIdentity === legacyIdentity
@@ -1150,19 +1192,33 @@ async function preparePublicationInput(
       ? original?.parsed.findings.map((row) => row.source_finding_id)
       : undefined);
   const unprovenPrefixes = new Set(input.unprovenIdPrefixes);
-  const prefixCandidates = unprovenPrefixes.size
-    ? new Map(parsed.findings.map((row) => [row.source_finding_id, row]))
+  const uncertainIds = new Set(input.uncertainFindingIds);
+  const uncertainMembership =
+    uncertainIds.size > 0 || unprovenPrefixes.size > 0;
+  function uncertainRow({
+    source_finding_id: id,
+  }: ExternalFindings["findings"][number]) {
+    return (
+      uncertainIds.has(id) ||
+      unprovenPrefixes.has(id.replace(/\/[a-f0-9]{64}$/u, "/"))
+    );
+  }
+  // Only admission for uncertain occurrences could differ across the SDKs.
+  const stableRows = uncertainMembership
+    ? (input.knownFindings ?? parsed.findings)
+        .filter((row) => !uncertainRow(row))
+        .map(wireFinding)
     : undefined;
+  let originalInputDigest: string | undefined;
   const cannotCaptureOriginal =
-    !input.original && !!(potentialIds?.length || unprovenPrefixes.size);
+    !input.original && !!(potentialIds?.length || uncertainMembership);
   function potentialOriginal(record: SavedSubmission, fileKey: string) {
     const projection = record.inputProjection;
     if (
       !projection ||
       !/^[a-f0-9]{64}$/u.test(projection.inputDigest) ||
       !/^[a-f0-9]{64}$/u.test(projection.savedEvidenceDigest) ||
-      (projection.identityFormat === 2 &&
-        !(cannotCaptureOriginal && record.wireKey)) ||
+      (projection.identityFormat === 2 && !record.legacyApproval) ||
       record.accountId !== credentials.account_id
     )
       return false;
@@ -1180,18 +1236,31 @@ async function preparePublicationInput(
         if (original && originalWire !== wireJson(rows)) return false;
       }
       if (
-        prefixCandidates &&
-        rows.length &&
-        rows.every((row) => {
-          const id = row.source_finding_id;
-          if (unprovenPrefixes.has(id.replace(/\/[a-f0-9]{64}$/u, "/")))
-            return true;
-          const current = prefixCandidates.get(id);
-          return current && wireJson(row) === wireJson(wireFinding(current));
-        })
-      ) {
-        // An uncertain alert might have changed refs or been excluded entirely.
-        // Its identity can stop a duplicate batch but never authorize replay.
+        original &&
+        !record.wireKey &&
+        fileKey !== (originalKey ?? key) &&
+        fileKey !== originalWireKey &&
+        projection.inputDigest ===
+          (originalInputDigest ??= hash(
+            "sha256",
+            canonicalJson(original.identity),
+          )) &&
+        fileKey !== localeKey(original.parsed.findings) &&
+        projection.savedEvidenceDigest ===
+          hash(
+            "sha256",
+            canonicalJson(original.parsed.findings.map(wireFinding)),
+          ) &&
+        wireJson(rows) === wireJson(original.parsed.findings.map(wireFinding))
+      )
+        return false;
+      if (stableRows) {
+        // A saved subset can belong to this batch only if every proven row
+        // still matches in order. Uncertain occurrences can stop an upload,
+        // but never establish which submission to replay.
+        const stableSaved = rows.filter((row) => !uncertainRow(row));
+        if (!rows.length || wireJson(stableSaved) !== wireJson(stableRows))
+          return false;
         readSaved(record);
         return true;
       }
@@ -1218,7 +1287,7 @@ async function preparePublicationInput(
       readSaved(record);
       return (
         !sameFindingSelection(rows, candidates) ||
-        (input.unprovenIdPrefixes !== undefined && !original) ||
+        cannotCaptureOriginal ||
         rows.every((row, i) => {
           const { source_data: savedData, ...savedFields } = row.evidence;
           const { source_data: selectedData, ...selectedFields } =
@@ -1226,10 +1295,7 @@ async function preparePublicationInput(
           if (wireJson(savedFields) !== wireJson(selectedFields)) return false;
           // Once the original SDK discarded boxed positions, a plain JSON export
           // alone cannot attribute a new numeric spelling to that saved request.
-          return (
-            (potentialIds !== undefined && !original) ||
-            sameNonNumericJson(savedData, selectedData)
-          );
+          return sameNonNumericJson(savedData, selectedData);
         })
       );
     } catch {
@@ -1293,7 +1359,14 @@ async function preparePublicationInput(
         // Some early locale filenames carry no deployment identity. Never guess their target.
         if (record && !record.inputProjection && !legacyKeys.has(fileKey)) {
           try {
-            validateSaved(record, true);
+            // A different locale cannot authorize replay, even when the
+            // original native capture proves these rows were selected.
+            if (
+              !original ||
+              wireJson(submissionFindings(readSaved(record).requests)) !==
+                wireJson(original.parsed.findings.map(wireFinding))
+            )
+              validateSaved(record, true);
             unidentified = true;
           } catch {
             /* Unrelated input. */

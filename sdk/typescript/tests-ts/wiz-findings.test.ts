@@ -1615,20 +1615,32 @@ function legacyCheckpointKey(identity: unknown[]) {
   return hash("sha256", encoded);
 }
 
-test("a normalized Wiz retry reads its acknowledged locale-era receipt before using fresh JSON", async () => {
+test("a normalized Wiz retry requires a known locale to reuse its acknowledged receipt", async () => {
   const f = await previewCheckpointFixture();
-  await writeFile(join(f.directory, localPreviewFilename()), savedPreview);
   const input = await readVendorFindings(f.file);
   const data = input.findings[0]!.evidence.source_data!;
   Object.defineProperty(data, "toJSON", { value: () => ({ ...data, Z: 7 }) });
-  const prepare = () =>
-    prepareNormalizedExternalPublication(input, f.options, {
+  const prepare = (selected = input) =>
+    prepareNormalizedExternalPublication(selected, f.options, {
       ...f.deps,
       environment: {
         ...f.environment,
         CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
       },
     });
+  const early = await prepare();
+  const foreign = join(f.directory, hostedForeignName);
+  await writeFile(foreign, savedPreview);
+  await expect(early.publish()).rejects.toThrow(
+    "original deployment and locale",
+  );
+  await expect(prepare()).rejects.toThrow("original deployment and locale");
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(foreign, "utf8")).toBe(savedPreview);
+  const distinct = await prepare(JSON.parse(JSON.stringify(input)));
+  expect(distinct.preview.resumed).toBe(false);
+
+  await rename(foreign, join(f.directory, localPreviewFilename()));
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect<unknown[]>(retry.preview.requests).toEqual(previewCheckpoint.requests);

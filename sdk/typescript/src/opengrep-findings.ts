@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import {
+  legacySizeOutcome,
   validateExternalEvidenceJson,
   validateExternalReport,
   type ExternalImportTarget,
@@ -18,6 +19,8 @@ import {
   readScannerJson,
   record,
   relativePath,
+  rememberReaderSizeUncertainty,
+  finishReaderSizeSelection,
   requiredText,
   stableId,
 } from "./scanner-import.js";
@@ -198,9 +201,16 @@ export function normalizeOpenGrepFindings(
             .flatMap((observation) => {
               try {
                 const result = structuredClone(observation.parsed.result);
+                // The group adds these same raw bytes when choosing a representative
+                // and deciding which traces fit alongside it.
                 validateExternalEvidenceJson(
                   { source_data: { results: [result] } },
                   target,
+                  0,
+                  (previousBytes, currentBytes) => {
+                    if (previousBytes !== currentBytes)
+                      rememberReaderSizeUncertainty(output, id);
+                  },
                 );
                 observation.parsed.result = result;
                 return [{ observation, key: canonicalJson(result) }];
@@ -226,14 +236,18 @@ export function normalizeOpenGrepFindings(
         if (retained.length === ordered.length) throw error;
         evidence = projectGroup(retained);
       }
+      if (legacySizeOutcome(evidence) === null)
+        rememberReaderSizeUncertainty(output, id);
       output.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
+      if (error instanceof Error && legacySizeOutcome(error) !== undefined)
+        rememberReaderSizeUncertainty(output, id);
       for (const observation of retained)
         exclude(observation.position, id, error);
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
-  return output;
+  return finishReaderSizeSelection(output);
 }
 
 export async function readOpenGrepFindings(

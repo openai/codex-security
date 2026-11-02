@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
-import { CodexSecurityError, errorMessage } from "./errors.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   type ExternalImportTarget,
   validateExternalEvidence,
@@ -8,7 +8,14 @@ import {
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
-import { record, relativePath, requiredText, text } from "./scanner-import.js";
+import {
+  appendReaderFinding,
+  finishReaderSizeSelection,
+  record,
+  relativePath,
+  requiredText,
+  text,
+} from "./scanner-import.js";
 
 export function isGitHubDependabotAlert(
   value: unknown,
@@ -328,22 +335,13 @@ export function normalizeGitHubDependabotAlerts(
       );
     ids.add(sourceId);
     const inputEvidence = evidence(alert, url);
-    try {
+    appendReaderFinding(result, index + 1, sourceId, () => {
       if (target === "cloud" && Buffer.byteLength(sourceId) > 512)
         throw new Error(
           "Source finding ID exceeds the Cloud limit of 512 UTF-8 bytes.",
         );
-      result.findings.push({
-        source_finding_id: sourceId,
-        evidence: validateExternalEvidence(inputEvidence, target),
-      });
-    } catch (error) {
-      result.excluded.push({
-        position: index + 1,
-        source_finding_id: sourceId,
-        reason: errorMessage(error),
-      });
-    }
+      return validateExternalEvidence(inputEvidence, target);
+    });
   }
-  return result;
+  return finishReaderSizeSelection(result);
 }

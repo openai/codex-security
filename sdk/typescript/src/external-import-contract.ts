@@ -337,12 +337,34 @@ export function validateExternalEvidenceFields(
   return result;
 }
 
+// Only a changed admission needs a witness. The detached evidence is still available
+// here when the fresh limit excludes a row that an older reader would have kept.
+const previousSizeAdmissions = new WeakMap<
+  object,
+  ExternalFindingEvidence | null
+>();
+
+export function legacySizeOutcome(value: object) {
+  return previousSizeAdmissions.get(value);
+}
+
 export function validateExternalEvidence(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindingEvidence {
   const result = validateExternalEvidenceFields(input, target);
-  validateExternalEvidenceJson(result, target);
+  let changed = false;
+  try {
+    validateExternalEvidenceJson(result, target, 0, (previous, current) => {
+      changed =
+        previous > CLOUD_EVIDENCE_BYTES !== current > CLOUD_EVIDENCE_BYTES;
+    });
+  } catch (error) {
+    if (changed && error instanceof Error)
+      previousSizeAdmissions.set(error, result);
+    throw error;
+  }
+  if (changed) previousSizeAdmissions.set(result, null);
   return result;
 }
 
@@ -408,11 +430,15 @@ function serializeImportJson(
   });
 }
 
-function* dataValues(value: object): Generator<unknown> {
-  if (isProxy(value)) return;
+function* dataValues(value: object, skipped?: () => void): Generator<unknown> {
+  if (isProxy(value)) {
+    skipped?.();
+    return;
+  }
   for (const key of Object.keys(value)) {
     const field = Object.getOwnPropertyDescriptor(value, key);
     if (field && Object.hasOwn(field, "value")) yield field.value;
+    else skipped?.();
   }
 }
 
@@ -424,6 +450,7 @@ function rawJsonNumbers(
   number: ValidateNumber,
   oldSize = false,
   dataOnly = false,
+  skipped?: () => void,
 ): number {
   const pending: unknown[] = [input];
   const depths: number[] = [0];
@@ -452,10 +479,13 @@ function rawJsonNumbers(
       // On raw GitHub records, the JSON export determines what a wrapper emits.
       if (!dataOnly && isNumberObject(value))
         number(Number.prototype.valueOf.call(value));
-      for (const child of dataOnly ? dataValues(value) : Object.values(value)) {
+      for (const child of dataOnly
+        ? dataValues(value, skipped)
+        : Object.values(value)) {
         if (typeof child === "number") {
           number(child);
-          if (oldSize) adjustment += cloudNumberByteAdjustment(child);
+          if (target === "cloud")
+            adjustment += cloudNumberByteAdjustment(child);
         }
         if (child !== null && typeof child === "object") {
           pending.push(child);
@@ -470,14 +500,15 @@ function rawJsonNumbers(
       }
     } else if (typeof value === "number") {
       number(value);
-      if (oldSize) adjustment += cloudNumberByteAdjustment(value);
+      if (target === "cloud") adjustment += cloudNumberByteAdjustment(value);
     }
   }
   return adjustment;
 }
 
+const CLOUD_EVIDENCE_BYTES = 256 * 1024;
 function checkEvidenceSize(bytes: number): number {
-  if (bytes > 256 * 1024)
+  if (bytes > CLOUD_EVIDENCE_BYTES)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
   return bytes;
 }
@@ -487,9 +518,10 @@ export function validateExternalEvidenceJson(
   input: unknown,
   target: ExternalImportTarget,
   additionalCloudBytes = 0,
+  observe?: (previousBytes: number, currentBytes: number) => void,
 ): number {
   if (target === "local") JSON.stringify(input);
-  rawJsonNumbers(input, target, evidenceNumber);
+  const rawAdjustment = rawJsonNumbers(input, target, evidenceNumber);
   if (target === "local") return 0;
   let adjustment = 0;
   const text = serializeImportJson(
@@ -500,9 +532,28 @@ export function validateExternalEvidenceJson(
     },
     true,
   );
-  return checkEvidenceSize(
-    Buffer.byteLength(text) + adjustment + additionalCloudBytes,
+  const bytes = Buffer.byteLength(text) + additionalCloudBytes;
+  observe?.(bytes + rawAdjustment, bytes + adjustment);
+  return checkEvidenceSize(bytes + adjustment);
+}
+
+/** Reproduce the released SDK's checks on a detached native finding. */
+export function validatePreviousCloudEvidence(
+  input: unknown,
+): ExternalFindingEvidence {
+  const evidence = validateExternalEvidenceFields(input, "cloud");
+  // Older validation counted enumerable primitive numbers, while JSON encoded
+  // the native wrappers. Check depth before serializing a possibly shared graph.
+  const adjustment = rawJsonNumbers(
+    evidence,
+    "cloud",
+    evidenceNumber,
+    true,
+    true,
   );
+  if (!Number.isFinite(adjustment)) throw new CloudEvidenceDepthError();
+  checkEvidenceSize(Buffer.byteLength(JSON.stringify(evidence)) + adjustment);
+  return evidence;
 }
 
 /** Use the array index as toJSON's key, as when saving the supplied GitHub records. */
@@ -510,18 +561,23 @@ export function exportedGitHubRecord(
   value: unknown,
   index: number,
   target: ExternalImportTarget,
+  checkPreviousLocal = false,
 ) {
-  // Only the released Cloud reader validated numeric fields hidden by serializers.
+  // The released readers validated numeric fields hidden by serializers.
   let adjustment = 0;
   let previousInvalid: unknown;
-  if (target === "cloud") {
+  let skippedRawValue = false;
+  if (target === "cloud" || checkPreviousLocal) {
     try {
       adjustment = rawJsonNumbers(
         { source_data: value },
         target,
         evidenceNumber,
+        target === "cloud",
         true,
-        true,
+        () => {
+          skippedRawValue = true;
+        },
       );
     } catch (error) {
       previousInvalid = error;
@@ -545,7 +601,14 @@ export function exportedGitHubRecord(
     Buffer.byteLength(text) -
     Buffer.byteLength(JSON.stringify({ [index]: null })) +
     4;
-  return { record, bytes, adjustment, previousInvalid, invalid };
+  return {
+    record,
+    bytes,
+    adjustment,
+    previousInvalid,
+    skippedRawValue,
+    invalid,
+  };
 }
 
 /** Combine the observed vendor bytes with the old native mapping's typed fields. */

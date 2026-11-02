@@ -68,6 +68,7 @@ import type {
 } from "../src/external-import-models.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
+import { normalizeGitHubDependabotAlerts } from "../src/github-dependabot-findings.js";
 import { githubDependabotAlert } from "./support/github-dependabot-fixtures.js";
 import {
   importedAlert,
@@ -344,6 +345,64 @@ test("a Wiz Raw Event export explains the finding-report path before contacting 
     }),
   ).rejects.toThrow("scan metadata rather than vulnerability records");
   expect(contactedCloud).toBe(false);
+});
+
+test("Dependabot retries the approved subset when a numeric size correction admits another alert", async () => {
+  const f = await fixture();
+  const selection = {
+    ...options,
+    provider: "github" as const,
+    sourceKey: "github.com/example/project/dependabot",
+  };
+  const a = githubDependabotAlert(1);
+  const b = {
+    ...githubDependabotAlert(2),
+    score: new Number(0.00001),
+    pad: "",
+  };
+  const bare = normalizeGitHubDependabotAlerts([b], "cloud").findings[0]!
+    .evidence;
+  b.pad = "x".repeat(256 * 1024 + 1 - Buffer.byteLength(JSON.stringify(bare)));
+  const normalized = normalizeGitHubDependabotAlerts([a, b], "cloud");
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      normalized,
+      selection,
+      releasedDependencies(f),
+    );
+  const fresh = (await prepare()).preview.requests[0]!;
+  expect(fresh.items).toHaveLength(2);
+
+  // Recorded from the released reader when only alert 1 fit its size calculation.
+  const request = {
+    ...fresh,
+    request_id: "95af968c-8f7c-4cb5-a79a-561eb06e39e8",
+    items: fresh.items.slice(0, 1),
+  };
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "bdec6e68ba764e63a60c83e14d7b691b03332c7af1c4ac031c2b5ca1cb92c69f",
+  );
+  const directory = join(f.root, "state", "external-finding-publications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const digest =
+    "50c57ce23ee63e16bd06580d955f37110cdc827b26b4737c58ae13bfb88c2bca";
+  await writeFile(
+    join(
+      directory,
+      "c99d3e8e89437eeb0462959cc3504183d1c67b8bc5a07bfe0af58da058bca72d.pending.json",
+    ),
+    JSON.stringify({
+      accountId: "synthetic-account",
+      requests: [request],
+      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    }),
+    { mode: 0o600 },
+  );
+
+  const resumed = await prepare();
+  expect(resumed.preview.resumed).toBe(true);
+  expect((await resumed.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
 });
 
 test("Dependabot publishes on the existing GitHub provider and rejects foreign repositories before POST", async () => {
@@ -4334,6 +4393,72 @@ async function oldScoreApproval(field: string, stageApproval = true) {
   return { f, prepare, directory, path, filename, request, saved };
 }
 
+test.each(["invalid title", "unsafe number"])(
+  "a fresh %s can only publish its verified older request",
+  async (kind) => {
+    const { f, path, saved, request } = await oldScoreApproval(
+      "evidence",
+      false,
+    );
+    const score = new Number(2.5);
+    const selected = scoredFindings(score);
+    if (kind === "unsafe number") {
+      Object.defineProperty(score, "toJSON", { value: () => 2 ** 53 });
+    } else {
+      Object.setPrototypeOf(selected.findings[0]!.evidence, {
+        toJSON(this: Record<string, unknown>) {
+          return { ...this, title: "" };
+        },
+      });
+    }
+    const prepare = () =>
+      prepareNormalizedExternalPublication(
+        selected,
+        options,
+        releasedDependencies(f),
+      );
+    await expect(prepare()).rejects.toThrow();
+    expect(f.posts).toHaveLength(0);
+    await writeFile(path, saved, { mode: 0o600 });
+    const recovered = await prepare();
+    expect(recovered.preview.resumed).toBe(true);
+    await recovered.publish();
+    expect(f.posts).toEqual([JSON.stringify(request)]);
+  },
+);
+
+test.each(["deep shared data", "cycle", "row BigInt"])(
+  "a compact export remains publishable with an unusable native %s",
+  async (kind) => {
+    const f = await fixture();
+    const input = scoredFindings(4);
+    if (kind === "row BigInt") {
+      Object.assign(input.findings[0]!, {
+        cursor: Object.assign(Object(17n), { toJSON: () => "17" }),
+      });
+    } else {
+      class Compact {
+        constructor(readonly content: unknown) {}
+        toJSON() {
+          return 4;
+        }
+      }
+      let content: unknown = {};
+      if (kind === "cycle") Object.assign(content as object, { self: content });
+      else for (let n = 0; n < 24; n++) content = [content, content];
+      input.findings[0]!.evidence.source_data.score = new Compact(content);
+    }
+    const preview = await prepareNormalizedExternalPublication(
+      input,
+      options,
+      releasedDependencies(f),
+    );
+    expect(preview.preview.resumed).toBe(false);
+    await preview.publish();
+    expect(JSON.parse(f.posts[0]!).items[0].evidence.source_data.score).toBe(4);
+  },
+);
+
 test.each(["getter", "data property"])(
   "a JSON hook cannot replace a %s score to match a released approval",
   async (kind) => {
@@ -4366,6 +4491,67 @@ test.each(["getter", "data property"])(
   },
 );
 
+test("an uncertain newly eligible advisory cannot replace a released subset", async () => {
+  const { normalizeGitHubAdvisories } =
+    await import("../src/github-findings.js");
+  const f = await fixture();
+  const selected = { ...options, provider: "github" as const };
+  const prepare = (rows: ReturnType<typeof importedAdvisory>[]) =>
+    prepareNormalizedExternalPublication(
+      normalizeGitHubAdvisories(rows),
+      selected,
+      releasedDependencies(f),
+    );
+  const first = importedAdvisory();
+  const id = "GHSA-abcd-efgh-5678";
+  const url = first.url.replace(first.ghsaId, id);
+  const second = {
+    ...first,
+    ghsaId: id,
+    url,
+    advisory: { ...first.advisory, ghsa_id: id, html_url: url },
+  };
+  const value = Object.assign(new Number(7), { bad: Infinity });
+  Object.defineProperty(second.advisory, "score", {
+    enumerable: true,
+    get: () => value,
+  });
+  expect(normalizeGitHubAdvisories([first, second]).findings).toHaveLength(2);
+
+  const request = {
+    ...(await prepare([first])).preview.requests[0]!,
+    request_id: "58b468b5-45c6-4804-8f5a-5e2919c967c5",
+  };
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "19039224ccc25a9375739c7f16227a26e9fd92cf900de1a32425c20c94697488",
+  );
+  const saved = JSON.stringify({
+    accountId: boxedNumberCheckpoints.accountId,
+    requests: [request],
+    inputProjection: {
+      inputDigest:
+        "fbba527f5ff2cf86972d97f543de935515cbaa618ab2f1168ddbb3d1ab3ea338",
+      savedEvidenceDigest:
+        "fbba527f5ff2cf86972d97f543de935515cbaa618ab2f1168ddbb3d1ab3ea338",
+    },
+  });
+  const dir = join(f.root, "state", "external-finding-publications");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const path = join(
+    dir,
+    "6137d904632ecb17ecdf0276e37794699ff19f6e37f6a89b833b56ec0a7c953b.pending.json",
+  );
+  await writeFile(path, saved, { mode: 0o600 });
+
+  await expect(prepare([first, second])).rejects.toThrow("cannot be matched");
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+  expect((await (await prepare([first])).publish()).receipts[0]!.id).toBe(
+    request.request_id,
+  );
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+});
+
 test("an ambiguous getter cannot start another import after a released approval was matched", async () => {
   const { f, prepare, path, request } = await oldScoreApproval("evidence");
   const score = Object.assign(new Number(2.5), { toJSON: () => 9 });
@@ -4397,6 +4583,31 @@ test("an ambiguous getter cannot start another import after a released approval 
   expect(f.posts).toEqual([JSON.stringify(request), JSON.stringify(request)]);
 });
 
+test("a fresh boxed approval cannot claim a different getter-backed JSON import", async () => {
+  const { f, prepare } = await oldScoreApproval("evidence", false);
+  f.state.throttle = true;
+  const first = await prepare(new Number(1));
+  await expect(first.publish()).rejects.toThrow("Slow down");
+  const input = scoredFindings(undefined);
+  Object.defineProperty(input.findings[0]!.evidence.source_data, "score", {
+    enumerable: true,
+    get: () => 2,
+  });
+  const second = await prepareNormalizedExternalPublication(
+    input,
+    options,
+    releasedDependencies(f),
+  );
+  expect(second.preview.resumed).toBe(false);
+  expect(second.preview.requests[0]!.request_id).not.toBe(
+    first.preview.requests[0]!.request_id,
+  );
+  expect(second.preview.requests[0]!.items[0]!.evidence.source_data).toEqual({
+    score: 2,
+  });
+  expect(f.posts).toEqual([JSON.stringify(first.preview.requests[0])]);
+});
+
 test("a vendor evidence class resumes its released title and exports its JSON title for a fresh import", async () => {
   class ScannerEvidence {
     title = "Scanner score";
@@ -4406,7 +4617,7 @@ test("a vendor evidence class resumes its released title and exports its JSON ti
       return { ...this, title: "New scanner score" };
     }
   }
-  const { f, request } = await oldScoreApproval("unreported");
+  const { f, path, request, saved } = await oldScoreApproval("unreported");
   const input = scoredFindings(2.5);
   input.findings[0]!.evidence = new ScannerEvidence();
   const prepare = () =>
@@ -4415,6 +4626,26 @@ test("a vendor evidence class resumes its released title and exports its JSON ti
       options,
       releasedDependencies(f),
     );
+  // Without an independent native capture, the exported title cannot rule out this approval.
+  class UncertainEvidence extends ScannerEvidence {
+    exportedTitle() {
+      return "Separate scanner title";
+    }
+    override toJSON() {
+      return { ...this, title: this.exportedTitle() };
+    }
+  }
+  input.findings[0]!.evidence = new UncertainEvidence();
+  await expect(prepare()).rejects.toThrow("cannot be matched");
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toEqual([]);
+
+  input.findings[0]!.evidence = {
+    ...new ScannerEvidence(),
+    title: "Separate scanner title",
+  };
+  expect((await prepare()).preview.resumed).toBe(false);
+  input.findings[0]!.evidence = new ScannerEvidence();
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).receipts[0]!.id).toBe(request.request_id);
@@ -4516,6 +4747,44 @@ test("a boxed JSON hook keeps the released request and applies to fresh normaliz
     score: 9,
   });
 });
+
+test.each([
+  { field: "evidence", native: 2.5, report: undefined },
+  { field: "empty-report", native: 12, report: {} },
+])(
+  "a released $field approval stays on its original deployment",
+  async ({ field, native, report }) => {
+    const { f, path, saved, request } = await oldScoreApproval(field);
+    const input = scoredFindings(
+      Object.assign(new Number(native), { toJSON: () => 9 }),
+      report,
+    );
+    if (report) {
+      class SourceData {
+        score = new Number(native);
+        toJSON() {
+          return { score: 9 };
+        }
+      }
+      input.findings[0]!.evidence.source_data = new SourceData();
+    }
+    const other = await prepareNormalizedExternalPublication(input, options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: "https://other.example.test/backend-api",
+        CODEX_SECURITY_CLOUD_WEB_URL: "https://other.example.test",
+      },
+    });
+    expect(other.preview.resumed).toBe(false);
+    expect(other.preview.requests[0]!.request_id).not.toBe(request.request_id);
+    expect(other.preview.requests[0]!.items[0]!.evidence.source_data).toEqual({
+      score: 9,
+    });
+    expect(f.posts).toHaveLength(0);
+    expect(await readFile(path, "utf8")).toBe(saved);
+  },
+);
 
 test("a getter-backed finding keeps released approvals scoped to their deployment", async () => {
   const f = await fixture();
@@ -5159,55 +5428,79 @@ test("normalized SDK publication rejects unserializable report metadata before u
   expect(f.posts).toHaveLength(0);
 });
 
-test("a native scanner error resumes its released message-only approval", async () => {
-  const { f, directory, prepare, request } = await oldScoreApproval(
-    "evidence",
-    false,
-  );
-  request.request_id = "15ab6427-635d-4537-9975-f7f536155b49";
-  const path = join(
-    directory,
-    "19d4eb5e5738ac54ae3d847f50534f09ac60882b0145fa5abc4260299e7f02b6.pending.json",
-  );
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
-    requests: [request],
-    inputProjection: {
-      inputDigest:
-        "603ea14278affa7a9a27fc2a624f5a2ce8fd85460f99175bef69a0572430b59b",
-      savedEvidenceDigest:
-        "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
-    },
-  });
-  await writeFile(path, saved, { mode: 0o600 });
-  const diagnostic = () =>
-    Object.assign(new Error("scanner message"), { code: "E_TEST" });
-  const uncertain = diagnostic();
-  let stackReads = 0;
-  Object.defineProperty(uncertain, "stack", {
-    get() {
-      stackReads++;
-      return "custom stack";
-    },
-  });
-  await expect(prepare(2.5, { errors: [uncertain] })).rejects.toThrow(
-    "cannot be matched",
-  );
-  expect(stackReads).toBe(0);
-  expect(f.posts).toEqual([]);
-  expect(await readFile(path, "utf8")).toBe(saved);
+test.each([Error, TypeError])(
+  "a native %p resumes its released message-only approval",
+  async (Diagnostic) => {
+    const { f, directory, prepare, request } = await oldScoreApproval(
+      "evidence",
+      false,
+    );
+    request.request_id = "15ab6427-635d-4537-9975-f7f536155b49";
+    const path = join(
+      directory,
+      "19d4eb5e5738ac54ae3d847f50534f09ac60882b0145fa5abc4260299e7f02b6.pending.json",
+    );
+    const saved = JSON.stringify({
+      accountId: boxedNumberCheckpoints.accountId,
+      requests: [request],
+      inputProjection: {
+        inputDigest:
+          "603ea14278affa7a9a27fc2a624f5a2ce8fd85460f99175bef69a0572430b59b",
+        savedEvidenceDigest:
+          "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
+      },
+    });
+    await writeFile(path, saved, { mode: 0o600 });
+    const diagnostic = () =>
+      Object.assign(
+        new Diagnostic("scanner message", { cause: "scanner failure" }),
+        { code: "E_TEST" },
+      );
+    const uncertain = diagnostic();
+    let stackReads = 0;
+    Object.defineProperty(uncertain, "stack", {
+      get() {
+        stackReads++;
+        return "custom stack";
+      },
+    });
+    await expect(prepare(2.5, { errors: [uncertain] })).rejects.toThrow(
+      "cannot be matched",
+    );
+    expect(stackReads).toBe(0);
+    expect(f.posts).toEqual([]);
+    expect(await readFile(path, "utf8")).toBe(saved);
 
-  const report = { errors: [diagnostic()] };
-  const retry = await prepare(2.5, report);
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).receipts[0]!.id).toBe(request.request_id);
-  expect(f.posts).toEqual([JSON.stringify(request)]);
-  const fresh = await prepare(2.5, report);
-  expect(fresh.preview.resumed).toBe(false);
-  expect(fresh.preview.report?.["errors"]).toEqual([
-    expect.objectContaining({ message: "scanner message", code: "E_TEST" }),
-  ]);
-});
+    const report = { errors: [diagnostic()] };
+    const retry = await prepare(2.5, report);
+    expect(retry.preview.resumed).toBe(true);
+    const completed = await retry.publish();
+    expect(completed.receipts[0]!.id).toBe(request.request_id);
+    const expected = structuredClone(report.errors[0]!);
+    for (const value of [retry.preview.report, completed.report]) {
+      const error = (value?.["errors"] as Error[])[0]!;
+      expect(error).toBeInstanceOf(Diagnostic);
+      expect(error.message).toBe(expected.message);
+      expect(error.stack).toBe(expected.stack);
+      expect(error.cause).toBe(expected.cause);
+      expect(error).not.toHaveProperty("code");
+    }
+    const receipt = (await readdir(directory)).find((name) =>
+      name.endsWith(".result.json"),
+    )!;
+    expect(
+      JSON.parse(await readFile(join(directory, receipt), "utf8")).report,
+    ).toEqual({
+      errors: [{ message: "scanner message" }],
+    });
+    expect(f.posts).toEqual([JSON.stringify(request)]);
+    const fresh = await prepare(2.5, report);
+    expect(fresh.preview.resumed).toBe(false);
+    expect(fresh.preview.report?.["errors"]).toEqual([
+      expect.objectContaining({ message: "scanner message", code: "E_TEST" }),
+    ]);
+  },
+);
 
 test("publication JSON retains native Error messages and scanner diagnostics", async () => {
   const scannerErrors = opengrepJson().errors;

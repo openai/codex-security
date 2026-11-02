@@ -107,9 +107,10 @@ After an SDK upgrade, retry with the original input. An older SDK could approve
 different bytes from those its JSON export contained. When the SDK verifies
 the old selection and request bytes, it resumes with the original request IDs
 and skips batches that already have receipts. If it cannot verify the original
-request, it preserves the checkpoint and stops before uploading. This can happen
-when verification would require running a caller’s getter again, or when a
-saved JSON export lacks information from the original SDK input.
+request, it preserves the checkpoint and stops before uploading. A saved JSON
+export can lose information from the original SDK input. If a getter might
+have changed a finding’s title or which findings an earlier reader included,
+the SDK can also stop a new submission for the same occurrence.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

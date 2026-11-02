@@ -19,12 +19,13 @@ import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import {
-  asRecord,
-  canonicalJson,
-  canSnapshotWithoutGetters,
-} from "./record.js";
+import { asRecord, canSnapshotWithoutGetters } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
+
+import {
+  rememberPreviousSelection,
+  type LegacyReaderSelection,
+} from "./reader-selection.js";
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
@@ -264,36 +265,6 @@ function advisoryFinding(record: Record<string, unknown>): {
   };
 }
 
-interface LegacyGitHubSelection {
-  sourceFindingIds: string[];
-  snapshot?: ExternalFindings;
-  unprovenIdPrefixes?: string[];
-}
-const previousSelections = new WeakMap<
-  object,
-  { exported: string; previous: LegacyGitHubSelection }
->();
-
-/** Only unchanged SDK output can identify an older, differently serialized selection. */
-export function legacyGitHubFindings(
-  input: ExternalFindings,
-  current: ExternalFindings,
-): LegacyGitHubSelection | undefined {
-  const selection =
-    previousSelections.get(input) ??
-    (!isProxy(input) &&
-      previousSelections.get(
-        Object.getOwnPropertyDescriptor(input, "findings")?.value,
-      ));
-  if (!selection) return undefined;
-  return hash("sha256", canonicalJson(current)) === selection.exported
-    ? selection.previous
-    : {
-        sourceFindingIds: selection.previous.sourceFindingIds,
-        unprovenIdPrefixes: selection.previous.unprovenIdPrefixes,
-      };
-}
-
 function mapRecord(input: unknown) {
   const record = asRecord(input);
   if (!record) throw new Error("GitHub finding must be an object.");
@@ -308,7 +279,7 @@ function mapRecord(input: unknown) {
 
 function nativeGitHubRecord(
   value: unknown,
-  observe?: (value: object) => void,
+  observe?: (value: object) => boolean | void,
 ): Record<string, unknown> | undefined {
   if (!canSnapshotWithoutGetters(value, true, observe)) return;
   try {
@@ -360,15 +331,17 @@ function normalizeRecords(
     findings: [],
     excluded: [],
   };
-  const previous =
-    snapshot && target === "cloud"
-      ? ({
-          read: records.length,
-          findings: [],
-          excluded: [],
-        } as ExternalFindings)
-      : undefined;
-  const checks: { input: unknown; before: unknown; prefix?: string }[] = [];
+  const previous = snapshot
+    ? ({
+        read: records.length,
+        findings: [],
+        excluded: [],
+      } as ExternalFindings)
+    : undefined;
+  const checks: { input: unknown; before: unknown; uncertain: () => void }[] =
+    [];
+  const uncertainIds = new Set<string>();
+  let largeLocalSelection = false;
   const potentialIds: string[] = [];
   const prefixes = new Set<string>();
   let uncertain = false;
@@ -379,10 +352,33 @@ function normalizeRecords(
     // Its byte count can be reconstructed for plain JSON containing ordinary Buffers.
     let plainBufferWire = true;
     let buffers: Buffer[] | undefined;
+    let hiddenFields = false;
+    let largeLocalRow = false;
     const before = previous
       ? nativeGitHubRecord(input, (value) => {
-          if (!plainBufferWire) return;
           const prototype = Object.getPrototypeOf(value);
+          if (
+            target === "local" &&
+            ((Array.isArray(value) && value.length > 256 * 1024) ||
+              (prototype === Buffer.prototype &&
+                Buffer.isBuffer(value) &&
+                !Object.hasOwn(value, "byteLength") &&
+                value.byteLength > 256 * 1024))
+          ) {
+            largeLocalRow = true;
+            return false;
+          }
+          // Native capture drops non-enumerable fields the released vendor mapper could read.
+          if (
+            (prototype === Object.prototype || prototype === null) &&
+            Object.getOwnPropertyNames(value).some(
+              (key) =>
+                key !== "toJSON" &&
+                !Object.prototype.propertyIsEnumerable.call(value, key),
+            )
+          )
+            hiddenFields = true;
+          if (!plainBufferWire) return;
           if (Buffer.isBuffer(value)) (buffers ??= []).push(value);
           plainBufferWire = Buffer.isBuffer(value)
             ? prototype === Buffer.prototype &&
@@ -396,8 +392,11 @@ function normalizeRecords(
         })
       : undefined;
     let prefix = previous ? codeOccurrencePrefix(input) : undefined;
+    const rowIds = new Set<string>();
+    let rowUncertain = false;
     function possible() {
-      uncertain = true;
+      uncertain = rowUncertain = true;
+      for (const id of rowIds) uncertainIds.add(id);
       if (prefix) prefixes.add(prefix);
     }
     const exclusion = (record: unknown, reason: string) => ({
@@ -408,13 +407,26 @@ function normalizeRecords(
     let possibleFreshId = false;
     try {
       if (snapshot) {
-        const source = exportedGitHubRecord(input, index, target);
+        const source = exportedGitHubRecord(
+          input,
+          index,
+          target,
+          target === "local" && !largeLocalRow,
+        );
         exported = source.record;
         if (previous) {
           prefix ??= codeOccurrencePrefix(exported);
           if (
+            target === "local" &&
+            (largeLocalRow || source.bytes > 256 * 1024)
+          ) {
+            largeLocalSelection = true;
+            possible();
+            possibleFreshId = true;
+          } else if (
             !before &&
             source.previousInvalid &&
+            !source.skippedRawValue &&
             canSnapshotWithoutGetters(input, true)
           ) {
             previous.excluded.push(
@@ -427,6 +439,7 @@ function normalizeRecords(
               source.adjustment === Infinity ||
               source.bytes + source.adjustment > 256 * 1024;
             if (
+              target === "local" ||
               !rawSizeExcludes ||
               !canSnapshotWithoutGetters(input, true) ||
               (input && typeof input === "object" && "toJSON" in input)
@@ -441,10 +454,13 @@ function normalizeRecords(
                 ),
               );
           } else {
-            checks.push({ input, before, prefix });
+            checks.push({ input, before, uncertain: possible });
+            if (hiddenFields || source.skippedRawValue) possible();
             try {
               const row = mapRecord(before);
               const knownOldId = row.source_finding_id;
+              rowIds.add(knownOldId);
+              if (rowUncertain) uncertainIds.add(knownOldId);
               const evidence = validateExternalEvidenceFields(
                 row.evidence,
                 target,
@@ -453,13 +469,14 @@ function normalizeRecords(
               const keySensitive =
                 input && typeof input === "object" && "toJSON" in input;
               if (keySensitive) possible();
-              const reason = keySensitive
-                ? undefined
-                : previousGitHubExclusion(
-                    evidence,
-                    source.bytes,
-                    source.adjustment,
-                  );
+              const reason =
+                keySensitive || target === "local"
+                  ? undefined
+                  : previousGitHubExclusion(
+                      evidence,
+                      source.bytes,
+                      source.adjustment,
+                    );
               if (reason) previous.excluded.push(exclusion(before, reason));
               else {
                 previous.findings.push({
@@ -477,6 +494,8 @@ function normalizeRecords(
       }
       const mapped = mapRecord(exported),
         id = mapped.source_finding_id;
+      rowIds.add(id);
+      if (rowUncertain) uncertainIds.add(id);
       if (possibleFreshId) potentialIds.push(id);
       const evidence = validateExternalEvidence(mapped.evidence, target);
       if (identities.has(id))
@@ -489,7 +508,7 @@ function normalizeRecords(
       if (error instanceof CodexSecurityError) throw error;
       const reason = errorMessage(error);
       result.excluded.push(
-        exclusion(exported === input ? before : exported, reason),
+        exclusion(snapshot && exported === input ? before : exported, reason),
       );
       if (previous && exported === input) {
         if (
@@ -528,7 +547,7 @@ function normalizeRecords(
               evidence,
             });
             potentialIds.push(row.source_finding_id);
-            checks.push({ input, before, prefix });
+            checks.push({ input, before, uncertain: possible });
           } catch (priorError) {
             previous.excluded.push(exclusion(before, errorMessage(priorError)));
           }
@@ -539,7 +558,9 @@ function normalizeRecords(
         possible();
         if (before)
           try {
-            potentialIds.push(mapRecord(before).source_finding_id);
+            const id = mapRecord(before).source_finding_id;
+            potentialIds.push(id);
+            uncertainIds.add(id);
           } catch {
             /* No old identity. */
           }
@@ -547,22 +568,21 @@ function normalizeRecords(
     }
   }
   if (previous) {
-    for (const { input, before, prefix } of checks) {
-      if (!isDeepStrictEqual(before, nativeGitHubRecord(input))) {
-        uncertain = true;
-        if (prefix) prefixes.add(prefix);
-      }
+    for (const check of checks) {
+      if (!isDeepStrictEqual(check.before, nativeGitHubRecord(check.input)))
+        check.uncertain();
     }
     if (uncertain || !isDeepStrictEqual(previous.findings, result.findings)) {
-      const prior: LegacyGitHubSelection = { sourceFindingIds: potentialIds };
-      if (uncertain) prior.unprovenIdPrefixes = [...prefixes];
-      else prior.snapshot = previous;
-      const selection = {
-        exported: hash("sha256", canonicalJson(result)),
-        previous: prior,
-      };
-      previousSelections.set(result, selection);
-      previousSelections.set(result.findings, selection);
+      const prior: LegacyReaderSelection = { sourceFindingIds: potentialIds };
+      if (uncertain) {
+        prior.unprovenIdPrefixes = [...prefixes];
+        prior.uncertainFindingIds = [...uncertainIds];
+        if (!largeLocalSelection)
+          prior.knownFindings = previous.findings.filter(
+            (finding) => !uncertainIds.has(finding.source_finding_id),
+          );
+      } else prior.snapshot = previous;
+      rememberPreviousSelection(result, prior);
     }
   }
   return result;
