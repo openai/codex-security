@@ -436,13 +436,17 @@ function commandRepositoryPaths(
   // Only whole, unquoted words with escaped blanks need POSIX decoding.
   // All other command strings retain their existing attribution behavior.
   if (posix && /\\[ \t]/u.test(command)) {
-    const words = Array.from(
-      command.matchAll(
-        /(?:^|[\s|;&<>])((?:\\[ \t]|[^\s\\|;&<>"'\x60$()])+)(?=$|[\s|;&<>])/gu,
-      ),
-      (match) => match[1]!.replace(/\\([ \t])/gu, "$1"),
-    );
-    return literalRepositoryPaths(words, repository, false);
+    command = command.replace(/(?:\\[ \t]|[^\s|;&<>])+/gu, (word) => {
+      if (!/\\[ \t]/u.test(word) || /^["']/u.test(word)) return word;
+      const operand = word.replace(
+        /^\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\})\//u,
+        "",
+      );
+      if (/["'\x60$()]/u.test(operand) || /\\(?![ \t])/u.test(word)) {
+        return "__unresolved_path__";
+      }
+      return '"' + word.replace(/\\([ \t])/gu, "$1") + '"';
+    });
   }
   const paths = new Set<string>();
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
