@@ -699,6 +699,7 @@ export async function runReadOnlyCodex(
     surface: CodexSecuritySurface;
     command: string;
     threadSource: ReadOnlyCodexThreadSource;
+    /** @internal */
     onUsage?: (usage: Usage) => void;
   },
 ): Promise<string> {
