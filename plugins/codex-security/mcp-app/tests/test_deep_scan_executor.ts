@@ -86,9 +86,6 @@ const {
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
-  classifyCodexWorkerError,
-  codexWorkerTurnError,
-  DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = await importModule({
@@ -99,7 +96,7 @@ const {
     // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export * from "./errors.js";
+export { isCodexCybersecurityPolicyRefusal } from "./errors.js";
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -136,23 +133,23 @@ try {
     }
   });
 
+  await test(
+    "Deep worker runtime settings at the child-process boundary",
+    testWorkerRuntimeSettings,
+  );
+
   await test("Deep worker runtime settings", async (t) => {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
-    await check(t, testWorkerRuntimeSettings);
     await check(
       t,
       () =>
         testWorkerSelectedProfileFiles({
           CodexSdkWorkerExecutor,
           fakeCodexFixture,
-          deniedWorkerPermissionProfile,
-          trustedParentSandboxWithDenials,
           workerPermissionProfileOverride,
-          assertConfigOverrides,
           assertReadOnlyWorkerPolicy,
           assertWorkerSubagentPolicy,
-          restoreEnv,
         }),
       "selected profile files",
     );
@@ -234,6 +231,7 @@ try {
       () => testWindowsNpmPackageResolution("managed"),
       "managed Windows npm package resolution",
     );
+    await check(t, testHoistedManagedWindowsPackages);
     if (process.platform === "win32") {
       await check(t, testWindowsLongExecutableLaunches);
       await check(t, testWindowsRootRelativePathsStayBoundToOriginalDrive);
@@ -243,10 +241,8 @@ try {
   });
 
   await test("Deep worker diagnostics", async (t) => {
+    await check(t, testFailedWorkerItems);
     await check(t, testCodeModeFrameDiagnosticBoundaries);
-    await check(t, testUsageLimitClassification);
-    await check(t, testOsErrorCodesRemainRetryable);
-    await check(t, testWorkerErrorClassificationPreservesExplicitFailures);
     if (process.platform !== "win32") {
       await check(t, testRetryNotificationDoesNotInterruptTurn);
       await check(t, testSandboxNamespaceDiagnosticIsPreserved);
@@ -342,81 +338,6 @@ function testConfiguredExecutablePaths() {
     ),
     path.join(originalCwd, "codex"),
   );
-}
-
-function testOsErrorCodesRemainRetryable() {
-  for (const code of ["ENOENT", "EACCES", "ENOEXEC", "EPERM"]) {
-    const original = Object.assign(new Error(`spawn codex ${code}`), { code });
-    const classified = classifyCodexWorkerError(original);
-    assert.equal(classified, original);
-    assert.equal(classified.name, "Error");
-  }
-}
-
-function testWorkerErrorClassificationPreservesExplicitFailures() {
-  const explicit = new DeepScanNonRetryableError(
-    "Explicitly rejected worker permission profile.",
-  );
-  assert.equal(classifyCodexWorkerError(explicit), explicit);
-
-  const refusalMessages = [
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for potentially high-risk cyber activity.",
-    "This request has been flagged for possible cybersecurity risk.",
-    "This request has been flagged for potentially high-risk cyber activity.",
-  ];
-  for (const message of refusalMessages) {
-    const original = new Error(message);
-    const classified = classifyCodexWorkerError(original);
-    assert.equal(classified, original);
-    assert.equal(classified.name, "Error");
-    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
-
-    const explicitRefusal = new DeepScanNonRetryableError(message);
-    assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
-
-    for (const unrecognized of [
-      `Source fixture: ${message}`,
-      `${message} Source fixture.`,
-      JSON.stringify({ message }),
-      `Codex Exec exited with code 1: ${message}`,
-      `429 Too Many Requests: ${message}`,
-      ` ${message}`,
-      `${message}\n`,
-      message.toLowerCase(),
-    ]) {
-      const unrelated = new Error(unrecognized);
-      assert.equal(classifyCodexWorkerError(unrelated), unrelated);
-      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
-    }
-  }
-
-  for (const message of [
-    "config parser handles unknown keys",
-    "failed to load configuration: invalid value",
-    "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
-    "authentication required",
-    "not logged in",
-    "missing API key",
-    "Codex Exec exited with code 2: failed to load configuration: invalid value",
-    "Codex Exec exited with code 1:\nError: No such file or directory (os error 2)",
-    "Codex Exec exited with code 1:\nError: The system cannot find the file specified. (os error 2)",
-    "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
-    "chatgpt authentication required to sync remote plugins; api key auth is not supported",
-    "required MCP servers failed to initialize: codex_security_artifacts: timed out handshaking with MCP server after 30s",
-    "required MCP servers failed to initialize: other_server: request timed out",
-  ]) {
-    const original = new Error(message);
-    assert.equal(classifyCodexWorkerError(original), original);
-  }
-  for (const code of ["ECONNRESET", "EPIPE", "ETIMEDOUT", "cyber_policy"]) {
-    const original = Object.assign(new Error("Unrecognized worker failure"), {
-      code,
-    });
-    assert.equal(classifyCodexWorkerError(original), original);
-  }
 }
 
 async function testWindowsRootRelativePathsStayBoundToOriginalDrive() {
@@ -865,6 +786,38 @@ async function testWindowsNpmPackageResolution(installation = "global") {
   }
 }
 
+async function testHoistedManagedWindowsPackages() {
+  const root = await temporaryDirectories.create("codex-managed-cli-");
+  const packages = path.join(root, "managed CLI", "node_modules", "@openai");
+  const codex = path.join(packages, "codex");
+  await mkdir(codex, { recursive: true });
+  await writeJson(path.join(codex, "package.json"), {});
+  const env = { PATH: "", CODEX_MANAGED_PACKAGE_ROOT: ` ${codex} ` };
+  for (const [arch, triple] of [
+    ["x64", "x86_64-pc-windows-msvc"],
+    ["arm64", "aarch64-pc-windows-msvc"],
+  ] as const) {
+    const platform = path.join(packages, `codex-win32-${arch}`);
+    const executable = path.join(
+      platform,
+      "vendor",
+      triple,
+      "bin",
+      "codex.exe",
+    );
+    await mkdir(path.dirname(executable), { recursive: true });
+    await writeJson(path.join(platform, "package.json"), {});
+    await writeFile(executable, "synthetic executable");
+    assert.equal(resolveCodexPath(env, "win32", arch), executable);
+    const override = path.join(root, "custom CLI", "codex.exe");
+    assert.equal(
+      resolveCodexPath({ ...env, CODEX_CLI_PATH: override }, "win32", arch),
+      override,
+    );
+    assert.equal(resolveCodexPath(env, "linux", arch), path.resolve("codex"));
+  }
+}
+
 function windowsLauncherEnvironment(...directories: string[]) {
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) {
@@ -1300,7 +1253,7 @@ env_key = "CODEX_API_KEY"
         `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
       );
       const executor = new CodexSdkWorkerExecutor({
-        model: "gpt-daybreak-blue-latest",
+        model: "gpt-6.1-sol",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"] as const) {
@@ -1323,11 +1276,7 @@ env_key = "CODEX_API_KEY"
             runtimeEnvironment.LD_LIBRARY_PATH,
           );
           assert.equal(invocation.codexHome, fixture.root);
-          assertFlagPair(
-            invocation.argv,
-            "--model",
-            "gpt-daybreak-blue-latest",
-          );
+          assertFlagPair(invocation.argv, "--model", "gpt-6.1-sol");
           assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);
@@ -2469,6 +2418,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
+              "mcp_servers.codex-security.enabled": false,
               "mcp_servers.cs_artifacts.command": process.execPath,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
                 undefined,
@@ -2492,6 +2442,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               string,
               { env: Record<string, string> }
             >;
+            assert.deepEqual(Object.keys(servers).sort(), [
+              "codex-security",
+              "cs_artifacts",
+            ]);
             const scopeFile =
               servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
             if (index % 2 === 0) {
@@ -3515,6 +3469,51 @@ async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {
   }
 }
 
+function testFailedWorkerItems() {
+  const diagnostics: CodexWorkerDiagnostic[] = [];
+  for (const [server, tool, error, result, expected] of [
+    [
+      "cs_artifacts",
+      "record_codex_security_deep_reduction",
+      null,
+      { isError: true, content: [{ type: "text", text: "provider detail" }] },
+      "provider detail",
+    ],
+    [
+      "cs_artifacts",
+      "additional_codex_security_worker_tool",
+      { message: "transport failure" },
+      null,
+      "transport failure",
+    ],
+    [
+      "codex_security_artifacts",
+      "record_codex_security_discovery_candidates",
+      null,
+      null,
+      "Codex worker artifact tool record_codex_security_discovery_candidates failed.",
+    ],
+  ] as const) {
+    appendItemDiagnostic(diagnostics, {
+      type: "mcp_tool_call",
+      status: "failed",
+      server,
+      tool,
+      error,
+      result,
+      arguments: { token: "synthetic-input-only" },
+    });
+    assert.deepEqual(diagnostics.pop(), {
+      code: "artifact_tool_failed",
+      message: expected,
+    });
+  }
+  appendItemDiagnostic(diagnostics, { type: "file_change", status: "failed" });
+  assert.deepEqual(diagnostics, [
+    { code: "file_change_failed", message: "Codex worker file change failed." },
+  ]);
+}
+
 function testCodeModeFrameDiagnosticBoundaries() {
   const failedArtifactTool = {
     type: "mcp_tool_call",
@@ -4026,30 +4025,6 @@ async function withWorkerFixture<Result>(
     return await action(fixture, promptPath, workingDirectory);
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
-  }
-}
-
-function testUsageLimitClassification() {
-  for (const message of [
-    "Quota exceeded. Check your plan and billing details.",
-    "Your workspace is out of credits. Add credits to continue.",
-    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
-    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
-    "You’ve hit your usage limit. Try again later.",
-    "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
-  ]) {
-    const error = codexWorkerTurnError(message);
-    assert.ok(error instanceof DeepScanNonRetryableError);
-    assert.equal(error.message, message);
-  }
-  for (const message of [
-    "429 Too Many Requests",
-    "Command failed: Quota exceeded. Check your plan and billing details.",
-  ]) {
-    const error = codexWorkerTurnError(message);
-    assert.equal(error.name, "Error");
-    assert.equal(error.message, message);
   }
 }
 

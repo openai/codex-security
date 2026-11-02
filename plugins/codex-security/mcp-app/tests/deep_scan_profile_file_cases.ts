@@ -7,43 +7,36 @@ import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 import { parse as parseToml } from "smol-toml";
 import { readJson } from "./support/json.ts";
-import { assertFlagPair } from "./assertions.ts";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-
-export async function testWorkerSelectedProfileFiles<Profile>({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
+import { assertConfigOverrides, assertFlagPair } from "./assertions.ts";
+import {
   deniedWorkerPermissionProfile,
   trustedParentSandboxWithDenials,
+} from "./support/fake-codex-fixture.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
+import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
+
+export async function testWorkerSelectedProfileFiles({
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
   workerPermissionProfileOverride,
-  assertConfigOverrides,
   assertReadOnlyWorkerPolicy,
   assertWorkerSubagentPolicy,
-  restoreEnv,
 }: {
   CodexSdkWorkerExecutor: typeof WorkerExecutor;
   fakeCodexFixture: (
-    profile: Profile,
+    profile: typeof deniedWorkerPermissionProfile,
     allowed: boolean,
     account: { account: null; requiresOpenaiAuth: boolean },
   ) => Promise<{ root: string; executablePath: string }>;
-  deniedWorkerPermissionProfile: Profile;
-  trustedParentSandboxWithDenials: DeepWorkerParentSandbox;
   workerPermissionProfileOverride: (
     args: readonly string[],
   ) => string | undefined;
-  assertConfigOverrides: (
-    args: readonly string[],
-    values: Record<string, string | string[] | number | boolean | undefined>,
-  ) => void;
   assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
   assertWorkerSubagentPolicy: (
     args: readonly string[],
     subagents: number,
     codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
   ) => void;
-  restoreEnv: (name: string, value: string | undefined) => void;
 }) {
   const { mergedCodexConfig, resolveCodexProfile, writeCodexConfig } =
     await importModule({

@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { requireFinding } from "./finding-schema.js";
+import {
+  requireFinding,
+  requireImportedFinding,
+  type ImportedFinding,
+} from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
 import {
@@ -39,9 +43,9 @@ export type ScreeningResult = z.infer<typeof screeningSchema>;
 export type DuplicateDecision = z.infer<typeof reviewSchema>;
 export type GroupingDecision = z.infer<typeof screeningDecisionSchema>;
 
-export interface DeduplicationReviewer {
-  screen(findings: readonly Finding[]): Promise<ScreeningResult>;
-  reviewPair(findings: readonly Finding[]): Promise<GroupingDecision>;
+export interface DeduplicationReviewer<T = Finding> {
+  screen(findings: readonly T[]): Promise<ScreeningResult>;
+  reviewPair(findings: readonly T[]): Promise<GroupingDecision>;
 }
 
 export function pairKey(ids: readonly string[]): string {
@@ -54,11 +58,14 @@ export function screeningPairSlot(index: number): string {
 
 export function validateReview(
   value: unknown,
-  findings: readonly Finding[],
+  findings: readonly (Finding | ImportedFinding)[],
+  importedIds?: ReadonlySet<string>,
 ): DuplicateDecision {
   const result = reviewSchema.parse(value);
   if (result.decision !== "SAME") return result;
-  const finding = requireFinding(result.mergedFinding);
+  const finding = importedIds?.has(result.canonicalFindingId)
+    ? requireImportedFinding(result.mergedFinding)
+    : requireFinding(result.mergedFinding);
   if (finding.findingId !== result.canonicalFindingId)
     throw new Error(
       "Every SAME decision requires the canonical finding's identity.",
@@ -75,7 +82,7 @@ export function validateReview(
 
 export function validateScreening(
   value: unknown,
-  findings: readonly Finding[],
+  findings: readonly unknown[],
 ): ScreeningResult {
   const result = screeningSchema.parse(value);
   const required = findings
@@ -86,7 +93,9 @@ export function validateScreening(
     submitted.length !== required.length ||
     required.some((slot) => !Object.hasOwn(result.decisions, slot))
   ) {
-    throw new Error("Submit exactly the assigned screening pair slots.");
+    throw new Error(
+      `Submit exactly the assigned screening pair slots: ${required.join(", ")}.`,
+    );
   }
   return result;
 }
@@ -106,13 +115,12 @@ function screeningToolSchema(neighborCount: number): object {
   });
 }
 
-class CodexReviewer {
+class CodexReviewer<T extends Pick<Finding, "findingId"> = Finding> {
   constructor(
     protected readonly runner: Pick<CodexReviewRunner, "run">,
     private readonly configuration: JsonObject = {},
-    protected readonly sourceContext: (
-      findings: readonly Finding[],
-    ) => string = () => "",
+    protected readonly sourceContext: (findings: readonly T[]) => string = () =>
+      "",
   ) {}
 
   protected settings(model: string, effort: string) {
@@ -123,7 +131,7 @@ class CodexReviewer {
     });
     return { model: selected.model, effort: selected.reasoningEffort };
   }
-  async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
+  async screen(findings: readonly T[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
       findingIds: findings.map((finding) => finding.findingId),
@@ -137,10 +145,20 @@ class CodexReviewer {
 
 /** Rich review contract used by host-provided records consumers. */
 export class CodexDeduplicationReviewer
-  extends CodexReviewer
-  implements DeduplicationReviewer
+  extends CodexReviewer<Finding | ImportedFinding>
+  implements DeduplicationReviewer<Finding | ImportedFinding>
 {
-  async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
+  constructor(
+    runner: Pick<CodexReviewRunner, "run">,
+    configuration: JsonObject = {},
+    private readonly importedIds?: ReadonlySet<string>,
+  ) {
+    super(runner, configuration);
+  }
+
+  async reviewPair(
+    findings: readonly (Finding | ImportedFinding)[],
+  ): Promise<DuplicateDecision> {
     return await this.runner.run({
       stage: "pair-review",
       findingIds: findings.map((finding) => finding.findingId),
@@ -150,7 +168,7 @@ export class CodexDeduplicationReviewer
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
       },
-      validate: (value) => validateReview(value, findings),
+      validate: (value) => validateReview(value, findings, this.importedIds),
     });
   }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -23,7 +23,7 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
       ],
       [
         "security.json",
-        JSON.stringify({
+        `\uFEFF${JSON.stringify({
           scan: {
             mode: "deep",
             max_time_minutes: 30,
@@ -34,7 +34,7 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
               max_discovery_runs: 4,
             },
           },
-        }),
+        })}`,
       ],
     ]) {
       await writeFile(join(root, name), content);
@@ -113,6 +113,7 @@ await test("built MCP setup previews and saves the selected project before scan 
   const targetPath = join(root, "repository");
   const projectConfigPath = join(targetPath, "selected.yaml");
   const legacyConfigPath = join(root, "defaults.toml");
+  const workbenchCalls = join(root, "workbench-calls");
   const client = new Client({
     name: "deep-project-config-test",
     version: "1.0.0",
@@ -129,6 +130,14 @@ await test("built MCP setup previews and saves the selected project before scan 
       "[deep_scan]\nworkers=7\nmax_time_hours=4\n",
     );
     await buildServer(bundle, {
+      banner: {
+        js: `require("node:diagnostics_channel").subscribe("child_process", ({ process: child }) => {
+          child.once("spawn", () => {
+            if (child.spawnargs.some(arg => arg.endsWith("workbench_db.py")))
+              require("node:fs").appendFileSync(${JSON.stringify(workbenchCalls)}, "call\\n");
+          });
+        });`,
+      },
       logOverride: { "empty-import-meta": "silent" },
     });
     await client.connect(
@@ -158,17 +167,33 @@ await test("built MCP setup previews and saves the selected project before scan 
       return result.structuredContent as Record<string, any>;
     };
     const selection = {
-      targetPath: "~/repository",
+      targetPath,
       scope: ".",
       mode: "deep",
       projectConfigPath: "selected.yaml",
     };
     const preview = (await call("inspect_codex_security_setup", selection))
       .setup.deepScanConfig;
+    assert.equal(await readFile(workbenchCalls, "utf8"), "call\n");
     assert.equal(preview.settings.maxTimeHours, 0.5);
     assert.equal(preview.settings.workers, 2);
     assert.equal(preview.sources.workers, "project");
     assert.equal(preview.projectConfigPath, projectConfigPath);
+    const homeTarget = await call("inspect_codex_security_setup", {
+      ...selection,
+      targetPath: "~/repository",
+    });
+    assert.deepEqual(homeTarget.setup.deepScanConfig, preview);
+    const invalid = await client.callTool({
+      name: "inspect_codex_security_setup",
+      arguments: {
+        ...selection,
+        targetPath: "repository",
+        projectConfigPath: "missing.yaml",
+      },
+    });
+    assert.equal(invalid.isError, true);
+    assert.match(JSON.stringify(invalid.content), /absolute local directory/);
     if (process.platform === "win32" && /^[A-Za-z]:/.test(targetPath)) {
       selection.projectConfigPath = `${targetPath.slice(0, 2)}selected.yaml`;
       const driveRelative = (

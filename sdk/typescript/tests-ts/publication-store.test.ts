@@ -23,12 +23,8 @@ import {
   prepareScanPublication,
   type PreparedScanPublication,
 } from "../src/publication.js";
-import type {
-  CoverageDocument,
-  FindingsDocument,
-  ScanManifest,
-} from "../src/models.js";
-import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
+import type { FindingsDocument, ScanManifest } from "../src/models.js";
+import { writePublicationFindings } from "./support/sealed-scan.js";
 import type { PublishedScanIssue } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
@@ -92,37 +88,7 @@ async function sealedPublication(
   scanId = SCAN_ID,
 ): Promise<PreparedScanPublication> {
   await copyCompletedScanFixture(scanDirectory);
-  const manifestPath = join(scanDirectory, "scan-manifest.json");
-  const findingsPath = join(scanDirectory, "findings.json");
-  const coveragePath = join(scanDirectory, "coverage.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  const findings = JSON.parse(
-    await readFile(findingsPath, "utf8"),
-  ) as FindingsDocument;
-  const coverage = JSON.parse(
-    await readFile(coveragePath, "utf8"),
-  ) as CoverageDocument;
-  manifest.scan.id = scanId;
-  findings.scanId = scanId;
-  coverage.scanId = scanId;
-  const example = findings.findings[0]!;
-  findings.findings = Array.from({ length: count }, (_, index) => {
-    const finding = structuredClone(example);
-    finding.identity.anchor = `${example.identity.anchor}-${index + 1}`;
-    finding.title = `Synthetic finding ${index + 1}`;
-    setFindingIdentity(manifest.scan, finding);
-    return finding;
-  });
-  await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
-  await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
-  for (const artifact of manifest.scan.artifacts) {
-    artifact.sha256 = sha256(
-      await readFile(join(scanDirectory, artifact.path)),
-    );
-  }
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await writePublicationFindings(scanDirectory, scanId, count);
   return prepareScanPublication(scanDirectory, {
     destination: "linear",
     teamId: "team-example",

@@ -5,7 +5,10 @@ import type { ScanResults } from './results.js';
 
 export function plain(value: string, limit?: number): string {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '');
-  return text.slice(0, limit);
+  const prefix = text.slice(0, limit);
+  // A two-unit code point starting at the last included unit spans the cut.
+  const codePoint = text.codePointAt(prefix.length - 1);
+  return codePoint !== undefined && codePoint > 0xffff ? prefix.slice(0, -1) : prefix;
 }
 function html(value: string): string {
   // Inline HTML still parses Markdown; entities keep report fields literal.

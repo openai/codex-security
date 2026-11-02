@@ -17,8 +17,8 @@ Use its security workflows in Codex, or automate them with the
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.
-- Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
-  findings to Linear or a findings service.
+- Import Semgrep, Snyk, and Wiz findings locally or publish them to Codex Security Cloud. [All scanner import guides](docs/scanner-imports/README.md).
+- Export SARIF, JSON, or CSV, and publish findings to Linear or a findings service.
 - Automate scans across repositories or project components, including in CI and
   containers.
 
@@ -272,7 +272,7 @@ for examples.
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
 - [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
-- [Scanner file import schema and capability guide](docs/scanner-imports/schema-guide.md)
+- [Imported finding identity and evidence](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

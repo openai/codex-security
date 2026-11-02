@@ -14,6 +14,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -383,8 +384,9 @@ test.each([
   },
 );
 
-test("CLI resumes through native execution with current permissions and preserves interrupted state", async () => {
+test("CLI resumes through native execution with current permissions and preserves interrupted state and output permissions", async () => {
   const f = await interruptedScan();
+  if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
   const feedbackPath = join(
     f.scanDir,
     "artifacts",
@@ -480,6 +482,8 @@ test("CLI resumes through native execution with current permissions and preserve
             return {
               id: threadId,
               async runStreamed(prompt) {
+                if (process.platform !== "win32")
+                  expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
                 expect(await readFile(feedbackPath, "utf8")).toBe(
                   originalFeedback,
                 );
@@ -525,6 +529,8 @@ test("CLI resumes through native execution with current permissions and preserve
   ).toMatchObject({ progress: { status: "running" } });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
   expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
+  if (process.platform !== "win32")
+    expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
 });
 
 test.each([false, true])(

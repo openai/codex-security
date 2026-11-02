@@ -1,5 +1,4 @@
 import { promises as fs } from "node:fs";
-import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
@@ -37,7 +36,6 @@ import type {
 export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
-  result: ScanDraftInput;
   completionSequence: number;
   attempt?: number;
 }
@@ -147,7 +145,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryResult: ScanDraftInput | undefined;
+    let validated = false;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -157,12 +155,13 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
+        await validateDiscoveryArtifacts(
           artifacts,
           resultPath,
           run.scanId,
           run,
         );
+        validated = true;
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -177,7 +176,7 @@ export class DeepScanWorkerRunner {
         outcome.threadId,
       );
     }
-    if (!discoveryResult) {
+    if (!validated) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -226,7 +225,6 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
-        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
         attempt: persisted.attempt,
       },

@@ -24,6 +24,8 @@ For a finding link, accept the selected Cloud `webOrigin` with the path `/codex/
 
 ## List and inspect findings
 
+When the findings list or detail tool offers `api_version`, select `v2` for requests that include imported scanner findings. The default `v1` view covers native findings. For an imported-only list, also set `source` to `imported` if exposed. Use only provider values advertised by the selected tool. If you filter returned evidence locally, follow every page in the requested scope and say how you filtered it.
+
 Use `defense_factory_findings_list` with the discovered repository URL in `repo` and the user's filters; `repo` accepts comma-separated URLs, not repository IDs. Workflow tools use the returned repository ID in `repo_id`. Filters may include severity (`criticality`), lifecycle `status`, `source`, `q`, `path_prefix`, `start_at`, `end_at`, `scan_id`, `review_run_id`, `validated`, `has_patch`, `author`, and `assignee`; use the tool's current schema for available filters and their accepted values. `assignee` accepts comma-separated recorded user emails and is separate from commit authorship. Do not invent an assigned-team filter.
 
 Follow returned cursors with the same filters and sort order when a complete list or count is requested. Reset the cursor if the filters change. State when only a page or a subset was read. For repository-run findings, use `source: repository_scan` and `scan_id` equal to the run ID. Inspect selected finding IDs with `defense_factory_findings_get` before describing their evidence, assignment, patches, or verification.
