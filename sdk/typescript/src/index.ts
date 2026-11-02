@@ -331,6 +331,11 @@ export {
   readOpenGrepFindings,
   type OpenGrepImportOptions,
 } from "./opengrep-findings.js";
+export { readSonarFindings, type SonarCapture } from "./sonar-findings.js";
+export {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "./sonar-collector.js";
 export {
   normalizeVeracodeFindings,
   readVeracodeFindings,
@@ -349,6 +354,7 @@ export {
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
+export { normalizeSelectedSemgrepPlatformFindings } from "./semgrep-platform-findings.js";
 export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,

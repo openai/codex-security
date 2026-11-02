@@ -32,6 +32,29 @@ function createDashboard(
   });
 }
 
+function budgetRequest(signal = new AbortController().signal) {
+  return {
+    maxCostUsd: 20,
+    cost: fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 1,
+    }).cost!,
+    signal,
+  };
+}
+
+function recordActions(dashboard: ScanDashboard, count: number): void {
+  for (let index = 1; index <= count; index += 1) {
+    dashboard.record({
+      id: `action-${index}`,
+      kind: "command",
+      status: "completed",
+      description: `rg -n finding-${index} routes.ts`,
+      paths: [],
+    });
+  }
+}
+
 function lastFrame(stderr: ReturnType<typeof capture>): string {
   return stripVTControlCharacters(stderr.text())
     .split("CODEX SECURITY  ·  juice-shop")
@@ -57,6 +80,25 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("keeps activity while a terminal is backpressured and restores the screen", async () => {
+    const stderr = capture(true);
+    const stream = { ...stderr.stream, writableNeedDrain: true };
+    const dashboard = createDashboard(stream);
+    dashboard.start();
+    const initial = stderr.text();
+    dashboard.note("First event");
+    await Promise.resolve();
+    expect(stderr.text()).toBe(initial);
+    stream.writableNeedDrain = false;
+    dashboard.note("Second event");
+    await Promise.resolve();
+    expect(stderr.text()).toContain("First event");
+    expect(stderr.text()).toContain("Second event");
+    stream.writableNeedDrain = true;
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];
@@ -120,14 +162,7 @@ describe("live scan dashboard", () => {
     dashboard.start();
     try {
       input.emit("data", "d");
-      const answer = dashboard.requestBudgetIncrease({
-        maxCostUsd: 20,
-        cost: fakeResult([], "complete", {
-          input_tokens: 100,
-          output_tokens: 1,
-        }).cost!,
-        signal: new AbortController().signal,
-      });
+      const answer = dashboard.requestBudgetIncrease(budgetRequest());
       input.emit("data", "\u001BO");
       input.emit("data", "1;5P\u001B\u001B[A");
       await expect(answer).resolves.toBeUndefined();
@@ -150,14 +185,7 @@ describe("live scan dashboard", () => {
           onInterrupt: interrupted,
         });
         dashboard.start();
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         input.emit("data", prefix);
         expect(lastFrame(stderr)).toContain("Raise total USD limit");
         input.emit("data", key);
@@ -192,14 +220,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", "d");
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         for (const chunk of chunks) input.emit("data", chunk);
         expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
         await expect(answer).resolves.toBeUndefined();
@@ -980,14 +1001,7 @@ describe("live scan dashboard", () => {
         const dashboard = createDashboard(capture(true).stream, { input });
         dashboard.start();
         try {
-          const answer = dashboard.requestBudgetIncrease({
-            maxCostUsd: 20,
-            cost: fakeResult([], "complete", {
-              input_tokens: 100,
-              output_tokens: 1,
-            }).cost!,
-            signal: new AbortController().signal,
-          });
+          const answer = dashboard.requestBudgetIncrease(budgetRequest());
           input.emit("data", "30");
           const prefix = "\u001B".repeat(escapes);
           const chunks = coalesced
@@ -1102,14 +1116,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", sequence);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         await Promise.resolve();
         expect(jest.getTimerCount()).toBe(0);
         jest.runAllTimers();
@@ -1140,14 +1147,9 @@ describe("live scan dashboard", () => {
       try {
         for (let index = 0; index < 20; index++)
           dashboard.note(`Activity ${index}`);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: controller.signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(
+          budgetRequest(controller.signal),
+        );
         input.emit("data", prefix);
         controller.abort();
         await expect(answer).resolves.toBeUndefined();
@@ -1264,14 +1266,7 @@ describe("live scan dashboard", () => {
           }
           if (mode === "budget")
             void dashboard
-              .requestBudgetIncrease({
-                maxCostUsd: 20,
-                cost: fakeResult([], "complete", {
-                  input_tokens: 100,
-                  output_tokens: 1,
-                }).cost!,
-                signal: controller.signal,
-              })
+              .requestBudgetIncrease(budgetRequest(controller.signal))
               .then((value) => {
                 answer = value;
               });
@@ -2003,15 +1998,7 @@ describe("live scan dashboard", () => {
 
     dashboard.start();
     expect(input.isRaw).toBe(true);
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     let frame = lastFrame(stderr);
     expect(frame).toContain("finding-16");
@@ -2066,15 +2053,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 30; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 30);
 
     const framesBefore = stderr.text().match(/\u001B\[H/gu)?.length ?? 0;
     input.emit("data", Buffer.from("\u001B[A".repeat(6)));
@@ -2103,15 +2082,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     input.emit("data", "\u0015");
     let frame = lastFrame(stderr);

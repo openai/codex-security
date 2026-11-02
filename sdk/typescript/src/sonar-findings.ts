@@ -1,0 +1,432 @@
+import { z } from "zod";
+import {
+  cloudRepositoryUrlKey,
+  type ExternalImportTarget,
+  repositoryUrlKey,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
+import type { ExternalFindings } from "./external-findings.js";
+import type { Provider, Severity } from "./external-import-models.js";
+import { isRecord } from "./record.js";
+import {
+  array,
+  normalizeRecords,
+  readScannerJson,
+  record,
+  relativePath,
+  requiredText,
+  text,
+} from "./scanner-import.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+
+const sonarFormat = "sonar-issues/v1";
+const captureText = z.string().refine((value) => Boolean(value.trim()));
+const captureSchema = z.object({
+  format: z.literal(sonarFormat),
+  server: captureText,
+  organization: captureText,
+  project: captureText,
+  branch: captureText.optional(),
+  pullRequest: captureText.optional(),
+  repositoryUrl: captureText.optional(),
+  projectBase: z
+    .string()
+    .refine((path) => path === "" || relativePath(path) === path)
+    .optional(),
+  pages: z.array(z.unknown()).min(1),
+  queryPageCounts: z.array(z.int().positive()).min(1).optional(),
+});
+export type SonarCapture = z.infer<typeof captureSchema>;
+
+export function parseSonarCapture(value: unknown): SonarCapture {
+  const capture = captureSchema.parse(value);
+  if (capture.branch && capture.pullRequest)
+    throw new Error(
+      "A Sonar capture must select a branch or a pull request, not both.",
+    );
+  const url = URL.parse(capture.server);
+  if (
+    !url ||
+    !["https:", "http:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw new Error(
+      "Expected an HTTP(S) Sonar server URL without credentials, query or fragment.",
+    );
+  capture.server = url.href.replace(/\/$/u, "");
+  if (capture.repositoryUrl)
+    declaredScannerRepositoryUrl(capture.repositoryUrl, "Sonar", "local");
+  return capture;
+}
+
+type NativeRecord = Record<string, unknown>;
+
+const issueScopeFields = [
+  "organization",
+  "project",
+  "branch",
+  "pullRequest",
+] as const;
+const scopeFields = ["server", ...issueScopeFields] as const;
+type SonarScope = Partial<Record<(typeof scopeFields)[number], string>>;
+
+function mergeSonarScope(
+  scope: SonarScope,
+  data: NativeRecord,
+  fields: readonly (keyof SonarScope)[] = scopeFields,
+) {
+  for (const field of fields) {
+    const value = text(data[field]);
+    if (value === null) continue;
+    if (scope[field] !== undefined && scope[field] !== value)
+      throw new Error(`The Sonar export contains conflicting ${field} values.`);
+    scope[field] = value;
+  }
+  if (scope.branch && scope.pullRequest)
+    throw new Error("The Sonar export mixes branch and pull request results.");
+}
+
+function requireConsistentSonarRef(
+  scope: SonarScope,
+  hasUnscopedIssue: boolean,
+) {
+  if (hasUnscopedIssue && (scope.branch || scope.pullRequest))
+    throw new Error(
+      "The Sonar export mixes issues with a named ref and issues without a ref.",
+    );
+}
+
+/** Normalized Sonar reports and their individual issues retain the source repository. */
+export function sonarRepositoryUrls(
+  provider: Provider,
+  findings: ExternalFindings["findings"],
+  report: ExternalFindings["report"],
+  target: ExternalImportTarget,
+): Set<string> {
+  const urls = new Set<string>();
+  function add(data: NativeRecord | undefined, scope: SonarScope) {
+    if (data?.["format"] !== sonarFormat) return;
+    if (provider !== "sonar")
+      throw new Error("Retained Sonar evidence requires the sonar provider.");
+    mergeSonarScope(scope, data);
+    urls.add(
+      declaredScannerRepositoryUrl(data["repositoryUrl"], "Sonar", target),
+    );
+  }
+  const reportScope: SonarScope = {};
+  add(report, reportScope);
+  const scope = { ...reportScope };
+  let hasUnscopedIssue = false;
+  for (const { evidence, source_finding_id } of findings) {
+    const data = evidence.source_data;
+    const rowScope = { ...reportScope };
+    add(data ?? undefined, rowScope);
+    if (data?.["format"] === sonarFormat && data["issue"] !== undefined) {
+      const issue = record(data["issue"], "Retained Sonar issue");
+      mergeSonarScope(rowScope, issue, issueScopeFields);
+      if (
+        requiredText(issue["key"], "Retained Sonar issue key") !==
+        source_finding_id
+      )
+        throw new Error(
+          "The normalized finding ID does not match the retained Sonar issue key.",
+        );
+    }
+    mergeSonarScope(scope, rowScope);
+    if (!rowScope.branch && !rowScope.pullRequest) hasUnscopedIssue = true;
+  }
+  requireConsistentSonarRef(scope, hasUnscopedIssue);
+  if (
+    scope.branch &&
+    findings.some(
+      ({ evidence }) =>
+        (report?.["format"] === sonarFormat ||
+          evidence.source_data?.["format"] === sonarFormat) &&
+        evidence.branch != null &&
+        evidence.branch !== scope.branch,
+    )
+  )
+    throw new Error(
+      "The finding branch does not match the retained Sonar branch.",
+    );
+  return urls;
+}
+
+const pagingSchema = z.object({
+  pageIndex: z.int().positive(),
+  pageSize: z.int().positive(),
+  total: z.int().nonnegative(),
+});
+
+function indexByKey(value: unknown, label: string) {
+  const index = new Map<string, NativeRecord>();
+  for (const item of array(value ?? [], label)) {
+    const row = record(item, label);
+    const key = requiredText(row["key"], `${label} key`);
+    index.set(key, row);
+  }
+  return index;
+}
+
+export function mergeSonarIssueScope(scope: SonarScope, issue: NativeRecord) {
+  mergeSonarScope(scope, issue, issueScopeFields);
+}
+
+function readPage(value: unknown) {
+  const page = record(value, "Sonar issue search page");
+  return {
+    paging: pagingSchema.parse(page["paging"]),
+    issues: array(page["issues"], "Sonar issues").map((issue) =>
+      record(issue, "Sonar issue"),
+    ),
+    components: indexByKey(page["components"], "Sonar component"),
+    rules: indexByKey(page["rules"], "Sonar rule"),
+  };
+}
+
+function completeQueryPages(values: unknown[]) {
+  const pages = values
+    .map(readPage)
+    .sort((a, b) => a.paging.pageIndex - b.paging.pageIndex);
+  const first = pages[0]?.paging;
+  if (
+    !first ||
+    pages.length !== Math.max(1, Math.ceil(first.total / first.pageSize)) ||
+    pages.some(
+      ({ paging, issues }, i) =>
+        paging.pageIndex !== i + 1 ||
+        paging.total !== first.total ||
+        paging.pageSize !== first.pageSize ||
+        issues.length !==
+          Math.min(first.pageSize, first.total - i * first.pageSize),
+    )
+  )
+    throw new Error(
+      "Supply every Sonar issue search page exactly once, with consistent paging and issue counts.",
+    );
+  return pages;
+}
+
+export function completeSonarPages(
+  values: unknown[],
+  queryPageCounts?: number[],
+) {
+  const counts = queryPageCounts ?? [values.length];
+  if (counts.reduce((sum, count) => sum + count, 0) !== values.length)
+    throw new Error("Sonar query page counts do not match the captured pages.");
+  let offset = 0;
+  const pages = counts.flatMap((count) => {
+    const query = values.slice(offset, offset + count);
+    offset += count;
+    return completeQueryPages(query);
+  });
+  const ids = new Set<string>();
+  for (const { issues } of pages) {
+    for (const issue of issues) {
+      const id = text(issue["key"]);
+      if (id && ids.has(id))
+        throw new Error(
+          "Sonar issue search pages overlap. Collect the selection again.",
+        );
+      if (id) ids.add(id);
+    }
+  }
+  return pages;
+}
+
+const severityLevels: Readonly<Record<string, Severity>> = {
+  BLOCKER: "critical",
+  HIGH: "high",
+  MEDIUM: "medium",
+  LOW: "low",
+  INFO: "informational",
+  CRITICAL: "high",
+  MAJOR: "medium",
+  MINOR: "low",
+};
+
+function securitySeverity(issue: NativeRecord): Severity {
+  const impacts = array(issue["impacts"] ?? [], "Sonar issue impacts");
+  const security = impacts.find(
+    (impact) => isRecord(impact) && impact["softwareQuality"] === "SECURITY",
+  );
+  if (
+    !isRecord(security) &&
+    (impacts.length || issue["type"] !== "VULNERABILITY")
+  )
+    throw new Error(
+      "Sonar issue has no security impact or legacy vulnerability type.",
+    );
+  const value = isRecord(security) ? security["severity"] : issue["severity"];
+  return typeof value === "string" && Object.hasOwn(severityLevels, value)
+    ? severityLevels[value]!
+    : "unknown";
+}
+
+function relatedComponents(
+  issue: NativeRecord,
+  primary: string,
+  components: Map<string, NativeRecord>,
+) {
+  const keys = new Set([primary]);
+  for (const value of array(issue["flows"] ?? [], "Sonar issue flows")) {
+    const flow = record(value, "Sonar flow");
+    for (const entry of array(flow["locations"], "Sonar flow locations")) {
+      const location = record(entry, "Sonar flow location");
+      const key = text(location["component"]);
+      if (key) keys.add(key);
+    }
+  }
+  return Array.from(keys).flatMap((key) => components.get(key) ?? []);
+}
+
+function issueLink(
+  server: string,
+  project: string,
+  id: string,
+  branch?: string,
+  pullRequest?: string,
+) {
+  const link = new URL("project/issues", server + "/");
+  link.searchParams.set("id", project);
+  if (branch) link.searchParams.set("branch", branch);
+  if (pullRequest) link.searchParams.set("pullRequest", pullRequest);
+  link.searchParams.set("open", id);
+  link.searchParams.set("issues", id);
+  return link.href;
+}
+
+export function normalizeSonarFindings(
+  input: unknown,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+) {
+  const capture =
+    isRecord(input) && "format" in input ? parseSonarCapture(input) : undefined;
+  const repository = declaredScannerRepositoryUrl(
+    capture?.repositoryUrl ?? sourceRepositoryUrl,
+    "Sonar",
+    target,
+  );
+  if (capture?.repositoryUrl && sourceRepositoryUrl) {
+    const key = target === "cloud" ? cloudRepositoryUrlKey : repositoryUrlKey;
+    if (
+      key(repository) !==
+      key(declaredScannerRepositoryUrl(sourceRepositoryUrl, "Sonar", target))
+    )
+      throw new Error(
+        "The Sonar capture repository does not match the declared source repository.",
+      );
+  }
+  const pages = completeSonarPages(
+    capture?.pages ?? (Array.isArray(input) ? input : [input]),
+    capture?.queryPageCounts,
+  );
+  const rows = pages.flatMap((page) =>
+    page.issues.map((issue) => ({ issue, page })),
+  );
+  const scope: SonarScope = {};
+  if (capture) mergeSonarScope(scope, capture);
+  const hasUnscopedIssue = rows.some(
+    ({ issue }) => !text(issue["branch"]) && !text(issue["pullRequest"]),
+  );
+  for (const { issue } of rows) {
+    requiredText(issue["project"], "Sonar issue project");
+    mergeSonarIssueScope(scope, issue);
+  }
+  requireConsistentSonarRef(
+    scope,
+    !capture?.branch && !capture?.pullRequest && hasUnscopedIssue,
+  );
+  const context = {
+    format: sonarFormat,
+    ...(capture?.projectBase !== undefined && {
+      projectBase: capture.projectBase,
+    }),
+    ...scope,
+    repositoryUrl: repository,
+  };
+  const result = normalizeRecords(
+    rows,
+    ({ issue, page }, id) => {
+      const component = requiredText(
+        issue["component"],
+        "Sonar issue component",
+      );
+      const componentPath = relativePath(
+        page.components.get(component)?.["path"],
+      );
+      const base = capture?.projectBase;
+      const path =
+        componentPath && base !== undefined
+          ? base
+            ? `${base}/${componentPath}`
+            : componentPath
+          : null;
+      const range =
+        issue["textRange"] == null
+          ? null
+          : record(issue["textRange"], "Sonar issue textRange");
+      const line = range?.["startLine"] ?? issue["line"] ?? null;
+      const rule = requiredText(issue["rule"], "Sonar issue rule");
+      const descriptor = page.rules.get(rule);
+      const name = text(descriptor?.["name"]);
+      const updated = text(issue["updateDate"]);
+      const severity = securitySeverity(issue);
+      return validateExternalEvidence(
+        {
+          title: name ?? rule,
+          severity,
+          description: text(issue["message"]),
+          url: capture
+            ? issueLink(
+                capture.server,
+                capture.project,
+                id,
+                scope.branch,
+                scope.pullRequest,
+              )
+            : null,
+          locations: path ? [{ path, line }] : [],
+          branch: scope.branch ?? null,
+          source_updated_at: updated
+            ? Math.floor(Date.parse(updated) / 1000)
+            : null,
+          details: {
+            kind: "sast",
+            scanner_origin: "SonarQube",
+            repository: { url: repository },
+            source_status: text(issue["issueStatus"]) ?? text(issue["status"]),
+            rule: { id: rule, name },
+            code: { end_line: path ? (range?.["endLine"] ?? null) : null },
+          },
+          source_data: structuredClone({
+            ...context,
+            issue,
+            components: relatedComponents(issue, component, page.components),
+            ...(descriptor && { rule: descriptor }),
+          }),
+        },
+        target,
+      );
+    },
+    ({ issue }) => requiredText(issue["key"], "Sonar issue key"),
+    target,
+  );
+  return { ...result, report: context };
+}
+
+export async function readSonarFindings(
+  path: string,
+  sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "cloud",
+): Promise<ExternalFindings> {
+  return normalizeSonarFindings(
+    await readScannerJson(path),
+    sourceRepositoryUrl,
+    target,
+  );
+}

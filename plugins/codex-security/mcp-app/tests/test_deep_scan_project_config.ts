@@ -23,7 +23,7 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
       ],
       [
         "security.json",
-        JSON.stringify({
+        `\uFEFF${JSON.stringify({
           scan: {
             mode: "deep",
             max_time_minutes: 30,
@@ -34,7 +34,7 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
               max_discovery_runs: 4,
             },
           },
-        }),
+        })}`,
       ],
     ]) {
       await writeFile(join(root, name), content);

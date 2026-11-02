@@ -1,16 +1,11 @@
 import { requestMetadata } from "./support/request-metadata.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import {
-  MAX_VERIFICATION_INPUT_CHARS,
-  planVerificationRequests,
-  remediationPrompt,
-} from "../src/remediation.js";
+import { remediationPrompt, verificationBatches } from "../src/remediation.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -26,117 +21,6 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
 afterEach(cleanup);
-
-const CODEX_INPUT_LIMIT = 1_048_576;
-
-function turnStartTextCharacters(prompt: string): number {
-  const request = JSON.stringify({
-    id: 3,
-    method: "turn/start",
-    params: {
-      threadId: "synthetic-thread",
-      input: [{ type: "text", text: prompt, text_elements: [] }],
-    },
-  });
-  const decoded = JSON.parse(request) as {
-    params: { input: [{ text: string }] };
-  };
-  return [...decoded.params.input[0].text].length;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-async function runLinuxPtyInterruption(signal: "SIGINT" | "SIGTERM") {
-  const fixture = join(
-    import.meta.dirname,
-    "fixtures",
-    "verify-fix-signal-gap.ts",
-  );
-  const child = spawn(
-    "script",
-    [
-      "-q",
-      "-e",
-      "-c",
-      `${shellQuote(process.execPath)} ${shellQuote(fixture)} ${signal}`,
-      "/dev/null",
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  child.stdout.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  child.stderr.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  const status = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  return { output, status };
-}
-
-async function runLinuxStoredAuthInterruption(
-  mode: "git" | "helper-unresponsive" | "helper-responsive",
-  signal: "SIGINT" | "SIGTERM",
-) {
-  const fixture = join(
-    import.meta.dirname,
-    "fixtures",
-    "verify-fix-stored-auth-process-signal.ts",
-  );
-  const child = spawn(
-    "script",
-    [
-      "-q",
-      "-e",
-      "-c",
-      `${shellQuote(process.execPath)} ${shellQuote(fixture)} ${mode} ${signal}`,
-      "/dev/null",
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let output = "";
-  child.stdout.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  child.stderr.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  const status = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  return { output, status };
-}
-
-async function runCredentialPreparationInterruption(
-  signal: "SIGINT" | "SIGTERM",
-) {
-  const fixture = join(
-    import.meta.dirname,
-    "fixtures",
-    "verify-fix-auth-signal.ts",
-  );
-  const child = spawn(process.execPath, [fixture, signal], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  child.stderr.setEncoding("utf8").on("data", (chunk) => {
-    output += chunk;
-  });
-  const status = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  return { output, status };
-}
 
 async function linearIssue(identifier: string) {
   return {
@@ -158,28 +42,6 @@ async function linearIssue(identifier: string) {
 
 const linearClient = () =>
   ({ issue: linearIssue }) as ReturnType<LinearClientFactory>;
-
-function savedScanWithEvidence(
-  severities: readonly ("critical" | "high" | "medium" | "low")[],
-  evidence: string | ((index: number) => string),
-) {
-  const result = fakeResult(severities);
-  const findings = result.findings.findings as Finding[];
-  findings.forEach((finding, index) => {
-    Object.assign(finding, {
-      findingId: `csf_${index + 1}`,
-      occurrenceId: `occ_${index + 1}`,
-      title: `Finding ${index + 1}`,
-      codeEvidence: [
-        {
-          code: typeof evidence === "string" ? evidence : evidence(index),
-          path: `src/finding-${index + 1}.ts`,
-        },
-      ],
-    });
-  });
-  return { result, findings };
-}
 
 describe("read-only finding verification", () => {
   test("verifies imported Linear issues in a read-only sandbox without exposing credentials", async () => {
@@ -535,531 +397,204 @@ describe("read-only finding verification", () => {
     });
   });
 
-  test("preserves every selected saved finding across bounded verification requests", async () => {
-    const evidence = `${'"quoted evidence"\n'.repeat(22_000)}🚀`;
-    const { result, findings } = savedScanWithEvidence(
-      ["high", "high", "high", "low"],
-      evidence,
-    );
-    const expected = [
-      {
-        id: "occ_1",
-        status: "fixed",
-        evidence: "The original exploit is rejected.",
-      },
-      {
-        id: "occ_2",
-        status: "still_vulnerable",
-        evidence: "The vulnerable path remains reachable.",
-      },
-      {
-        id: "occ_3",
-        status: "inconclusive",
-        evidence: "A required runtime dependency is unavailable.",
-      },
-    ];
-    const prompts: string[] = [];
-    const suppliedIds: string[] = [];
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["verify-fix", "--scan", "scan-large", "--severity", "high", "--json"],
-        dependencies({
-          result,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan-large",
-              targetPath: "/saved/repository",
-              findings: findings as unknown as JsonObject[],
-            },
-          }),
-          onCodex: (_args, output) => {
-            const prompt = output!.appServer!.prompt;
-            prompts.push(prompt);
-            const actualCharacters = turnStartTextCharacters(prompt);
-            if (actualCharacters > CODEX_INPUT_LIMIT) {
-              output!.stderr.write(
-                `Input exceeds the maximum length of ${CODEX_INPUT_LIMIT} characters.\n`,
-              );
-              return 1;
-            }
-            const supplied = JSON.parse(
-              prompt.split("\n").at(-1)!,
-            ) as Finding[];
-            expect(
-              supplied.every(
-                (finding) => finding.codeEvidence?.[0]?.code === evidence,
-              ),
-            ).toBe(true);
-            suppliedIds.push(
-              ...supplied.map(({ occurrenceId }) => occurrenceId),
-            );
-            output!.stdout.write(
-              JSON.stringify({
-                results: supplied.map(({ occurrenceId }) =>
-                  expected.find(({ id }) => id === occurrenceId),
-                ),
-              }),
-            );
-            return 0;
-          },
-        }),
-      ),
-    ).toBe(2);
-
-    expect(prompts.length).toBeGreaterThan(1);
-    expect(
-      prompts.every(
-        (prompt) => turnStartTextCharacters(prompt) <= CODEX_INPUT_LIMIT,
-      ),
-    ).toBe(true);
-    expect(suppliedIds).toEqual(["occ_1", "occ_2", "occ_3"]);
-    expect(JSON.parse(stdout.text()).results).toEqual(expected);
-    expect(prompts.join("\n")).not.toContain("src/finding-4.ts");
-    expect(stderr.text()).not.toContain("quoted evidence");
-    expect(stderr.text()).not.toContain(
-      `Input exceeds the maximum length of ${CODEX_INPUT_LIMIT} characters.`,
-    );
-  });
-
-  test.skipIf(process.platform !== "linux").each([
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const)(
-    "restores a real Linux PTY when %s arrives between verification requests",
-    async (signal, expectedStatus) => {
-      const { output, status } = await runLinuxPtyInterruption(signal);
-
-      expect(status).toBe(expectedStatus);
-      expect(output).toContain("\u001B[?1049h\u001B[?25l");
-      expect(output).toContain("PTY_WORKER_1");
-      expect(output).toContain("PTY_SIGNAL_BETWEEN_BATCHES");
-      expect(output).not.toContain("PTY_WORKER_2");
-      expect(output).toContain("\u001B[?25h\u001B[?1049l");
-      expect(output).toContain(`PTY_EXIT_${expectedStatus}`);
-      expect(output).not.toContain('"results"');
-    },
-  );
-
-  test.skipIf(process.platform !== "linux").each([
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const)(
-    "cancels a delayed stored-auth Git probe with one PID-targeted %s",
-    async (signal, expectedStatus) => {
-      const { output, status } = await runLinuxStoredAuthInterruption(
-        "git",
-        signal,
-      );
-
-      expect(status).toBe(expectedStatus);
-      expect(output).toContain("PTY_CAPABLE_true");
-      expect(output).toContain("\u001B[?1049h\u001B[?25l");
-      expect(output).toContain("\u001B[?25h\u001B[?1049l");
-      expect(output).toContain("PID_TARGET_ONLY_true");
-      expect(output).toContain("SIGNAL_SENT_COUNT_1");
-      expect(output).toContain("WORKER_STARTED_false");
-      expect(output).toContain("SIGNAL_LISTENERS_0_0");
-      expect(output).toContain(`STORED_AUTH_EXIT_${expectedStatus}`);
-      expect(output).not.toContain('"results"');
-    },
-  );
-
-  test.skipIf(process.platform !== "linux").each([
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const)(
-    "forces an unresponsive login-status helper down after PID-targeted %s",
-    async (signal, expectedStatus) => {
-      const { output, status } = await runLinuxStoredAuthInterruption(
-        "helper-unresponsive",
-        signal,
-      );
-
-      expect(status).toBe(expectedStatus);
-      expect(output).toContain("PTY_CAPABLE_true");
-      expect(output).toContain("\u001B[?1049h\u001B[?25l");
-      expect(output).toContain("\u001B[?25h\u001B[?1049l");
-      expect(output).toContain("PID_TARGET_ONLY_true");
-      expect(output).toContain("SIGNAL_SENT_COUNT_1");
-      expect(output).toContain("SIGTERM_RECEIVED");
-      expect(output).not.toContain("GRACEFUL_EXIT");
-      expect(output).toContain("HELPER_ALIVE_false");
-      expect(output).toContain("LOCK_REACQUIRED");
-      expect(output).toContain("WORKER_STARTED_false");
-      expect(output).toContain("SIGNAL_LISTENERS_0_0");
-      expect(output).toContain(`STORED_AUTH_EXIT_${expectedStatus}`);
-      expect(output).not.toContain('"results"');
-    },
-  );
-
-  test.skipIf(process.platform !== "linux")(
-    "lets a login-status helper honor SIGTERM without forced termination",
-    async () => {
-      const { output, status } = await runLinuxStoredAuthInterruption(
-        "helper-responsive",
-        "SIGTERM",
-      );
-
-      expect(status).toBe(143);
-      expect(output).toContain("PTY_CAPABLE_true");
-      expect(output).toContain("SIGTERM_RECEIVED");
-      expect(output).toContain("GRACEFUL_EXIT");
-      expect(output).toContain("HELPER_ALIVE_false");
-      expect(output).toContain("LOCK_REACQUIRED");
-      expect(output).toContain("WORKER_STARTED_false");
-      expect(output).toContain("SIGNAL_LISTENERS_0_0");
-      expect(output).toContain("STORED_AUTH_EXIT_143");
-      expect(output).not.toContain('"results"');
-    },
-  );
-
   test.each([
+    ["complete", 1],
+    ["redirected output", 1],
+    ["wrong ID", 2],
+    ["transport failure", 2],
+    ["closed stderr", 2],
     ["SIGINT", 130],
     ["SIGTERM", 143],
+    ["repeated signal", 130],
+    ["interrupted worker", 143],
+    ["oversized finding", 2],
   ] as const)(
-    "restores the dashboard when %s arrives during request planning",
-    async (signal, expectedStatus) => {
+    "handles %s across saved verification batches",
+    async (scenario, expectedExit) => {
+      const result = fakeResult(["high", "high", "high", "low"]);
+      const evidence = '"quoted"\n'.repeat(60_000);
+      result.findings.findings.forEach((finding, i) => {
+        Object.assign(finding, {
+          occurrenceId: `occ_${i}`,
+          findingId: `csf_${i}`,
+          codeEvidence: [
+            {
+              path: "src/check.ts",
+              code:
+                scenario === "oversized finding" && i === 1
+                  ? evidence.repeat(2)
+                  : evidence,
+            },
+          ],
+        });
+      });
       const signals = new FakeSignals();
-      const onCodex = mock(() => 0);
-      const { result, findings } = savedScanWithEvidence(
-        ["high", "high", "high"],
-        "x".repeat(525_000),
-      );
-      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+      const { stdout, stderr } = createCliTest(main, {
+        stdout: scenario !== "redirected output",
+        stderr: true,
+      });
+      const seen: string[] = [];
+      const forceExit = mock(() => {});
       const deps = dependencies({
         result,
         signals,
         onWorkbench: () => ({
           scan: {
-            scanId: "scan-planning-interruption",
+            scanId: "scan",
             targetPath: "/saved/repository",
-            findings: findings as unknown as JsonObject[],
+            findings: result.findings.findings as unknown as JsonObject[],
           },
         }),
-        onCodex,
-      });
-      deps.setInterval = () => {
-        queueMicrotask(() => signals.emit(signal));
-        return {} as NodeJS.Timeout;
-      };
-
-      expect(
-        await runCli(
-          ["verify-fix", "--scan", "scan-planning-interruption", "--json"],
-          deps,
-        ),
-      ).toBe(expectedStatus);
-      expect(onCodex).not.toHaveBeenCalled();
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
-      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
-      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
-      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
-    },
-  );
-
-  test.skipIf(process.platform === "win32").each([
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const)(
-    "cancels an active Codex child through %s without duplicate process listeners",
-    async (signal, expectedStatus) => {
-      const controller = new AbortController();
-      const stdout = capture();
-      const stderr = capture();
-      const interruptListeners = process.listenerCount("SIGINT");
-      const terminateListeners = process.listenerCount("SIGTERM");
-      const status = runCodexSkillCommand(
-        ["-e", "setInterval(() => {}, 1000)"],
-        {
-          command: "verify-fix",
-          stdout: stdout.stream,
-          stderr: stderr.stream,
-          signal: controller.signal,
+        onCodex: (_args, output) => {
+          const prompt = output!.appServer!.prompt;
+          expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
+          const batch = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
+          expect(batch).toHaveLength(1);
+          expect(batch[0]!.codeEvidence![0]!.code).toBe(evidence);
+          const id = batch[0]!.occurrenceId;
+          seen.push(id);
+          output!.appServer!.onEvent?.({
+            method: "item/reasoning/summaryTextDelta",
+            params: { itemId: "reason_0", delta: `Checked ${id}.` },
+          });
+          output!.appServer!.onEvent?.({
+            method: "item/completed",
+            params: {
+              item: {
+                type: "reasoning",
+                id: "reason_0",
+                summary: [`Checked ${id}.`],
+              },
+            },
+          });
+          if (seen.length === 1 && scenario === "transport failure")
+            output!.stderr.write("First batch diagnostic.\n");
+          if (seen.length === 2 && scenario === "transport failure") return 1;
+          if (seen.length === 2 && scenario === "interrupted worker") {
+            signals.emit("SIGINT");
+            signals.emit("SIGTERM");
+            return 143;
+          }
+          if (seen.length === 2 && scenario === "closed stderr") {
+            output!.stderr.write("Second worker failed.\n");
+            return 1;
+          }
+          if (
+            seen.length === 1 &&
+            (scenario === "SIGINT" || scenario === "SIGTERM")
+          )
+            setImmediate(() => signals.emit(scenario));
+          if (seen.length === 1 && scenario === "repeated signal")
+            setImmediate(() => {
+              signals.emit("SIGINT");
+              signals.emit("SIGTERM");
+            });
+          output!.stdout.write(
+            JSON.stringify({
+              results: [
+                {
+                  id:
+                    seen.length === 2 && scenario === "wrong ID" ? "occ_0" : id,
+                  status: seen.length === 1 ? "still_vulnerable" : "fixed",
+                  evidence: "Verified against source.",
+                },
+              ],
+            }),
+          );
+          return 0;
         },
-        { command: process.execPath },
-        {},
-      );
-
-      expect(process.listenerCount("SIGINT")).toBe(interruptListeners);
-      expect(process.listenerCount("SIGTERM")).toBe(terminateListeners);
-      controller.abort(signal);
-      expect(await status).toBe(expectedStatus);
-      expect(process.listenerCount("SIGINT")).toBe(interruptListeners);
-      expect(process.listenerCount("SIGTERM")).toBe(terminateListeners);
-    },
-  );
-
-  test.each(["SIGINT", "SIGTERM"] as const)(
-    "cancels stored-auth preparation waiting for the credential lock on %s",
-    async (signal) => {
-      const { output, status } =
-        await runCredentialPreparationInterruption(signal);
-
-      expect(status).toBe(0);
-      expect(output).toContain("LOCK_CONTENDER_ATTEMPTED");
-      expect(output).toContain("LOCK_OWNER_PRESERVED");
-      expect(output).toContain("LOCK_REACQUIRED");
-      expect(output).toContain("ABORT_LISTENERS_0");
-      expect(output).toContain("SIGNAL_LISTENERS_0_0");
-      expect(output).toContain(`PREPARATION_ABORT_${signal}`);
-    },
-  );
-
-  test.each([
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const)(
-    "restores the dashboard when %s arrives during an active verification",
-    async (signal, expectedStatus) => {
-      const signals = new FakeSignals();
-      const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
-      let calls = 0;
-
-      expect(
-        await runCli(
-          ["verify-fix", "Synthetic finding", "--json"],
-          dependencies({
-            signals,
-            onCodex: (_arguments, output) => {
-              calls += 1;
-              signals.emit(signal);
-              expect(output?.signal?.aborted).toBe(true);
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(expectedStatus);
-      expect(calls).toBe(1);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
-      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
-      expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
-      expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
-    },
-  );
-
-  test("uses the real prompt size at the Codex input boundary", async () => {
-    const contents = [
-      { occurrenceId: "occ_1", evidence: "small" },
-      { occurrenceId: "occ_2", evidence: "" },
-    ];
-    const verificationIds = ["occ_1", "occ_2"];
-    const base = await remediationPrompt({
-      operation: "verify",
-      pluginRoot: PLUGIN_ROOT,
-      contents,
-      verificationIds,
-    });
-    const padding =
-      MAX_VERIFICATION_INPUT_CHARS - 1 - turnStartTextCharacters(base);
-    expect(padding).toBeGreaterThan(0);
-    contents[1]!.evidence = "x".repeat(padding);
-
-    const below = await planVerificationRequests({
-      pluginRoot: PLUGIN_ROOT,
-      contents,
-      verificationIds,
-    });
-    expect(below).toHaveLength(1);
-    expect(below[0]!.inputCharacters).toBe(MAX_VERIFICATION_INPUT_CHARS - 1);
-    const belowPrompt = await remediationPrompt({
-      operation: "verify",
-      pluginRoot: PLUGIN_ROOT,
-      contents: below[0]!.contents,
-      verificationIds: below[0]!.identifiers,
-    });
-    expect(turnStartTextCharacters(belowPrompt)).toBe(
-      MAX_VERIFICATION_INPUT_CHARS - 1,
-    );
-
-    contents[1]!.evidence += "xx";
-    const combined = await remediationPrompt({
-      operation: "verify",
-      pluginRoot: PLUGIN_ROOT,
-      contents,
-      verificationIds,
-    });
-    expect(turnStartTextCharacters(combined)).toBe(
-      MAX_VERIFICATION_INPUT_CHARS + 1,
-    );
-    const above = await planVerificationRequests({
-      pluginRoot: PLUGIN_ROOT,
-      contents,
-      verificationIds,
-    });
-    expect(above).toHaveLength(2);
-    const abovePrompts = await Promise.all(
-      above.map(({ contents, identifiers }) =>
-        remediationPrompt({
-          operation: "verify",
-          pluginRoot: PLUGIN_ROOT,
-          contents,
-          verificationIds: identifiers,
-        }),
-      ),
-    );
-    expect(
-      above.every(
-        ({ inputCharacters }, index) =>
-          inputCharacters === turnStartTextCharacters(abovePrompts[index]!) &&
-          inputCharacters <= MAX_VERIFICATION_INPUT_CHARS,
-      ),
-    ).toBe(true);
-  });
-
-  test("rejects one oversized saved finding without exposing its evidence", async () => {
-    const sensitiveMarker = "SENSITIVE_FINDING_BODY";
-    const { result, findings } = savedScanWithEvidence(
-      ["high"],
-      sensitiveMarker.repeat(55_000),
-    );
-    const onCodex = mock(() => 0);
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(
-      await runCli(
-        ["verify-fix", "--scan", "scan-oversized", "--json"],
-        dependencies({
-          result,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan-oversized",
-              targetPath: "/saved/repository",
-              findings: findings as unknown as JsonObject[],
-            },
-          }),
-          onCodex,
-        }),
-      ),
-    ).toBe(2);
-
-    expect(onCodex).not.toHaveBeenCalled();
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      status: "failed",
-      code: "VERIFICATION_FAILED",
-      message: expect.stringContaining(
-        "cannot fit in one complete Codex verification request",
-      ),
-    });
-    expect(stderr.text()).not.toContain(sensitiveMarker);
-    expect(stdout.text()).not.toContain(sensitiveMarker);
-  });
-
-  test.each([
-    ["transport failure", "Synthetic middle transport failure."],
-    [
-      "wrong identifier",
-      "Codex did not return an evidence-backed verification result for every finding.",
-    ],
-  ])(
-    "fails atomically on a middle verification %s",
-    async (failure, message) => {
-      const { result, findings } = savedScanWithEvidence(
-        ["high", "high", "high"],
-        "x".repeat(525_000),
-      );
-      let calls = 0;
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      expect(
-        await runCli(
-          ["verify-fix", "--scan", "scan-failure", "--json"],
-          dependencies({
-            result,
-            onWorkbench: () => ({
-              scan: {
-                scanId: "scan-failure",
-                targetPath: "/saved/repository",
-                findings: findings as unknown as JsonObject[],
-              },
-            }),
-            onCodex: (_args, output) => {
-              calls += 1;
-              expect(
-                turnStartTextCharacters(output!.appServer!.prompt),
-              ).toBeLessThanOrEqual(CODEX_INPUT_LIMIT);
-              if (calls === 2 && failure === "transport failure") {
-                output!.stderr.write(`${message}\n`);
-                return 1;
-              }
-              const supplied = JSON.parse(
-                output!.appServer!.prompt.split("\n").at(-1)!,
-              ) as Finding[];
-              output!.stdout.write(
-                JSON.stringify({
-                  results: supplied.map(({ occurrenceId }) => ({
-                    id: calls === 2 ? "occ_wrong" : occurrenceId,
-                    status: "fixed",
-                    evidence: "Synthetic verification passed.",
-                  })),
-                }),
-              );
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(2);
-
-      expect(calls).toBe(2);
-      expect(JSON.parse(stdout.text())).toMatchObject({
-        status: "failed",
-        code: "VERIFICATION_FAILED",
-        message,
       });
-      expect(JSON.parse(stdout.text())).not.toHaveProperty("results");
-      expect(stderr.text()).toContain(message);
-    },
-  );
-
-  test.each([130, 143] as const)(
-    "preserves interrupted status %i from a middle verification request",
-    async (status) => {
-      const { result, findings } = savedScanWithEvidence(
-        ["high", "high", "high"],
-        "x".repeat(525_000),
-      );
-      let calls = 0;
-      const { stdout, runCli } = createCliTest(main);
-
-      expect(
-        await runCli(
-          ["verify-fix", "--scan", "scan-interrupted", "--json"],
-          dependencies({
-            result,
-            onWorkbench: () => ({
-              scan: {
-                scanId: "scan-interrupted",
-                targetPath: "/saved/repository",
-                findings: findings as unknown as JsonObject[],
+      const errorOutput =
+        scenario === "closed stderr"
+          ? new Writable({
+              write(chunk, _encoding, done) {
+                done(
+                  chunk.includes("Second worker")
+                    ? new Error("EPIPE")
+                    : undefined,
+                );
               },
-            }),
-            onCodex: (_args, output) => {
-              calls += 1;
-              if (calls === 2) return status;
-              const supplied = JSON.parse(
-                output!.appServer!.prompt.split("\n").at(-1)!,
-              ) as Finding[];
-              output!.stdout.write(
-                JSON.stringify({
-                  results: supplied.map(({ occurrenceId }) => ({
-                    id: occurrenceId,
-                    status: "fixed",
-                    evidence: "Synthetic verification passed.",
-                  })),
-                }),
-              );
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(status);
-      expect(calls).toBe(2);
-      expect(stdout.text()).toBe("");
+            })
+          : stderr.stream;
+      const exit = await main(
+        ["verify-fix", "--scan", "scan", "--severity", "high", "--json"],
+        stdout.stream,
+        errorOutput,
+        { ...deps, forceExit },
+      );
+      expect(forceExit).not.toHaveBeenCalled();
+      expect(exit).toBe(expectedExit);
+      if (scenario === "complete" || scenario === "redirected output") {
+        if (scenario === "redirected output") {
+          expect(stderr.text()).toContain(
+            "Verifying 3 findings against the current checkout.",
+          );
+          expect(stderr.text()).not.toContain("\u001B[?1049h");
+        } else {
+          expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+        }
+        expect(seen).toEqual(["occ_0", "occ_1", "occ_2"]);
+        expect(stderr.text()).toContain("Checked occ_1.");
+        expect(stderr.text()).not.toContain("Checked occ_0.Checked occ_1.");
+        expect(
+          JSON.parse(stdout.text()).results.map(({ id }: { id: string }) => id),
+        ).toEqual(seen);
+      } else if (
+        scenario === "SIGINT" ||
+        scenario === "SIGTERM" ||
+        scenario === "repeated signal" ||
+        scenario === "interrupted worker"
+      ) {
+        expect(seen).toEqual(
+          scenario === "interrupted worker" ? ["occ_0", "occ_1"] : ["occ_0"],
+        );
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("1 / 3 processed");
+        expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+      } else {
+        expect(seen).toEqual(
+          scenario === "oversized finding" ? [] : ["occ_0", "occ_1"],
+        );
+        const failure = JSON.parse(stdout.text());
+        if (scenario === "oversized finding")
+          expect(failure.message).toContain("Finding occ_1 cannot fit");
+        expect(failure.code).toBe("VERIFICATION_FAILED");
+        expect(failure.results).toBeUndefined();
+        if (scenario === "transport failure")
+          expect(failure.message).toBe(
+            "Codex verification failed with exit code 1.",
+          );
+        if (scenario === "closed stderr")
+          expect(failure.message).toBe("Second worker failed.");
+      }
     },
   );
+
+  test("batches at the exact decoded prompt limit and rejects an oversized finding", async () => {
+    const findings = fakeResult(["high", "high"]).findings.findings.map(
+      (finding, i) => ({
+        ...finding,
+        occurrenceId: `occ_${i}`,
+        title: "",
+      }),
+    );
+    const prompt = await remediationPrompt({
+      operation: "verify",
+      contents: findings,
+      verificationIds: findings.map(({ occurrenceId }) => occurrenceId),
+      pluginRoot: PLUGIN_ROOT,
+      verificationMode: "static",
+    });
+    const batches = () => verificationBatches(findings, PLUGIN_ROOT, "static");
+    findings[1]!.title = "🚀".repeat((1 << 20) - [...prompt].length);
+    expect((await batches()).map((batch) => batch.length)).toEqual([2]);
+    findings[1]!.title += "x";
+    expect((await batches()).map((batch) => batch.length)).toEqual([1, 1]);
+    findings[1]!.title += "x".repeat(1024);
+    await expect(batches()).rejects.toThrow(
+      "Finding occ_1 cannot fit in one complete Codex verification request",
+    );
+  });
 
   test("reports inconclusive findings without treating them as fixed", async () => {
     const stdout = captureCli(main, "stdout");

@@ -4,9 +4,11 @@ import { parseInputs, scanArguments, type Inputs } from './inputs.js';
 import { resolveTarget, type EventContext, type Target } from './targets.js';
 import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.js';
 import { runProcess, safeLogLines } from './process.js';
-import { analyzeResults, type ScanResults } from './results.js';
+import { analyzeResults, type ScanResults, type Severity } from './results.js';
 import { collectReports, uploadReports } from './artifacts.js';
 import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
+
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 
 export const OUTPUT_NAMES = [
   'sarif-path', 'json-path', 'manifest-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
@@ -160,8 +162,12 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]),
+        };
+        finalSummary = resultSummary(displayResult, inputs, target);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
       }

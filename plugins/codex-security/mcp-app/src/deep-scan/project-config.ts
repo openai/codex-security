@@ -42,7 +42,7 @@ export async function readDeepScanProjectConfig(
   const text = await readFile(path, "utf8");
   let value: unknown;
   try {
-    if (extension === ".json") value = JSON.parse(text);
+    if (extension === ".json") value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     else {
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];

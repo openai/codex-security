@@ -386,7 +386,8 @@
             "semgrep",
             "inspector",
             "blackduck",
-            "veracode"
+            "veracode",
+            "sonar"
           ],
           "title": "Provider",
           "type": "string"

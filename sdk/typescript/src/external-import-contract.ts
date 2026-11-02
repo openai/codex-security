@@ -349,6 +349,7 @@ export function validateExternalEvidenceJson(
         pending.push([child, depth + 1]);
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");
+      if (target === "local") continue;
       const wire = JSON.stringify(value);
       // Cloud pads short exponents and formats small fractions scientifically.
       const cloud = (

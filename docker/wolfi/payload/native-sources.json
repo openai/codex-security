@@ -2,5 +2,6 @@
   "@openai/codex@0.164.0-linux-x64": "https://github.com/openai/codex/tree/6aaac694803004a63c6f393d153c96d22521a6b9",
   "@openai/codex@0.165.0-linux-x64": "https://github.com/openai/codex/tree/360319d8dee62d87e2d59fc0c21805d79519cfed",
   "@napi-rs/canvas-linux-x64-gnu@1.0.10": "https://github.com/Brooooooklyn/canvas/tree/7d19abed029287e7c26b14eaa6e67d560a37d853",
-  "@napi-rs/canvas-linux-x64-gnu@1.0.13": "https://github.com/Brooooooklyn/canvas/tree/00a115d9903647f116daf86eccd2c6ba36128371"
+  "@napi-rs/canvas-linux-x64-gnu@1.0.13": "https://github.com/Brooooooklyn/canvas/tree/00a115d9903647f116daf86eccd2c6ba36128371",
+  "@openai/codex@0.166.0-linux-x64": "https://github.com/openai/codex/tree/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
 }
