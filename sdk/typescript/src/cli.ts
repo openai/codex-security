@@ -3666,14 +3666,23 @@ export async function main(
               : {};
           const coverageWarnings = (selection: ExternalFindings): string => {
             const notifications = selection.report?.["notifications"];
-            return Array.isArray(notifications) && notifications.length
-              ? notifications
-                  .map(
-                    (entry) =>
-                      `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
-                  )
-                  .join("")
-              : "";
+            const messages = Array.isArray(notifications)
+              ? notifications.map(
+                  (entry) =>
+                    `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
+                )
+              : [];
+            const collection = selection.report?.["collection"];
+            if (
+              isJsonObject(collection) &&
+              isJsonObject(collection["completeness"]) &&
+              collection["completeness"]["collection"] === "partial"
+            ) {
+              messages.push(
+                `Scanner coverage: ${diagnosticValue(JSON.stringify({ completeness: collection["completeness"], scans: collection["scans"] }))}\n`,
+              );
+            }
+            return messages.join("");
           };
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);

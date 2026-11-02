@@ -141,10 +141,14 @@ test("cancels preparation while the source file read is pending", async () => {
 test.each(["snyk", "endor"] as const)(
   "%s SARIF rejects malformed repository provenance for full and empty runs",
   async (provider) => {
-    await using fixture = await localReportFixture("report.sarif", {
-      provider,
-      sourceKey: "example-project",
-    });
+    await using fixture = await localReportFixture(
+      "report.sarif",
+      {
+        provider,
+        sourceKey: "example-project",
+      },
+      { remote: "https://github.com/example/project" },
+    );
     const sarif = provider === "snyk" ? snykSarif() : endorSarif();
     const run = sarif.runs[0]!;
     for (const results of [run.results, []]) {
@@ -164,6 +168,25 @@ test.each(["snyk", "endor"] as const)(
         "version control provenance must be an array",
       );
     }
+    await fixture.writeJson({
+      ...sarif,
+      runs: [
+        {
+          ...run,
+          versionControlProvenance: [
+            { repositoryUri: "https://github.com/example/project" },
+          ],
+        },
+        {
+          ...run,
+          results: [],
+          versionControlProvenance: [
+            { repositoryUri: "https://github.com/example/other-project" },
+          ],
+        },
+      ],
+    });
+    await expect(fixture.prepare()).rejects.toThrow("other-project");
   },
 );
 

@@ -139,7 +139,7 @@ codex-security publish findings /path/to/selected-wiz-findings.json \
   --source-key TENANT_ID/vulnerability-finding --dry-run --format json
 ```
 
-When the preview returns `status: "empty"`, report that there is nothing to upload and stop. For a nonempty preview, show the Cloud API endpoint, account, repository, environments, source namespace, severity counts, and exclusions. Identify the evidence file and make the complete JSON preview available for inspection without pasting a large report into the conversation. Explain that vendor evidence is not a Codex assessment.
+When the preview returns `status: "empty"`, report that there is nothing to upload, relay any scanner warnings or partial coverage in `report`, and stop. For a nonempty preview, show the Cloud API endpoint, account, repository, environments, source namespace, severity counts, and exclusions. Identify the evidence file and make the complete JSON preview available for inspection without pasting a large report into the conversation. Explain that vendor evidence is not a Codex assessment.
 
 Obtain explicit confirmation for this concrete upload, including skipped records. Then run the same command without `--dry-run`, adding `--yes`. Authorization to inspect or assess findings alone does not authorize sending them to Cloud. Keep approval when the user already approved this preview and the input and destination are unchanged.
 

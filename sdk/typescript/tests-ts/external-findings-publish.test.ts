@@ -1133,7 +1133,7 @@ test("failed or malformed vendor collections never report a successful empty imp
       },
       "successful SCA scan",
     ],
-    ["endor", { list: { objects: null } }, "must be an array"],
+    ["endor", { list: { objects: {} } }, "must be an array"],
     [
       "semgrep",
       {
@@ -1212,6 +1212,18 @@ test("failed or malformed vendor collections never report a successful empty imp
       },
     },
   });
+  const terminal = createCliTest(main);
+  expect(
+    await terminal.runCli(
+      f.command
+        .slice(0, -2)
+        .map((argument) => (argument === "wiz" ? "snyk" : argument)),
+      f.cliDeps,
+    ),
+  ).toBe(0);
+  expect(terminal.stdout.text() + terminal.stderr.text()).toContain(
+    "Code scan denied",
+  );
   const unsupported = plugin.findings[0]!;
   await writeFile(
     f.file,

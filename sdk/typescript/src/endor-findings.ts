@@ -6,7 +6,6 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   normalizeRecords,
-  optionalArray,
   readScannerJson,
   record,
   relativePath,
@@ -62,7 +61,7 @@ export function normalizeEndorFindings(
       throw new Error("Expected Endor list.objects in the finding export.");
   }
   const values = list
-    ? optionalArray(list["objects"], "Endor list.objects")
+    ? array(list["objects"] ?? [], "Endor list.objects")
     : Array.isArray(input)
       ? input
       : [input];
@@ -328,12 +327,7 @@ export function normalizeEndorSarif(
         "Endor finding-uuid",
       ),
     target,
-    {
-      report:
-        !entries.length && notifications.length
-          ? { notifications: structuredClone(notifications) }
-          : undefined,
-    },
+    { emptyNotifications: notifications },
   );
 }
 

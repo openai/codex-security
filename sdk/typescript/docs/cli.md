@@ -1371,13 +1371,13 @@ the saved submission to resume it.
 
 ### Results and exit codes
 
-| Status        | Exit code | Meaning                                                                 |
-| ------------- | --------- | ----------------------------------------------------------------------- |
-| `empty`       | 0         | The report contained no records or diagnostics.                         |
-| `complete`    | 0         | All selected records were acknowledged and read back.                   |
-| `partial`     | 1         | Some records were excluded locally or rejected by Cloud.                |
-| `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation. |
-| `failed`      | 2         | Preparation failed before upload.                                       |
+| Status        | Exit code | Meaning                                                                      |
+| ------------- | --------- | ---------------------------------------------------------------------------- |
+| `empty`       | 0         | No records were available to upload. Check the report for coverage warnings. |
+| `complete`    | 0         | All selected records were acknowledged and read back.                        |
+| `partial`     | 1         | Some records were excluded locally or rejected by Cloud.                     |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation.      |
+| `failed`      | 2         | Preparation failed before upload.                                            |
 
 For a clean zero-record report, the CLI returns `empty` before checking a Cloud
 destination or asking for confirmation. A local import still checks the selected

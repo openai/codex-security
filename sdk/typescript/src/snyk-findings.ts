@@ -422,12 +422,7 @@ export function normalizeSnykSarif(
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
-    {
-      report:
-        !entries.length && notifications.length
-          ? { notifications: structuredClone(notifications) }
-          : undefined,
-    },
+    { emptyNotifications: notifications },
   );
 }
 

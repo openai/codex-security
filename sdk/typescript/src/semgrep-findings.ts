@@ -321,12 +321,7 @@ export function normalizeSemgrepSarif(
     },
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
-    {
-      report:
-        !entries.length && notifications.length
-          ? { notifications: structuredClone(notifications) }
-          : undefined,
-    },
+    { emptyNotifications: notifications },
   );
 }
 

@@ -691,3 +691,56 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     "no scanner runs",
   );
 });
+
+test("covered SARIF diagnostics survive exclusions and retain unsuccessful invocation details", () => {
+  const input: any = endorSarif();
+  const run = input.runs[0];
+  delete run.results[0].properties["finding-uuid"];
+  const guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const componentGuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+  run.tool.extensions = [
+    {
+      name: "example",
+      guid: componentGuid,
+      globalMessageStrings: { constructor: { text: "File skipped" } },
+      notifications: [
+        {
+          id: "coverage",
+          guid,
+          messageStrings: {},
+          defaultConfiguration: { level: "error" },
+        },
+      ],
+    },
+  ];
+  const descriptor = {
+    guid: guid.toUpperCase(),
+    toolComponent: { guid: componentGuid.toUpperCase() },
+  };
+  const message = { id: "constructor" };
+  const invocation = {
+    executionSuccessful: false,
+    toolExecutionNotifications: [{ descriptor, message }],
+    exitCodeDescription: "Scanner timed out",
+  };
+  run.invocations = [invocation];
+  expect(() => normalizeEndorSarif(input)).toThrow("Scanner timed out");
+  invocation.executionSuccessful = true;
+  expect(() => normalizeEndorSarif(input)).toThrow("File skipped");
+  run.tool.extensions[0].notifications[0].defaultConfiguration.level =
+    "warning";
+  expect(normalizeEndorSarif(input)).toMatchObject({
+    findings: [],
+    report: {
+      notifications: [
+        { level: "warning", messageTemplate: { text: "File skipped" } },
+      ],
+    },
+  });
+});
+
+test("Endor accepts a nullable native list with no remaining page", () => {
+  expect(
+    normalizeEndorFindings({ list: { objects: null, response: null } }),
+  ).toMatchObject({ findings: [], read: 0, excluded: [] });
+});

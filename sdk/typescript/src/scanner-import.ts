@@ -49,7 +49,7 @@ function notificationDescriptors(value: unknown) {
   for (const component of [driver, ...extensions]) {
     if (!isRecord(component)) continue;
     if (typeof component["guid"] === "string")
-      components.set(component["guid"], component);
+      components.set(component["guid"].toLowerCase(), component);
     const entries = optionalArray(
       component["notifications"],
       "SARIF notification descriptors",
@@ -58,7 +58,8 @@ function notificationDescriptors(value: unknown) {
     const byId = new Map<unknown, Record<string, unknown>>();
     for (const entry of entries) {
       if (!isRecord(entry)) continue;
-      if (typeof entry["guid"] === "string") byGuid.set(entry["guid"], entry);
+      if (typeof entry["guid"] === "string")
+        byGuid.set(entry["guid"].toLowerCase(), entry);
       if (typeof entry["id"] === "string") byId.set(entry["id"], entry);
     }
     descriptors.set(component, { entries, byGuid, byId });
@@ -70,7 +71,7 @@ function notificationDescriptors(value: unknown) {
       if (typeof target["index"] === "number" && target["index"] >= 0)
         component = extensions[target["index"]];
       else if (typeof target["guid"] === "string")
-        component = components.get(target["guid"]);
+        component = components.get(target["guid"].toLowerCase());
     }
     if (!isRecord(component) || !isRecord(ref)) return { component };
     const lookup = descriptors.get(component);
@@ -78,7 +79,7 @@ function notificationDescriptors(value: unknown) {
       typeof ref["index"] === "number" && ref["index"] >= 0
         ? lookup?.entries[ref["index"]]
         : typeof ref["guid"] === "string"
-          ? lookup?.byGuid.get(ref["guid"])
+          ? lookup?.byGuid.get(ref["guid"].toLowerCase())
           : lookup?.byId.get(ref["id"]);
     return {
       component,
@@ -112,7 +113,7 @@ export function successfulSarifInvocations(
       if (descriptor && override["configuration"]["level"] !== undefined)
         levels.set(descriptor, override["configuration"]["level"]);
     }
-    const messages: unknown[] = [];
+    const messages: Record<string, unknown>[] = [];
     for (const property of [
       "toolExecutionNotifications",
       "toolConfigurationNotifications",
@@ -141,19 +142,18 @@ export function successfulSarifInvocations(
         const template =
           key === undefined
             ? undefined
-            : ((isRecord(local) ? local[key] : undefined) ??
-              (isRecord(global) ? global[key] : undefined));
+            : ((isRecord(local) && Object.hasOwn(local, key)
+                ? local[key]
+                : undefined) ??
+              (isRecord(global) && Object.hasOwn(global, key)
+                ? global[key]
+                : undefined));
         const diagnostic = {
           ...notification,
           level,
           ...(template === undefined ? {} : { messageTemplate: template }),
         };
-        if (level === "error")
-          throw new Error(
-            `${producer} SARIF contains scan error notifications: ${JSON.stringify(diagnostic)}`,
-          );
-        if (successful) retained?.push(diagnostic);
-        else messages.push(diagnostic);
+        messages.push(diagnostic);
       }
     }
     if (!successful) {
@@ -168,6 +168,11 @@ export function successfulSarifInvocations(
         `${producer} SARIF contains an unsuccessful invocation.${diagnostics.length ? " " + JSON.stringify(diagnostics) : ""}`,
       );
     }
+    if (messages.some((message) => message["level"] === "error"))
+      throw new Error(
+        `${producer} SARIF contains scan error notifications: ${JSON.stringify(messages)}`,
+      );
+    if (retained) for (const message of messages) retained.push(message);
     return invocation;
   }
   if (run["conversion"] !== undefined) {
@@ -608,6 +613,7 @@ export function normalizeRecords<T>(
   target: "local" | "cloud" = "cloud",
   options: {
     report?: ExternalFindings["report"];
+    emptyNotifications?: unknown[];
     filter?: SelectionFilter;
   } = {},
 ): ExternalFindings {
@@ -656,5 +662,12 @@ export function normalizeRecords<T>(
     selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  return selection.finish(options.filter);
+  const normalized = selection.finish(options.filter);
+  if (!normalized.findings.length && options.emptyNotifications?.length) {
+    normalized.report = {
+      ...normalized.report,
+      notifications: structuredClone(options.emptyNotifications),
+    };
+  }
+  return normalized;
 }

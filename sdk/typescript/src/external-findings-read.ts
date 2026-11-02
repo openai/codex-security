@@ -144,8 +144,9 @@ export async function readExternalFindings(
         ).map((url) => ({ url })),
       );
     }
-    if (hasNoExternalRecords(findings) && isRecord(input)) {
+    if (isRecord(input)) {
       if (
+        hasNoExternalRecords(findings) &&
         options.provider === "snyk" &&
         input["format"] === "snyk-findings-export/v1"
       )
@@ -156,9 +157,10 @@ export async function readExternalFindings(
         const producer = (
           { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
         )[options.provider];
-        sourceRepositories = input["runs"].flatMap((run) =>
-          sarifRepositoryUrls(run, producer).map((url) => ({ url })),
-        );
+        const urls = new Set(sourceRepositories.map(({ url }) => url));
+        for (const run of input["runs"])
+          for (const url of sarifRepositoryUrls(run, producer)) urls.add(url);
+        sourceRepositories = [...urls].map((url) => ({ url }));
       }
     }
     return { findings, sourceRepositories };
