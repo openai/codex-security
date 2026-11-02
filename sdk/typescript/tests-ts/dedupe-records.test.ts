@@ -123,6 +123,101 @@ function answer(review: DeduplicationReviewRequest): unknown {
       };
 }
 
+function importedRecord(id: string) {
+  const { finding } = record(id, "shared");
+  const { ruleId, taxonomy, identity, remediation, ...evidence } = finding;
+  return {
+    id,
+    kind: "imported" as const,
+    finding: {
+      ...evidence,
+      locations: [],
+      originalSource: { advisory: "example-advisory" },
+    },
+  };
+}
+
+test("a locationless import with no neighbors returns its original ID without review", async () => {
+  const imported = importedRecord("external");
+  const request: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [imported],
+    candidateRelationships: [
+      { observationId: imported.id, candidateObservationIds: [] },
+    ],
+  };
+  const run = mock(async () => {
+    throw new Error("Unexpected review");
+  });
+  expect(
+    (await deduplicateRecords(request, { reviewRunner: { run } })).groups,
+  ).toEqual([
+    { representativeObservationId: imported.id, observationIds: [imported.id] },
+  ]);
+  expect(run).not.toHaveBeenCalled();
+  // The same evidence must still fail the default native contract.
+  await expect(
+    deduplicateRecords(
+      {
+        ...request,
+        observations: [
+          { id: imported.id, finding: imported.finding as unknown as Finding },
+        ],
+      },
+      { reviewRunner: { run } },
+    ),
+  ).rejects.toThrow("Finding schema");
+});
+
+test.each(["native", "imported"])(
+  "compares a locationless import with a neighbor of kind %s",
+  async (kind) => {
+    const anchor = importedRecord("external");
+    const neighbor =
+      kind === "native"
+        ? record("neighbor", "shared")
+        : importedRecord("neighbor");
+    const request: DeduplicateRecordsInput = {
+      version: 1,
+      observations: [anchor, neighbor],
+      candidateRelationships: [
+        { observationId: anchor.id, candidateObservationIds: [neighbor.id] },
+      ],
+    };
+    let pair = false;
+    const result = await deduplicateRecords(request, {
+      reviewRunner: {
+        async run(review) {
+          if (review.stage === "pair-review") {
+            pair = true;
+            const findings = assigned(review);
+            const validate = new Ajv2020({ strict: false }).compile(
+              review.findingSchema as object,
+            );
+            expect(findings.map((finding) => validate(finding))).toEqual([
+              true,
+              true,
+            ]);
+            expect(validate({ ...findings[1], locations: [] })).toBe(
+              kind === "imported",
+            );
+            expect(findings[0]?.["originalSource"]).toEqual(
+              anchor.finding.originalSource,
+            );
+          }
+          return answer(review);
+        },
+      },
+    });
+    expect(pair).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.groups[0]?.observationIds.sort()).toEqual([
+      "external",
+      "neighbor",
+    ]);
+  },
+);
+
 test("records groups original observations and retrieved neighbors with unique representatives", async () => {
   const original = input();
   const requests: DeduplicationReviewRequest[] = [];
