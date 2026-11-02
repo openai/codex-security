@@ -122,3 +122,10 @@ mocked model/workbench boundaries, verifying isolated state, completion, prompt
 capture, and parent-plus-worker usage. CI reuses its host native build, builds
 the plugin with `build_mcp_app.mjs --native host`, and links it at
 `sdk/typescript/_bundled_plugin`; universal release artifacts are not required.
+
+A second integration test sends synthetic findings for the five fixture cases
+through the shipped draft tool and the real workbench. It checks that an empty
+terminal draft preserves previously accepted findings, source evidence, and
+validation details in the sealed scan. Each accepted finding must appear in
+the generated report. A control leaves one candidate in deferred work and
+verifies that discovery text earns no recall.
