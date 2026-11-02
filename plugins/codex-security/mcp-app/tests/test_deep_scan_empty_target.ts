@@ -22,6 +22,19 @@ import { writeJson } from "./support/json.ts";
 
 const execFile = promisify(nodeExecFile);
 const { decodePosixBytes } = await importSource("src/helpers/posix-path.ts");
+const { windowsFiles } = await importSource(
+  "src/helpers/resolve-security-md.ts",
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
+);
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
   define: {
@@ -34,6 +47,41 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   },
 });
 after(() => temporaryDirectories.cleanup());
+
+for (const nonempty of [false, true]) {
+  test(
+    `Windows directory selection preserves lone surrogates, nonempty=${nonempty}`,
+    { skip: process.platform !== "win32" },
+    async () => {
+      const fixture = await fixtureRun();
+      await mkdir(fixture.run.targetPath, { recursive: true });
+      const name = "selected-\ud800",
+        selected = path.join(fixture.run.targetPath, name),
+        replacement = path.join(fixture.run.targetPath, "selected-\ufffd");
+      const files = windowsFiles(),
+        wide = Buffer.from(selected, "utf16le"),
+        source = Buffer.from(path.join(selected, "source.py"), "utf16le");
+      files.mkdir(wide);
+      await mkdir(replacement);
+      if (nonempty) files.writeFile(source, [Buffer.from("pass\n")]);
+      else await writeFile(path.join(replacement, "source.py"), "pass\n");
+      fixture.run.includePaths = [name];
+      try {
+        const { coordinator, executor } = await startFixture(fixture);
+        if (nonempty) await assertDiscoveryThenCancel(coordinator, executor);
+        else {
+          const terminal = await coordinator.wait(undefined, 5_000);
+          assert.equal(terminal?.status, "failed");
+          assert.match(terminal?.error ?? "", /target is empty/iu);
+          assert.equal(executor.discoveryCalls, 0);
+        }
+      } finally {
+        if (nonempty) files.unlink(source);
+        files.unlink(wide);
+      }
+    },
+  );
+}
 
 for (const checkpoint of ["persisted phase", "dispatched worker"]) {
   test(`resumed ${checkpoint} preserves admission before any accepted result`, async () => {
