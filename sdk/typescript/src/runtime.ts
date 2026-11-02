@@ -404,14 +404,14 @@ export async function preparePolicyOutputDirectory(
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -2191,8 +2191,7 @@ export async function validatePreparedOutputDir(
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
-  const entries = await readdir(canonical);
-  if (!allowNonempty && entries.length !== 0) {
+  if (!allowNonempty && (await readdir(canonical)).length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );

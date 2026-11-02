@@ -1,4 +1,5 @@
 import {
+  canonicalNumber,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -76,35 +77,6 @@ const wireJson = JSON as JSON & {
 // A retained JSON number is represented as an object in JavaScript.
 function responseRecord(value: unknown, label: string) {
   return record(wireJson.isRawJSON(value) ? undefined : value, label);
-}
-
-// Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-function canonicalNumber(token: string, fixedDigits = 21): string {
-  const [, sign = "", integer, fraction = "", exponent = "0"] =
-    /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
-  const significant = (integer + fraction).replace(/^0+/u, "");
-  if (!significant) return "0";
-  let end = significant.length;
-  while (significant[end - 1] === "0") end--;
-  const digits = significant.slice(0, end);
-  const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
-  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
-  if (point > -6n && point <= BigInt(fixedDigits)) {
-    const split = Number(point);
-    if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
-    if (split >= digits.length) return sign + digits.padEnd(split, "0");
-    return sign + digits.slice(0, split) + "." + digits.slice(split);
-  }
-  const trailing = digits.slice(1);
-  const scientific = point - 1n;
-  return (
-    sign +
-    digits.charAt(0) +
-    (trailing ? "." + trailing : "") +
-    "e" +
-    (scientific >= 0n ? "+" : "") +
-    scientific
-  );
 }
 
 function sourceLine(value: unknown): number | null {
