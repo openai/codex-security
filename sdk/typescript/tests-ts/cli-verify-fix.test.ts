@@ -1131,16 +1131,26 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
     },
   );
 
-  test.each([false, true])(
-    "writes a structured selection failure before stderr drains (token count: %s)",
-    async (tokenCount) => {
+  test.each(["JSON", "token count", "failed stderr"])(
+    "writes a structured selection failure before stderr drains (%s)",
+    async (scenario) => {
+      const tokenCount = scenario === "token count";
       const stdout = capture();
+      const output = new Writable({
+        write(chunk, _encoding, callback) {
+          stdout.stream.write(chunk);
+          setImmediate(callback);
+        },
+      });
       const writeStarted = Promise.withResolvers<(error?: Error) => void>();
       let diagnostic = "";
       const stderr = new Writable({
+        highWaterMark: 1,
         write(chunk, _encoding, callback) {
+          const first = diagnostic.length === 0;
           diagnostic += chunk.toString();
-          writeStarted.resolve(callback);
+          if (first) writeStarted.resolve(callback);
+          else callback();
         },
       });
       let finished = false;
@@ -1152,7 +1162,7 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
           "--json",
           ...(tokenCount ? ["--token-count"] : []),
         ],
-        stdout.stream,
+        output,
         stderr,
         dependencies({ onWorkbench: () => ({ scans: [] }) }),
       ).then((code) => {
@@ -1164,22 +1174,32 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
       await new Promise<void>((resolve) => setImmediate(resolve));
       const beforeDrain = stdout.text();
       const finishedBeforeDrain = finished;
-      if (!tokenCount) {
-        const queued = stderr.writableLength;
+      if (scenario === "JSON") {
         const repeated = await main(
-          ["verify-fix", "--scan", "latest", "--json"],
-          capture().stream,
+          ["verify-fix", "--scan", "missing", "--json"],
+          output,
           stderr,
           dependencies({ onWorkbench: () => ({ scans: [] }) }),
         );
         expect(repeated).toBe(2);
         expect(stderr.listenerCount("error")).toBe(0);
-        expect(stderr.writableLength).toBe(queued);
+        expect(
+          JSON.parse(stdout.text().slice(beforeDrain.length)).message,
+        ).toBe("Could not read the selected scan and repository.");
       }
       finishWrite(
-        tokenCount ? undefined : new Error("Synthetic stderr failure."),
+        scenario === "failed stderr"
+          ? new Error("Synthetic stderr failure.")
+          : undefined,
       );
       expect(await operation).toBe(2);
+      if (scenario === "JSON") {
+        await new Promise<void>((resolve) => stderr.end(resolve));
+        expect(diagnostic).toBe(
+          "codex-security: No saved scan was found for this repository.\n" +
+            "codex-security: Could not read the selected scan and repository.\n",
+        );
+      }
       expect(finishedBeforeDrain).toBe(!tokenCount);
       expect(diagnostic).toContain("No saved scan was found");
       if (tokenCount) expect(beforeDrain).toMatch(/^\d+\n$/u);

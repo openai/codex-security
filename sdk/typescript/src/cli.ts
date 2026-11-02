@@ -1984,11 +1984,7 @@ function writeOptionalVerificationDiagnostic(
   try {
     if (!(stream instanceof NodeWritable)) {
       stream.write(message);
-    } else if (
-      stream.writable &&
-      !stream.writableLength &&
-      !stream.writableNeedDrain
-    ) {
+    } else if (stream.writable) {
       stream.write(message, (error) => {
         // Node calls the write callback before emitting its error. A stalled
         // write needs no listener, and other consumers still receive the event.
