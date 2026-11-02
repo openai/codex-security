@@ -1,4 +1,5 @@
 import type {
+  ExternalFinding,
   ExternalFindings,
   ExternalPublicationInput,
   ExternalSourceRepository,
@@ -7,7 +8,7 @@ import { hasNoExternalRecords } from "./external-findings.js";
 import { readScannerJson, sarifRepositoryUrls } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
 import { normalizeSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
 import { normalizeSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
@@ -16,10 +17,16 @@ import {
   endorRepositoryUrls,
 } from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readSonarFindings } from "./sonar-findings.js";
+import { readVeracodeFindings } from "./veracode-findings.js";
+import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
-import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
-import { readVendorFindingsForPublication } from "./wiz-findings.js";
+import {
+  readLocalWizFindings,
+  readVendorFindingsForPublication,
+  wizFindingRepository,
+} from "./wiz-findings.js";
 
 /** File reader names mapped to their stored and Cloud source provider. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
@@ -31,6 +38,9 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   endor: "endor",
   github: "github",
   inspector: "inspector",
+  blackduck: "blackduck",
+  veracode: "veracode",
+  sonar: "sonar",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -54,12 +64,44 @@ export interface ReadExternalFindings {
   sourceRepositories?: ExternalSourceRepository[];
 }
 
+/** Repository references retained by a provider's individual finding. */
+export function localFindingRepositories(
+  provider: Provider,
+  finding: ExternalFinding,
+): ExternalSourceRepository[] {
+  const { evidence } = finding;
+  if (provider === "snyk")
+    return snykRepositoryUrls(evidence.source_data, {
+      normalizeGitRemote: false,
+    }).map((url) => ({ url }));
+  if (provider === "endor")
+    return endorRepositoryUrls(evidence.source_data).map((url) => ({ url }));
+  if (provider === "wiz") {
+    const repository = wizFindingRepository(evidence);
+    return repository ? [repository] : [];
+  }
+  if (provider === "github") {
+    const url = dependabotRepository(finding);
+    if (url) return [{ url, platform: "github" }];
+  }
+  return [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "sonar") {
+    const url = options.sourceRepositoryUrl;
+    const findings = await readSonarFindings(path, url ?? "", target);
+    const binding = findings.report?.["repositoryUrl"];
+    return {
+      findings,
+      sourceRepositories: typeof binding === "string" ? [{ url: binding }] : [],
+    };
+  }
   if (options.provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
     return {
@@ -78,18 +120,16 @@ export async function readExternalFindings(
   ) {
     const input = await readScannerJson(path);
     let findings: ExternalFindings;
-    let repositoryUrls: string[];
+    let sourceRepositories: ExternalSourceRepository[];
     if (options.provider === "snyk") {
       findings = normalizeSnykFindings(input, target);
-      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
-        snykRepositoryUrls(evidence.source_data, {
-          normalizeGitRemote: false,
-        }),
+      sourceRepositories = findings.findings.flatMap((finding) =>
+        localFindingRepositories("snyk", finding),
       );
     } else if (options.provider === "endor") {
       findings = normalizeEndorFindings(input, target);
-      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
-        endorRepositoryUrls(evidence.source_data),
+      sourceRepositories = findings.findings.flatMap((finding) =>
+        localFindingRepositories("endor", finding),
       );
     } else {
       findings = normalizeSemgrepFindings(
@@ -97,8 +137,11 @@ export async function readExternalFindings(
         { sourceRepositoryUrl: options.sourceRepositoryUrl ?? "" },
         target,
       );
-      repositoryUrls = findings.findings.flatMap(({ evidence }) =>
-        sarifRepositoryUrls(evidence.source_data?.["runContext"], "Semgrep"),
+      sourceRepositories = findings.findings.flatMap(({ evidence }) =>
+        sarifRepositoryUrls(
+          evidence.source_data?.["runContext"],
+          "Semgrep",
+        ).map((url) => ({ url })),
       );
     }
     if (
@@ -110,73 +153,50 @@ export async function readExternalFindings(
         options.provider === "snyk" &&
         input["format"] === "snyk-findings-export/v1"
       )
-        repositoryUrls = snykRepositoryUrls(input, {
+        sourceRepositories = snykRepositoryUrls(input, {
           normalizeGitRemote: false,
-        });
+        }).map((url) => ({ url }));
       else if (input["version"] === "2.1.0" && Array.isArray(input["runs"])) {
         const producer = (
           { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
         )[options.provider];
-        repositoryUrls = input["runs"].flatMap((run) =>
-          sarifRepositoryUrls(run, producer),
+        sourceRepositories = input["runs"].flatMap((run) =>
+          sarifRepositoryUrls(run, producer).map((url) => ({ url })),
         );
       }
     }
-    return {
-      findings,
-      sourceRepositories: repositoryUrls.map((url) => ({ url })),
-    };
+    return { findings, sourceRepositories };
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
-  if (options.provider === "inspector") {
+  if (
+    options.provider === "inspector" ||
+    options.provider === "blackduck" ||
+    options.provider === "veracode"
+  ) {
     const url = options.sourceRepositoryUrl ?? "";
+    const read = {
+      inspector: readInspectorFindings,
+      blackduck: readBlackDuckFindings,
+      veracode: readVeracodeFindings,
+    }[options.provider];
     return {
-      findings: await readInspectorFindings(
-        path,
-        url,
-        target,
-        options.inspectorProjectMap,
-      ),
+      findings: await read(path, url, target, options.inspectorProjectMap),
       sourceRepositories: [{ url }],
     };
   }
-  const publication = await readVendorFindingsForPublication(path, target);
-  // Raw package exports keep repository-branch URLs in retained source data.
-  const sourceRepositories = publication.current.findings.flatMap(
-    ({ evidence }) => {
-      const csvUrl = wizCsvRepositoryUrl(evidence);
-      if (csvUrl) return [{ url: csvUrl, platform: "github" as const }];
-      const asset = evidence.source_data?.["vulnerableAsset"];
-      if (!isRecord(asset) || typeof asset["cloudProviderURL"] !== "string")
-        return [];
-      const url = URL.parse(asset["cloudProviderURL"]);
-      if (!url) return [];
-      const github =
-        asset["nativeType"] === "github#repositoryBranch" ||
-        (asset["type"] === "REPOSITORY_BRANCH" &&
-          isGitHubCloudHost(url.hostname));
-      if (!github)
-        return asset["type"] === "REPOSITORY_BRANCH"
-          ? [{ url: asset["cloudProviderURL"] }]
-          : [];
-      const [, owner, repository] = url.pathname.split("/");
-      return owner && repository
-        ? [
-            {
-              url: `${url.origin}/${owner}/${repository}`,
-              platform: "github" as const,
-            },
-          ]
-        : [];
-    },
+  // A new reader must choose its parser before reaching the Wiz replay path.
+  options.provider satisfies "wiz";
+  const wiz =
+    target === "local"
+      ? await readLocalWizFindings(path)
+      : await readVendorFindingsForPublication(path, target);
+  const sourceRepositories = wiz.current.findings.flatMap((finding) =>
+    localFindingRepositories("wiz", finding),
   );
   return {
-    findings: publication.current,
-    publication,
-    sourceRepositories: [
-      ...publication.sourceRepositories,
-      ...sourceRepositories,
-    ],
+    findings: wiz.current,
+    ...("legacy" in wiz && { publication: wiz }),
+    sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
   };
 }

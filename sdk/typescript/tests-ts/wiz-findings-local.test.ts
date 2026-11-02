@@ -23,6 +23,10 @@ const row: Record<string, string> = {
   LocationPath: "/package-lock.json",
   Version: "1.0.0",
   FixedVersion: "2.0.0",
+  context_type: "",
+  context_guid: "",
+  scan_type: "",
+  issue_id: "",
 };
 
 function csvReport(source: Record<string, string>): string {

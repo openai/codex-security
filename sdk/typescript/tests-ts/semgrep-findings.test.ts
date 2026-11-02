@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   normalizeSemgrepFindings as normalizeJson,
   normalizeSemgrepSarif as normalizeSarif,
-} from "../src/semgrep-findings.js";
+} from "../src/index.js";
 import {
   semgrepJson,
   semgrepSarif,
@@ -196,6 +196,68 @@ test("a small SARIF finding does not copy an unrelated run artifact inventory", 
     output.findings[0]!.evidence.source_data?.["runContext"],
   ).not.toHaveProperty("artifacts");
   expect(input).toEqual(original);
+});
+
+test("SARIF retains the current run inventory only for results that reference it", () => {
+  const input = semgrepSarif();
+  const run = input.runs[0]!;
+  const first = run.results[0]!;
+  const second = structuredClone(first);
+  second.fingerprints["matchBasedId/v1"] = "another-fingerprint";
+  second.locations[0]!.physicalLocation.artifactLocation.uri = "src/other.ts";
+  const artifact = {
+    location: { uri: "src/other.ts", uriBaseId: "%SRCROOT%" },
+  };
+  const report = {
+    ...input,
+    runs: [{ ...run, results: [first, second], artifacts: [artifact] }],
+  };
+  function contexts() {
+    const { findings, excluded } = normalizeSemgrepSarif(report);
+    expect(excluded).toEqual([]);
+    return findings.map(({ evidence }) => evidence.source_data?.["runContext"]);
+  }
+  const context = { invocations: run.invocations };
+  expect(contexts()).toEqual([context, { ...context, artifacts: [artifact] }]);
+  artifact.location.uri =
+    first.locations[0]!.physicalLocation.artifactLocation.uri;
+  expect(contexts()).toEqual([{ ...context, artifacts: [artifact] }, context]);
+});
+
+test("lazy SDK metadata retains the artifact named by the Semgrep document", () => {
+  const input = semgrepSarif();
+  const run = input.runs[0]!;
+  const artifacts = [
+    { location: { uri: "src/generated.ts", uriBaseId: "%SRCROOT%" } },
+  ];
+  Object.assign(run, { artifacts });
+  let driverReady = false;
+  const description = {
+    get text() {
+      driverReady = true;
+      return "Loaded";
+    },
+  };
+  const invocation = {
+    executionSuccessful: true,
+    get workingDirectory() {
+      return driverReady ? { index: 0 } : {};
+    },
+  };
+  Object.assign(run.tool.driver, { shortDescription: description });
+  Object.assign(input, {
+    inlineExternalProperties: [{ invocations: [invocation] }],
+  });
+  const output = normalizeSemgrepSarif(input);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({
+    documentContext: {
+      inlineExternalProperties: [
+        { invocations: [{ workingDirectory: { index: 0 } }] },
+      ],
+    },
+    runContext: { artifacts },
+  });
 });
 
 test.each(["primary URI", "trace index", "tool index", "invocation index"])(

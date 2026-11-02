@@ -7,7 +7,7 @@ import {
   readScannerJson,
   readScannerText,
   relativePath,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   successfulSarifInvocations,
 } from "../src/scanner-import.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -170,7 +170,8 @@ test("SARIF findings omit unrelated inventory without mutating shared run contex
       { physicalLocation: { artifactLocation: { uri: "src/main.ts" } } },
     ],
   };
-  expect(sarifRunContextForResult(context, direct)).toEqual({
+  const selectContext = sarifRunContextSelector(context);
+  expect(selectContext(direct)).toEqual({
     versionControlProvenance: provenance,
   });
   expect(context.artifacts).toBe(artifacts);
@@ -185,9 +186,7 @@ test("SARIF findings omit unrelated inventory without mutating shared run contex
     ],
   };
   const before = structuredClone(indexed);
-  expect(sarifRunContextForResult(context, indexed)["artifacts"]).toBe(
-    artifacts,
-  );
+  expect(selectContext(indexed)["artifacts"]).toBe(artifacts);
   expect(indexed).toEqual(before);
 });
 
@@ -231,7 +230,7 @@ test.each([
       },
     ];
     const context = { artifacts };
-    expect(sarifRunContextForResult(context, selected)["artifacts"]).toBe(
+    expect(sarifRunContextSelector(context)(selected)["artifacts"]).toBe(
       artifacts,
     );
   },
@@ -262,7 +261,7 @@ test.each([
     const result = {
       locations: [{ physicalLocation: { artifactLocation: location } }],
     };
-    expect(sarifRunContextForResult(context, result)["artifacts"]).toBe(
+    expect(sarifRunContextSelector(context)(result)["artifacts"]).toBe(
       artifacts,
     );
   },
@@ -276,5 +275,5 @@ test("unrelated SARIF property-bag indexes do not require artifact inventory", (
       { physicalLocation: { artifactLocation: { uri: "src/main.ts" } } },
     ],
   };
-  expect(sarifRunContextForResult(context, result)).toEqual({});
+  expect(sarifRunContextSelector(context)(result)).toEqual({});
 });

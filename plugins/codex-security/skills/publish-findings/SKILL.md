@@ -1,17 +1,17 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings into the local workbench or Codex Security Cloud. Use the selected provider's documented export format.
+description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud.
 ---
 
 # Publish external findings
 
 Before acquiring or importing findings, check for `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment. If it is unset or has another value, stop and ask the user to enable imports.
 
-Use the installed `codex-security publish findings` command for preview and import. Select `--to local` for the local workbench or `--to cloud` for Cloud. The command owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
+Use `codex-security import sonar` for [live SonarQube Cloud issues](#sonarqube-cloud-issues) or a capture saved by that command. Use `codex-security publish findings` for native scanner exports, including Sonar `/api/issues/search` pages with `--provider sonar`. Select the requested destination. The CLI owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
 
 ## Select the evidence
 
-Prefer the provider's supported native JSON from its authenticated CLI, plugin, or API. Keep the original records and complete the requested pagination. A JSON summary or a different product's API response is not interchangeable with the documented report. Use SARIF or CSV only when the installed provider reader supports that profile and native JSON is unavailable or the user supplies that format. Do not convert a richer JSON report to SARIF for import.
+Use a supplied report, connected tool or signed-in CLI that provides the requested native records for the selected account, repository and ref. Follow the [scanner import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) to narrow broader reports and verify the selection in the JSON preview. Use a direct API only when the provider guide supports its response for the selected destination. Otherwise ask for a supported report. A fresh scan produces new findings. Keep the original records and complete the requested pagination. A JSON summary or a different product's API response is not interchangeable with the documented report. Use SARIF or CSV only when the installed provider reader supports that profile and native JSON is unavailable or the user supplies that format. Do not convert a richer JSON report to SARIF for import.
 
 Use the same acquisition format for repeated imports. Check the provider's identity rules before switching formats: another format can create a separate record or replace a richer snapshot with less detail. Importing findings does not reconcile equivalent vulnerabilities across formats. `--format json` controls command output, not the input report format; readers detect their supported inputs.
 
@@ -35,22 +35,30 @@ Local records remain unassessed source evidence, separate from `findings list` a
 
 Use `--provider inspector` and `--source-repository-url` with a complete Inspector2 ListFindings export for one Code Security repository. If it contains only a project ARN and name, pass the full `--inspector-project-arn ARN` verified for that Git URL in the SCM integration. Supply the same ARN when resuming a pending Cloud submission. Self-managed GitLab is supported locally.
 
+## Black Duck SCA project-version vulnerabilities
+
+Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.
+
+## Veracode Static Analysis policy findings
+
+Use `--provider veracode` with all Findings API pages for one application’s STATIC policy findings. Verify that the application maps to the repository named by `--source-repository-url`. Keep the source key stable for that application and preview the import before writing.
+
 ## Endor Labs findings
 
-For Endor Labs imports, prefer native Finding JSON from authenticated `endorctl`, scoped to one project and context. Omit `--field-mask` and fetch all pages with `--list-all`:
+Use authenticated `endorctl` for one verified project and context. Omit `--field-mask` to keep complete native Finding objects. Replace `/path/to/private/reports` with a private directory outside the checkout.
 
 ```sh
-endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
-  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
-  --list-all --output-type json > endor-findings.json
-codex-security publish findings endor-findings.json --to local \
-  --provider endor --repository /path/to/project \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+out=$(mktemp -d "/path/to/private/reports/endor.XXXXXX") &&
+  endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+    --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+    --list-all --output-type json > "$out/findings.tmp" &&
+  mv "$out/findings.tmp" "$out/endor-findings.json" &&
+  printf '%s\n' "$out/endor-findings.json"
 ```
 
-Choose a project that corresponds to the selected local checkout or Cloud repository. To publish the same export to Cloud, use `--to cloud --repository "CLOUD_REPOSITORY_ID"`. For a different branch or scan context, change the Endor filter and keep a distinct, stable source key. The [official Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) can help with setup and investigation; its summaries, counts and field-masked results do not replace complete Finding objects. The [CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api) supplies the export. The importer reads that saved file; it does not maintain an Endor API connection or write changes back to Endor.
+Preview the completed file with `--provider endor` and a stable source key such as `YOUR_NAMESPACE/PROJECT_UUID/main`. Match the project to the destination repository. For another branch or scan context, change the filter and use a distinct source key. The [official Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) can help with setup and investigation; its summaries, counts and field-masked results do not replace complete Finding objects. The [CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api) supplies the export. The importer reads that saved file; it does not maintain an Endor API connection or write changes back to Endor.
 
-Native JSON retains severity, scanned commit, package and advisory data, and primary SAST/AI SAST locations. Existing self-contained endorctl SARIF is a lossy compatibility format that retains finding UUIDs and links; unavailable severity or revisions stay unknown. Both formats use the Endor UUID within the selected repository and source key as identity. Importing SARIF after native JSON updates the same record by replacing its evidence snapshot, not merging it: native detail absent from SARIF is removed from that snapshot. Use native JSON consistently for ongoing imports. Keep the original evidence and inspect exclusions. Imported records remain unassessed source evidence. For local imports, use the preview and readback procedure above; for Cloud, use the publication procedure below.
+Native JSON retains severity, scanned commit, package and advisory data, and primary SAST/AI SAST locations. Existing self-contained endorctl SARIF is a lossy compatibility format that retains finding UUIDs and links; unavailable severity or revisions stay unknown. Both formats use the Endor UUID within the selected repository and source key as identity. Importing SARIF after native JSON updates the same record by replacing its evidence snapshot, not merging it: native detail absent from SARIF is removed from that snapshot. Use native JSON consistently for ongoing imports. Keep the original evidence and inspect exclusions. Imported records remain unassessed source evidence. Follow the [local](#import-locally) or [Cloud](#publish-to-cloud) workflow for the chosen destination.
 
 ## Wiz findings
 
@@ -78,7 +86,7 @@ Prefer native Code/SAST CLI or CI JSON for this reader; use self-contained SARIF
 
 For a user-requested new scan, use the installed Semgrep CLI from the source repository root with the selected SAST rules: `semgrep scan --config /path/to/sast-rules.yaml --json-output /path/to/semgrep.json .`. Existing CI jobs can produce the same artifact using `--json-output`; authenticated `semgrep ci --code` follows the job's policy and baseline scope. Explain that this generates fresh scan findings, and do not substitute it for a request to retrieve existing Platform findings.
 
-For existing findings, the official [Semgrep Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) can help select and inspect them. Importing its output needs a separate qualified response mapping and complete pagination for the selected repository/ref. The local `semgrep_findings` MCP tool and Platform REST API also use contracts distinct from CLI reports. Do not reshape a summary into a scan report or claim that a limited tool response is a complete export.
+For selected Semgrep Platform SAST findings, follow the [local SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk). It takes the original Web API project response, SAST findings pages and selected IDs. The [Semgrep Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex) can help select and inspect findings. Guardian and the `semgrep_findings` MCP tool return different records from the SDK inputs.
 
 Import the native report with `--provider semgrep`, a stable organization/project/branch `--source-key`, and `--source-repository-url` identifying the actual source repository. Use `--to local --repository /path/to/project` for local storage or `--to cloud --repository URL_OR_ID` for Cloud. The source URL is checked against configured local Git remotes or the Cloud destination. Preview with `--dry-run --format json` before confirming the import.
 
@@ -87,6 +95,21 @@ Keep supplied fingerprints. Reimporting the same fingerprint after code moves up
 ## OpenGrep
 
 Import native OpenGrep JSON with `--provider opengrep`, `--source-repository-url`, and a stable OpenGrep-specific `--source-key`. Preview the destination and scan diagnostics before importing. Local and Cloud imports use the Semgrep provider and retain OpenGrep as the scanner origin.
+
+## SonarQube Cloud issues
+
+For “import these Sonar findings,” carry over the Sonar project, branch or PR, and the exact issue keys selected in the [SonarQube plugin for Codex](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/). Use the keys from the underlying Sonar result. If only a formatted table remains, resolve the selected rows against the same project and ref and ask about ambiguous matches. A rule can occur more than once. Never turn a selection into a project-wide import.
+
+From the intended checkout, preview the selection using the developer's authenticated `sonar` CLI. Use `--sonar-pull-request` in place of `--sonar-branch` for a PR. Omit `--sonar-issue` only when the user wants the project's open security issues. If the project has no verified SCM binding, confirm the repository URL that belongs to the project and pass it with `--source-repository-url`.
+
+```sh
+codex-security import sonar --sonar-project example_project --sonar-branch main \
+  --sonar-issue ISSUE_A --sonar-issue ISSUE_B --dry-run --format json
+```
+
+Pass `--to cloud` at preview time if the user also requested Cloud publication. Show the selected issues and exclusions, the local repository, and any Cloud destination as described under [Publish to Cloud](#publish-to-cloud). The preview returns a private evidence file in `capture`. After confirmation, run `codex-security import sonar CAPTURE --yes` for local import. For Cloud, use the exact `capture` from the successful Cloud preview and add `--to cloud`. If the account, repository, or environment changes, show a fresh preview and ask for confirmation. If Cloud is unavailable, finish the requested local import and report the Cloud error. For a request to publish an existing import, start with its capture. Report the saved path so the developer can resume.
+
+Sonar authentication is required only for a live fetch. If the local CLI lacks a login, direct the user to `sonar auth login` and keep the selection. A hosted MCP connection can help identify issues, but its issue summaries omit flow evidence. Use the signed-in CLI or a saved Codex Security Sonar capture to complete the import. If `codex-security` is absent, ask the user to install it from a trusted directory and invoke that installed executable in the checkout.
 
 ## GitHub alerts and advisories
 
@@ -98,32 +121,15 @@ For Dependabot, follow the [repository alert export guide](https://github.com/op
 
 **GHSA import stages advisory evidence for investigation; it does not establish an installed dependency or applicability to the destination repository.** Keep advisories separate from code scanning. `codex-security import github-advisories OWNER/REPO --format json` reads published repository disclosures by default. Repeated `--github-advisory GHSA-xxxx-xxxx-xxxx` selects exact IDs; `--github-state draft|triage|closed` explicitly selects an unpublished list and cannot be combined with exact IDs. Add `--github-advisory-source global` for exact public database IDs. This does not enumerate the global database. Private advisory access needs Repository security advisories read permission and access to those records. Stop on a read failure instead of publishing an incomplete selection.
 
-```sh
-codex-security import github example/project --format json > /path/to/alerts.json
-codex-security publish findings /path/to/alerts.json \
-  --to local --repository /path/to/project --provider github \
-  --source-key github.com/example/project/code-scanning --dry-run --format json
-codex-security publish findings /path/to/alerts.json \
-  --to cloud --repository https://github.com/example/project --provider github \
-  --source-key github.com/example/project/code-scanning --dry-run --format json
+Save the selected collector’s output in a private file outside the checkout. After collection succeeds, use `--provider github` and the [local](#import-locally) or [Cloud](#publish-to-cloud) workflow for the requested destination. Keep a separate stable source key for each family, such as `github.com/example/project/code-scanning` or `github.com/example/project/security-advisories`.
 
-codex-security import github-advisories example/project \
-  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
-  --format json > /path/to/advisories.json
-codex-security publish findings /path/to/advisories.json \
-  --to cloud --repository https://github.com/example/project --provider github \
-  --source-key github.com/example/project/security-advisories --dry-run --format json
-```
-
-Choose the local or Cloud preview for the intended destination. GHSA input supports the same choice: use `--to local --repository /path/to/project` with the advisory file and source key. Follow [local imports](#import-locally) for confirmation and readback or [Cloud publication](#publish-to-cloud) for upload review.
-
-Use a separate stable source key for each GitHub finding family. Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. Secret-scanning alerts and writeback to GitHub are outside this workflow.
+Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. Secret-scanning alerts and writeback to GitHub are outside this workflow.
 
 ## Publish to Cloud
 
 Resolve the user's destination to a connected GitHub or GitHub Enterprise repository URL or Cloud repository ID, including custom Enterprise hosts. Confirm the intended Cloud account and authorized repository environment before running a preview that can contact Cloud. Use the existing file-backed ChatGPT login; explain a missing or incompatible login rather than changing credential storage automatically.
 
-For another Cloud deployment, read [Deployment settings](references/wiz-import.md#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
+For staging or another Cloud deployment, configure the [deployment settings](#deployment-settings) before previewing. Keep the selected deployment and login throughout the upload.
 
 ### Preview and approve
 
@@ -139,6 +145,25 @@ Obtain explicit confirmation for this concrete upload, including skipped records
 
 ### Upload and report
 
-Read [Results and recovery](references/wiz-import.md#results-and-recovery), including when the process exits nonzero. After a lost response or retryable failure, repeat the command with unchanged input and destination so the publisher resumes saved requests. A lost response does not mean nothing reached Cloud. A repository reset requires fresh discovery and confirmation before a new publication.
+Read the structured result even when the process exits nonzero. Progress appears on stderr.
 
-Report verified, unacknowledged, excluded, and failed records distinctly, retaining source IDs and recovery details. Receipts and source-record readback confirm stored vendor evidence; they do not establish a Codex assessment or visibility in the shared Cloud Findings view. Include the returned `cloudUrl` as a clickable repository link when available; do not invent a UI link from the API endpoint.
+| Status        | Exit code | Meaning                                                 |
+| ------------- | --------- | ------------------------------------------------------- |
+| `complete`    | 0         | All selected records were acknowledged and read back.   |
+| `partial`     | 1         | Some records were excluded or have final item failures. |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped.   |
+| `failed`      | 2         | Preparation failed before upload.                       |
+
+Cancellation uses the normal signal exit code. Report verified, unacknowledged, excluded, and failed records separately. Include source IDs from `failures`, any `savedSubmission` path, and recovery errors. Receipts and readback confirm stored vendor evidence. Assessment and visibility in the shared Cloud Findings view require separate verification. Link to the returned `cloudUrl` when available.
+
+### Resume an interrupted upload
+
+After a lost response or retryable failure, repeat the command with the same input and destination. Cloud may already have accepted some records. The publisher reuses saved request IDs and bodies, resends only requests without a saved receipt, and verifies the acknowledged records. Existing findings keep their original Cloud environment when the repository default changes.
+
+If the repository was reset, stop and report the error. Rediscover the repository and get fresh confirmation before starting a new publication.
+
+### Deployment settings
+
+Set `CODEX_SECURITY_CLOUD_BASE_URL` to the deployment's API root for preview and upload. Use its login and an isolated state directory for tests. If the user or Cloud page supplies an app URL, set `CODEX_SECURITY_CLOUD_WEB_URL` to that full URL. This setting controls the returned UI link. The API root and login still determine routing and authentication.
+
+Check the preview's `cloudApiUrl` and any `cloudUrl` against the intended API endpoint and app. Saved retries are scoped to the deployment. `CODEX_SECURITY_CLOUD_PUBLISH_URL` applies only to native scan publication. If staging is unavailable, stop before uploading.

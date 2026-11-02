@@ -5,17 +5,19 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
   normalizeRecords,
   optionalArray,
   readScannerJson,
   record,
   requiredText,
   sarifRepositoryUrls,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   stableId,
   strings,
   successfulSarifInvocations,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 function snykIdentity(value: unknown, project: string | null): string {
@@ -286,14 +288,10 @@ export function normalizeSnykSarif(
     const rules = array(driver["rules"], "SARIF rules").map((rule) =>
       record(rule, "SARIF rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    rules.forEach((rule, index) => {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    });
+    // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
+    const rulesById = indexSarifRules(
+      rules.entries().filter(([index]) => index in rules),
+    );
     const project = snykSarifProject(run);
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -303,11 +301,12 @@ export function normalizeSnykSarif(
     );
     runContext["tool"] = toolContext;
     const { runs: _runs, ...documentContext } = document;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"], "SARIF results").map((result) => ({
       result,
       rulesById,
       project,
-      runContext,
+      selectRunContext,
       driverContext,
       documentContext,
     }));
@@ -317,7 +316,7 @@ export function normalizeSnykSarif(
     ({
       result: value,
       rulesById,
-      runContext,
+      selectRunContext,
       driverContext,
       documentContext,
     }) => {
@@ -326,21 +325,8 @@ export function normalizeSnykSarif(
       const match = rulesById.get(id);
       if (!match)
         throw new Error("Result must reference exactly one rule in its run.");
-      const { rule, index } = match;
-      if (result["ruleIndex"] !== undefined && result["ruleIndex"] !== index)
-        throw new Error("Result ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== id) ||
-          (ref["index"] !== undefined && ref["index"] !== index) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule["guid"])
-        )
-          throw new Error(
-            "Result uses an inconsistent or external rule reference.",
-          );
-      }
+      const { rule } = match;
+      validateSarifRuleReference(result, id, match, "Snyk");
       const help = requiredText(
         record(rule["help"], "Rule help")["markdown"],
         "Rule help markdown",
@@ -416,13 +402,7 @@ export function normalizeSnykSarif(
           locations: [],
           source_data: structuredClone({
             document: documentContext,
-            run: sarifRunContextForResult(
-              runContext,
-              result,
-              rule,
-              driverContext,
-              documentContext,
-            ),
+            run: selectRunContext(result, rule, driverContext, documentContext),
             driver: driverContext,
             rule,
             result,
