@@ -3672,7 +3672,11 @@ export async function main(
                     `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
                 )
               : [];
-            const collection = selection.report?.["collection"];
+            const collection =
+              selection.report?.["collection"] ??
+              (options.provider === "snyk"
+                ? selection.findings[0]?.evidence.source_data?.["collection"]
+                : undefined);
             if (
               isJsonObject(collection) &&
               isJsonObject(collection["completeness"]) &&

@@ -44,7 +44,12 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
     findings: [],
     excluded: [],
   });
-  for (const list of [{}, { response: { next_page_token: 0 } }]) {
+  for (const list of [
+    {},
+    { response: { next_page_token: 0 } },
+    { response: { total_size: 0 } },
+    { objects: null, response: { total_size: "0" } },
+  ]) {
     expect(normalizeEndorFindings({ list })).toEqual(
       normalizeEndorFindings([]),
     );

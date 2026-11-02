@@ -66,7 +66,10 @@ export function normalizeEndorFindings(
         (key) => key !== "objects" && key !== "response",
       ) ||
         Object.keys(response).some(
-          (key) => key !== "next_page_id" && key !== "next_page_token",
+          (key) =>
+            key !== "next_page_id" &&
+            key !== "next_page_token" &&
+            !(key === "total_size" && (total === 0 || total === "0")),
         ))
     )
       throw new Error("Expected Endor list.objects in the finding export.");

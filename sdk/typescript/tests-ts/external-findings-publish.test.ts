@@ -1175,23 +1175,20 @@ test("failed or malformed vendor collections never report a successful empty imp
       error: expect.stringContaining(diagnostic),
     });
   }
+  const partialCollection = {
+    ...plugin.collection,
+    completeness: {
+      collection: "partial",
+      analysis: "Code denied; SCA succeeded",
+    },
+    scans: [
+      { category: "sca", outcome: "succeeded", issueCount: 0 },
+      { category: "code", outcome: "denied", error: "Code scan denied" },
+    ],
+  };
   await writeFile(
     f.file,
-    JSON.stringify({
-      ...plugin,
-      findings: [],
-      collection: {
-        ...plugin.collection,
-        completeness: {
-          collection: "partial",
-          analysis: "Code denied; SCA succeeded",
-        },
-        scans: [
-          { category: "sca", outcome: "succeeded", issueCount: 0 },
-          { category: "code", outcome: "denied", error: "Code scan denied" },
-        ],
-      },
-    }),
+    JSON.stringify({ ...plugin, findings: [], collection: partialCollection }),
   );
   const cleanSca = createCliTest(main);
   expect(
@@ -1224,6 +1221,26 @@ test("failed or malformed vendor collections never report a successful empty imp
   expect(terminal.stdout.text() + terminal.stderr.text()).toContain(
     "Code scan denied",
   );
+  const withFindings = await fixture({
+    ...plugin,
+    collection: {
+      ...partialCollection,
+      scans: [...plugin.collection.scans, partialCollection.scans[1]],
+    },
+  });
+  const nonempty = createCliTest(main);
+  expect(
+    await nonempty.runCli(
+      [
+        ...withFindings.command
+          .slice(0, -2)
+          .map((argument) => (argument === "wiz" ? "snyk" : argument)),
+        "--dry-run",
+      ],
+      withFindings.cliDeps,
+    ),
+  ).toBe(0);
+  expect(nonempty.stderr.text()).toContain("Code scan denied");
   const excludedReport = endorSarif();
   const run = excludedReport.runs[0]!;
   await writeFile(
