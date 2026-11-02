@@ -12,6 +12,14 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  privateImportClient,
+  selectPrivateReport,
+  type PrivateImportFormat,
+  readPrivateCheckpoint,
+  unsuccessfulJob,
+  type PrivateImportJob,
+} from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -123,6 +131,8 @@ export interface ExternalPublicationResult {
   verified: number;
   error?: string;
   savedSubmission?: string;
+  /** Private jobs expose aggregate outcomes before assessment or publication. */
+  privateJob?: PrivateImportJob;
 }
 
 /** Preserve accepted work in CLI JSON output when publication cannot finish. */
@@ -152,6 +162,13 @@ export interface ExternalPublicationPreview extends ExternalFindings {
   source: FindingImportRequest["source"];
   resumed: boolean;
   requests: FindingImportRequest[];
+  privateImport?: {
+    format: PrivateImportFormat;
+    contextVersion: string;
+    sha256: string;
+    bytes: number;
+    retryOfJobId?: string;
+  };
 }
 
 export interface PreparedExternalPublication {
@@ -380,6 +397,7 @@ export async function prepareExternalPublication(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
+    path,
   );
 }
 
@@ -445,6 +463,7 @@ async function preparePublicationInput(
   input: ExternalPublicationInput,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
+  nativePath?: string,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void =>
@@ -481,6 +500,7 @@ async function preparePublicationInput(
   const credentials = await (
     dependencies.credentials ?? (() => readCloudCredentials(environment))
   )();
+  let privateProviders: Set<string> | undefined;
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -514,6 +534,15 @@ async function preparePublicationInput(
         response.status,
         `Cloud import failed (HTTP ${response.status}). ${payload?.error?.message ?? response.statusText}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""}`,
       );
+    }
+    if (endpoint.startsWith("/repositories?")) {
+      const advertised = response.headers.get(
+        "Codex-Security-Private-Import-Providers",
+      );
+      if (advertised !== null)
+        privateProviders = new Set(
+          advertised.split(",").map((provider) => provider.trim()),
+        );
     }
     return response.json();
   }
@@ -848,6 +877,203 @@ async function preparePublicationInput(
     checkRepositories(submissionFindings(saved.requests), report);
   }
 
+  // Existing repository submissions keep their original request bodies and receipts.
+  const privatePath = join(state, `${key}.private-import.json`);
+  const privateSaved = await readOptionalFile(privatePath);
+  if (
+    !saved &&
+    (privateProviders?.has(source.provider) || privateSaved !== undefined)
+  ) {
+    const client = privateImportClient(
+      apiBaseUrl,
+      credentials,
+      dependencies.fetch ?? globalThis.fetch,
+      dependencies.signal,
+    );
+    const context = await client.context();
+    if (source.source_key.trim() !== source.source_key)
+      throw new CodexSecurityError(
+        "A private source key cannot have leading or trailing whitespace.",
+      );
+    const report = await selectPrivateReport(
+      parsed,
+      source.provider,
+      nativePath,
+      context,
+      privateSaved,
+    );
+    const binding = {
+      format: report.format,
+      apiBaseUrl,
+      accountId: credentials.account_id,
+      source,
+      repository: {
+        id: destination.id,
+        repo_connector_id: destination.repo_connector_id,
+      },
+      sha256: report.digest,
+      contextVersion: context.context_version,
+    };
+    function checkpointForContext(data: string | undefined) {
+      return data === undefined
+        ? undefined
+        : readPrivateCheckpoint(data, binding);
+    }
+    const previous = checkpointForContext(privateSaved);
+    function requireAccess(
+      value: typeof context,
+      savedFile: boolean,
+      savedJob: boolean,
+    ) {
+      if (
+        !value.can_read ||
+        (!savedJob &&
+          ((!savedFile && !value.can_upload) ||
+            !value.can_create_import_jobs ||
+            !value.formats.includes(report.format)))
+      )
+        throw new CodexSecurityError(
+          "Private findings import is unavailable for this account or report format.",
+        );
+    }
+    requireAccess(context, !!previous?.fileId, !!previous?.jobId);
+    const retryOfJobId =
+      unsuccessfulJob(previous?.receipt) &&
+      context.can_upload &&
+      context.can_create_import_jobs &&
+      context.formats.includes(report.format)
+        ? previous?.jobId
+        : undefined;
+    const privateImport = {
+      format: report.format,
+      contextVersion: binding.contextVersion,
+      sha256: report.digest,
+      bytes: Buffer.byteLength(report.bytes),
+      ...(retryOfJobId ? { retryOfJobId } : {}),
+    };
+    const preview: ExternalPublicationPreview = {
+      ...parsed,
+      cloudApiUrl: `${apiBaseUrl}/finding-imports`,
+      accountId: credentials.account_id,
+      destination,
+      source,
+      resumed: previous !== undefined && !retryOfJobId,
+      requests: [],
+      privateImport,
+    };
+    return {
+      preview: structuredClone(preview),
+      publish: () =>
+        withImportLock(state, key, dependencies.signal, async () => {
+          const current = await client.context();
+          if (current.context_version !== binding.contextVersion)
+            throw new CodexSecurityError(
+              "The private inbox changed. Run the command again to review the new destination.",
+            );
+          const stored = checkpointForContext(
+            await readOptionalFile(privatePath),
+          );
+          // Only a preview of this terminal job can start a new attempt.
+          const retrying =
+            retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
+          const active = retrying ? undefined : stored;
+          requireAccess(current, !!active?.fileId, !!active?.jobId);
+          if ((await readOptionalFile(pendingPath)) !== undefined)
+            throw new CodexSecurityError(
+              "A repository submission is pending. Review its saved request before continuing.",
+            );
+          const checkpoint = active ?? {
+            ...binding,
+            uploadRequestId: randomUUID(),
+            jobRequestId: randomUUID(),
+            fileId: undefined,
+            jobId: undefined,
+            receipt: undefined,
+            previousReceipt: retrying ? stored?.receipt : undefined,
+          };
+          const result: ExternalPublicationResult = {
+            cloudApiUrl: preview.cloudApiUrl,
+            status: "interrupted",
+            read: parsed.read,
+            ready: parsed.findings.length,
+            report: parsed.report,
+            excluded: parsed.excluded,
+            receipts: [],
+            counts: { created: 0, updated: 0, unchanged: 0, error: 0 },
+            failures: [],
+            unacknowledged: parsed.findings.length,
+            verified: 0,
+          };
+          function acknowledge(job: PrivateImportJob) {
+            const { created, updated, unchanged, error } = job.counts;
+            const processed = created + updated + unchanged + error;
+            if (
+              job.counts.discovered !== processed + job.counts.unprocessed ||
+              job.counts.discovered > result.ready ||
+              (job.status === "completed" &&
+                (processed !== result.ready ||
+                  job.counts.total !== result.ready))
+            )
+              throw new CodexSecurityError(
+                "Cloud returned counts that do not match the selected report.",
+              );
+            result.privateJob = job;
+            result.counts = { created, updated, unchanged, error };
+            result.unacknowledged = result.ready - processed;
+            result.status =
+              job.status === "completed" && !error && !parsed.excluded.length
+                ? "complete"
+                : "partial";
+            if (job.error) result.error = job.error.message;
+            else delete result.error;
+          }
+          try {
+            const savedReceipt =
+              checkpoint.receipt ?? checkpoint.previousReceipt;
+            if (savedReceipt) acknowledge(savedReceipt);
+            if (!active) await writeAtomicJson(privatePath, checkpoint);
+            if (!checkpoint.fileId) {
+              progress({ phase: "uploading", completed: 0 });
+              checkpoint.fileId = await client.upload({
+                requestId: checkpoint.uploadRequestId,
+                contextVersion: binding.contextVersion,
+                ...report,
+                recovering: active !== undefined,
+              });
+              await writeAtomicJson(privatePath, checkpoint);
+            }
+            progress({ phase: "verifying", completed: 0 });
+            const job = await client.job(
+              {
+                requestId: checkpoint.jobRequestId,
+                contextVersion: binding.contextVersion,
+                fileId: checkpoint.fileId,
+                format: report.format,
+                source,
+                repository: binding.repository,
+                jobId: checkpoint.jobId,
+              },
+              async (id) => {
+                checkpoint.jobId = id;
+                await writeAtomicJson(privatePath, checkpoint);
+              },
+            );
+            acknowledge(job);
+            checkpoint.jobId = job.id;
+            checkpoint.receipt = job;
+            await writeAtomicJson(privatePath, checkpoint);
+            return result;
+          } catch (error) {
+            result.status = "interrupted";
+            result.error =
+              error instanceof Error ? error.message : String(error);
+            result.savedSubmission = privatePath;
+            throw new ExternalPublicationError(result.error, result, error);
+          }
+        }),
+    };
+  }
+
   let requests = saved?.requests;
   if (!requests) {
     let preparedCount = 0;
@@ -1015,8 +1241,13 @@ async function preparePublicationInput(
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
         const pending = await readOptionalFile(pendingPath);
-        if (pending === undefined && !saved)
+        if (pending === undefined && !saved) {
+          if ((await readOptionalFile(privatePath)) !== undefined)
+            throw new CodexSecurityError(
+              "A private import already owns this selection. Review its saved job before continuing.",
+            );
           await rejectUnidentifiedLegacyCheckpoint();
+        }
         const current =
           pending === undefined
             ? submission

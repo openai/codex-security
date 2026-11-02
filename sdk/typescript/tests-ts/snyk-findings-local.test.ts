@@ -66,7 +66,7 @@ test.each(["plugin", "JSON", "SARIF"] as const)(
   },
 );
 
-test.each(["plugin", "SARIF"] as const)(
+test.each(["plugin", "JSON", "SARIF"] as const)(
   "Snyk %s repository provenance cannot be imported into a different local checkout",
   async (format) => {
     await using fixture = await localReportFixture(
@@ -78,15 +78,20 @@ test.each(["plugin", "SARIF"] as const)(
     const input =
       format === "plugin"
         ? snykPluginExport()
-        : {
-            ...sarif,
-            runs: sarif.runs.map((run) => ({
-              ...run,
-              versionControlProvenance: [
-                { repositoryUri: "https://github.com/example/project" },
-              ],
-            })),
-          };
+        : format === "JSON"
+          ? {
+              ...snykJson(),
+              path: "https://github.com/example/project#release",
+            }
+          : {
+              ...sarif,
+              runs: sarif.runs.map((run) => ({
+                ...run,
+                versionControlProvenance: [
+                  { repositoryUri: "https://github.com/example/project" },
+                ],
+              })),
+            };
     await fixture.writeJson(input);
     await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
     expect(await fixture.read()).toEqual([]);

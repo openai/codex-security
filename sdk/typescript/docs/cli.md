@@ -1409,6 +1409,32 @@ The [Wiz guide](https://github.com/openai/codex-security/blob/main/docs/scanner-
 SAST findings, repository secrets, or IaC findings. The format reference below
 describes the fields to preserve when preparing those exports.
 
+#### Review the Cloud destination
+
+The preview shows which Cloud destination will receive the selected records.
+When the deployment advertises private import for the scanner, the CLI puts a
+report in the signed-in account’s **private findings inbox**. The preview
+identifies its format and byte count. For complete Endor findings and Wiz
+vulnerability JSON exports, the CLI sends the original bytes when Cloud
+advertises the format and every record matches the reviewed selection. Other
+selections and in-memory collectors use `security.findings.v1`. The CLI
+attaches the selected repository and connector as a suggested assessment
+target. Review the selection, exclusions, source key and destination before
+confirming.
+
+The job receipt contains the file and job identifiers and record counts. To
+share a finding, open it in Cloud, assess it against a pinned repository
+revision, and explicitly publish a reportable assessment. An import can
+finish with record errors. Check the error and unprocessed counts in the
+receipt.
+
+Repeat the same command to recover an interrupted private import. The CLI
+checks the report digest, reuses its saved request IDs, and reads an accepted
+job even when new uploads are disabled. Resetting the inbox requires a new
+preview and confirmation. Deployments and scanners using the repository
+publisher continue to show the repository destination and per-finding receipts.
+An in-flight repository publication resumes on its original protocol.
+
 #### Select findings and a destination
 
 Acquire selected findings through an authorized Wiz connection and save the

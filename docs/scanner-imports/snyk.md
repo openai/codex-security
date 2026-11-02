@@ -104,6 +104,10 @@ each format a separate key. Changes in collection context such as a plugin
 scan's `issueCount` can update a stored snapshot even if the occurrence
 stays the same. [Imported evidence and identity](schema-guide.md)
 
+For native tests of a public GitHub URL, the reader checks the repository in
+the report's `path` against the selected destination. Any `#ref` stays in the
+saved source evidence.
+
 Known source Git URLs must match a comparable configured local remote when
 one is available, or the selected Cloud repository. Snyk Code, Container,
 IaC, SBOM results and hosted backlog responses use other formats.

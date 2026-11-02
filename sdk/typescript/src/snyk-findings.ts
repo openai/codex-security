@@ -212,6 +212,24 @@ export function snykRepositoryUrls(
         : repository,
     ];
   }
+  const project = source["project"];
+  if (
+    isRecord(project) &&
+    typeof project["ok"] === "boolean" &&
+    text(project["packageManager"]) &&
+    isRecord(source["vulnerability"])
+  ) {
+    // A remote Snyk test puts its GitHub URL and optional ref in the same
+    // path field that local scans use for a directory or npm package name.
+    const repository = text(project["path"])?.split("#", 1)[0];
+    if (
+      repository &&
+      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+        repository,
+      )
+    )
+      return [repository];
+  }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
   const driver = source["driver"];

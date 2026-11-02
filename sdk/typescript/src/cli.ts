@@ -708,9 +708,16 @@ function renderExternalPublicationSummary(
   result: ExternalPublicationResult,
 ): string {
   return [
-    `Import ${result.status}.`,
+    result.privateJob
+      ? `Private inbox import ${result.privateJob.status}. Job: ${diagnosticValue(result.privateJob.id)}`
+      : `Import ${result.status}.`,
     `Submission totals — Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
-    `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
+    result.privateJob
+      ? `Excluded: ${result.excluded.length}  Unprocessed: ${result.privateJob.counts.unprocessed}`
+      : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
+    ...(result.privateJob?.error
+      ? [diagnosticValue(result.privateJob.error.message)]
+      : []),
     ...result.failures.map(
       (item) =>
         `Failed ${diagnosticValue(item.source_finding_id)} (${item.code}): ${diagnosticValue(item.message)}`,
@@ -726,9 +733,11 @@ function renderExternalPublicationSummary(
       ? []
       : [
           "Imported evidence remains not assessed by Codex.",
-          result.cloudUrl
-            ? `View Cloud repository: ${diagnosticValue(result.cloudUrl)}`
-            : "Open the repository in Codex Security Cloud.",
+          result.privateJob
+            ? "Open the private inbox in Codex Security Cloud to assess a finding and choose whether to publish it."
+            : result.cloudUrl
+              ? `View Cloud repository: ${diagnosticValue(result.cloudUrl)}`
+              : "Open the repository in Codex Security Cloud.",
         ]),
     "",
   ].join("\n");
@@ -3795,7 +3804,7 @@ export async function main(
             const showPreview = () => {
               showScannerReport(preview);
               writeDiagnostic(
-                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nRetrying private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
               if (preview.cloudUrl)
                 writeDiagnostic(
@@ -4230,7 +4239,7 @@ export async function main(
                 `Cloud account: ${diagnosticValue(cloud.accountId)} on ${diagnosticValue(cloud.cloudApiUrl)}`,
               );
               note(
-                `Cloud repository: ${diagnosticValue(cloud.destination.url)} · Environments: ${[...environments].map(diagnosticValue).join(", ")}`,
+                `Cloud repository: ${diagnosticValue(cloud.destination.url)} · ${cloud.privateImport ? `Private inbox · ${cloud.privateImport.format} (${cloud.privateImport.bytes} bytes)` : `Environments: ${[...environments].map(diagnosticValue).join(", ")}`}`,
               );
               note(
                 `Cloud: ${cloud.findings.length} ready, ${cloud.excluded.length} excluded.`,
