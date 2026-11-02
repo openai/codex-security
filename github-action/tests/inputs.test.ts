@@ -6,8 +6,8 @@ const parse = (values: Record<string, string> = {}) => parseInputs(key => values
 test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
-    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard',
-    model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
+    repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
+    provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
@@ -16,6 +16,41 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--max-time-hours'));
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
+  assert.ok(!args.includes('--cyber-access-program'));
+});
+test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
+  for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])
+  for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {
+    const input = parse({provider, model:'synthetic/model', mode, 'dry-run':dryRun});
+    const args = scanArguments(input, {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--provider') + 1], provider);
+    assert.equal(args[args.indexOf('--auth') + 1], provider === 'amazon-bedrock' || dryRun === 'true' ? 'auto' : 'api-key');
+    assert.ok(args.includes('--model=synthetic/model'));
+    assert.equal(args.includes('--dry-run'), dryRun === 'true');
+  }
+  assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const model of ['', '  ']) {
+    const args = scanArguments(parse({provider, model}), {repository:'/checkout'}, '/results');
+    assert.ok(!args.some(arg => arg.startsWith('--model')), 'Leave missing model validation to the CLI');
+  }
+  assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
+});
+test('reasoning efforts pass through to both scan modes', () => {
+  for (const mode of ['standard', 'deep']) for (const effort of ['ultra', 'synthetic-future-effort', '--help']) {
+    const args = scanArguments(parse({mode, effort}), {repository:'/checkout'}, '/results');
+    assert.ok(args.includes(`--effort=${effort}`));
+    assert.ok(!args.includes(effort));
+  }
+  assert.equal(parse({effort:'  '}).effort, 'xhigh');
+});
+test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
+  for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    const args = scanArguments(parse({mode, 'cyber-access-program':program}), {repository:'/checkout'}, '/results');
+    assert.equal(args[args.indexOf('--cyber-access-program') + 1], program);
+  }
+  const blank = scanArguments(parse({'cyber-access-program':'  '}), {repository:'/checkout'}, '/results');
+  assert.ok(!blank.includes('--cyber-access-program'));
+  assert.throws(() => parse({'cyber-access-program':'unsupported'}), /cyber-access-program must be one of/);
 });
 test('Deep scans forward an explicit discovery budget and selected repository paths', () => {
   const input = parse({mode:'deep', paths:'./src/\nlib', 'max-time-hours':'1.5'});
@@ -38,7 +73,7 @@ test('Deep scan mode and discovery budgets reject unsupported combinations', () 
   assert.throws(() => parse({mode:'deep', scope:'diff'}), /mode: deep requires scope: repository/);
   assert.throws(() => parse({'max-time-hours':'1'}), /max-time-hours requires mode: deep/);
   for (const value of ['NaN', 'Infinity', '-1', '0', '96.1'])
-    assert.throws(() => parse({mode:'deep', 'max-time-hours':value}), /max-time-hours/);
+    assert.throws(() => parse({mode:'deep', 'max-time-hours':value}), {message: 'max-time-hours must be a positive number no greater than 96.'});
   assert.equal(parse({mode:'deep', 'max-time-hours':'96'}).maxTimeHours, 96);
 });
 test('verbose diagnostics default on and can be explicitly disabled', () => {
@@ -52,11 +87,11 @@ test('only repository and diff scopes are supported, with separate path and diff
   assert.throws(() => parse({'diff-base':'HEAD~1'}), /requires scope: diff/);
 });
 test('numeric and boolean parsing follows their documented types', () => {
-  for (const value of ['NaN','Infinity','-1','0','10 dollars']) assert.throws(() => parse({'max-cost':value}));
+  for (const value of ['NaN','Infinity','-1','0','10 dollars']) assert.throws(() => parse({'max-cost':value}), {message: 'max-cost must be a positive number.'});
   assert.equal(parse({'max-cost':'1e99'}).maxCost, 1e99);
   assert.equal(parse({'max-cost':'1e-2'}).maxCost, 0.01);
   for (const value of ['yes','TRUE','1']) assert.throws(() => parse({verbose:value}));
-  for (const value of ['0','1.5','91']) assert.throws(() => parse({'retention-days':value}));
+  for (const value of ['0','1.5','91']) assert.throws(() => parse({'retention-days':value}), {message: 'retention-days must be an integer between 1 and 90.'});
 });
 test('path lists accept literal filenames but reject unsafe locations and option injection', () => {
   assert.deepEqual(parse({paths:'src/my folder\nlib'}).paths, ['src/my folder','lib']);
@@ -90,7 +125,7 @@ test('CLI arguments preserve literal values and enforce CI policy', () => {
   assert.ok(!args.some(arg => arg.startsWith('approval_policy=')));
   assert.ok(!args.some(arg => arg.startsWith('approvals_reviewer=')));
   assert.ok(args.includes('analytics.enabled=false'));
-  assert.equal(args[args.indexOf('--effort') + 1], 'medium');
+  assert.ok(args.includes('--effort=medium'));
   assert.equal(args[args.indexOf('--max-cost') + 1], '5');
   assert.equal(args[args.indexOf('--fail-on-severity') + 1], 'high');
   assert.ok(!args.some(value => value.includes('API_KEY')));

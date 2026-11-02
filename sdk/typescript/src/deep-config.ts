@@ -1,3 +1,4 @@
+import { isRecord } from "./record.js";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
@@ -9,6 +10,7 @@ import {
   DEFAULT_SCAN_MODE,
   DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
+  ScanSettingsSchema,
   type DeepScanOptions,
 } from "./scan-settings.js";
 import type { ScanMode } from "./scan-modes.js";
@@ -26,9 +28,17 @@ export interface ResolvedDeepScanConfig {
 }
 
 export function deepScanOptions(
-  options: DeepScanOptions & { mode?: ScanMode },
+  options: DeepScanOptions & { mode?: ScanMode; maxTimeMinutes?: number },
 ): DeepScanOptions {
   const selected: DeepScanOptions = {};
+  const minutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
+    options.maxTimeMinutes,
+  );
+  if (!minutes.success) {
+    throw new CodexSecurityError(
+      "maxTimeMinutes / --max-time must be a finite positive number of minutes.",
+    );
+  }
   for (const [name] of DEEP_SCAN_SETTINGS) {
     const value = options[name];
     if (value === undefined) continue;
@@ -36,6 +46,32 @@ export function deepScanOptions(
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
     selected[name] = requireDeepScanValue(name, value, name);
+  }
+  if (minutes.data !== undefined && options.mode === "deep") {
+    if (minutes.data > 5760) {
+      throw new CodexSecurityError(
+        "Deep scan maxTimeMinutes / --max-time must be no greater than 5760 minutes.",
+      );
+    }
+    const hours = minutes.data / 60;
+    if (
+      selected.maxTimeHours !== undefined &&
+      Math.abs(selected.maxTimeHours - hours) >
+        Number.EPSILON * Math.max(selected.maxTimeHours, hours)
+    ) {
+      throw new CodexSecurityError(
+        "Conflicting maxTimeMinutes / --max-time and maxTimeHours / --max-time-hours settings.",
+      );
+    }
+    selected.maxTimeHours = hours;
+  }
+  if (
+    minutes.data !== undefined &&
+    !Number.isFinite(new Date(Date.now() + minutes.data * 60_000).getTime())
+  ) {
+    throw new CodexSecurityError(
+      "maxTimeMinutes / --max-time must produce a deadline within the supported date range.",
+    );
   }
   return selected;
 }
@@ -55,7 +91,7 @@ function requireDeepScanValue(
 }
 
 export async function resolveDeepScanConfig(
-  options: DeepScanOptions,
+  options: DeepScanOptions & { maxTimeMinutes?: number },
   source: string,
   signal?: AbortSignal,
 ): Promise<ResolvedDeepScanConfig> {
@@ -68,9 +104,7 @@ export async function resolveDeepScanConfig(
   const existing = document["deep_scan"];
   if (
     existing !== undefined &&
-    (typeof existing !== "object" ||
-      existing === null ||
-      Array.isArray(existing) ||
+    (!isRecord(existing) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(existing)))
   ) {
     throw new CodexSecurityError(

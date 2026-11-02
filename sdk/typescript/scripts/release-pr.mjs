@@ -8,12 +8,18 @@ import { assertStableVersion, releaseVersion } from "./release-automation.mjs";
 import { isMain } from "./is-main.mjs";
 
 export const packagePath = "sdk/typescript/package.json";
+export const actionPackagePath = "github-action/package.json";
+export const actionLockPath = "github-action/package-lock.json";
+export const exampleWorkflowPath = "examples/github-actions/codex-security.yml";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
+const packagePaths = [packagePath, actionPackagePath, actionLockPath];
 const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
 const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\(([^)]*)\))?(!)?: (.+)$/u;
+const exampleVersionPattern =
+  /^([ \t]*CODEX_SECURITY_VERSION:[ \t]*)(["']?)[0-9]+\.[0-9]+\.[0-9]+\2(?=[ \t]*(?:#[^\r\n]*)?\r?$)/gmu;
 
 function isReleaseTitle(title) {
   const [, type, scope] = conventionalTitle.exec(title) ?? [];
@@ -175,6 +181,35 @@ function updatePackageVersion(packageText, version) {
   throw new Error("Unable to update only the top-level package version.");
 }
 
+function updateActionLockVersion(lockText, version) {
+  const lock = JSON.parse(lockText);
+  lock.version = version;
+  lock.packages[""].version = version;
+  return `${JSON.stringify(lock, null, 2)}\n`;
+}
+
+function updateExampleVersion(exampleText, version) {
+  if ([...exampleText.matchAll(exampleVersionPattern)].length !== 1) {
+    throw new Error(
+      "Unable to update only the GitHub Actions example CLI version.",
+    );
+  }
+  return exampleText.replace(
+    exampleVersionPattern,
+    (_match, prefix, quote) => `${prefix}${quote}${version}${quote}`,
+  );
+}
+
+function packageWithoutVersion(text, path) {
+  if (text === null) return null;
+  const metadata = JSON.parse(text);
+  delete metadata.version;
+  if (path === actionLockPath && metadata.packages?.[""]) {
+    delete metadata.packages[""].version;
+  }
+  return metadata;
+}
+
 export function createReleasePlan(history, previous = null) {
   const { baseVersion, baseCommit, mainSha, packageText, changes } = history;
   if (
@@ -195,6 +230,29 @@ export function createReleasePlan(history, previous = null) {
     previous?.state.sections,
   );
   const state = { baseVersion, baseCommit, sections };
+  const files = {
+    [packagePath]: updatePackageVersion(packageText, version),
+    [notesPath]: notes,
+    [statePath]: `${JSON.stringify(state, null, 2)}\n`,
+  };
+  if (history.actionPackageText != null) {
+    files[actionPackagePath] = updatePackageVersion(
+      history.actionPackageText,
+      version,
+    );
+  }
+  if (history.actionLockText != null) {
+    files[actionLockPath] = updateActionLockVersion(
+      history.actionLockText,
+      version,
+    );
+  }
+  if (history.exampleWorkflowText != null) {
+    files[exampleWorkflowPath] = updateExampleVersion(
+      history.exampleWorkflowText,
+      version,
+    );
+  }
   return {
     baseVersion,
     baseCommit,
@@ -205,17 +263,13 @@ export function createReleasePlan(history, previous = null) {
     changes,
     generated,
     humanOwned: sectionIds.filter((id) => sections[id].humanOwned),
-    files: {
-      [packagePath]: updatePackageVersion(packageText, version),
-      [notesPath]: notes,
-      [statePath]: `${JSON.stringify(state, null, 2)}\n`,
-    },
+    files,
   };
 }
 
-export function createGitRepository(directory) {
+export function createGitRepository(directory, env = process.env) {
   const git = (...args) =>
-    gitText(args, { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
+    gitText(args, { cwd: directory, env, stdio: ["pipe", "pipe", "pipe"] });
   return {
     git,
     ensureCommit(sha) {
@@ -232,7 +286,7 @@ export function createGitRepository(directory) {
   };
 }
 
-export async function readReleaseHistory(repo, mainSha, github) {
+export function readVersionHistory(repo, mainSha) {
   repo.ensureCommit(mainSha);
   const packageText = repo.readFile(mainSha, packagePath);
   const baseVersion = releaseVersion(JSON.parse(packageText));
@@ -246,6 +300,14 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit = sha;
   }
 
+  return { baseVersion, baseCommit, packageText };
+}
+
+export async function readReleaseHistory(repo, mainSha, github) {
+  const { baseVersion, baseCommit, packageText } = readVersionHistory(
+    repo,
+    mainSha,
+  );
   const commits = repo
     .git("rev-list", "--first-parent", "--reverse", `${baseCommit}..${mainSha}`)
     .trim()
@@ -281,6 +343,9 @@ export async function readReleaseHistory(repo, mainSha, github) {
     baseCommit,
     mainSha,
     packageText,
+    actionPackageText: repo.readFile(mainSha, actionPackagePath),
+    actionLockText: repo.readFile(mainSha, actionLockPath),
+    exampleWorkflowText: repo.readFile(mainSha, exampleWorkflowPath),
     changes: [...changes.values()],
   };
 }
@@ -293,21 +358,44 @@ function readReleaseBranch(repo, mainSha, headSha) {
     .split("\0")
     .filter(Boolean);
   if (
-    paths.some((path) => ![packagePath, notesPath, statePath].includes(path))
+    paths.some(
+      (path) =>
+        ![...packagePaths, exampleWorkflowPath, notesPath, statePath].includes(
+          path,
+        ),
+    )
   ) {
     return {
       holdReason:
         "The release branch has other file edits. Preserve or merge them before running the updater.",
     };
   }
-  const originalPackage = JSON.parse(repo.readFile(mergeBase, packagePath));
-  const branchPackage = JSON.parse(repo.readFile(headSha, packagePath));
-  delete originalPackage.version;
-  delete branchPackage.version;
-  if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+  for (const path of packagePaths) {
+    const originalPackage = packageWithoutVersion(
+      repo.readFile(mergeBase, path),
+      path,
+    );
+    const branchPackage = packageWithoutVersion(
+      repo.readFile(headSha, path),
+      path,
+    );
+    if (!isDeepStrictEqual(originalPackage, branchPackage)) {
+      return {
+        holdReason:
+          "The release branch has package edits beyond its version. Preserve them before running the updater.",
+      };
+    }
+  }
+  const originalExample = repo
+    .readFile(mergeBase, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  const branchExample = repo
+    .readFile(headSha, exampleWorkflowPath)
+    ?.replace(exampleVersionPattern, "$1$2$2");
+  if (originalExample !== branchExample) {
     return {
       holdReason:
-        "The release branch has package edits beyond its version. Preserve them before running the updater.",
+        "The release branch has GitHub Actions example edits beyond its CLI version. Preserve them before running the updater.",
     };
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
@@ -325,7 +413,7 @@ function initialPullBody(template) {
     Changes:
       "Update the package version and draft release notes. The version header and PR title are maintained by automation. Edit the marked note sections in `.github/release-notes.md`; edited or deleted sections become human-owned. New suggestions appear in subsequent bot comments. The PR description is never regenerated.",
     Testing:
-      "The updater does not run package tests. Check required CI and Codex review on the current head before merging. Request a final Codex review if the last review targets an older head. Record any additional checks here.",
+      "The updater does not run package tests. Before merging, verify required CI in the **Checks** tab and Codex review on the current commit. Request a final review if Codex last reviewed an older commit. Post later manual test results in a PR comment or review with the tested commit SHA. Editing the description to update status can trigger CI.",
     "Risk and rollout":
       "Merging this PR starts the existing CI and protected release process. Review migration details and complete the public disclosure review before merging.",
   };
@@ -370,18 +458,26 @@ async function branchHead(github, branch) {
   }
 }
 
-function pullHoldReason(pull, branch) {
+const closedPullReason =
+  "The release PR was closed or retargeted during the update. Review it before continuing.";
+const pendingHeadReason =
+  "GitHub has not exposed the updated PR head yet. Rerun the updater before final review.";
+const changedHeadReason =
+  "The release head changed. Rerun before final review.";
+
+function pullHoldReason(pull, branch, repository) {
   if (
     pull?.state !== "open" ||
     pull.head.ref !== branch ||
+    pull.head.repo?.full_name?.toLowerCase() !== repository.toLowerCase() ||
     pull.base.ref !== "main"
   ) {
-    return "The release PR was closed or retargeted during the update. Review it before continuing.";
+    return closedPullReason;
   }
   return null;
 }
 
-function releaseHoldReason(openPulls, pullNumber, branch, repository) {
+function conflictingReleaseReason(openPulls, pullNumber, branch, repository) {
   const retargeted = openPulls.find(
     (candidate) =>
       candidate.head.ref === branch &&
@@ -398,10 +494,112 @@ function releaseHoldReason(openPulls, pullNumber, branch, repository) {
   );
   if (other)
     return `Another release PR is open: #${other.number}. It has not been changed.`;
+  return null;
+}
+
+function releaseHoldReason(openPulls, pullNumber, branch, repository) {
+  const conflict = conflictingReleaseReason(
+    openPulls,
+    pullNumber,
+    branch,
+    repository,
+  );
+  if (conflict) return conflict;
   const current = openPulls.find(
     (candidate) => candidate.number === pullNumber,
   );
-  return pullNumber === undefined ? null : pullHoldReason(current, branch);
+  return pullNumber === undefined
+    ? null
+    : pullHoldReason(current, branch, repository);
+}
+
+function nextCursor({ hasNextPage, endCursor }) {
+  if (!hasNextPage) return null;
+  if (!endCursor)
+    throw new Error("GitHub did not return the next page cursor.");
+  return endCursor;
+}
+
+// Only wait for a commit this run actually replaced. Read the PR, refs,
+// competing proposals and review markers together on the final page.
+async function reviewComments(github, plan, current, head, previous, wait) {
+  const { number } = current;
+  if (current.head.sha === head)
+    return {
+      comments: await github.list(`issues/${number}/comments?per_page=100`),
+    };
+  if (!previous) return { reason: pendingHeadReason };
+  const held = (reason) => ({ action: "held", reason });
+  const foreign = (sha) => sha !== head && sha !== previous;
+  if (foreign(current.head.sha)) return held(changedHeadReason);
+  for (const ms of [0, 1000, 2000, 4000]) {
+    if (ms) await wait(ms);
+    const comments = [];
+    let after = null;
+    let openAfter = null;
+    for (;;) {
+      const page = await github.releaseReviewPage(
+        number,
+        plan.branch,
+        after,
+        openAfter,
+      );
+      const pr = page?.pullRequest;
+      if (
+        pr?.state !== "OPEN" ||
+        pr.baseRefName !== "main" ||
+        pr.headRefName !== plan.branch ||
+        pr.headRepository?.nameWithOwner.toLowerCase() !==
+          github.repository.toLowerCase()
+      )
+        return held(closedPullReason);
+      if (page.main?.target?.oid !== plan.mainSha)
+        return held(
+          "main advanced after the release branch was updated. Let the next updater run, or rerun it manually before final review.",
+        );
+      if (page.branch?.target?.oid !== head || foreign(pr.headRefOid))
+        return held(changedHeadReason);
+      const open = page.open.nodes.map((p) => ({
+        number: p.number,
+        title: p.title,
+        head: {
+          ref: p.headRefName,
+          sha: p.headRefOid,
+          repo: { full_name: p.headRepository?.nameWithOwner },
+        },
+        base: { ref: p.baseRefName },
+      }));
+      const hold = conflictingReleaseReason(
+        open,
+        number,
+        plan.branch,
+        github.repository,
+      );
+      if (hold) return held(hold);
+      if (open.some((p) => p.number === number && foreign(p.head.sha)))
+        return held(changedHeadReason);
+      if (pr.headRefOid === previous) break;
+      const nextComments = nextCursor(pr.comments.pageInfo);
+      const nextOpen = nextCursor(page.open.pageInfo);
+      // Keep reading each connection's last page until both are complete.
+      // Newly opened or updated PRs are at the end of the open connection.
+      if (!nextComments && !nextOpen) {
+        comments.push(...pr.comments.nodes);
+        // Match the REST issue-comment order used for proposal marker selection.
+        return {
+          comments: comments.sort((a, b) =>
+            Number(BigInt(a.id) - BigInt(b.id)),
+          ),
+        };
+      }
+      if (nextComments) {
+        comments.push(...pr.comments.nodes);
+        after = nextComments;
+      }
+      if (nextOpen) openAfter = nextOpen;
+    }
+  }
+  return { reason: pendingHeadReason };
 }
 
 async function ensurePullRequest(
@@ -411,6 +609,8 @@ async function ensurePullRequest(
   template,
   headSha,
   currentPulls,
+  previousSha,
+  waitForHead,
 ) {
   const holdReason = releaseHoldReason(
     currentPulls ?? (await github.list("pulls?state=open&per_page=100")),
@@ -422,7 +622,7 @@ async function ensurePullRequest(
     return { action: "held", reason: holdReason, reviewRequested: false };
   if (pull) {
     pull = await github.request("GET", `pulls/${pull.number}`);
-    const reason = pullHoldReason(pull, plan.branch);
+    const reason = pullHoldReason(pull, plan.branch, github.repository);
     if (reason)
       return {
         action: "held",
@@ -445,7 +645,7 @@ async function ensurePullRequest(
     });
   }
   const current = await github.request("GET", `pulls/${pull.number}`);
-  const reason = pullHoldReason(current, plan.branch);
+  const reason = pullHoldReason(current, plan.branch, github.repository);
   if (reason)
     return {
       action: "held",
@@ -453,20 +653,19 @@ async function ensurePullRequest(
       pull: current.number,
       reviewRequested: false,
     };
-  if (current.head.sha !== headSha) {
-    return {
-      pull: current.number,
-      reviewRequested: false,
-      reason:
-        "GitHub has not exposed the updated PR head yet. Rerun the updater before final review.",
-    };
-  }
+  const { comments, ...stopped } = await reviewComments(
+    github,
+    plan,
+    current,
+    headSha,
+    previousSha,
+    waitForHead,
+  );
+  if (!comments)
+    return { pull: current.number, reviewRequested: false, ...stopped };
   const marker = `<!-- release-pr-head: ${headSha} -->`;
   const proposalMarker = `<!-- release-pr-proposal: ${hash("sha256", JSON.stringify(plan.files))} -->`;
   const suggestionsMarker = `<!-- release-pr-suggestions: ${hash("sha256", JSON.stringify(plan.generated))} -->`;
-  const comments = await github.list(
-    `issues/${current.number}/comments?per_page=100`,
-  );
   const previous = comments.findLast((comment) =>
     comment.body?.startsWith("<!-- release-pr-head: "),
   );
@@ -497,6 +696,7 @@ export async function reconcileReleasePullRequest({
   repo,
   github,
   dryRun = true,
+  waitForHead = delay,
 }) {
   // Rebuild the plan only when main or the proposal actually moves.
   for (;;) {
@@ -610,6 +810,8 @@ export async function reconcileReleasePullRequest({
       repo.readFile(mainSha, templatePath),
       commitSha,
       pull ? currentPulls : undefined,
+      pull && branchChanged ? headSha : null,
+      waitForHead,
     );
     return {
       action: !pull ? "created" : changed ? "updated" : "unchanged",
@@ -621,32 +823,75 @@ export async function reconcileReleasePullRequest({
   }
 }
 
-export function createGitHubClient(repository, token, fetcher = fetch) {
+const releaseReviewQuery = `query ReleaseReviewPage($owner: String!, $name: String!, $number: Int!, $ref: String!, $after: String, $openAfter: String) {
+  repository(owner: $owner, name: $name) {
+    branch: ref(qualifiedName: $ref) { target { oid } }
+    main: ref(qualifiedName: "refs/heads/main") { target { oid } }
+    open: pullRequests(states: OPEN, first: 100, after: $openAfter, orderBy: { field: UPDATED_AT, direction: ASC }) {
+      nodes { number title baseRefName headRefName headRefOid headRepository { nameWithOwner } }
+      pageInfo { hasNextPage endCursor }
+    }
+    pullRequest(number: $number) {
+      state baseRefName headRefName headRefOid headRepository { nameWithOwner }
+      comments(first: 100, after: $after) {
+        nodes { body id: fullDatabaseId }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`;
+
+export function createGitHubClient(
+  repository,
+  token,
+  fetcher = fetch,
+  sleep = delay,
+) {
   const apiRoot = `https://api.github.com/repos/${repository}/`;
-  async function responseFor(method, path, body) {
+  async function responseFor(method, path, body, reviewQuery = false) {
+    const read = method === "GET" || reviewQuery;
+    const url = reviewQuery
+      ? "https://api.github.com/graphql"
+      : `${apiRoot}${path}`;
     for (let retry = 0; ; retry += 1) {
-      const response = await fetcher(`${apiRoot}${path}`, {
-        method,
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "X-GitHub-Api-Version": "2026-03-10",
-          "Content-Type": "application/json",
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      if (response.ok) return response;
+      const retryDelay = 1000 * 2 ** retry;
+      let response;
+      try {
+        response = await fetcher(url, {
+          method,
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${token}`,
+            "X-GitHub-Api-Version": "2026-03-10",
+            "Content-Type": "application/json",
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (response.ok) {
+          return { data: await response.json(), headers: response.headers };
+        }
+      } catch (error) {
+        if (!read || retry >= 2 || error instanceof SyntaxError) throw error;
+        await sleep(retryDelay);
+        continue;
+      }
+      const retryAfter = response.headers.get("retry-after");
+      const minimumDelay = /^\d+$/u.test(retryAfter ?? "")
+        ? Number(retryAfter) * 1000
+        : Date.parse(retryAfter ?? "") - Date.now() || 0;
       if (
-        method === "GET" &&
+        read &&
         retry < 2 &&
-        [500, 502, 503, 504].includes(response.status)
+        [500, 502, 503, 504].includes(response.status) &&
+        minimumDelay <= retryDelay
       ) {
         await response.body?.cancel().catch(() => undefined);
-        await delay(1000 * 2 ** retry);
+        await sleep(retryDelay);
         continue;
       }
       const error = new Error(
-        `GitHub ${method} ${path} failed with HTTP ${response.status}.`,
+        `GitHub ${method} ${path} failed with HTTP ${response.status}.` +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
       );
       error.status = response.status;
       throw error;
@@ -657,7 +902,31 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
     owner: repository.split("/")[0],
     repositoryUrl: `https://github.com/${repository}`,
     async request(method, path, body) {
-      return (await responseFor(method, path, body)).json();
+      return (await responseFor(method, path, body)).data;
+    },
+    async releaseReviewPage(number, branch, after, openAfter) {
+      const [owner, name] = repository.split("/");
+      const { data: result } = await responseFor(
+        "POST",
+        "graphql",
+        {
+          query: releaseReviewQuery,
+          variables: {
+            owner,
+            name,
+            number,
+            ref: `refs/heads/${branch}`,
+            after,
+            openAfter,
+          },
+        },
+        true,
+      );
+      if (result.errors?.length)
+        throw new Error(
+          `GitHub release review query failed: ${result.errors.map((e) => e.message).join("; ")}`,
+        );
+      return result.data.repository;
     },
     async list(path) {
       const items = [];
@@ -666,7 +935,7 @@ export function createGitHubClient(repository, token, fetcher = fetch) {
           "GET",
           `${path}${path.includes("?") ? "&" : "?"}page=${page}`,
         );
-        items.push(...(await response.json()));
+        items.push(...response.data);
         if (!response.headers.get("link")?.includes('rel="next"')) return items;
       }
     },

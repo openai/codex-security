@@ -10,17 +10,17 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "=3.13.0", default-features = false, features = ["napi8"] }
-napi-derive = "=3.6.10"
+napi = { version = "=3.15.0", default-features = false, features = ["napi8"] } # notices.mts supplies the license for this exact release.
+napi-derive = "=3.6.13" # notices.mts supplies the license for this exact release.
 
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.189"
+libc = "=0.2.191" # Requalify the Unix account lookup on glibc, musl, and macOS when updating these bindings.
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_JobObjects"] }
 
 [build-dependencies]
-napi-build = "=2.5.0"
+napi-build = "=2.6.0" # notices.mts supplies the license for this exact release.
 
 [profile.release]
 strip = true

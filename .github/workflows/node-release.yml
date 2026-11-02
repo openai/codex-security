@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
+    env: &release-environment
       NPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
       PNPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
       COREPACK_NPM_REGISTRY: https://openai.firewall.socket.dev/npm/
@@ -35,27 +35,32 @@ jobs:
       version: ${{ steps.release.outputs.version }}
 
     steps:
-      - name: Checkout repository
+      - &checkout-release
+        name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare native runtime
+      - &download-release-native
+        name: Prepare native runtime
         uses: ./.github/actions/download-native
 
-      - name: Set up Socket Firewall
+      - &setup-release-firewall
+        name: Set up Socket Firewall
         uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
         with:
           mode: firewall-free
-          firewall-version: "1.15.0"
+          firewall-version: "1.15.4"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - &setup-release-node
+        name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.13.0"
           package-manager-cache: false
 
-      - name: Activate Socket Firewall
+      - &activate-release-firewall
+        name: Activate Socket Firewall
         shell: bash
         run: |
           set -euo pipefail
@@ -75,13 +80,15 @@ jobs:
             printf 'PIP_INDEX_URL=%s\n' "$pypi_registry"
           } >> "$GITHUB_ENV"
 
-      - name: Set up Bun
+      - &setup-release-bun
+        name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
           no-cache: true
 
-      - name: Enable pnpm
+      - &setup-release-pnpm
+        name: Enable pnpm
         shell: bash
         run: corepack enable && corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
@@ -142,15 +149,15 @@ jobs:
           node sdk/typescript/scripts/release-automation.mjs \
             validate-release-notes "$RELEASE_VERSION" "$release_notes_file" >/dev/null
 
-      - name: Install dependencies
+      - &install-release-dependencies
+        name: Install dependencies
         run: |
           sfw pnpm --dir sdk/typescript install --frozen-lockfile
           sfw pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 
-      - name: Install ripgrep
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+      - &install-release-ripgrep
+        name: Install ripgrep
+        run: .github/scripts/install-ripgrep.sh
 
       - name: Audit production dependencies
         run: sfw pnpm --dir sdk/typescript run audit:prod
@@ -158,8 +165,6 @@ jobs:
       - name: Verify
         run: |
           pnpm --dir sdk/typescript run types
-          pnpm --dir sdk/typescript run test
-          pnpm --dir sdk/typescript run test:mcp
           pnpm --dir sdk/typescript run format
 
       - name: Pack
@@ -231,10 +236,15 @@ jobs:
           (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
           "$consumer/node_modules/.bin/codex-security" --version
           "$consumer/node_modules/.bin/codex-security" --help
+          "$consumer/node_modules/.bin/cs" --version
+          "$consumer/node_modules/.bin/cs" --help
+
+      - name: Check Action against the release candidate
+        uses: ./.github/actions/check-action-candidate
 
       - name: Upload verified package
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-release-tarball
           path: dist/*.tgz
@@ -242,10 +252,59 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+  test:
+    needs: native
+    if: github.repository == 'openai/codex-security'
+    name: release tests / ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env: *release-environment
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [1, 2, 3, mcp]
+    steps:
+      - *checkout-release
+      - *download-release-native
+      - *setup-release-firewall
+      - *setup-release-node
+      - *activate-release-firewall
+      - *setup-release-bun
+      - *setup-release-pnpm
+      - *install-release-dependencies
+      - *install-release-ripgrep
+      - name: Build the plugin for TypeScript tests
+        if: matrix.suite != 'mcp'
+        run: pnpm --dir sdk/typescript run build:plugin
+      - name: Test TypeScript shard
+        if: matrix.suite != 'mcp'
+        working-directory: sdk/typescript
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+        run: node --experimental-strip-types scripts/run-ci-tests.mts ${{ matrix.suite }}/3
+      - name: Test MCP app
+        if: matrix.suite == 'mcp'
+        run: pnpm --dir sdk/typescript run test:mcp
+      - name: Upload test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-tests-${{ matrix.suite }}
+          path: |
+            sdk/typescript/reports/junit-*.xml
+            plugins/codex-security/mcp-app/reports/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
   publish:
     if: github.repository == 'openai/codex-security'
-    name: publish
-    needs: verify
+    name: ${{ needs.verify.outputs.mode == 'recover' && 'Verify existing npm release' || 'Publish npm and container images' }}
+    needs: [verify, test]
     runs-on: ubuntu-latest
     environment: npm
     permissions:
@@ -260,7 +319,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
@@ -270,45 +329,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
-          npm install \
-            --prefix "$npm_tools" \
-            --ignore-scripts \
-            --no-audit \
-            --no-fund \
-            --registry=https://openai.firewall.socket.dev/npm/ \
-            npm@11.12.1
+          source .github/scripts/release-npm.sh
+          install_release_npm
+          printf '%s\n' "$release_npm_bin" >> "$GITHUB_PATH"
 
-          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
-            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
-            exit 1
-          fi
-          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
-
-      - name: Verify bundled trusted-publishing npm
+      - name: Verify npm on PATH
         shell: bash
         run: |
           set -euo pipefail
-          node --eval '
-            const version = process.argv[1];
-            const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-            const [major, minor, patch] = match?.slice(1).map(Number) ?? [];
-            if (
-              !match ||
-              major < 11 ||
-              (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))
-            ) {
-              console.error(
-                "npm 11.5.1 or newer is required for trusted publishing; found " +
-                  version +
-                  ".",
-              );
-              process.exit(1);
-            }
-          ' "$(npm --version)"
+          source .github/scripts/release-npm.sh
+          verify_release_npm "$(command -v npm)"
 
       - name: Download verified package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: dist
@@ -445,6 +478,7 @@ jobs:
 
     steps:
       - name: Dispatch the verified GitHub release
+        id: dispatch
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -452,8 +486,24 @@ jobs:
           RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          gh workflow run node-github-release.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f "tag=$RELEASE_TAG" \
-            -f "run_id=$RELEASE_RUN_ID"
+          run_id="$(gh api --method POST \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/node-github-release.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[tag]=$RELEASE_TAG" \
+            -f "inputs[run_id]=$RELEASE_RUN_ID" --jq '.workflow_run_id')"
+          printf 'run-id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Start release progress observer
+        if: steps.dispatch.outputs.run-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.dispatch.outputs.run-id }}
+        run: |
+          # The downstream resolver waits for this workflow to finish. Keep the
+          # optional notification within its 60-second completion wait.
+          timeout --kill-after=5s 10s gh workflow run release-progress.yml \
+            --repo "$GITHUB_REPOSITORY" --ref main \
+            -f "run-id=$RELEASE_RUN_ID" -f watch=true

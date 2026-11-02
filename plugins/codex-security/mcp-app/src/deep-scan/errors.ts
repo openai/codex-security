@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
-
-const MAX_PERSISTED_ERROR_LENGTH = 2_400;
+import type { DeepScanRunState } from "./types.js";
 
 const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
@@ -25,49 +23,56 @@ export class DeepScanNonRetryableError extends Error {
   }
 }
 
-/** Keep SQLite's bounded diagnostic useful while the manifest retains the full error. */
-export function boundedDeepScanErrorMessage(error: unknown): string {
-  return boundedDeepScanErrorText(
-    deepScanErrorMessage(error),
-    MAX_PERSISTED_ERROR_LENGTH,
-  );
+const USAGE_LIMIT_MESSAGES = new Set([
+  "Quota exceeded. Check your plan and billing details.",
+  "Your workspace is out of credits. Add credits to continue.",
+  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+  "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+]);
+
+// Codex exec exposes only text for failed turns. Match its native quota messages here.
+export function codexWorkerTurnError(message: string): Error {
+  if (
+    USAGE_LIMIT_MESSAGES.has(message) ||
+    message.startsWith("You’ve hit your usage limit.") ||
+    message.startsWith("You’ve hit your usage limit for ")
+  ) {
+    return new DeepScanNonRetryableError(message);
+  }
+  return new Error(message);
 }
 
-export function boundedDeepScanErrorPair(
-  primary: unknown,
-  separator: string,
-  secondary: unknown,
-): string {
-  const primaryMessage = deepScanErrorMessage(primary);
-  const secondaryMessage = deepScanErrorMessage(secondary);
-  const available = MAX_PERSISTED_ERROR_LENGTH - separator.length;
-  const balancedBudget = Math.floor(available / 2);
-  let primaryBudget = Math.min(primaryMessage.length, balancedBudget);
-  const secondaryBudget = Math.min(
-    secondaryMessage.length,
-    available - primaryBudget,
-  );
-  primaryBudget = Math.min(primaryMessage.length, available - secondaryBudget);
-  return [
-    boundedDeepScanErrorText(primaryMessage, primaryBudget),
-    separator,
-    boundedDeepScanErrorText(secondaryMessage, secondaryBudget),
-  ].join("");
+/** A store read confirmed that this coordinator no longer owns the scan. */
+export class DeepScanOwnershipChangedError extends Error {
+  constructor(
+    readonly run: DeepScanRunState,
+    cause: unknown,
+  ) {
+    super(errorMessage(cause), { cause });
+    this.name = "DeepScanOwnershipChangedError";
+  }
 }
 
-function deepScanErrorMessage(error: unknown): string {
+/** Only a store-confirmed state for this scan establishes ownership loss. */
+export function confirmedOwnershipChange(
+  error: unknown,
+  scanId: string,
+): DeepScanOwnershipChangedError | undefined {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    if (
+      cause instanceof DeepScanOwnershipChangedError &&
+      cause.run.scanId === scanId
+    )
+      return cause;
+  }
+}
+
+export function deepScanErrorMessage(error: unknown): string {
   return (
     (error instanceof Error ? error.message : String(error)).trim() ||
     "Codex Security Deep Scan failed."
   );
-}
-
-function boundedDeepScanErrorText(message: string, maxLength: number): string {
-  if (message.length <= maxLength) return message;
-  const digest = createHash("sha256").update(message).digest("hex");
-  const suffix = `\n...[truncated; sha256:${digest}]`;
-  if (suffix.length >= maxLength) return message.slice(0, maxLength);
-  return `${message.slice(0, maxLength - suffix.length)}${suffix}`;
 }
 
 export function isStaleCoordinatorGenerationError(error: unknown): boolean {

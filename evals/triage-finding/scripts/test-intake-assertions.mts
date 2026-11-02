@@ -138,6 +138,10 @@ const githubContext = (behavior: string) => ({
     target_repo: "https://github.com/example/project",
   },
 });
+function expectGitHub(behavior: string, text: string, pass = true) {
+  expectPass(github, text, githubContext(behavior), pass);
+}
+
 for (const repository of ["{owner}/{repo}", "example/project"]) {
   for (const sourceType of [
     "source_type: advisory",
@@ -150,16 +154,45 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     "source_type: advisory.",
     "source_type: advisory!",
   ]) {
-    expectPass(
-      github,
+    expectGitHub(
+      "dependabot_malware",
       `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. ${sourceType}`,
-      githubContext("dependabot_malware"),
     );
-    expectPass(
-      github,
+    expectGitHub(
+      "advisories_private_reports",
       `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage is for private vulnerability reports. ${sourceType}`,
-      githubContext("advisories_private_reports"),
     );
+  }
+}
+// Match the complete collection endpoint, allowing prose delimiters.
+for (const repository of ["{owner}/{repo}", "example/project"]) {
+  for (const [behavior, output] of Object.entries({
+    dependabot_malware: `GET /repos/${repository}/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: advisory`,
+    advisories_private_reports: `GET /repos/${repository}/security-advisories?per_page=100, with separate state=triage, state=draft, state=published, state=closed requests. Triage includes private vulnerability reports. source_type: advisory`,
+  })) {
+    for (const suffix of [
+      "/42/instances",
+      "-wrong",
+      ".json",
+      "_wrong",
+      "Extra",
+    ]) {
+      expectGitHub(behavior, output.replaceAll("?", `${suffix}?`), false);
+    }
+    for (const delimiter of [
+      "\n",
+      "` ",
+      '\" ',
+      " ",
+      ") ",
+      ", ",
+      ". ",
+      "; ",
+      ": ",
+      "] ",
+    ]) {
+      expectGitHub(behavior, output.replaceAll("?", `${delimiter}?`));
+    }
   }
 }
 const codeScanning = {
@@ -177,16 +210,15 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
   const answer = JSON.parse(
     JSON.stringify(codeScanning).replaceAll("example/project", repository),
   );
-  expectPass(
-    github,
+  expectGitHub(
+    "code_scanning",
     JSON.stringify(answer).replaceAll(":100", ':"100"'),
-    githubContext("code_scanning"),
   );
   for (const text of [
     JSON.stringify(answer),
     `\`\`\`json\n${JSON.stringify(answer)}\n\`\`\``,
   ]) {
-    expectPass(github, text, githubContext("code_scanning"));
+    expectGitHub("code_scanning", text);
   }
 }
 for (const invalid of [
@@ -221,19 +253,13 @@ for (const invalid of [
     alerts: { ...codeScanning.alerts, parameters: { state: "open" } },
   },
 ]) {
-  expectPass(
-    github,
-    JSON.stringify(invalid),
-    githubContext("code_scanning"),
-    false,
-  );
+  expectGitHub("code_scanning", JSON.stringify(invalid), false);
 }
-expectPass(github, "not JSON", githubContext("code_scanning"), false);
+expectGitHub("code_scanning", "not JSON", false);
 
-expectPass(
-  github,
+expectGitHub(
+  "explicit_issue",
   'GitHub Issues require an explicit issue and are not included in all sources. source_type: "freeform"',
-  githubContext("explicit_issue"),
 );
 for (const text of [
   'GET /repos/example/other/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: "advisory"',
@@ -247,7 +273,7 @@ for (const text of [
   'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type_suffix":"advisory"}',
   "GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. source_type: advisory_other",
 ]) {
-  expectPass(github, text, githubContext("dependabot_malware"), false);
+  expectGitHub("dependabot_malware", text, false);
 }
 
 for (const emphasis of ["**", "*", "__", "_", "***"]) {
@@ -256,10 +282,9 @@ for (const emphasis of ["**", "*", "__", "_", "***"]) {
     `Normalize as ${emphasis}advisory${emphasis}`,
     `${emphasis}source_type${emphasis}: advisory`,
   ]) {
-    expectPass(
-      github,
+    expectGitHub(
+      "dependabot_malware",
       `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${normalization}.`,
-      githubContext("dependabot_malware"),
     );
   }
   for (const normalization of [
@@ -274,16 +299,14 @@ for (const emphasis of ["**", "*", "__", "_", "***"]) {
     "Normalize as advisory: preserve the identifier",
     "Normalization: source_type: advisory",
   ]) {
-    expectPass(
-      github,
+    expectGitHub(
+      "dependabot_malware",
       `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}${normalization}${emphasis}.`,
-      githubContext("dependabot_malware"),
     );
   }
-  expectPass(
-    github,
+  expectGitHub(
+    "dependabot_malware",
     `GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. ${emphasis}source_type: advisory_other${emphasis}`,
-    githubContext("dependabot_malware"),
     false,
   );
 }
@@ -298,7 +321,7 @@ const decision = {
 };
 const connectorJson = JSON.stringify(decision);
 for (const text of [connectorJson, `\`\`\`json\n${connectorJson}\n\`\`\``]) {
-  expectPass(github, text, githubContext("explicit_connector"));
+  expectGitHub("explicit_connector", text);
 }
 for (const invalid of [
   null,
@@ -321,21 +344,53 @@ for (const invalid of [
   { ...decision, explanation: "additional field" },
   { ...decision, scope: { ...decision.scope, extra: true } },
 ]) {
-  expectPass(
-    github,
-    JSON.stringify(invalid),
-    githubContext("explicit_connector"),
-    false,
-  );
+  expectGitHub("explicit_connector", JSON.stringify(invalid), false);
 }
 for (const text of [
   "not JSON",
   `\`\`\`json\n${connectorJson}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``,
 ]) {
-  expectPass(github, text, githubContext("explicit_connector"), false);
+  expectGitHub("explicit_connector", text, false);
 }
+const restJson = JSON.stringify({ transport: "rest" });
+for (const text of [restJson, `\`\`\`json\n${restJson}\n\`\`\``]) {
+  expectGitHub("default_rest", text);
+}
+for (const invalid of [
+  null,
+  [],
+  {},
+  decision,
+  { transport: "other" },
+  { transport: "rest", findings: [] },
+]) {
+  expectGitHub("default_rest", JSON.stringify(invalid), false);
+}
+for (const [behavior, answer] of [
+  ["explicit_connector", connectorJson],
+  ["default_rest", restJson],
+]) {
+  for (const extra of [
+    "null",
+    "true",
+    "42",
+    '"extra"',
+    "{}",
+    triage,
+    "{'verdict': 'confirmed'}",
+    '{schema_version: "triage-finding/v0", findings: []}',
+  ]) {
+    for (const text of [
+      `${answer}\n${extra}`,
+      `\`\`\`json\n${answer}\n\`\`\`\n\`\`\`json\n${extra}\n\`\`\``,
+    ]) {
+      expectGitHub(behavior, text, false);
+    }
+  }
+}
+
 for (const behavior of ["", "code_scaning", "constructor"]) {
-  expectPass(github, "arbitrary text", githubContext(behavior), false);
+  expectGitHub(behavior, "arbitrary text", false);
 }
 
 for (const repository of [
