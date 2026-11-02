@@ -654,6 +654,7 @@ describe("read-only finding verification", () => {
       );
 
       expect(status).toBe(expectedStatus);
+      expect(output).toContain("PTY_CAPABLE_true");
       expect(output).toContain("\u001B[?1049h\u001B[?25l");
       expect(output).toContain("\u001B[?25h\u001B[?1049l");
       expect(output).toContain("PID_TARGET_ONLY_true");
@@ -677,6 +678,7 @@ describe("read-only finding verification", () => {
       );
 
       expect(status).toBe(expectedStatus);
+      expect(output).toContain("PTY_CAPABLE_true");
       expect(output).toContain("\u001B[?1049h\u001B[?25l");
       expect(output).toContain("\u001B[?25h\u001B[?1049l");
       expect(output).toContain("PID_TARGET_ONLY_true");
@@ -701,6 +703,7 @@ describe("read-only finding verification", () => {
       );
 
       expect(status).toBe(143);
+      expect(output).toContain("PTY_CAPABLE_true");
       expect(output).toContain("SIGTERM_RECEIVED");
       expect(output).toContain("GRACEFUL_EXIT");
       expect(output).toContain("HELPER_ALIVE_false");

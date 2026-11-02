@@ -137,7 +137,7 @@ for (const mode of [
         mode === "archive-pending"
       ) {
         expect(outcome.error).toMatchObject({ name: "AbortError" });
-        if (mode === "command-ignore-term")
+        if (mode === "command-ignore-term" && process.platform !== "win32")
           expect(existsSync(`${release}.term`)).toBe(true);
       } else {
         expect(outcome.error).toBeUndefined();

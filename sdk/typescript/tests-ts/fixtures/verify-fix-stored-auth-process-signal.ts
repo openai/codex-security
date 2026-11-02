@@ -90,7 +90,7 @@ if (args.includes("login") && args.includes("status")) {
 await chmod(git, 0o755);
 await chmod(codex, 0o755);
 
-const environment = {
+const environment: NodeJS.ProcessEnv = {
   ...process.env,
   TERM: "xterm-256color",
   PATH: `${dirname(process.execPath)}:${root}:/usr/bin:/bin`,
@@ -98,7 +98,13 @@ const environment = {
   CODEX_HOME: ambientHome,
   CODEX_SECURITY_STATE_DIR: stateDirectory,
 };
+delete environment["CI"];
+delete process.env["CI"];
 Object.assign(process.env, environment);
+if (process.stderr.isTTY !== true) {
+  throw new Error("Stored-auth process-signal fixture requires a real TTY");
+}
+process.stderr.write("PTY_CAPABLE_true\n");
 const finding = {
   findingId: "csf_1",
   occurrenceId: "occ_1",
