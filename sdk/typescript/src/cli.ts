@@ -985,10 +985,7 @@ class FindingProgressPresenter {
     }
   }
 
-  public observe(
-    event: Readonly<Record<string, unknown>>,
-    idPrefix = "",
-  ): void {
+  public observe(event: Readonly<Record<string, unknown>>): void {
     const method = event["method"];
     const params = event["params"];
     if (!isJsonObject(params)) {
@@ -1046,7 +1043,7 @@ class FindingProgressPresenter {
       this.#repository,
     )) {
       if (this.#dashboard !== null) {
-        this.#dashboard.record({ ...activity, id: idPrefix + activity.id });
+        this.#dashboard.record(activity);
         continue;
       }
       const key = `${activity.id}\0${activity.description}`;
@@ -1060,17 +1057,9 @@ class FindingProgressPresenter {
     }
   }
 
-  public updateVerification(results: readonly FindingVerification[]): void {
-    this.#reasoning.clear();
-    this.#seenActivities.clear();
+  public complete(results: readonly FindingVerification[]): void {
     if (this.#dashboard === null) return;
     this.#dashboard.setPublicationProgress(results.length, this.#total);
-    if (results.length < this.#total) {
-      this.#dashboard.setStage(
-        `Verifying findings · ${results.length}/${this.#total}`,
-      );
-      return;
-    }
     this.#dashboard.setStage(
       `Verification complete · ${results.length}/${this.#total}`,
     );
@@ -1758,11 +1747,12 @@ export async function runCodexSkillCommand(
         forcedTermination = undefined;
         if (invocation.exitCode === null && invocation.signalCode === null) {
           invocation.kill("SIGKILL");
+        } else {
+          forceStatusCompletion?.();
         }
         forceCaptureCompletion?.();
         invocation.stdout?.destroy();
         invocation.stderr?.destroy();
-        forceStatusCompletion?.();
       }, CHILD_TERMINATION_GRACE_MS);
     };
     const onInterrupt = (): void => {
@@ -1771,6 +1761,18 @@ export async function runCodexSkillCommand(
     const onTerminate = (): void => {
       requestTermination("SIGTERM");
     };
+    const signal = output?.signal;
+    const onAbort = (): void => {
+      // A process signal also invokes the handlers below in the same turn.
+      queueMicrotask(() => {
+        if (requestedSignal === null && forceStatusCompletion !== null) {
+          requestTermination(
+            signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+          );
+        }
+      });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
     try {
@@ -1873,6 +1875,7 @@ export async function runCodexSkillCommand(
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       forceStatusCompletion = null;
       forceCaptureCompletion = null;
+      signal?.removeEventListener("abort", onAbort);
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
     }
@@ -2097,7 +2100,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
-  let quietVerificationTerminal = false;
+  let batchedVerification = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -6125,8 +6128,9 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: incurError }) {
         let failureReported = false;
+        const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = (chunk: string | Uint8Array): void => {
-          if (!quietVerificationTerminal)
+          if (!batchedVerification || !structured)
             void writeCliOutput(errorOutput, chunk).catch(() => {});
         };
         try {
@@ -6147,6 +6151,7 @@ export async function main(
             );
           }
 
+          if (savedFindings) guardDisconnectedVerificationTerminal(errorOutput);
           const selected = savedFindings
             ? await selectSavedFindings(
                 positionals,
@@ -6184,12 +6189,9 @@ export async function main(
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
-            // A synchronous terminal write can block delivery of the structured
-            // failure, including when the planner rejects an oversized finding.
-            quietVerificationTerminal =
-              selected !== undefined &&
-              errorOutput.isTTY === true &&
-              (format === "json" || format === "jsonl");
+            // A finding rejected by the planner follows the same diagnostic
+            // path as a failed batch, before any worker starts.
+            batchedVerification = selected !== undefined;
             const batches = selected
               ? await verificationBatches(
                   selected.findings,
@@ -6200,8 +6202,8 @@ export async function main(
             // Multi-batch verification can outlive its stderr reader. Keep
             // optional progress off that execution path so terminal failures
             // and backpressure cannot prevent a complete stdout result.
-            const presentProgress = batches.length === 1;
-            if (presentProgress) quietVerificationTerminal = false;
+            batchedVerification = batches.length > 1;
+            const presentProgress = !batchedVerification;
             const progress = new FindingProgressPresenter(
               errorOutput,
               dependencies,
@@ -6209,17 +6211,11 @@ export async function main(
               identifiers.length,
               presentProgress,
             );
-            const controller =
-              batches.length > 1 ? new AbortController() : undefined;
-            let stderrError: Error | undefined;
-            const observeStderr = (error: Error): void => {
-              const code = (error as NodeJS.ErrnoException).code;
-              if (code !== "EPIPE" && code !== "EIO") stderrError ??= error;
-            };
-            if (controller) {
-              guardDisconnectedVerificationTerminal(errorOutput);
-              errorOutput.on?.("error", observeStderr);
-            }
+            const controller = batchedVerification
+              ? new AbortController()
+              : undefined;
+            const ignoreStderrError = (): void => {};
+            if (controller) errorOutput.on?.("error", ignoreStderrError);
             const removeSignals =
               controller && listenForAbort(dependencies, controller);
             let restoration: Promise<void> | undefined;
@@ -6235,7 +6231,7 @@ export async function main(
             });
             try {
               if (presentProgress) progress.startVerification();
-              for (const [index, findings] of batches.entries()) {
+              for (const findings of batches) {
                 const batchIds =
                   findings?.map(({ occurrenceId }) => occurrenceId) ??
                   identifiers;
@@ -6244,8 +6240,10 @@ export async function main(
                 const verificationErrors = {
                   write(chunk: string | Uint8Array) {
                     diagnostics.stream.write(chunk);
-                    progress.stop();
-                    reportDiagnostic(chunk);
+                    if (presentProgress) {
+                      progress.stop();
+                      reportDiagnostic(chunk);
+                    }
                     return true;
                   },
                 };
@@ -6265,7 +6263,7 @@ export async function main(
                     verificationMode: options.verificationMode,
                     environment,
                     onEvent: presentProgress
-                      ? (event) => progress.observe(event, `${index}:`)
+                      ? (event) => progress.observe(event)
                       : undefined,
                   },
                 );
@@ -6277,16 +6275,17 @@ export async function main(
                 if (exitCode !== 0) {
                   const message = diagnostics.text().trim();
                   failureReported = message.length > 0;
+                  if (batchedVerification && failureReported)
+                    reportDiagnostic(diagnostics.text());
                   throw new CodexSecurityError(
                     message ||
                       `Codex verification failed with exit code ${exitCode}.`,
                   );
                 }
-                if (stderrError) throw stderrError;
                 results.push(
                   ...parseFindingVerifications(response.text(), batchIds),
                 );
-                progress.updateVerification(results);
+                if (presentProgress) progress.complete(results);
               }
               exitCode = results.some(({ status }) => status === "inconclusive")
                 ? 2
@@ -6300,7 +6299,7 @@ export async function main(
                 const stopped = stopProgress();
                 if (output.isTTY) await stopped;
               } finally {
-                if (controller) errorOutput.off?.("error", observeStderr);
+                if (controller) errorOutput.off?.("error", ignoreStderrError);
               }
             }
             if (controller?.signal.aborted) {
@@ -6310,7 +6309,7 @@ export async function main(
             }
           }
 
-          if (format === "json" || format === "jsonl") {
+          if (structured) {
             return {
               repository,
               ...(selected === undefined ? {} : { scanId: selected.scanId }),
@@ -7398,7 +7397,7 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined && !quietVerificationTerminal) {
+  if (notice !== undefined && !batchedVerification) {
     try {
       errorOutput.write(formatUpdateNotice(notice));
     } catch {}

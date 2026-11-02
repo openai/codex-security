@@ -66,6 +66,10 @@ function setSingleRequest(value: boolean): void {
   }
 }
 
+if (scenario === "pty-oversized") {
+  result.findings.findings[0]!.codeEvidence![0]!.code = largeEvidence.repeat(2);
+}
+
 const publishWorkerPid = `
 const { writeFileSync, renameSync } = require("node:fs");
 const statePath = process.env.VERIFY_FIX_WORKER_STATE;
@@ -78,16 +82,37 @@ const base = dependencies({
   environment: {
     ...process.env,
     CI: scenario.endsWith("-ci") ? "1" : undefined,
+    CODEX_SECURITY_NO_UPDATE_NOTICE: undefined,
+    NO_UPDATE_NOTIFIER: undefined,
     TERM: "xterm-256color",
   },
   result,
-  onWorkbench: () => ({
-    scan: {
-      scanId: "scan",
-      targetPath: process.cwd(),
-      findings: result.findings.findings as unknown as JsonObject[],
-    },
-  }),
+  onUpdateCheck: async () => {
+    if (scenario !== "pty-text-update") return undefined;
+    await notify({ event: "update-checked" });
+    return {
+      currentVersion: "1.0.0",
+      latestVersion: "2.0.0",
+      command: "update",
+    };
+  },
+  onWorkbench: async () => {
+    if (scenario === "pty-oversized") {
+      process.once(
+        "SIGWINCH",
+        () => void notify({ event: "selection-resized" }),
+      );
+      await notify({ event: "selecting" });
+      await nextControl();
+    }
+    return {
+      scan: {
+        scanId: "scan",
+        targetPath: process.cwd(),
+        findings: result.findings.findings as unknown as JsonObject[],
+      },
+    };
+  },
   onCodex: async (_args, output) => {
     invocationWorker += 1;
     const batchWorker = invocationWorker;
@@ -182,8 +207,24 @@ process.stderr.write("Second worker original diagnostic.\\n", () => process.exit
       if (scenario !== "pty-backpressure-success") {
         const state = process.env["VERIFY_FIX_WORKER_STATE"];
         if (state === undefined) throw new Error("Missing worker state path.");
+        let signalHandlers = "";
+        if (scenario.includes("mixed")) {
+          // The child acknowledges the first forwarded signal before the harness sends the second.
+          process.once(
+            "SIGUSR2",
+            () => void notify({ event: "worker-signaled" }),
+          );
+          const first = scenario.includes("mixed-sigint-")
+            ? "SIGINT"
+            : "SIGTERM";
+          signalHandlers = `
+process.on("SIGINT", () => {});
+process.on("SIGTERM", () => {});
+process.once("${first}", () => process.kill(process.ppid, "SIGUSR2"));
+`;
+        }
         const source = `
-${scenario.includes("mixed") ? 'process.on("SIGINT", () => {}); process.on("SIGTERM", () => {});' : ""}
+${signalHandlers}
 ${publishWorkerPid}
 setInterval(() => {}, 1_000);
 `;
@@ -203,8 +244,14 @@ setInterval(() => {}, 1_000);
       const error = Object.assign(new Error("Synthetic unrelated error."), {
         code: "EBADF",
       });
+      const observed = new Promise<Error>((resolve) =>
+        process.stderr.once("error", resolve),
+      );
       process.nextTick(() => process.stderr.emit("error", error));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await notify({
+        event: "stderr-error-observed",
+        message: (await observed).message,
+      });
     }
     if (batchWorker === 2 && scenario === "missing-id") {
       output?.stdout.write(JSON.stringify({ results: [] }));
@@ -241,8 +288,8 @@ const arguments_ = [
   "scan",
   "--severity",
   "high",
-  "--json",
-] as const;
+  ...(scenario === "pty-text-update" ? [] : ["--json"]),
+];
 const discardedOutput = new Writable({
   write(_chunk, _encoding, done) {
     done();

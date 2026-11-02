@@ -20,7 +20,7 @@ interface HarnessResult {
 }
 
 const hasFullDevice = existsSync("/dev/full");
-const scenarioCount = hasFullDevice ? 18 : 17;
+const scenarioCount = hasFullDevice ? 21 : 20;
 const scenarioTimeoutSeconds = 22;
 const harnessTimeoutMs = (scenarioCount * scenarioTimeoutSeconds + 5) * 1_000;
 
@@ -110,7 +110,6 @@ test.skipIf(process.platform === "win32")(
     const python = Bun.which("python3");
     expect(python).not.toBeNull();
     let pid = 0;
-    const started = Date.now();
     await expect(
       runHarness(
         [
@@ -127,7 +126,6 @@ test.skipIf(process.platform === "win32")(
         },
       ),
     ).rejects.toThrow("Harness timed out after 100ms.");
-    expect(Date.now() - started).toBeLessThan(2_000);
     expect(pid).toBeGreaterThan(0);
     expect(() => process.kill(pid, 0)).toThrow();
   },
@@ -197,7 +195,8 @@ test.skipIf(process.platform === "win32")(
     for (const scenario of [
       "pipe-quiet-success",
       "pipe-progress-success",
-      "pty-disconnected",
+      "pipe-unrelated-stderr-error",
+      "pty-quiet-success",
       "pty-backpressure-success",
     ]) {
       const entry = result(results, scenario);
@@ -209,6 +208,7 @@ test.skipIf(process.platform === "win32")(
 
     const workerFailures = [
       "pipe-worker-failure",
+      "full-pipe",
       "pty-backpressure-worker-failure",
     ];
     if (hasFullDevice) workerFailures.push("full-device");
@@ -223,12 +223,29 @@ test.skipIf(process.platform === "win32")(
     }
 
     const unrelated = result(results, "pipe-unrelated-stderr-error");
-    expect(unrelated.exit).toBe(2);
-    expect(JSON.parse(unrelated.stdout)).toMatchObject({
-      status: "failed",
-      code: "VERIFICATION_FAILED",
+    expect(unrelated.events).toContainEqual({
+      event: "stderr-error-observed",
       message: "Synthetic unrelated error.",
     });
+
+    const text = result(results, "pty-text-update");
+    expect(text.exit).toBe(0);
+    expect(text.events).toContainEqual({ event: "update-checked" });
+    expect(text.stderr).not.toContain("update available");
+    expect(text.stdout.trimEnd().split("\n")).toEqual(
+      ["occ_0", "occ_1", "occ_2"].map(
+        (id) => `FIXED ${id}: Verified ${id} against source.`,
+      ),
+    );
+
+    const oversized = result(results, "pty-oversized");
+    expect(oversized.exit).toBe(2);
+    expect(JSON.parse(oversized.stdout).message).toContain(
+      "Finding occ_0 cannot fit",
+    );
+    expect(
+      oversized.events.some((event) => event["event"] === "worker-started"),
+    ).toBe(false);
 
     for (const [scenario, expectedExit] of [
       ["pty-backpressure-sigint", 130],

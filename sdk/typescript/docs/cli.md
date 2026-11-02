@@ -2601,9 +2601,8 @@ The CLI selects findings from the workbench and loads their evidence from the
 saved scan artifacts. It measures the verification request with that evidence
 included. Large selections use multiple requests without splitting or further
 truncating any selected finding. The CLI prints verdicts in selection order
-after every request returns valid results.
-Optional per-event progress is disabled for these selections so stderr terminal
-failures and backpressure cannot interfere with verification results.
+after every request returns valid results. For these selections the CLI omits
+per-event progress and update notices so stderr cannot delay the verdicts.
 
 If one finding exceeds the input limit on its own, verification stops before
 the first request. The error reports its occurrence ID and required request
@@ -2619,8 +2618,8 @@ fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 With `--json` or `--format jsonl`, authentication and execution failures return
 `status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
 `--full-output`, these failures use an `ok: false` error envelope. If a saved
-selection exceeds one request and stderr is a terminal, the CLI sends the
-failure message only to the structured output. Other formats report failures
+selection exceeds one request, the CLI sends the failure message only to
+the structured output. Other formats report failures
 on stderr. Interruptions retain exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations

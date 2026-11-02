@@ -259,18 +259,46 @@ def connected_output(scenario: str, name: str, stderr=subprocess.PIPE):
         return {"scenario": name, **fixture.finish(events)}
 
 
-def disconnected_pty():
+def fill_output(fd: int):
+    os.set_blocking(fd, False)
+    try:
+        for chunk in (b"x" * 4096, b"x"):
+            try:
+                while True:
+                    os.write(fd, chunk)
+            except BlockingIOError:
+                pass
+    finally:
+        os.set_blocking(fd, True)
+
+
+def full_pipe():
+    reader, writer = os.pipe()
+    try:
+        fill_output(writer)
+        return connected_output("worker-failure", "full-pipe", writer)
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+def disconnected_pty(scenario: str):
     master, slave = open_pty()
     try:
-        with running("pty-quiet-success", slave) as fixture:
+        with running(scenario, slave) as fixture:
             os.close(slave)
             slave = -1
-            events = fixture.event_until("worker-started", 2)
+            if scenario == "pty-oversized":
+                events = fixture.event_until("selecting")
+            else:
+                events = fixture.event_until("worker-started", 2)
             os.close(master)
             master = -1
             os.kill(fixture.process.pid, signal.SIGWINCH)
+            if scenario == "pty-oversized":
+                events.extend(fixture.event_until("selection-resized"))
             fixture.send()
-            return {"scenario": "pty-disconnected", **fixture.finish(events)}
+            return {"scenario": scenario, **fixture.finish(events)}
     finally:
         if slave >= 0:
             os.close(slave)
@@ -314,37 +342,27 @@ def paused_pty(scenario: str, sent_signal: signal.Signals | None):
             os.close(master)
 
 
-def paused_worker_failure():
-    scenario = "pty-backpressure-worker-failure"
+def full_terminal(scenario: str):
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
             events = fixture.event_until("worker-started", 2)
             # Open a separate description so the worker's stderr stays blocking.
             with open(os.ttyname(slave), "wb", buffering=0) as filler:
-                os.set_blocking(filler.fileno(), False)
-                for chunk in (b"x" * 4096, b"x"):
-                    try:
-                        while True:
-                            os.write(filler.fileno(), chunk)
-                    except BlockingIOError:
-                        pass
+                fill_output(filler.fileno())
             os.close(slave)
             slave = -1
             fixture.send()
+            if scenario == "pty-text-update":
+                result = fixture.finish(events)
+                # Inspect the terminal only after verification has exited.
+                result["stderr"] = read_pty(master)
+                return {"scenario": scenario, **result}
             events.extend(fixture.event_until("progress-queued"))
             worker_pid = wait_for_worker(fixture.state)
-            events.extend(fixture.event_until("complete"))
-            fixture.close_stdin()
-            blocked = wait(fixture.process, 2)
-            if blocked:
-                os.close(master)
-                master = -1
-                fixture.stop()
-            result = fixture.collect(events, blocked)
             return {
                 "scenario": scenario,
-                **result,
+                **fixture.finish(events),
                 "workerPid": worker_pid,
                 "workerAlive": process_exists(worker_pid),
             }
@@ -367,7 +385,7 @@ def mixed_signals(first: signal.Signals, second: signal.Signals):
             events.extend(fixture.event_until("progress-queued"))
             worker_pid = wait_for_worker(fixture.state)
             os.kill(fixture.process.pid, first)
-            time.sleep(0.110)
+            events.extend(fixture.event_until("worker-signaled"))
             os.kill(fixture.process.pid, second)
             events.extend(fixture.event_until("complete"))
             fixture.close_stdin()
@@ -469,11 +487,14 @@ results = [
     disconnected_pipe("progress-success"),
     disconnected_pipe("worker-failure"),
     connected_output("unrelated-stderr-error", "pipe-unrelated-stderr-error"),
-    disconnected_pty(),
+    full_pipe(),
+    disconnected_pty("pty-quiet-success"),
+    disconnected_pty("pty-oversized"),
     paused_pty("pty-backpressure-success", None),
     paused_pty("pty-backpressure-sigint", signal.SIGINT),
     paused_pty("pty-backpressure-sigterm", signal.SIGTERM),
-    paused_worker_failure(),
+    full_terminal("pty-backpressure-worker-failure"),
+    full_terminal("pty-text-update"),
     mixed_signals(signal.SIGINT, signal.SIGTERM),
     mixed_signals(signal.SIGTERM, signal.SIGINT),
     cleanup_sigwinch(),
