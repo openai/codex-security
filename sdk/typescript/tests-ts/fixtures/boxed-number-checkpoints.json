@@ -1,0 +1,104 @@
+{
+  "accountId": "synthetic-account",
+  "request": {
+    "repository": {
+      "id": "repo-example",
+      "repo_connector_id": "github",
+      "environment_id": "environment-example",
+      "reset_marker": "generation-1"
+    },
+    "source": {
+      "provider": "wiz",
+      "source_key": "tenant-example/vulnerability-finding"
+    },
+    "items": [
+      {
+        "client_id": "item-1",
+        "source_finding_id": "boxed-score",
+        "expected_version": 1,
+        "evidence": {
+          "title": "Scanner score",
+          "severity": "high",
+          "source_data": {
+            "score": 2.5
+          },
+          "description": null,
+          "url": null,
+          "advisory_ids": [],
+          "packages": [],
+          "locations": [],
+          "branch": null,
+          "code_revision": null,
+          "source_scan_id": null,
+          "image_digests": [],
+          "source_updated_at": null
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "field": "evidence",
+      "filename": "1b86d2d5fc316cb278171f1a8eabbb4c2662236348fe12d7064a4c2b0b8d76d7.pending.json",
+      "requestId": "e68c368b-9650-4c7a-9560-fab0c24b5a95",
+      "inputProjection": {
+        "inputDigest": "c7582873f1bfaab3cb3a8f5f0b6bdea63e622dfdf3896e4d4c34e3510125082f",
+        "savedEvidenceDigest": "425dc35452a9246322e7751766727cbfb373d5dedce85f143e6c8f1210ce5013"
+      }
+    },
+    {
+      "field": "report",
+      "filename": "7281a4be61bfaf2614d8399d91dbc1a8fd34a2bac0f3e8ae1dfc0fa143fcb9ba.pending.json",
+      "requestId": "5b646989-937e-4497-83ee-6694b967597c",
+      "inputProjection": {
+        "inputDigest": "790edb4daf5954c0d992847a2aa38c665a4e36fe94a2e46cddc62aef4cc83fde",
+        "savedEvidenceDigest": "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc"
+      }
+    },
+    {
+      "field": "aliased",
+      "filename": "294b9a84b47d7b08595ae253884111b17b21557f48e90897231da61ab4971035.pending.json",
+      "requestId": "9462e9b9-b78f-49a9-95bd-59bc3d842304",
+      "inputProjection": {
+        "inputDigest": "8f63530e51452c8bb96583dd2bb85705196a209c41258d45be4280e2b5ce424a",
+        "savedEvidenceDigest": "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc"
+      }
+    },
+    {
+      "field": "mixed",
+      "filename": "2bdb5e0976da513a32b080995421a304bb498f2ecd8cf1dca323e50e4684cf2c.pending.json",
+      "requestId": "eb070433-a248-4313-a692-21c53effa137",
+      "inputProjection": {
+        "inputDigest": "e0d874045a94c17362500a970e819c07a10d4a27103acabf4f3fd50156050a4d",
+        "savedEvidenceDigest": "425dc35452a9246322e7751766727cbfb373d5dedce85f143e6c8f1210ce5013"
+      }
+    },
+    {
+      "field": "unreported",
+      "filename": "a01f282b3e06ba2cf0ffb43749e47d15620e6f7b057bfb16a4baa3044e90bd6b.pending.json",
+      "requestId": "9ac96055-5fa4-4786-ad5b-a044fb59ce8f",
+      "inputProjection": {
+        "inputDigest": "7fddcc63cf22a90e05f4fb5dc5ef1107661d0a0147ae3eb7e610e840cf663fba",
+        "savedEvidenceDigest": "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc"
+      }
+    },
+    {
+      "field": "flag",
+      "filename": "2302ce8a88755173629443d05cb1b296e77e62c99b2c2334116b04677202d96b.pending.json",
+      "requestId": "a47dc563-e876-46dc-b7a9-469dc4c32583",
+      "inputProjection": {
+        "inputDigest": "28f91d7339da91f5497a628f8e084ee938b363d7ce9bd18a0be95115f9769ecf",
+        "savedEvidenceDigest": "c731c2bd0466093f147300606be75bad7b61c6f308fc9fafa8e55c5e2f93049c"
+      }
+    },
+    {
+      "field": "empty-report",
+      "filename": "d14283c9bb988385486811b4a41dcdbf4cf5b6474c5654e087ae0d60c4cd64ad.pending.json",
+      "requestId": "e1c3295f-41a3-4bc7-b6fd-58fab4338933",
+      "inputProjection": {
+        "inputDigest": "ac73456afe6f082161af44bc2134d65c1f75c1dc3ba191ab8a9b7ddf3fd05c73",
+        "savedEvidenceDigest": "425dc35452a9246322e7751766727cbfb373d5dedce85f143e6c8f1210ce5013"
+      }
+    }
+  ]
+}

@@ -1,11 +1,15 @@
 import { expect, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { readExternalFindings } from "../src/external-findings-read.js";
-import { validateExternalEvidence } from "../src/external-import-contract.js";
+import {
+  validateExternalEvidence,
+  validateExternalEvidenceJson,
+} from "../src/external-import-contract.js";
 import type {
   ExternalFindingEvidence,
   Provider,
@@ -341,6 +345,116 @@ test.each(["wiz", "endor"] as const)(
     expect(credentials).not.toHaveBeenCalled();
   },
 );
+
+test.each([1e-7, 0.00001])(
+  "Cloud counts the serialized numeric value %s at the evidence byte limit",
+  (score) => {
+    const limit = 256 * 1024;
+    const padding =
+      limit - validateExternalEvidenceJson({ scores: [score] }, "cloud");
+    for (const value of [
+      new Number(score),
+      { hidden: 0.00001, toJSON: () => score },
+      { toJSON: () => Object.assign(new Number(1), { valueOf: () => score }) },
+    ]) {
+      expect(
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding),
+      ).toBe(limit);
+      expect(() =>
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding + 1),
+      ).toThrow("256 KiB");
+    }
+  },
+);
+
+test("Cloud measures caller fields at their exported numeric size", () => {
+  const limit = 256 * 1024;
+  const padding =
+    limit - validateExternalEvidenceJson({ score: 1e-7 }, "cloud");
+  const score = Object.assign(new Number(1), { toJSON: () => 1e-7 });
+  class Metrics {
+    score = score;
+  }
+  for (const input of [
+    { score },
+    new Metrics(),
+    {
+      get score() {
+        return score;
+      },
+    },
+  ]) {
+    expect(validateExternalEvidenceJson(input, "cloud", padding)).toBe(limit);
+    expect(() =>
+      validateExternalEvidenceJson(input, "cloud", padding + 1),
+    ).toThrow("256 KiB");
+  }
+});
+
+test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", () => {
+  const sdk = join(import.meta.dir, "..");
+  function run(entrypoint: string, script: string) {
+    const source = execFileSync(
+      process.execPath,
+      [
+        "build",
+        join(sdk, "src", entrypoint + ".ts"),
+        "--target=node",
+        "--format=cjs",
+        "--packages=external",
+      ],
+      { encoding: "utf8" },
+    );
+    return execFileSync(
+      "node",
+      ["--max-old-space-size=64", "--input-type=commonjs"],
+      {
+        input: `${source}\n{${script}}`,
+        cwd: sdk,
+        encoding: "utf8",
+      },
+    );
+  }
+  const direct = run(
+    "external-import-contract",
+    `
+    const samples = Array.from({length: 400_000}, (_, index) => index % 10);
+    const input = {title: "Samples", severity: "low", source_data: {samples}};
+    const result = module.exports.validateExternalEvidence(input, "local");
+    process.stdout.write(String(result.source_data.samples.length));
+  `,
+  );
+  expect(direct).toBe("400000");
+
+  for (const kind of ["alert", "advisory"] as const) {
+    const alert = kind === "alert";
+    const record = alert ? importedAlert() : importedAdvisory();
+    const reader = alert
+      ? "normalizeGitHubCodeScanningAlerts"
+      : "normalizeGitHubAdvisories";
+    const samples = alert
+      ? "Array(650_000).fill(1)"
+      : "Buffer.alloc(512 * 1024)";
+    const retained = run(
+      "github-findings",
+      `
+      const record = ${JSON.stringify(record)};
+      const samples = ${samples};
+      const score = Object.assign(new Number(7), {toJSON: () => 9});
+      record.${kind}.samples = samples;
+      record.${kind}.score = score;
+      if (Array.isArray(samples)) samples[samples.length - 1] = score;
+      const result = module.exports.${reader}([record], "local");
+      const row = result.findings[0].evidence.source_data.${kind};
+      const values = Array.isArray(row.samples) ? row.samples : row.samples.data;
+      process.stdout.write(JSON.stringify([values.length, values.at(-1), row.score]));
+    `,
+    );
+    expect(JSON.parse(retained)).toEqual(
+      alert ? [650_000, 9, 9] : [524_288, 0, 9],
+    );
+  }
+});
 
 test("local evidence validation keeps structure, paths, links and numeric integrity", () => {
   const circular: Record<string, unknown> = {};

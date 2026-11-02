@@ -6,6 +6,8 @@ import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { isRecord } from "./record.js";
+import { previousAdmission } from "./external-import-contract.js";
+import { rememberPreviousSelection } from "./reader-selection.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -284,17 +286,151 @@ export function validateSarifRuleReference(
     );
 }
 
+interface SizeChange {
+  index: number;
+  position: number;
+  id: string;
+  previous: ExternalFinding["evidence"] | null;
+}
+
+const sizeChanges = new WeakMap<
+  ExternalFindings,
+  { rows: SizeChange[]; uncertain: Set<string> }
+>();
+function readerChanges(result: ExternalFindings) {
+  let changes = sizeChanges.get(result);
+  if (!changes) {
+    changes = { rows: [], uncertain: new Set() };
+    sizeChanges.set(result, changes);
+  }
+  return changes;
+}
+
+/** An earlier batch may have included this row or retained different observations. */
+export function rememberReaderUncertainty(
+  result: ExternalFindings,
+  id: string,
+) {
+  readerChanges(result).uncertain.add(id);
+}
+
+export function appendReaderFinding(
+  result: ExternalFindings,
+  position: number,
+  id: string,
+  project: () => ExternalFinding["evidence"],
+) {
+  const index = result.findings.length;
+  let outcome: unknown;
+  try {
+    const evidence = project();
+    outcome = evidence;
+    result.findings.push({ source_finding_id: id, evidence });
+  } catch (error) {
+    outcome = error;
+    result.excluded.push({
+      position,
+      source_finding_id: id,
+      reason: errorMessage(error),
+    });
+  }
+  const previous =
+    outcome && typeof outcome === "object"
+      ? previousAdmission(outcome)
+      : undefined;
+  if (previous === "uncertain") rememberReaderUncertainty(result, id);
+  else if (previous !== undefined)
+    readerChanges(result).rows.push({ index, position, id, previous });
+}
+
+export function finishReaderSizeSelection(
+  result: ExternalFindings,
+  filter?: (selection: ExternalFindings) => void,
+): ExternalFindings {
+  const changes = sizeChanges.get(result);
+  if (!changes) {
+    filter?.(result);
+    return result;
+  }
+  const findings: ExternalFinding[] = [];
+  const excluded: ExternalFindings["excluded"] = [];
+  const restoredPositions = new Set<number>();
+  let cursor = 0;
+  for (const { index, position, id, previous } of changes.rows) {
+    while (cursor < index) findings.push(result.findings[cursor++]!);
+    if (previous) {
+      findings.push({ source_finding_id: id, evidence: previous });
+      restoredPositions.add(position);
+    } else {
+      cursor++;
+      excluded.push({
+        position,
+        source_finding_id: id,
+        reason: "Evidence exceeds the Cloud limit of 256 KiB.",
+      });
+    }
+  }
+  while (cursor < result.findings.length)
+    findings.push(result.findings[cursor++]!);
+  for (const row of result.excluded) {
+    if (!restoredPositions.has(row.position)) excluded.push(row);
+  }
+  excluded.sort((a, b) => a.position - b.position);
+  const previous = { ...result, findings, excluded };
+  // A row excluded by size can no longer supply repository evidence to a sibling.
+  const possibleIds =
+    filter && changes.uncertain.size
+      ? new Set(findings.map((row) => row.source_finding_id))
+      : undefined;
+  filter?.(previous);
+  if (possibleIds && previous.findings.length < possibleIds.size) {
+    // An unproven row could have supplied the scope of a removed sibling.
+    for (const row of previous.findings)
+      possibleIds.delete(row.source_finding_id);
+    for (const id of possibleIds) changes.uncertain.add(id);
+  }
+  filter?.(result);
+  const sourceFindingIds = [
+    ...new Set([
+      ...previous.findings.map((row) => row.source_finding_id),
+      ...changes.uncertain,
+    ]),
+  ];
+  if (changes.uncertain.size) {
+    rememberPreviousSelection(result, {
+      sourceFindingIds,
+      uncertainFindingIds: [...changes.uncertain],
+      knownFindings: structuredClone(
+        previous.findings.filter(
+          (row) => !changes.uncertain.has(row.source_finding_id),
+        ),
+      ),
+    });
+  } else {
+    rememberPreviousSelection(result, {
+      sourceFindingIds,
+      snapshot: structuredClone(previous),
+    });
+  }
+  return result;
+}
+
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
   projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
+  options: {
+    report?: ExternalFindings["report"];
+    filter?: (selection: ExternalFindings) => void;
+  } = {},
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
+    ...(options.report === undefined ? {} : { report: options.report }),
   };
   const identified: { position: number; value: T; id: string }[] = [];
   const counts = new Map<string, number>();
@@ -331,19 +467,8 @@ export function normalizeRecords<T>(
       });
       continue;
     }
-    try {
-      result.findings.push({
-        source_finding_id: id,
-        evidence: projectEvidence(value, id),
-      });
-    } catch (error) {
-      result.excluded.push({
-        position,
-        source_finding_id: id,
-        reason: errorMessage(error),
-      });
-    }
+    appendReaderFinding(result, position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  return result;
+  return finishReaderSizeSelection(result, options.filter);
 }

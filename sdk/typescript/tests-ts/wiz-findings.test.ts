@@ -18,6 +18,7 @@ import { main } from "../src/cli.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { DEFAULT_CLOUD_BASE_URL } from "../src/cloud-endpoint.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
@@ -1614,6 +1615,51 @@ function legacyCheckpointKey(identity: unknown[]) {
   return hash("sha256", encoded);
 }
 
+test("a normalized Wiz retry requires a known locale to reuse its acknowledged receipt", async () => {
+  const f = await previewCheckpointFixture();
+  const input = await readVendorFindings(f.file);
+  const data = input.findings[0]!.evidence.source_data!;
+  Object.defineProperty(data, "toJSON", { value: () => ({ ...data, Z: 7 }) });
+  const prepare = (selected = input) =>
+    prepareNormalizedExternalPublication(selected, f.options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+      },
+    });
+  const early = await prepare();
+  const foreign = join(f.directory, hostedForeignName);
+  await writeFile(foreign, savedPreview);
+  await expect(early.publish()).rejects.toThrow(
+    "original deployment and locale",
+  );
+  await expect(prepare()).rejects.toThrow("original deployment and locale");
+  const opaque = await readVendorFindings(f.file);
+  const getter = opaque.findings[0]!.evidence.source_data!;
+  Object.defineProperty(getter, "Z", { get: () => 1 });
+  Object.defineProperty(getter, "toJSON", { value: () => ({ ...data, Z: 9 }) });
+  await expect(prepare(opaque)).rejects.toThrow("cannot be matched");
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(foreign, "utf8")).toBe(savedPreview);
+  const distinct = await prepare(JSON.parse(JSON.stringify(opaque)));
+  expect(distinct.preview.resumed).toBe(false);
+
+  await rename(foreign, join(f.directory, localPreviewFilename()));
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect<unknown[]>(retry.preview.requests).toEqual(previewCheckpoint.requests);
+  const completed = await retry.publish();
+  expect(completed.verified).toBe(1);
+  expect<unknown[]>(completed.receipts).toEqual(previewCheckpoint.receipts);
+  expect(f.posts).toHaveLength(1); // Only the original import seeded by the fixture.
+  const fresh = await prepare();
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.requests[0]!.items[0]!.evidence.source_data?.["Z"]).toBe(
+    7,
+  );
+});
+
 test.each(["distinct", "duplicate"] as const)(
   "a migrated preview checkpoint completes readback with a %s older file",
   async (kind) => {
@@ -2747,6 +2793,15 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     newer.evidence.description =
       "Newer Cloud evidence after the first resumer completed";
     f.reports.set("sast:occurrence-1", newer);
+    const otherPath = join(
+      directory,
+      `${hash("sha256", "other-deployment")}.pending.json`,
+    );
+    const projectionless = JSON.stringify({
+      accountId: saved.accountId,
+      requests: saved.requests,
+    });
+    await writeFile(otherPath, projectionless, { mode: 0o600 });
     releaseSecond.resolve();
     const trailing = await second;
     const result = await trailing.publish();
@@ -2756,6 +2811,7 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     expect(result.receipts).toEqual(saved.receipts);
     expect(result.verified).toBe(1);
     expect(f.reports.get("sast:occurrence-1")).toEqual(newer);
+    expect(await readFile(otherPath, "utf8")).toBe(projectionless);
   } finally {
     secondAtLock.resolve();
     releaseSecond.resolve();

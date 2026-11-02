@@ -1,17 +1,31 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { isBoxedPrimitive, isDate, isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import {
+  CloudEvidenceDepthError,
+  exportedGitHubRecord,
+  previousGitHubExclusion,
+  validateExternalEvidenceFields,
+  validateExternalEvidenceJson,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
+import type { ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
 import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import { asRecord } from "./record.js";
+import { asRecord, canSnapshotWithoutGetters } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
+
+import {
+  rememberPreviousSelection,
+  type LegacyReaderSelection,
+} from "./reader-selection.js";
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
@@ -48,10 +62,10 @@ function severity(value: unknown): string {
     : "unknown";
 }
 
-function codeScanningFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-): ExternalFinding {
+function codeScanningFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
   const repository = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
   const number = record["number"];
@@ -107,51 +121,55 @@ function codeScanningFinding(
   const sourceId = `${host}/${repository.toLowerCase()}/code-scanning/${number}/${hash("sha256", ref)}`;
   return {
     source_finding_id: sourceId,
-    evidence: validateExternalEvidence(
-      {
-        title:
-          text(rule?.["name"]) ??
-          text(rule?.["description"]) ??
-          `GitHub code-scanning alert #${number}`,
-        severity: severity(rule?.["security_severity_level"]),
-        description:
-          [...new Set([message, description].filter(Boolean))].join("\n\n") ||
-          null,
-        url,
-        locations: path
-          ? [{ path, line: location?.["start_line"] ?? null }]
-          : [],
-        branch: ref,
-        code_revision: text(instance?.["commit_sha"]),
-        source_updated_at: sourceTimestamp(alert["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "sast",
-          repository: {
-            url: `${origin}/${repository}`,
-            name: repository,
-          },
-          // Dismissal covers every branch; detection state belongs to the selected ref.
-          source_status:
-            alert["state"] === "dismissed"
-              ? "dismissed"
-              : (text(instance?.["state"]) ?? text(alert["state"])),
-          scanner_origin: text(tool?.["name"]),
-          rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
-          weakness_ids: weaknessIds,
-          remediation_instructions: text(rule?.["help"]),
-          code: path ? { end_line: location?.["end_line"] ?? null } : null,
+    evidence: {
+      title:
+        text(rule?.["name"]) ??
+        text(rule?.["description"]) ??
+        `GitHub code-scanning alert #${number}`,
+      severity: severity(rule?.["security_severity_level"]),
+      description:
+        [...new Set([message, description].filter(Boolean))].join("\n\n") ||
+        null,
+      url,
+      locations: path ? [{ path, line: location?.["start_line"] ?? null }] : [],
+      branch: ref,
+      code_revision: text(instance?.["commit_sha"]),
+      source_updated_at: sourceTimestamp(alert["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "sast",
+        repository: {
+          url: `${origin}/${repository}`,
+          name: repository,
         },
+        // Dismissal covers every branch; detection state belongs to the selected ref.
+        source_status:
+          alert["state"] === "dismissed"
+            ? "dismissed"
+            : (text(instance?.["state"]) ?? text(alert["state"])),
+        scanner_origin: text(tool?.["name"]),
+        rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
+        weakness_ids: weaknessIds,
+        remediation_instructions: text(rule?.["help"]),
+        code: path ? { end_line: location?.["end_line"] ?? null } : null,
       },
-      target,
-    ),
+    },
   };
 }
 
-function advisoryFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-): ExternalFinding {
+function advisorySourceId(
+  host: string,
+  selection: "global" | "repository",
+  repository: string,
+  id: string,
+): string {
+  return `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`;
+}
+
+function advisoryFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
   const repository = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
@@ -222,79 +240,425 @@ function advisoryFinding(
   });
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
-    source_finding_id: `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`,
-    evidence: validateExternalEvidence(
-      {
-        title: text(advisory["summary"]) ?? id,
-        severity: severity(advisory["severity"]),
-        description: text(advisory["description"]),
-        url,
-        advisory_ids: [...new Set(advisoryIds)],
-        packages,
-        source_updated_at: sourceTimestamp(advisory["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "advisory",
-          advisory: { source: selection },
-          ...(selection === "repository"
-            ? {
-                repository: {
-                  url: `${origin}/${repository}`,
-                  name: repository,
-                },
-              }
-            : {}),
-          source_status: text(advisory["withdrawn_at"])
-            ? "withdrawn"
-            : (text(advisory["state"]) ??
-              (selection === "global" ? "published" : null)),
-          scanner_origin: "GitHub Security Advisories",
-          weakness_ids: cwes
-            .map((value) => text(asRecord(value)?.["cwe_id"]))
-            .filter((value): value is string => value !== null),
-        },
+    source_finding_id: advisorySourceId(host, selection, repository, id),
+    evidence: {
+      title: text(advisory["summary"]) ?? id,
+      severity: severity(advisory["severity"]),
+      description: text(advisory["description"]),
+      url,
+      advisory_ids: [...new Set(advisoryIds)],
+      packages,
+      source_updated_at: sourceTimestamp(advisory["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "advisory",
+        advisory: { source: selection },
+        ...(selection === "repository"
+          ? {
+              repository: {
+                url: `${origin}/${repository}`,
+                name: repository,
+              },
+            }
+          : {}),
+        source_status: text(advisory["withdrawn_at"])
+          ? "withdrawn"
+          : (text(advisory["state"]) ??
+            (selection === "global" ? "published" : null)),
+        scanner_origin: "GitHub Security Advisories",
+        weakness_ids: cwes
+          .map((value) => text(asRecord(value)?.["cwe_id"]))
+          .filter((value): value is string => value !== null),
       },
-      target,
-    ),
+    },
   };
+}
+
+function mapRecord(input: unknown) {
+  const record = asRecord(input);
+  if (!record) throw new Error("GitHub finding must be an object.");
+  if (record["source"] === "github-code-scanning")
+    return codeScanningFinding(record);
+  if (record["source"] === "github-security-advisory")
+    return advisoryFinding(record);
+  throw new Error(
+    "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
+  );
+}
+
+function nativeGitHubRecord(
+  value: unknown,
+  observe?: (value: object) => boolean | void,
+): Record<string, unknown> | undefined {
+  if (!canSnapshotWithoutGetters(value, true, observe)) return;
+  try {
+    return asRecord(structuredClone(value));
+  } catch {
+    return;
+  }
+}
+
+function ownData(value: unknown, key: string): unknown {
+  if (value && typeof value === "object" && !isProxy(value))
+    return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+function priorAdvisoryId(value: unknown): string | undefined {
+  if (ownData(value, "source") !== "github-security-advisory") return;
+  const id = text(ownData(value, "ghsaId"));
+  const host = text(ownData(value, "githubHost"))?.toLowerCase();
+  const selection = ownData(value, "selection");
+  const repository = text(ownData(value, "repository"));
+  if (
+    id &&
+    GHSA_ID.test(id) &&
+    host &&
+    repository &&
+    githubRepositoryParts(repository) &&
+    (selection === "repository" || selection === "global")
+  )
+    return advisorySourceId(host, selection, repository, id);
+}
+
+// Determine whether JSON can call a serializer without evaluating a getter.
+function maySerialize(value: unknown): boolean {
+  while (value && typeof value === "object") {
+    if (isProxy(value)) return true;
+    const field = Object.getOwnPropertyDescriptor(value, "toJSON");
+    if (field)
+      return (
+        !Object.hasOwn(field, "value") || typeof field.value === "function"
+      );
+    value = Object.getPrototypeOf(value) as unknown;
+  }
+  return false;
+}
+
+function codeOccurrencePrefix(value: unknown): string | undefined {
+  const repository = ownData(value, "repository"),
+    number = ownData(value, "number"),
+    url = ownData(value, "url");
+  if (
+    ownData(value, "source") !== "github-code-scanning" ||
+    typeof repository !== "string" ||
+    !githubRepositoryParts(repository) ||
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    typeof url !== "string"
+  )
+    return;
+  try {
+    const { parsed, host } = sourceUrl(url);
+    if (
+      ["security/code-scanning", "code-scanning"].some(
+        (route) =>
+          parsed.pathname.toLowerCase() ===
+          `/${repository.toLowerCase()}/${route}/${number}`,
+      )
+    )
+      return `${host}/${repository.toLowerCase()}/code-scanning/${number}/`;
+  } catch {
+    /* No validated occurrence anchor. */
+  }
 }
 
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
+  snapshot = false,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
   };
+  const previous = snapshot
+    ? ({
+        read: records.length,
+        findings: [],
+        excluded: [],
+      } as ExternalFindings)
+    : undefined;
+  const checks: { input: unknown; before: unknown; uncertain: () => void }[] =
+    [];
+  const uncertainIds = new Set<string>();
+  const unidentifiedRows = new Set<number>();
+  let independentlyObserved = Infinity;
+  let ranRootSerializer = false;
+  let largeLocalSelection = false;
+  const potentialIds: string[] = [];
+  const prefixes = new Set<string>();
+  let uncertain = false;
   const identities = new Set<string>();
-  for (const [index, value] of records.entries()) {
-    const record = asRecord(value);
+  for (const [index, input] of records.entries()) {
+    const afterRootSerializer = ranRootSerializer;
+    const keySensitive = previous !== undefined && maySerialize(input);
+    ranRootSerializer ||= keySensitive;
+    let exported = input;
+    // The released reader measured the caller's source_data JSON before native capture.
+    // Its byte count can be reconstructed for plain JSON containing ordinary Buffers.
+    let plainBufferWire = true;
+    let buffers: Buffer[] | undefined;
+    let hiddenFields = false;
+    let largeLocalRow = false;
+    const before = previous
+      ? nativeGitHubRecord(input, (value) => {
+          const prototype = Object.getPrototypeOf(value);
+          if (
+            target === "local" &&
+            ((Array.isArray(value) && value.length > 256 * 1024) ||
+              (prototype === Buffer.prototype &&
+                Buffer.isBuffer(value) &&
+                !Object.hasOwn(value, "byteLength") &&
+                value.byteLength > 256 * 1024))
+          ) {
+            largeLocalRow = true;
+            return false;
+          }
+          // Native capture drops non-enumerable fields the released vendor mapper could read.
+          if (
+            !Array.isArray(value) &&
+            !ArrayBuffer.isView(value) &&
+            !isBoxedPrimitive(value) &&
+            !isDate(value) &&
+            Object.getOwnPropertyNames(value).some(
+              (key) =>
+                key !== "toJSON" &&
+                !Object.prototype.propertyIsEnumerable.call(value, key),
+            )
+          )
+            hiddenFields = true;
+          if (!plainBufferWire) return;
+          if (Buffer.isBuffer(value)) (buffers ??= []).push(value);
+          plainBufferWire = Buffer.isBuffer(value)
+            ? prototype === Buffer.prototype &&
+              !Object.hasOwn(value, "toJSON") &&
+              !Object.hasOwn(value, "length") &&
+              !("_arr" in value)
+            : (prototype === Object.prototype ||
+                prototype === null ||
+                prototype === Array.prototype) &&
+              !maySerialize(value);
+        })
+      : undefined;
+    const priorPrefix = previous ? codeOccurrencePrefix(input) : undefined;
+    let priorId = previous ? priorAdvisoryId(input) : undefined;
+    let prefix = priorPrefix;
+    const rowIds = new Set<string>();
+    let rowUncertain = false;
+    const priorRowCount = previous?.findings.length ?? 0;
+    function possible() {
+      uncertain = rowUncertain = true;
+      // A caller getter can mutate a later row before its native evidence is seen.
+      independentlyObserved = Math.min(independentlyObserved, priorRowCount);
+      for (const id of rowIds) uncertainIds.add(id);
+      if (prefix) prefixes.add(prefix);
+      if (priorId) uncertainIds.add(priorId);
+      else if (!priorPrefix) unidentifiedRows.add(index);
+    }
+    // The old reader called a root serializer with "source_data" rather than its
+    // array index. That code could change a later occurrence before it was read.
+    if (afterRootSerializer) {
+      possible();
+      unidentifiedRows.add(index);
+    }
+    const exclusion = (record: unknown, reason: string) => ({
+      position: index + 1,
+      source_finding_id: text(asRecord(record)?.["url"]),
+      reason,
+    });
+    let possibleFreshId = false;
     try {
-      if (!record) throw new Error("GitHub finding must be an object.");
-      let finding: ExternalFinding;
-      if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record, target);
-      else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record, target);
-      else
-        throw new Error(
-          "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
+      if (snapshot) {
+        const source = exportedGitHubRecord(
+          input,
+          index,
+          target,
+          target === "local" && !largeLocalRow,
         );
-      if (identities.has(finding.source_finding_id))
+        exported = source.record;
+        if (previous) {
+          prefix ??= codeOccurrencePrefix(exported);
+          // A serializer or Buffer can expand a native record that fit the approved request.
+          if (
+            target === "local" &&
+            (largeLocalRow ||
+              (source.bytes > 256 * 1024 &&
+                (!before || (plainBufferWire && !buffers))))
+          ) {
+            largeLocalSelection = true;
+            possible();
+            possibleFreshId = true;
+          } else if (
+            !before &&
+            source.previousInvalid &&
+            !source.skippedRawValue &&
+            canSnapshotWithoutGetters(input, true)
+          ) {
+            previous.excluded.push(
+              exclusion(exported, errorMessage(source.previousInvalid)),
+            );
+          } else if (!before) {
+            // With no independent native observation, only an occurrence can
+            // identify a possible older approval. It cannot authorize a retry.
+            const rawSizeExcludes =
+              source.adjustment === Infinity ||
+              source.bytes + source.adjustment > 256 * 1024;
+            if (
+              target === "local" ||
+              !rawSizeExcludes ||
+              !canSnapshotWithoutGetters(input, true) ||
+              keySensitive
+            ) {
+              possible();
+              possibleFreshId = true;
+            } else
+              previous.excluded.push(
+                exclusion(
+                  exported,
+                  "Evidence exceeds the Cloud limit of 256 KiB.",
+                ),
+              );
+          } else {
+            if (hiddenFields || source.skippedRawValue) possible();
+            try {
+              const row = mapRecord(before);
+              const knownOldId = row.source_finding_id;
+              priorId = knownOldId;
+              if (!afterRootSerializer) unidentifiedRows.delete(index);
+              rowIds.add(knownOldId);
+              if (rowUncertain) uncertainIds.add(knownOldId);
+              const evidence = validateExternalEvidenceFields(
+                row.evidence,
+                target,
+              );
+              if (source.previousInvalid) throw source.previousInvalid;
+              if (keySensitive) possible();
+              const reason =
+                keySensitive || target === "local"
+                  ? undefined
+                  : previousGitHubExclusion(
+                      evidence,
+                      source.bytes,
+                      source.adjustment,
+                    );
+              if (reason) previous.excluded.push(exclusion(before, reason));
+              else {
+                checks.push({ input, before, uncertain: possible });
+                previous.findings.push({
+                  source_finding_id: knownOldId,
+                  evidence,
+                });
+                potentialIds.push(knownOldId);
+              }
+            } catch (error) {
+              previous.excluded.push(exclusion(before, errorMessage(error)));
+            }
+          }
+        }
+        if (source.invalid) throw source.invalid;
+      }
+      const mapped = mapRecord(exported),
+        id = mapped.source_finding_id;
+      rowIds.add(id);
+      if (rowUncertain) uncertainIds.add(id);
+      if (possibleFreshId) potentialIds.push(id);
+      const evidence = validateExternalEvidence(mapped.evidence, target);
+      if (identities.has(id))
         throw new CodexSecurityError(
-          `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}. Select each GitHub occurrence once.`,
+          `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
         );
-      identities.add(finding.source_finding_id);
-      result.findings.push(finding);
+      identities.add(id);
+      result.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
-      result.excluded.push({
-        position: index + 1,
-        source_finding_id: text(record?.["url"]),
-        reason: errorMessage(error),
-      });
+      const reason = errorMessage(error);
+      result.excluded.push(
+        exclusion(
+          snapshot && exported === input
+            ? { url: ownData(input, "url") }
+            : exported,
+          reason,
+        ),
+      );
+      if (previous && exported === input) {
+        if (
+          error instanceof CloudEvidenceDepthError &&
+          before &&
+          plainBufferWire &&
+          // Extra Buffer fields were inspected by the old row validator, but
+          // structuredClone does not retain them as part of the typed array.
+          (buffers?.every(
+            (buffer) => Object.keys(buffer).length === buffer.length,
+          ) ??
+            true)
+        ) {
+          // Exported JSON can be deeper than an approved native snapshot.
+          // Retain only the independently observed, valid prior selection.
+          try {
+            const row = mapRecord(before);
+            const evidence = validateExternalEvidence(row.evidence, target);
+            const savedSource = JSON.stringify(evidence.source_data);
+            // structuredClone turns each Buffer into a Uint8Array. Reconstruct its
+            // original serialized size on detached data without running caller hooks.
+            const oldSource = JSON.stringify(
+              evidence.source_data,
+              (_key, value: unknown) =>
+                value instanceof Uint8Array
+                  ? { type: "Buffer", data: [...value] }
+                  : value,
+            );
+            validateExternalEvidenceJson(
+              evidence,
+              target,
+              Buffer.byteLength(oldSource) - Buffer.byteLength(savedSource),
+            );
+            previous.findings.push({
+              source_finding_id: row.source_finding_id,
+              evidence,
+            });
+            potentialIds.push(row.source_finding_id);
+            checks.push({ input, before, uncertain: possible });
+          } catch (priorError) {
+            previous.excluded.push(exclusion(before, errorMessage(priorError)));
+          }
+          continue;
+        }
+        // A serializer may throw at its array key while the old source_data
+        // key produced a valid record. Keep only evidence for refusing a match.
+        possible();
+        if (before)
+          try {
+            const id = mapRecord(before).source_finding_id;
+            priorId = id;
+            if (!afterRootSerializer) unidentifiedRows.delete(index);
+            potentialIds.push(id);
+            uncertainIds.add(id);
+          } catch {
+            /* No old identity. */
+          }
+      }
+    }
+  }
+  if (previous) {
+    for (const check of checks) {
+      if (!isDeepStrictEqual(check.before, nativeGitHubRecord(check.input)))
+        check.uncertain();
+    }
+    if (uncertain || !isDeepStrictEqual(previous.findings, result.findings)) {
+      const prior: LegacyReaderSelection = { sourceFindingIds: potentialIds };
+      if (uncertain) {
+        prior.unprovenIdPrefixes = [...prefixes];
+        prior.uncertainFindingIds = [...uncertainIds];
+        if (unidentifiedRows.size)
+          prior.unprovenOccurrenceCount = unidentifiedRows.size;
+        if (!largeLocalSelection)
+          prior.knownFindings = previous.findings
+            .slice(0, independentlyObserved)
+            .filter((finding) => !uncertainIds.has(finding.source_finding_id));
+      } else prior.snapshot = previous;
+      rememberPreviousSelection(result, prior);
     }
   }
   return result;
@@ -305,7 +669,7 @@ export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts, target);
+  return normalizeRecords(alerts, target, true);
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
@@ -313,7 +677,7 @@ export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories, target);
+  return normalizeRecords(advisories, target, true);
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */

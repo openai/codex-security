@@ -7,6 +7,7 @@ import {
   normalizeOpenGrepFindings as normalize,
   readOpenGrepFindings,
 } from "../src/opengrep-findings.js";
+import { previousReaderSelection } from "../src/reader-selection.js";
 import {
   opengrepJson,
   opengrepTraceJson,
@@ -173,6 +174,80 @@ test("grouped observations still honor the existing Cloud evidence size contract
     true,
   );
 });
+
+test.each(["group", "trace"] as const)(
+  "a size change affecting a %s keeps the unrelated occurrence proven",
+  (changed) => {
+    const input = opengrepTraceJson();
+    const second = input.results[1]!;
+    if (changed === "trace") second.extra.message = "x".repeat(140_000);
+    // The released reader counted a boxed decimal by its JSON spelling.
+    Object.assign(second.extra.metadata, {
+      score: new Number(0.00001),
+      pad: "",
+    });
+    const group = normalize(input, options).findings[0]!;
+    const bytes = Buffer.byteLength(JSON.stringify(group.evidence));
+    Object.assign(second.extra.metadata, { pad: "p".repeat(262_145 - bytes) });
+    const unrelated = structuredClone(input.results[0]!);
+    unrelated.check_id = "example.unrelated";
+    input.results.push(unrelated);
+    const current = normalize(input, options);
+    expect(current.excluded).toEqual([]);
+    expect(current.findings).toHaveLength(2);
+    const known = current.findings.filter(
+      (row) => row.source_finding_id !== group.source_finding_id,
+    );
+    expect(known).toHaveLength(1);
+    const previous = previousReaderSelection(
+      current,
+      JSON.parse(JSON.stringify(current)),
+    );
+    expect(previous?.uncertainFindingIds).toEqual([group.source_finding_id]);
+    expect(previous?.knownFindings).toEqual(known);
+    const local = normalize(input, options, "local");
+    expect(
+      previousReaderSelection(local, JSON.parse(JSON.stringify(local))),
+    ).toBeUndefined();
+  },
+);
+
+test.each([
+  { score: 0.00001, bytes: 262_145, freshCount: 2, priorCount: 1 },
+  { score: 1e-7, bytes: 262_144, freshCount: 1, priorCount: 2 },
+])(
+  "retains exact singleton membership at $bytes bytes",
+  ({ score, bytes, freshCount, priorCount }) => {
+    const input = opengrepJson();
+    const stable = normalize(input, options).findings[0]!;
+    const candidate = {
+      ...input.results[0]!,
+      check_id: "example.boundary",
+      score: new Number(score),
+      padding: "",
+    };
+    const selected = normalize({ ...input, results: [candidate] }, options)
+      .findings[0]!;
+    candidate.padding = "x".repeat(
+      bytes - Buffer.byteLength(JSON.stringify(selected.evidence)),
+    );
+    input.results.push(candidate);
+    const current = normalize(input, options);
+    expect(current.findings).toHaveLength(freshCount);
+    const prior = previousReaderSelection(
+      current,
+      JSON.parse(JSON.stringify(current)),
+    );
+    const expectedIds =
+      priorCount === 1
+        ? [stable.source_finding_id]
+        : [stable.source_finding_id, selected.source_finding_id].sort();
+    expect(
+      prior?.snapshot?.findings.map((row) => row.source_finding_id),
+    ).toEqual(expectedIds);
+    expect(prior?.uncertainFindingIds).toBeUndefined();
+  },
+);
 
 test("an oversized trace leaves the publishable traces at its source occurrence", () => {
   const input = opengrepJson();
