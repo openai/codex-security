@@ -21,6 +21,7 @@ import { importSource } from "./import-module.ts";
 import { writeJson } from "./support/json.ts";
 
 const execFile = promisify(nodeExecFile);
+const { decodePosixBytes } = await importSource("src/helpers/posix-path.ts");
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
   define: {
@@ -33,6 +34,30 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   },
 });
 after(() => temporaryDirectories.cleanup());
+
+test(
+  "POSIX encoded directories retain their filesystem bytes",
+  { skip: process.platform === "win32" },
+  async () => {
+    const fixture = await fixtureRun();
+    const name =
+      process.platform === "darwin"
+        ? Buffer.from("selected-雪")
+        : Buffer.from([115, 101, 108, 101, 99, 116, 101, 100, 45, 255]);
+    const selected = Buffer.concat([
+      Buffer.from(fixture.run.targetPath + path.sep),
+      name,
+    ]);
+    await mkdir(selected, { recursive: true });
+    await writeFile(
+      Buffer.concat([selected, Buffer.from("/source.py")]),
+      "pass\n",
+    );
+    fixture.run.includePaths = [decodePosixBytes(name)];
+    const { coordinator, executor } = await startFixture(fixture);
+    await assertDiscoveryThenCancel(coordinator, executor);
+  },
+);
 
 test("an empty child of a nonempty Git repository dispatches no workers", async () => {
   const fixture = await fixtureRun();

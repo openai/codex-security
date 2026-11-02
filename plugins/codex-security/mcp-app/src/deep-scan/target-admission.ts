@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { scopePath } from "../helpers/generate-inventory.js";
-import { regular } from "../helpers/inventory-paths.js";
+import { fsPath, regular } from "../helpers/inventory-paths.js";
 import type { DeepScanRunState } from "./types.js";
 
 /** Check physical selections without changing the shared inventory's ignore rules. */
@@ -23,7 +23,7 @@ export async function checkSelectedTargets(
     signal.throwIfAborted();
     try {
       if (regular(target)) return;
-      const entries = await readdir(target);
+      const entries = await readdir(fsPath(target));
       signal.throwIfAborted();
       if (entries.length > 0) return;
     } catch (error) {
