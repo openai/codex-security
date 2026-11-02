@@ -270,6 +270,57 @@ export class ScanCostTracker {
       SessionUsage,
       NonNullable<SessionUsage["events"]>
     >();
+    const known = new Set([
+      this.#threadId,
+      ...this.#receipts.keys(),
+      ...this.#workers.keys(),
+    ]);
+    const metadata = new Map(
+      [...this.#sessions.values()]
+        .filter((session) => session.threadId !== null)
+        .map((session) => [session.threadId!, session]),
+    );
+    const captureAssociated = (session: SessionUsage): boolean => {
+      if (session.threadId === null) return false;
+      metadata.set(session.threadId, session);
+      let current: SessionUsage | undefined = session;
+      const visited = new Set<string>();
+      while (
+        current?.threadId !== null &&
+        current?.threadId !== undefined &&
+        !visited.has(current.threadId)
+      ) {
+        if (known.has(current.threadId)) {
+          known.add(session.threadId);
+          return true;
+        }
+        visited.add(current.threadId);
+        const started = metadata.get(this.#threadId!)?.startedAt;
+        if (
+          this.#options.scanDirectory !== undefined &&
+          current.parentThreadId === null &&
+          current.workingDirectory !== null &&
+          started !== null &&
+          started !== undefined &&
+          current.startedAt !== null &&
+          current.startedAt >= started &&
+          isScanArtifactDirectory(
+            this.#options.scanDirectory,
+            current.workingDirectory,
+          )
+        ) {
+          known.add(session.threadId);
+          return true;
+        }
+        if (current.parentThreadId === null) return false;
+        if (known.has(current.parentThreadId)) {
+          known.add(session.threadId);
+          return true;
+        }
+        current = metadata.get(current.parentThreadId);
+      }
+      return false;
+    };
     let blocked: [SessionUsage, unknown] | undefined;
     let traversalFailure: { error: unknown } | undefined;
     try {
@@ -285,10 +336,15 @@ export class ScanCostTracker {
           this.#options.onSessionEvent !== undefined &&
           session.events === undefined &&
           session.offset === 0;
-        if (capture) session.events = [];
         try {
-          await readSessionUsage(path, session, repository);
-          if (capture) capturedEvents.set(session, session.events!);
+          await readSessionUsage(
+            path,
+            session,
+            repository,
+            capture ? captureAssociated : undefined,
+          );
+          if (capture && session.events !== undefined)
+            capturedEvents.set(session, session.events);
         } catch (error) {
           if (session.threadId === null) {
             if (!observeHealthySessions || !isBlockedLogRead(error))
@@ -617,6 +673,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  captureEvents?: (session: SessionUsage) => boolean,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -644,7 +701,12 @@ async function readSessionUsage(
           .split("\n");
         session.pendingLine.push(lines[0]!);
         for (const line of lines.slice(1)) {
-          readSessionEvent(session.pendingLine.join(""), session, repository);
+          readSessionEvent(
+            session.pendingLine.join(""),
+            session,
+            repository,
+            captureEvents,
+          );
           session.pendingLine = [line];
         }
       } catch (error) {
@@ -662,6 +724,7 @@ function readSessionEvent(
   line: string,
   session: SessionUsage,
   repository?: string,
+  captureEvents?: (session: SessionUsage) => boolean,
 ): void {
   if (line.length === 0) return;
   const event = parseJson(() => line);
@@ -681,6 +744,8 @@ function readSessionEvent(
     }
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
+    if (session.events === undefined && captureEvents?.(session))
+      session.events = [];
     session.events?.push(event);
     return;
   }
