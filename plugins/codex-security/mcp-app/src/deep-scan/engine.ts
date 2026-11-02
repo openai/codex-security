@@ -1,5 +1,5 @@
 import { createScanArtifactContext } from "../artifact-context.js";
-import { preflightCodexSecurityReviewItems } from "../artifact-inventory.js";
+import { checkSelectedTargets } from "./target-admission.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
 import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
@@ -58,23 +58,7 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
-      prepareReviewItems: async (signal) => {
-        const context = await createScanArtifactContext(
-          run.scanId,
-          runWorkbench,
-          {
-            requireRunning: true,
-            requireClaim: true,
-            handoffClaimToken,
-            pluginRoot,
-            pythonCommand: options.pythonCommand,
-          },
-        );
-        return preflightCodexSecurityReviewItems(
-          { ...context, filePaths: run.filePaths },
-          signal,
-        );
-      },
+      checkTarget: checkSelectedTargets,
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,

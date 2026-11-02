@@ -86,9 +86,7 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
-  prepareReviewItems?: (
-    signal: AbortSignal,
-  ) => Promise<{ reviewItemsTotal: number }>;
+  checkTarget?: (run: DeepScanRunState, signal: AbortSignal) => Promise<void>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -368,18 +366,35 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
 
       if (
-        this.options.prepareReviewItems &&
+        this.options.checkTarget &&
         !this.discoveryDeadlineReached &&
         !hasAcceptedWorkerResults(this.state)
       ) {
-        const inventory = await this.options.prepareReviewItems(
+        const checkTarget = this.options.checkTarget;
+        const signal = AbortSignal.any([
           this.abortController.signal,
-        );
-        if (this.canceled || this.externallyFailed) return;
-        if (inventory.reviewItemsTotal === 0) {
-          throw new Error(
-            "Deep Scan target contains no reviewable source files; no security audit was performed.",
-          );
+          this.discoveryAbortController.signal,
+        ]);
+        const aborted = Promise.withResolvers<never>();
+        const onAbort = () => aborted.reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          signal.throwIfAborted();
+          await Promise.race([
+            Promise.resolve().then(() => {
+              signal.throwIfAborted();
+              return checkTarget(this.state, signal);
+            }),
+            aborted.promise,
+          ]);
+        } catch (error) {
+          if (
+            !this.discoveryDeadlineReached ||
+            this.abortController.signal.aborted
+          )
+            throw error;
+        } finally {
+          signal.removeEventListener("abort", onAbort);
         }
       }
       if (this.canceled || this.externallyFailed) return;
