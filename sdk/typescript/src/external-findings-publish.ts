@@ -1957,9 +1957,9 @@ async function preparePublicationInput(
           status:
             parsed.excluded.length || counts.error ? "partial" : "complete",
           read: parsed.read,
-          ...(parsed.report === undefined
+          ...(preview.report === undefined
             ? {}
-            : snapshotNormalizedFindings({ report: parsed.report })),
+            : snapshotNormalizedFindings({ report: preview.report })),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,

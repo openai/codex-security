@@ -6593,6 +6593,8 @@ for (const [provider, report, normalize, dryRunTitle] of [
     );
     expect(restored.preview.resumed).toBe(true);
     expect(restored.preview.requests).toEqual(original.preview.requests);
+    const result = await retry.publish();
+    expect(result.report?.["notifications"]).toMatchObject([notification]);
 
     const otherRun = {
       ...input.runs[0],
