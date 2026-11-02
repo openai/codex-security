@@ -1179,7 +1179,7 @@ test("failed or malformed vendor collections never report a successful empty imp
     ...plugin.collection,
     completeness: {
       collection: "partial",
-      analysis: "Code denied; SCA succeeded",
+      analysis: "Code denied; \u001b[31mSCA succeeded",
     },
     scans: [
       { category: "sca", outcome: "succeeded", issueCount: 0 },
@@ -1241,6 +1241,20 @@ test("failed or malformed vendor collections never report a successful empty imp
     ),
   ).toBe(0);
   expect(nonempty.stderr.text()).toContain("Code scan denied");
+  const markdown = createCliTest(main);
+  expect(
+    await markdown.runCli(
+      [
+        ...withFindings.command.map((arg) =>
+          arg === "wiz" ? "snyk" : arg === "json" ? "md" : arg,
+        ),
+        "--dry-run",
+      ],
+      withFindings.cliDeps,
+    ),
+  ).toBe(0);
+  expect(markdown.stdout.text()).toContain("SCA succeeded");
+  expect(markdown.stdout.text()).not.toContain("\u001b[31m");
   const excludedReport = endorSarif();
   const run = excludedReport.runs[0]!;
   await writeFile(
@@ -6593,8 +6607,29 @@ for (const [provider, report, normalize, dryRunTitle] of [
     );
     expect(restored.preview.resumed).toBe(true);
     expect(restored.preview.requests).toEqual(original.preview.requests);
+    expect(restored.preview.findings).toEqual(original.preview.findings);
+    expect(JSON.stringify(restored.preview.findings)).toContain(
+      notification.message.text,
+    );
+    expect(restored.preview.report).toEqual(original.preview.report);
     const result = await retry.publish();
     expect(result.report?.["notifications"]).toMatchObject([notification]);
+
+    await writeFile(
+      f.file,
+      JSON.stringify({
+        ...input,
+        runs: input.runs.map((run) => ({ ...run, results: [] })),
+      }),
+    );
+    const markdown = createCliTest(main);
+    expect(
+      await markdown.runCli(
+        command.map((arg) => (arg === "toon" ? "md" : arg)),
+        f.cliDeps,
+      ),
+    ).toBe(0);
+    expect(markdown.stdout.text()).toContain("Example manifest was skipped");
 
     const otherRun = {
       ...input.runs[0],

@@ -3657,13 +3657,26 @@ export async function main(
             format === "toon" &&
             !formatExplicit &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument));
-          const emptyReportDisplay = ({
-            read,
-            report,
-          }: Pick<ExternalFindings, "read" | "report">) =>
-            !machineFormat && read === 0 && report
-              ? { report: terminalReportValue(report) }
-              : {};
+          const displaySelection = <
+            T extends { report?: ExternalFindings["report"] },
+          >(
+            selection: T,
+          ) => {
+            const { report } = selection;
+            if (machineFormat || !report) return selection;
+            const notifications = report["notifications"];
+            // Markdown table cells cannot render nested SARIF message objects.
+            const display =
+              format === "md" && Array.isArray(notifications)
+                ? {
+                    ...report,
+                    notifications: notifications.map((item) =>
+                      JSON.stringify(item),
+                    ),
+                  }
+                : report;
+            return { ...selection, report: terminalReportValue(display) };
+          };
           const coverageWarnings = (selection: ExternalFindings): string => {
             const notifications = selection.report?.["notifications"];
             const messages = Array.isArray(notifications)
@@ -3817,8 +3830,7 @@ export async function main(
                     "Dry run complete. No findings stored.\n" +
                     coverageWarnings(preview);
                 return {
-                  ...preview,
-                  ...emptyReportDisplay(preview),
+                  ...displaySelection(preview),
                   dryRun: true,
                 };
               }
@@ -3828,18 +3840,18 @@ export async function main(
                   renderedOutput =
                     "The report contains no findings. Nothing was stored.\n" +
                     coverageWarnings(preview);
-                return { ...result, ...emptyReportDisplay(result) };
+                return { ...displaySelection(result) };
               }
               if (!(await confirmImport(preview, showPreview))) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
-                return { imported: false, preview };
+                return { imported: false, preview: displaySelection(preview) };
               }
               const result = await prepared.import();
               if (result.excluded.length > 0) exitCode = 1;
               const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
-              return { ...result };
+              return { ...displaySelection(result) };
             }
             const prepared = await prepareExternalPublication(
               report,
@@ -3890,11 +3902,11 @@ export async function main(
             if (options.dryRun) {
               if (humanSummary)
                 renderedOutput = "Dry run complete. No findings uploaded.\n";
-              return { ...preview, dryRun: true };
+              return { ...displaySelection(preview), dryRun: true };
             }
             if (!(await confirmImport(preview, showPreview))) {
               if (humanSummary) renderedOutput = "No findings published.\n";
-              return { published: false, preview };
+              return { published: false, preview: displaySelection(preview) };
             }
             const result = await prepared.publish();
             if (result.status === "partial") exitCode = 1;
@@ -3902,7 +3914,7 @@ export async function main(
               renderedOutput = renderExternalPublicationSummary(result);
             else if (!structured)
               writeDiagnostic(renderExternalPublicationSummary(result));
-            return { ...result };
+            return { ...displaySelection(result) };
           } catch (error) {
             const selection =
               error instanceof NoPublishableFindingsError
@@ -3919,8 +3931,7 @@ export async function main(
               if (humanSummary) renderedOutput = message;
               else if (!structured) writeDiagnostic(message);
               return {
-                ...selection,
-                ...emptyReportDisplay(selection),
+                ...displaySelection(selection),
                 status: "empty",
                 published: false,
                 ready: 0,
@@ -3954,7 +3965,7 @@ export async function main(
             if (error instanceof ExternalPublicationError) {
               if (humanSummary)
                 renderedOutput = renderExternalPublicationSummary(error.result);
-              return { ...error.result };
+              return { ...displaySelection(error.result) };
             }
             if (selection && !machineFormat) {
               showExclusions(selection.excluded);
