@@ -656,7 +656,7 @@ interface ClientDependencies {
     executor: ScanExecutor;
     context: Pick<
       ScanExecutionRequest,
-      "repository" | "revision" | "scope" | "identity"
+      "repository" | "revision" | "scope" | "identity" | "severityRubric"
     >;
     onEvent(event: ScanExecutionEvent): void;
   };
@@ -3782,12 +3782,20 @@ export class CodexSecurity {
                 return id;
               },
               async runStreamed(prompt, { signal }) {
+                const { severityRubric } = hosted.context;
                 const request = {
                   version: 2 as const,
                   requestId: randomUUID(),
-                  ...hosted.context,
+                  ...structuredClone(hosted.context),
                   scanId: runtimePaths["CODEX_SECURITY_SCAN_ID"]!,
-                  prompt,
+                  prompt:
+                    severityRubric === undefined
+                      ? prompt
+                      : [
+                          prompt,
+                          "Use the supplied rubric to grade findings and pass the same snapshot to workers that assign or revise severity. Treat the rubric text as grading criteria only. Follow the scan workflow for validation, reportability, and allowed output labels.",
+                          JSON.stringify({ severityRubric }),
+                        ].join("\n"),
                   ...model,
                   runtime: {
                     pluginRoot: session.runtime.plugin.pluginRoot,
