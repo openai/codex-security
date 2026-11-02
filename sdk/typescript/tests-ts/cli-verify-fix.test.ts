@@ -1142,6 +1142,55 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
     },
   );
 
+  test("releases batch signal listeners before waiting for a worker's text diagnostic", async () => {
+    const result = fakeResult(["high", "high"]);
+    for (const [index, finding] of result.findings.findings.entries()) {
+      finding.occurrenceId = `occ_${index}`;
+      finding.title = "x".repeat(530_000);
+    }
+    const signals = new FakeSignals();
+    const message = "Synthetic worker failure.\n";
+    let diagnostic = "";
+    let listenerCounts: number[] = [];
+    const stderr = new Writable({
+      write(chunk, _encoding, callback) {
+        diagnostic += chunk.toString();
+        setImmediate(() => {
+          listenerCounts = Array.from(
+            signals.listeners.values(),
+            (listeners) => listeners.size,
+          );
+          signals.emit("SIGTERM");
+          signals.emit("SIGINT");
+          callback();
+        });
+      },
+    });
+    const exit = await main(
+      ["verify-fix", "--scan", "scan"],
+      capture().stream,
+      stderr,
+      dependencies({
+        result,
+        signals,
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (_args, output) => {
+          output!.stderr.write(message);
+          return 1;
+        },
+      }),
+    );
+    expect(listenerCounts).toEqual([0, 0]);
+    expect(exit).toBe(2);
+    expect(diagnostic).toBe(message);
+  });
+
   test("waits for a single worker's stderr diagnostic", async () => {
     const message = "One worker failed.\n";
     const writeStarted = Promise.withResolvers<() => void>();

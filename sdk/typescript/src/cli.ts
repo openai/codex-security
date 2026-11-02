@@ -6129,7 +6129,7 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: incurError }) {
-        let failureReported = false;
+        let workerDiagnostic: string | undefined;
         const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = async (chunk: string): Promise<void> => {
           if (structured) {
@@ -6268,10 +6268,9 @@ export async function main(
                 }
                 controller?.signal.throwIfAborted();
                 if (exitCode !== 0) {
-                  const message = diagnostics.text().trim();
-                  failureReported = message.length > 0;
-                  if (batchedVerification && failureReported)
-                    await reportDiagnostic(diagnostics.text());
+                  const diagnostic = diagnostics.text();
+                  const message = diagnostic.trim();
+                  if (message) workerDiagnostic = diagnostic;
                   throw new CodexSecurityError(
                     message ||
                       `Codex verification failed with exit code ${exitCode}.`,
@@ -6317,9 +6316,10 @@ export async function main(
         } catch (error) {
           exitCode = 2;
           const message = errorMessage(error);
-          if (!failureReported)
+          if (workerDiagnostic === undefined || batchedVerification)
             await reportDiagnostic(
-              `codex-security: ${diagnosticValue(message)}\n`,
+              workerDiagnostic ??
+                `codex-security: ${diagnosticValue(message)}\n`,
             );
           return finishScan(
             { exitCode, error: message },
