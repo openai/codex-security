@@ -26,7 +26,8 @@ export async function checkSelectedTargets(
       if (regular(target)) return;
       const directory = await opendir(
         process.platform === "win32" ? encodeGitPath(target) : fsPath(target),
-        { bufferSize: 1 },
+        // Node accepts raw entry names; OpenDirOptions omits this encoding.
+        { encoding: "buffer" as BufferEncoding, bufferSize: 1 },
       );
       try {
         signal.throwIfAborted();

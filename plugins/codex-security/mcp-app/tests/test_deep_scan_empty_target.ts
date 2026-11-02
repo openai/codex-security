@@ -84,7 +84,7 @@ for (const cancel of [false, true]) {
       filesystem,
       "opendir",
       async (_path: unknown, options: unknown) => {
-        assert.deepEqual(options, { bufferSize: 1 });
+        assert.deepEqual(options, { encoding: "buffer", bufferSize: 1 });
         return handle as unknown as Dir;
       },
     );
