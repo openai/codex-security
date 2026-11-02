@@ -54,7 +54,13 @@ try {
   await testPreflightPreservesSavedPathKinds();
   await testFailedTrackedFileDiscoveryIsNotEmpty();
   await testPreflightCombinesGitAndRipgrepIgnoreRules();
+  await testPreflightUsesOwningSubmoduleIndex();
+  await testTrackedSupplementHonorsRipgrepIgnoreRules();
+  if (process.platform !== "win32")
+    await testTrackedSupplementRejectsLinkedParents();
   await testPreflightMatchesCanonicalIgnoreSemantics();
+  if (process.platform !== "win32" && process.getuid?.() !== 0)
+    await testPartialEnumerationRetainsUsableSources();
   if (process.platform !== "win32")
     await testAuthoritativeScopesWithoutRipgrep();
   await testLargeAuthoritativeScopeTransport();
@@ -346,6 +352,174 @@ async function testPreflightCombinesGitAndRipgrepIgnoreRules() {
   );
 }
 
+async function testPreflightUsesOwningSubmoduleIndex() {
+  const fixture = await createFixture("submodule index ownership");
+  const source = path.join(fixture.root, "inner-source");
+  await mkdir(source);
+  await runGit(source, "init", "-q");
+  await writeInventory(path.join(source, ".gitignore"), "*.demo\n");
+  await writeInventory(path.join(source, "target", "only.demo"), "source\n");
+  await runGit(source, "add", ".gitignore");
+  await runGit(source, "add", "--force", "target/only.demo");
+  await runGit(source, "commit", "-qm", "force-tracked source");
+
+  await runGit(fixture.repoRoot, "init", "-q");
+  await runGit(
+    fixture.repoRoot,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "-q",
+    source,
+    "vendor/inner",
+  );
+  await runGit(fixture.repoRoot, "commit", "-qm", "nested repository");
+
+  await assertPreflightMatchesCanonical(
+    fixture,
+    "vendor/inner/target",
+    true,
+    "vendor/inner/target/only.demo",
+  );
+
+  const submodule = path.join(fixture.repoRoot, "vendor", "inner");
+  const direct = {
+    ...fixture,
+    repoRoot: submodule,
+    scan: { ...fixture.scan, repoRoot: submodule },
+  };
+  await assertPreflightMatchesCanonical(
+    direct,
+    "target",
+    true,
+    "target/only.demo",
+  );
+}
+
+async function testTrackedSupplementHonorsRipgrepIgnoreRules() {
+  for (const ignoreName of [".ignore", ".rgignore"]) {
+    const fixture = await createFixture(`tracked ${ignoreName} exclusion`);
+    await runGit(fixture.repoRoot, "init", "-q");
+    await fixture.writeRepositoryFile("selected/only.py", "# tracked\n");
+    await runGit(fixture.repoRoot, "add", "selected/only.py");
+    await runGit(fixture.repoRoot, "commit", "-qm", "tracked source");
+    await writeFile(
+      path.join(fixture.repoRoot, ".git", "info", "exclude"),
+      "/selected/only.py\n",
+    );
+    await fixture.writeRepositoryFile(ignoreName, "selected/only.py\n");
+
+    await assertPreflightMatchesCanonical(fixture, "selected", false);
+    await assertPreflightMatchesCanonical(
+      fixture,
+      "selected/only.py",
+      true,
+      "selected/only.py",
+      true,
+    );
+    await fixture.writeRepositoryFile(
+      ignoreName,
+      "selected/*.py\n!selected/only.py\n",
+    );
+    await assertPreflightMatchesCanonical(
+      fixture,
+      "selected",
+      true,
+      "selected/only.py",
+    );
+  }
+}
+
+async function testTrackedSupplementRejectsLinkedParents() {
+  const fixture = await createFixture("tracked linked parent");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile("selected/replaced/source.py", "# old\n");
+  await fixture.writeRepositoryFile(".gitignore", "selected/replaced/\n");
+  await runGit(fixture.repoRoot, "add", ".gitignore");
+  await runGit(
+    fixture.repoRoot,
+    "add",
+    "--force",
+    "selected/replaced/source.py",
+  );
+  await runGit(fixture.repoRoot, "commit", "-qm", "tracked source");
+  await rm(path.join(fixture.repoRoot, "selected", "replaced"), {
+    recursive: true,
+  });
+  await fixture.writeRepositoryFile("outside/source.py", "# outside\n");
+  await symlink(
+    path.join(fixture.repoRoot, "outside"),
+    path.join(fixture.repoRoot, "selected", "replaced"),
+  );
+
+  await assertPreflightMatchesCanonical(fixture, "selected", false);
+}
+
+async function testPartialEnumerationRetainsUsableSources() {
+  const fixture = await createFixture("partial enumeration");
+  await fixture.writeRepositoryFile(
+    "selected/left/private/blocked.py",
+    "# blocked\n",
+  );
+  await fixture.writeRepositoryFile("selected/right/ok.py", "# readable\n");
+  const privateDirectory = path.join(
+    fixture.repoRoot,
+    "selected",
+    "left",
+    "private",
+  );
+  const context = (requiredIncludePaths: string[]) => ({
+    ...fixture.scan,
+    targetContract: {
+      scope: {
+        requiredIncludePaths,
+        requiredExcludePaths: [],
+        filePaths: [],
+      },
+    },
+  });
+  await chmod(privateDirectory, 0);
+  try {
+    for (const paths of [
+      ["selected/left", "selected/right"],
+      ["selected/right", "selected/left"],
+      ["selected"],
+    ])
+      assert.deepEqual(
+        await inventory.preflightCodexSecurityReviewItems(context(paths)),
+        { reviewItemsTotal: 1 },
+      );
+
+    const canonical = await inventory.prepareCodexSecurityReviewItems({
+      ...fixture.scan,
+      scope: "selected",
+    });
+    assert.equal(canonical.reviewItemsTotal, 1);
+    const listed = await inventory.listCodexSecurityReviewItems(fixture.scan, {
+      limit: 1_000,
+    });
+    assert.deepEqual(
+      listed.items.map((item: { path: string }) => item.path),
+      ["selected/right/ok.py"],
+    );
+
+    await assert.rejects(
+      inventory.preflightCodexSecurityReviewItems(context(["selected/left"])),
+      /EACCES|permission denied/iu,
+    );
+    await assert.rejects(
+      inventory.prepareCodexSecurityReviewItems({
+        ...fixture.scan,
+        scope: "selected/left",
+      }),
+      /EACCES|permission denied/iu,
+    );
+  } finally {
+    await chmod(privateDirectory, 0o700);
+  }
+}
+
 async function testPreflightMatchesCanonicalIgnoreSemantics() {
   for (const ignoreName of [".ignore", ".rgignore"]) {
     const fixture = await createFixture(`nested ${ignoreName} negation`);
@@ -415,8 +589,13 @@ async function testPreflightMatchesCanonicalIgnoreSemantics() {
   if (process.platform !== "win32") {
     const fixture = await createFixture("unrelated unreadable ignored child");
     await runGit(fixture.repoRoot, "init", "-q");
-    await fixture.writeRepositoryFile(".gitignore", "selected/unreadable/\n");
+    await fixture.writeRepositoryFile(
+      ".gitignore",
+      "selected/source.py\nselected/unreadable/\n",
+    );
+    await fixture.writeRepositoryFile(".ignore", "unrelated/\n");
     await fixture.writeRepositoryFile("selected/source.py", "# included\n");
+    await runGit(fixture.repoRoot, "add", "--force", "selected/source.py");
     const unreadable = path.join(fixture.repoRoot, "selected", "unreadable");
     await mkdir(unreadable, { recursive: true });
     await chmod(unreadable, 0);
@@ -438,6 +617,7 @@ async function assertPreflightMatchesCanonical(
   scope: string,
   expectedNonempty: boolean,
   expectedPath?: string,
+  explicitFile = false,
 ) {
   const preflight = await inventory.preflightCodexSecurityReviewItems({
     ...fixture.scan,
@@ -445,7 +625,7 @@ async function assertPreflightMatchesCanonical(
       scope: {
         requiredIncludePaths: [scope],
         requiredExcludePaths: [],
-        filePaths: [],
+        filePaths: explicitFile ? [scope] : [],
       },
     },
   });

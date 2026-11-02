@@ -6,7 +6,7 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, parse, relative, sep } from "node:path";
+import { dirname, isAbsolute, parse, posix, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
@@ -26,9 +26,11 @@ import {
   exists,
   fsPath,
   inside,
+  linkedParent,
   lstat,
   regular,
   rejectStreams,
+  sameFile,
   stat,
   sourceMetadata,
   walk,
@@ -120,70 +122,201 @@ function scopePath(
 
 class RipgrepUnavailableError extends Error {}
 
+interface ScopeFiles {
+  paths: string[];
+  failure?: Error;
+}
+
+function toolFailure(
+  name: "Git" | "ripgrep",
+  result: {
+    status: number | null;
+    signal: NodeJS.Signals | null;
+    stderr: string;
+  },
+): Error {
+  const detail = result.stderr.trim();
+  return new Error(
+    detail ||
+      (result.signal
+        ? `${name} terminated by ${result.signal}`
+        : `${name} exited with status ${result.status}`),
+  );
+}
+
+async function scopeRipgrep(
+  repo: string,
+  requested: string | string[],
+  nonVcs = false,
+  maxDepth?: number,
+) {
+  return runRipgrep(
+    [
+      "--files",
+      "--null",
+      "--hidden",
+      "--path-separator",
+      "/",
+      ...(nonVcs ? ["--no-ignore-vcs"] : []),
+      ...(maxDepth === undefined ? [] : ["--max-depth", String(maxDepth)]),
+      "--glob",
+      "!**/{.git,.svn}",
+      "--glob",
+      "!**/{.git,.svn}/**",
+      "--",
+      ...(Array.isArray(requested) ? requested : [requested]),
+    ],
+    repo,
+  );
+}
+
+function rawRipgrepPaths(data: Buffer): Set<string> {
+  const paths = new Set<string>();
+  for (let start = 0; start < data.length;) {
+    let end = data.indexOf(0, start);
+    if (end < 0) end = data.length;
+    let path = data.subarray(start, end);
+    if (path[0] === 0x2e && path[1] === 0x2f) path = path.subarray(2);
+    if (path.length) paths.add(path.toString("hex"));
+    start = end + 1;
+  }
+  return paths;
+}
+
+function hasApplicableNonVcsRules(repo: string, path: string): boolean {
+  if (environmentValue("RIPGREP_CONFIG_PATH")) return true;
+  const parent = dirname(append(repo, path));
+  return [...ancestors(parent)].some(
+    (ancestor) =>
+      statFile(append(ancestor, ".ignore")) ||
+      statFile(append(ancestor, ".rgignore")),
+  );
+}
+
 async function ripgrepScopeFiles(
   repo: string,
   requested: string,
-  requireTrackedSuccess: boolean,
-): Promise<string[]> {
+  scope: string,
+): Promise<ScopeFiles> {
   let result;
   try {
-    result = await runRipgrep(
-      [
-        "--files",
-        "--null",
-        "--hidden",
-        "--path-separator",
-        "/",
-        "--glob",
-        "!**/{.git,.svn}",
-        "--glob",
-        "!**/{.git,.svn}/**",
-        "--",
-        requested,
-      ],
-      repo,
-    );
+    result = await scopeRipgrep(repo, requested);
   } catch (error) {
     throw new RipgrepUnavailableError(
       `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
-  if (result.status !== 0 && result.status !== 1)
-    throw new Error(
-      `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
-    );
-  let bytes = result.stdout;
-  if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
-    const tracked = await git(repo, [
-      "ls-files",
-      "--cached",
-      "--ignored",
-      "--exclude-standard",
-      "-z",
-      "--",
-      requested,
-    ]);
-    if (tracked.status === 0) {
+  if (result.signal) throw toolFailure("ripgrep", result);
+  let failure =
+    result.status === 0 || result.status === 1
+      ? undefined
+      : toolFailure("ripgrep", result);
+  const paths = decodePosixBytes(result.stdout).split("\0").filter(Boolean);
+  const trackedRoot = directory(scope) ? scope : dirname(scope);
+  if (
+    [...ancestors(trackedRoot)].some((path) => exists(append(path, ".git")))
+  ) {
+    const owner = await git(trackedRoot, ["rev-parse", "--show-toplevel"]);
+    if (owner.signal) throw toolFailure("Git", owner);
+    const ownerRoot =
+      owner.status === 0
+        ? canonical(
+            decodeGitPath(owner.stdout).replace(
+              windows ? /\r?\n$/u : /\n$/u,
+              "",
+            ),
+          )
+        : undefined;
+    const ownerScope = ownerRoot ? inside(ownerRoot, scope) : undefined;
+    const tracked = ownerRoot
+      ? await git(ownerRoot, [
+          "ls-files",
+          "--cached",
+          "--ignored",
+          "--exclude-standard",
+          "-z",
+          "--",
+          ".",
+        ])
+      : undefined;
+    if (tracked?.signal) throw toolFailure("Git", tracked);
+    if (tracked?.status === 0 && ownerRoot) {
       const prefix =
         requested === "." || requested.startsWith("./") ? "./" : "";
-      const paths = decodeGitPath(tracked.stdout)
-        .split("\0")
-        .filter((path) => path && regular(append(repo, path)));
-      bytes = Buffer.concat([
-        bytes,
-        encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-      ]);
-    } else if (requireTrackedSuccess && tracked.status !== 127) {
-      throw new Error(
-        tracked.stderr.trim() ||
-          (tracked.signal
-            ? `Git terminated by ${tracked.signal}`
-            : `Git exited with status ${tracked.status}`),
-      );
-    }
+      const candidates: string[] = [];
+      const scopeDepth = ownerScope === "." ? 0 : ownerScope!.split("/").length;
+      const scopeIsDirectory = directory(scope);
+      const matchingPrefixes = new Map<string, boolean>();
+      for (const path of decodeGitPath(tracked.stdout).split("\0")) {
+        if (!path) continue;
+        try {
+          const parts = path.split("/");
+          if (scopeIsDirectory) {
+            if (parts.length <= scopeDepth) continue;
+            if (scopeDepth) {
+              const indexedPrefix = append(
+                ownerRoot,
+                parts.slice(0, scopeDepth).join(sep),
+              );
+              if (!matchingPrefixes.has(indexedPrefix))
+                matchingPrefixes.set(
+                  indexedPrefix,
+                  sameFile(indexedPrefix, scope),
+                );
+              if (!matchingPrefixes.get(indexedPrefix)) continue;
+            }
+          }
+          const absolute = append(ownerRoot, path);
+          if (!scopeIsDirectory && !sameFile(absolute, scope)) continue;
+          if (!regular(absolute)) continue;
+          candidates.push(inside(repo, absolute));
+        } catch (error) {
+          failure ??= error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (candidates.length) {
+        const filtered = new Set(
+          candidates.filter((path) => hasApplicableNonVcsRules(repo, path)),
+        );
+        paths.push(
+          ...candidates
+            .filter((path) => !filtered.has(path))
+            .map((path) => prefix + path),
+        );
+        if (filtered.size) {
+          const allowed = await scopeRipgrep(
+            repo,
+            [...new Set([...filtered].map((path) => posix.dirname(path)))],
+            true,
+            1,
+          );
+          if (allowed.signal) throw toolFailure("ripgrep", allowed);
+          if (allowed.status !== 0 && allowed.status !== 1)
+            failure ??= toolFailure("ripgrep", allowed);
+          const allowedPaths = rawRipgrepPaths(allowed.stdout);
+          paths.push(
+            ...[...filtered]
+              .filter((path) =>
+                allowedPaths.has(encodeGitPath(path).toString("hex")),
+              )
+              .map((path) => prefix + path),
+          );
+        }
+      }
+    } else if (tracked && tracked.status !== 127)
+      failure ??= toolFailure("Git", tracked);
+    else if (
+      owner.status !== 0 &&
+      owner.status !== 127 &&
+      !/not a git repository/iu.test(owner.stderr)
+    )
+      failure ??= toolFailure("Git", owner);
   }
-  return decodePosixBytes(bytes).split("\0").filter(Boolean);
+  return {
+    paths,
+    failure,
+  };
 }
 
 function hasRipgrepOnlyRules(scope: string): boolean {
@@ -208,12 +341,23 @@ function statFile(path: string): boolean {
   }
 }
 
-async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
-  if (regular(scope)) return [scope];
+async function scopeCandidates(
+  repo: string,
+  scope: string,
+): Promise<ScopeFiles> {
+  if (regular(scope)) return { paths: [scope] };
   try {
-    return (
-      await ripgrepScopeFiles(repo, relative(repo, scope) || ".", true)
-    ).map((path) => append(repo, path.startsWith("./") ? path.slice(2) : path));
+    const result = await ripgrepScopeFiles(
+      repo,
+      relative(repo, scope) || ".",
+      scope,
+    );
+    return {
+      paths: result.paths.map((path) =>
+        append(repo, path.startsWith("./") ? path.slice(2) : path),
+      ),
+      failure: result.failure,
+    };
   } catch (error) {
     if (!(error instanceof RipgrepUnavailableError)) throw error;
     const indexed = await directoryPaths(scope);
@@ -223,7 +367,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
           "Could not safely enumerate ignored scoped files without Git or ripgrep.",
           { cause: error },
         );
-      return indexed;
+      return { paths: indexed };
     }
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
     let ignored =
@@ -252,7 +396,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       throw new Error(
         "Could not safely enumerate ignored scoped files without Git or ripgrep.",
       );
-    return files;
+    return { paths: files };
   }
 }
 
@@ -376,14 +520,28 @@ export async function generateInventory(
     const requested = isAbsolute(expandHome(scope, home))
       ? inside(repo, absolute)
       : scope;
-    for (const path of await ripgrepScopeFiles(repo, requested, false)) {
+    const listed = await ripgrepScopeFiles(repo, requested, absolute);
+    let listingFailure = listed.failure;
+    for (const path of listed.paths) {
+      const candidate = append(
+        repo,
+        path.startsWith("./") ? path.slice(2) : path,
+      );
+      try {
+        if (directory(absolute) && linkedParent(absolute, candidate)) continue;
+      } catch (error) {
+        listingFailure ??=
+          error instanceof Error ? error : new Error(String(error));
+        continue;
+      }
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
       if (/[\r\n]/u.test(path))
         throw new Error(
           "Repository contains a path that cannot fit in the file inventory",
         );
-      inventoryRows.push(encodePosixPath(path + "\n"));
+      inventoryRows.push(encodeGitPath(path + "\n"));
     }
+    if (inventoryRows.length === 0 && listingFailure) throw listingFailure;
   } else if (diff) {
     if (
       inventory &&
@@ -464,12 +622,16 @@ export async function generateInventory(
           scopes.filePaths.has(value) !== regular(selected)
         )
           continue;
-        for (const path of await scopeCandidates(repo, selected)) {
+        const candidates = await scopeCandidates(repo, selected);
+        const previousSize = rankRows.size;
+        for (const path of candidates.paths) {
           let name: string;
           try {
+            if (directory(selected) && linkedParent(selected, path)) continue;
             if (!regular(path)) continue;
             name = inside(repo, canonical(path));
-          } catch {
+          } catch (error) {
+            listingFailure ??= error;
             continue;
           }
           if (name.split("/").some((part) => sourceMetadata.has(part)))
@@ -477,6 +639,8 @@ export async function generateInventory(
           rankRows.set(name, { path: name });
           if (scopes.firstMatchOnly) break selectedScopes;
         }
+        if (rankRows.size === previousSize && candidates.failure)
+          listingFailure ??= candidates.failure;
       } catch (error) {
         if (!scopes.firstMatchOnly) throw error;
         listingFailure ??= error;
