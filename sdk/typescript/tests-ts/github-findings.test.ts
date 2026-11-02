@@ -237,6 +237,39 @@ test("snapshots shared evidence even when only one GitHub row needs numeric capt
   });
 });
 
+test.each([{ toJSON: () => "formatted" }, new WeakMap()])(
+  "an oversized uncloneable sibling preserves the accepted numeric snapshot",
+  (extra) => {
+    let reads = 0;
+    const score = Object.assign(new Number(7), { toJSON: () => 9 });
+    const shared = {
+      get score() {
+        return score;
+      },
+      get sample() {
+        return ++reads;
+      },
+    };
+    const rows = ["main", "review", "discarded"].map((ref) => {
+      const row = importedAlert(`refs/heads/${ref}`);
+      Object.assign(row.alert, { shared });
+      return row;
+    });
+    Object.assign(rows[2]!.alert, { extra, padding: "x".repeat(256 * 1024) });
+    const result = normalizeGitHubCodeScanningAlerts(rows);
+    expect(
+      result.excluded.map(({ position, reason }) => [position, reason]),
+    ).toEqual([[3, "Evidence exceeds the Cloud limit of 256 KiB."]]);
+    const retained = result.findings.map(
+      ({ evidence }) =>
+        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
+    );
+    expect(retained[0]).toBe(retained[1]);
+    expect(retained[0]!.score).toBeInstanceOf(Number);
+    expect(retained[0]!.sample).toBe(7);
+  },
+);
+
 test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {
   const row = importedAlert();
   const score = Object.assign(new Number(1), { toJSON: () => 123456 });

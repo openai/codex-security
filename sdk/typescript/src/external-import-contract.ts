@@ -405,11 +405,20 @@ function snapshotEvidence<T>(input: T): T {
   }
 }
 
+function tryNativeEvidence<T>(input: T): T | undefined {
+  try {
+    return structuredClone(input);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Hold shared getter-backed numbers until every selected row has
  * been read, then capture their graph once as the SDK does before publication. */
 export class EvidenceNumberBatch {
   readonly changed = new Set<object>();
   readonly #deferred: ExternalFindingEvidence[] = [];
+  readonly #outsideWireLimit = new WeakSet<ExternalFindingEvidence>();
   readonly #owners = new WeakMap<object, ExternalFindingEvidence>();
   readonly #linked = new Map<
     ExternalFindingEvidence,
@@ -420,7 +429,9 @@ export class EvidenceNumberBatch {
     input: ExternalFindingEvidence,
     getters: Set<object> | undefined,
     snapshot: boolean,
+    outsideWireLimit: boolean,
   ): void {
+    if (outsideWireLimit) this.#outsideWireLimit.add(input);
     if (snapshot) this.#deferred.push(input);
     const links = new Set<ExternalFindingEvidence>();
     this.#linked.set(input, links);
@@ -445,24 +456,34 @@ export class EvidenceNumberBatch {
     const needed = new Set(this.#deferred);
     for (const input of needed)
       for (const other of this.#linked.get(input)!) needed.add(other);
+    // Older readers excluded oversized rows before SDK capture. Preserve that
+    // group first so a rejected sibling cannot change its numbers or getters.
     const inputs = [...this.#linked.keys()].filter((input) =>
       needed.has(input),
     );
-    let snapshots: ExternalFindingEvidence[] | undefined;
-    try {
-      snapshots = snapshotEvidence(inputs);
-    } catch {
-      // A row can fail JSON fallback. Still normalize the other selected rows.
-    }
-    for (const [index, input] of inputs.entries()) {
-      try {
-        const evidence = snapshots
-          ? snapshots[index]!
-          : snapshotEvidence(input);
-        checkedEvidenceJson(evidence, target, 0, false);
-        captured.set(input, evidence);
-      } catch (error) {
-        captured.set(input, errorMessage(error));
+    for (const outside of [false, true]) {
+      const rows = inputs.filter(
+        (input) => this.#outsideWireLimit.has(input) === outside,
+      );
+      if (!rows.length) continue;
+      let native = rows;
+      let values = tryNativeEvidence(native);
+      if (!values && native.length > 1) {
+        // Keep the cloneable rows together, even if another row requires JSON.
+        native = native.filter((input) => tryNativeEvidence(input));
+        values = tryNativeEvidence(native);
+      }
+      const snapshots = new Map(
+        native.map((input, index) => [input, values?.[index]]),
+      );
+      for (const input of rows) {
+        try {
+          const evidence = snapshots.get(input) ?? snapshotEvidence(input);
+          checkedEvidenceJson(evidence, target, 0, false);
+          captured.set(input, evidence);
+        } catch (error) {
+          captured.set(input, errorMessage(error));
+        }
       }
     }
     return captured;
@@ -524,9 +545,14 @@ function checkedEvidenceJson<T>(
   // Only substitute fields the raw provider walk actually saw. A serializer
   // can create a new object whose own numeric representation is the wire value.
   let getters: Set<object> | undefined;
-  function retained(bytes: number, snapshot = false) {
+  function retained(bytes: number, snapshot = false, outsideWireLimit = false) {
     if (batch && (snapshot || getters))
-      batch.record(input as ExternalFindingEvidence, getters, snapshot);
+      batch.record(
+        input as ExternalFindingEvidence,
+        getters,
+        snapshot,
+        outsideWireLimit,
+      );
     return { retained: input, bytes };
   }
   const wireMatches = new Map<object, boolean>();
@@ -611,27 +637,26 @@ function checkedEvidenceJson<T>(
     }
   }
   if (target === "cloud") serialize();
-  if (customNumber) {
-    if (!batch)
-      return checkedEvidenceJson(
-        snapshotEvidence(input),
-        target,
-        additionalCloudBytes,
-        false,
-      );
-    if (
-      failed ||
-      (hasFunction && [...wireMatches.values()].includes(false)) ||
-      [...indirectNumbers].some((number) => wireMatches.get(number) !== true)
-    ) {
-      return retained(0, true);
-    }
-  }
-  if (failed) throw failed.reason;
+  if (customNumber && !batch)
+    return checkedEvidenceJson(
+      snapshotEvidence(input),
+      target,
+      additionalCloudBytes,
+      false,
+    );
   const bytes =
-    target === "cloud"
+    target === "cloud" && !failed
       ? Buffer.byteLength(json!) + numericByteAdjustment + additionalCloudBytes
       : 0;
+  if (
+    customNumber &&
+    (failed ||
+      (hasFunction && [...wireMatches.values()].includes(false)) ||
+      [...indirectNumbers].some((number) => wireMatches.get(number) !== true))
+  ) {
+    return retained(0, true, bytes > 256 * 1024);
+  }
+  if (failed) throw failed.reason;
   if (bytes > 256 * 1024)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
   if (batch && customNumber)
