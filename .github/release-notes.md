@@ -1,4 +1,4 @@
-<!-- release-version: 0.8.3 -->
+<!-- release-version: 0.9.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -91,6 +91,7 @@
 - reconcile unacknowledged findings uploads ([#2211](https://github.com/openai/codex-security/pull/2211))
 - reuse scoped GitHub connections for finding intake ([#2223](https://github.com/openai/codex-security/pull/2223))
 - clarify the post-scan findings review prompt ([#2255](https://github.com/openai/codex-security/pull/2255))
+- remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
 
 <!-- release-section: highlights:end -->
 
@@ -98,6 +99,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+Review migration steps for these breaking changes:
+
+- remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
 
 <!-- release-section: upgrades:end -->

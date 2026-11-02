@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import (
     UnreadableLocalFile,
     UnsupportedLocalFileType,
@@ -19,6 +20,7 @@ from workbench_target import (
     git_bytes,
     git_revision,
 )
+from workbench_validation import _valid_legacy_scan_cost
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -31,13 +33,80 @@ WORKFLOW_BINDINGS = {
 WORKFLOW_STAGES = ("scan", "publish", "dedupe")
 
 
+def _usable_cost_range(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("context") != "unknown" or "max" not in value:
+        return False
+    minimum, maximum = value.get("min"), value["max"]
+    return (
+        type(minimum) in (int, float)
+        and 0 <= minimum <= sys.float_info.max
+        and (
+            maximum is None
+            or type(maximum) in (int, float)
+            and minimum <= maximum <= sys.float_info.max
+        )
+    )
+
+
+def _recorded_cost(value: str | None) -> dict[str, Any] | None:
+    """Recover the SDK cost fields that are usable from this historical receipt."""
+    try:
+        cost = stored_scan_cost_fields(value).get("cost")
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not _valid_legacy_scan_cost(cost):
+        return None
+
+    fields = (
+        "model",
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "estimatedUsd",
+    )
+    result = {field: cost[field] for field in fields}
+    if isinstance(cost.get("cacheWriteInputTokensReported"), bool):
+        result["cacheWriteInputTokensReported"] = cost["cacheWriteInputTokensReported"]
+    bounds = cost.get("estimatedUsdRange")
+    if _usable_cost_range(bounds):
+        result["estimatedUsdRange"] = {field: bounds[field] for field in ("min", "max", "context")}
+
+    pricing = cost.get("pricing")
+    if (
+        isinstance(pricing, dict)
+        and pricing.get("serviceTier") == "standard"
+        and pricing.get("context") == "short"
+        and isinstance(pricing.get("source"), str)
+        and isinstance(pricing.get("asOf"), str)
+    ):
+        details = {field: pricing[field] for field in ("source", "asOf", "serviceTier", "context")}
+        rate_keys = ("input", "cacheRead", "cacheWrite", "output")
+        for field in ("usdPerMillionTokens", "longContextUsdPerMillionTokens"):
+            rates = pricing.get(field)
+            if isinstance(rates, dict) and all(
+                type(rates.get(key)) in (int, float) and 0 <= rates[key] <= sys.float_info.max
+                for key in rate_keys
+            ):
+                details[field] = {key: rates[key] for key in rate_keys}
+        if "usdPerMillionTokens" in details:
+            result["pricing"] = details
+    return result
+
+
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM finding_workflows WHERE id = ?", (workflow_id,)
+        """SELECT w.*, s.cost_json FROM finding_workflows AS w
+           LEFT JOIN scans AS s ON s.id = w.scan_id AND s.scan_dir = w.scan_dir
+                               AND s.status = 'complete'
+           WHERE w.id = ?""",
+        (workflow_id,),
     ).fetchone()
     if row is None:
         return None
     state = {"id": row["id"], "stages": {}}
+    if (cost := _recorded_cost(row["cost_json"])) is not None:
+        state["recordedCost"] = cost
     for field, column in WORKFLOW_BINDINGS.items():
         if row[column] is not None:
             state[field] = row[column]
