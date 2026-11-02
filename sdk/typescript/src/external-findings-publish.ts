@@ -1140,6 +1140,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalSelections({ ...parsed, findings: saved });
     return content;
   }
 
@@ -1151,7 +1152,8 @@ async function preparePublicationInput(
   ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
-    const savedWire = wireJson(submissionFindings(content.requests));
+    const saved = submissionFindings(content.requests);
+    const savedWire = wireJson(saved);
     const wireDigest = hash("sha256", savedWire);
     if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
@@ -1173,6 +1175,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalSelections({ ...parsed, findings: saved });
     content.legacyApproval = true;
     content.inputProjection = {
       identityFormat: 2,
