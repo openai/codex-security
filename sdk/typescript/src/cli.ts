@@ -1499,7 +1499,9 @@ export async function runCodexSkillCommand(
       const ambientConfig =
         output.appServer === undefined
           ? {}
-          : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
+          : resolveCodexProfile(
+              await readCodexHomeConfig(processEnvironment, output.signal),
+            );
       const resolved = resolveSkillAuthentication(
         { ...output, auth: output.auth },
         processEnvironment,
@@ -1523,29 +1525,41 @@ export async function runCodexSkillCommand(
         authentication.method === "stored_credentials" &&
         requiresOpenAiAuth
       ) {
-        const directory = await realpath(
-          output.directory ?? output.appServer?.directory ?? process.cwd(),
+        const directory = await abortable(
+          () =>
+            realpath(
+              output.directory ?? output.appServer?.directory ?? process.cwd(),
+            ),
+          output.signal,
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory)),
+          ...(await enclosingGitWorktreeRoots(directory, output.signal)),
         ];
+        output.signal?.throwIfAborted();
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
+        output.signal?.throwIfAborted();
         releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
           codexHome,
           output.signal,
         );
         output.signal?.throwIfAborted();
         let credentialsAvailable: boolean;
-        const ambientAuthConfig = await readCodexHomeConfig(selected);
-        credentialConfig = await readCodexHomeConfig({
-          ...selected,
-          CODEX_HOME: codexHome,
-        });
+        const ambientAuthConfig = await readCodexHomeConfig(
+          selected,
+          output.signal,
+        );
+        credentialConfig = await readCodexHomeConfig(
+          {
+            ...selected,
+            CODEX_HOME: codexHome,
+          },
+          output.signal,
+        );
         // Let native Codex apply the ambient home's project-trust decisions.
         for (const key of [
           ...CODEX_AUTH_CONFIG_KEYS,
@@ -1570,6 +1584,7 @@ export async function runCodexSkillCommand(
           join(codexHome, "config.toml"),
           credentialConfig,
         );
+        output.signal?.throwIfAborted();
         credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),

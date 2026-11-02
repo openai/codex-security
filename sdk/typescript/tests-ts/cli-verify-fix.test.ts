@@ -79,6 +79,40 @@ async function runLinuxPtyInterruption(signal: "SIGINT" | "SIGTERM") {
   return { output, status };
 }
 
+async function runLinuxStoredAuthInterruption(
+  mode: "git" | "helper-unresponsive" | "helper-responsive",
+  signal: "SIGINT" | "SIGTERM",
+) {
+  const fixture = join(
+    import.meta.dirname,
+    "fixtures",
+    "verify-fix-stored-auth-process-signal.ts",
+  );
+  const child = spawn(
+    "script",
+    [
+      "-q",
+      "-e",
+      "-c",
+      `${shellQuote(process.execPath)} ${shellQuote(fixture)} ${mode} ${signal}`,
+      "/dev/null",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    output += chunk;
+  });
+  const status = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { output, status };
+}
+
 async function runCredentialPreparationInterruption(
   signal: "SIGINT" | "SIGTERM",
 ) {
@@ -604,6 +638,76 @@ describe("read-only finding verification", () => {
       expect(output).not.toContain("PTY_WORKER_2");
       expect(output).toContain("\u001B[?25h\u001B[?1049l");
       expect(output).toContain(`PTY_EXIT_${expectedStatus}`);
+      expect(output).not.toContain('"results"');
+    },
+  );
+
+  test.skipIf(process.platform !== "linux").each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "cancels a delayed stored-auth Git probe with one PID-targeted %s",
+    async (signal, expectedStatus) => {
+      const { output, status } = await runLinuxStoredAuthInterruption(
+        "git",
+        signal,
+      );
+
+      expect(status).toBe(expectedStatus);
+      expect(output).toContain("\u001B[?1049h\u001B[?25l");
+      expect(output).toContain("\u001B[?25h\u001B[?1049l");
+      expect(output).toContain("PID_TARGET_ONLY_true");
+      expect(output).toContain("SIGNAL_SENT_COUNT_1");
+      expect(output).toContain("WORKER_STARTED_false");
+      expect(output).toContain("SIGNAL_LISTENERS_0_0");
+      expect(output).toContain(`STORED_AUTH_EXIT_${expectedStatus}`);
+      expect(output).not.toContain('"results"');
+    },
+  );
+
+  test.skipIf(process.platform !== "linux").each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "forces an unresponsive login-status helper down after PID-targeted %s",
+    async (signal, expectedStatus) => {
+      const { output, status } = await runLinuxStoredAuthInterruption(
+        "helper-unresponsive",
+        signal,
+      );
+
+      expect(status).toBe(expectedStatus);
+      expect(output).toContain("\u001B[?1049h\u001B[?25l");
+      expect(output).toContain("\u001B[?25h\u001B[?1049l");
+      expect(output).toContain("PID_TARGET_ONLY_true");
+      expect(output).toContain("SIGNAL_SENT_COUNT_1");
+      expect(output).toContain("SIGTERM_RECEIVED");
+      expect(output).not.toContain("GRACEFUL_EXIT");
+      expect(output).toContain("HELPER_ALIVE_false");
+      expect(output).toContain("LOCK_REACQUIRED");
+      expect(output).toContain("WORKER_STARTED_false");
+      expect(output).toContain("SIGNAL_LISTENERS_0_0");
+      expect(output).toContain(`STORED_AUTH_EXIT_${expectedStatus}`);
+      expect(output).not.toContain('"results"');
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "lets a login-status helper honor SIGTERM without forced termination",
+    async () => {
+      const { output, status } = await runLinuxStoredAuthInterruption(
+        "helper-responsive",
+        "SIGTERM",
+      );
+
+      expect(status).toBe(143);
+      expect(output).toContain("SIGTERM_RECEIVED");
+      expect(output).toContain("GRACEFUL_EXIT");
+      expect(output).toContain("HELPER_ALIVE_false");
+      expect(output).toContain("LOCK_REACQUIRED");
+      expect(output).toContain("WORKER_STARTED_false");
+      expect(output).toContain("SIGNAL_LISTENERS_0_0");
+      expect(output).toContain("STORED_AUTH_EXIT_143");
       expect(output).not.toContain('"results"');
     },
   );
