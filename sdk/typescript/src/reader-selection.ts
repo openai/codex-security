@@ -112,8 +112,16 @@ export function previousReaderSelection(
         : prior;
     }
   }
+  // Without a verified snapshot these IDs can only stop a retry. Preserve
+  // the caller's order when they rearranged the same known occurrences.
+  let sourceFindingIds = selection.previous.sourceFindingIds;
+  if (current.findings.length === sourceFindingIds.length) {
+    const members = new Set(sourceFindingIds);
+    const ordered = current.findings.map((row) => row.source_finding_id);
+    if (ordered.every((id) => members.has(id))) sourceFindingIds = ordered;
+  }
   return {
-    sourceFindingIds: selection.previous.sourceFindingIds,
+    sourceFindingIds,
     unprovenIdPrefixes: selection.previous.unprovenIdPrefixes,
     uncertainFindingIds: selection.previous.uncertainFindingIds,
     unprovenOccurrenceCount: selection.previous.unprovenOccurrenceCount,

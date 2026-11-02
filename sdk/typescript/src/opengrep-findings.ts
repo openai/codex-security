@@ -15,6 +15,7 @@ import {
   sourceRepositoryUrl,
 } from "./native-json-findings.js";
 import {
+  appendReaderFinding,
   array,
   readScannerJson,
   record,
@@ -198,35 +199,38 @@ export function normalizeOpenGrepFindings(
   for (const [id, observations] of [...groups].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
-    const ordered =
-      observations.length === 1
-        ? observations
-        : observations
-            .flatMap((observation) => {
-              try {
-                const result = structuredClone(observation.parsed.result);
-                // The group adds these same raw bytes when choosing a representative
-                // and deciding which traces fit alongside it.
-                validateExternalEvidenceJson(
-                  { source_data: { results: [result] } },
-                  target,
-                  0,
-                  (previousBytes, currentBytes) => {
-                    if (previousBytes !== currentBytes)
-                      rememberReaderUncertainty(output, id);
-                  },
-                );
-                observation.parsed.result = result;
-                return [{ observation, key: canonicalJson(result) }];
-              } catch (error) {
-                exclude(observation.position, id, error);
-                return [];
-              }
-            })
-            .sort((left, right) =>
-              left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
-            )
-            .map(({ observation }) => observation);
+    if (observations.length === 1) {
+      appendReaderFinding(output, observations[0]!.position, id, () =>
+        projectGroup(observations),
+      );
+      continue;
+    }
+    const ordered = observations
+      .flatMap((observation) => {
+        try {
+          const result = structuredClone(observation.parsed.result);
+          // The group adds these same raw bytes when choosing a representative
+          // and deciding which traces fit alongside it.
+          validateExternalEvidenceJson(
+            { source_data: { results: [result] } },
+            target,
+            0,
+            (previousBytes, currentBytes) => {
+              if (previousBytes !== currentBytes)
+                rememberReaderUncertainty(output, id);
+            },
+          );
+          observation.parsed.result = result;
+          return [{ observation, key: canonicalJson(result) }];
+        } catch (error) {
+          exclude(observation.position, id, error);
+          return [];
+        }
+      })
+      .sort((left, right) =>
+        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+      )
+      .map(({ observation }) => observation);
     if (!ordered.length) continue;
     let retained = ordered;
     try {

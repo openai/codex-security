@@ -2,6 +2,8 @@ import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
 import {
+  checkEmittedJsonNumber,
+  checkReportNumber,
   requireCloudEvidenceDepth,
   requireJsonNumber,
   type ExternalImportTarget,
@@ -92,15 +94,13 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
       )
         requireCloudEvidenceDepth(parents.length - 3, this, value);
       if (isNumberObject(value)) value = +value;
-      if (typeof value === "number") {
-        if (
-          parents[1]?.key === "report" ||
-          (parents.length === 1 && key === "report")
-        )
-          requireJsonNumber(value, "Scanner report");
-        if (parents[1]?.key === "findings" && parents[3]?.key === "evidence")
-          checkEvidenceNumber(value);
-      }
+      if (
+        parents[1]?.key === "report" ||
+        (parents.length === 1 && key === "report")
+      )
+        checkReportNumber(value);
+      if (parents[1]?.key === "findings" && parents[3]?.key === "evidence")
+        checkEmittedJsonNumber(value, checkEvidenceNumber);
       if (value !== null && typeof value === "object") {
         // The SDK exposes native Errors in report.errors and renders their messages
         // in saved receipts. Remember only those paths during the actual JSON read.

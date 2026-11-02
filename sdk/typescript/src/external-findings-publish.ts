@@ -19,7 +19,7 @@ import {
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
@@ -60,6 +60,7 @@ import {
 } from "./external-findings.js";
 import {
   cloudRepositoryUrlKey,
+  CloudEvidenceDepthError,
   validateImportRequest,
   validateExternalEvidence,
   validatePreviousCloudEvidence,
@@ -228,20 +229,45 @@ function submissionFindings(
   return requests.flatMap((batch) => batch.items.map(wireFinding));
 }
 
-function sameNonNumericJson(saved: unknown, current: unknown): boolean {
-  // JSON serialization can replace a boxed number with any value, or omit its property.
-  if (typeof saved === "number") return true;
-  if (saved === current) return true;
+function sameLegacyJson(
+  saved: unknown,
+  current: unknown,
+  equivalent: (saved: unknown, current: unknown) => boolean,
+): boolean {
+  if (saved === current || equivalent(saved, current)) return true;
   if (Array.isArray(saved) && Array.isArray(current))
     return (
       saved.length === current.length &&
-      saved.every((child, i) => sameNonNumericJson(child, current[i]))
+      saved.every((child, i) => sameLegacyJson(child, current[i], equivalent))
     );
   if (!isRecord(saved) || !isRecord(current)) return false;
   return (
     Object.keys(current).every((key) => Object.hasOwn(saved, key)) &&
     Object.keys(saved).every((key) =>
-      sameNonNumericJson(saved[key], current[key]),
+      sameLegacyJson(saved[key], current[key], equivalent),
+    )
+  );
+}
+
+// A copied reader result can retain the JSON from Buffer.toJSON but lose
+// the native Buffer that the previous reader cloned into a Uint8Array.
+function previousBufferJson(saved: unknown, current: unknown): boolean {
+  if (
+    !isRecord(current) ||
+    current["type"] !== "Buffer" ||
+    !Array.isArray(current["data"])
+  )
+    return false;
+  return (
+    isRecord(saved) &&
+    Object.keys(current).length === 2 &&
+    Object.keys(saved).length === current["data"].length &&
+    current["data"].every(
+      (byte, index) =>
+        Number.isInteger(byte) &&
+        byte >= 0 &&
+        byte <= 255 &&
+        saved[index] === byte,
     )
   );
 }
@@ -567,9 +593,10 @@ function previousDiagnosticInput(
 function previousNormalizedFindings(
   input: ExternalFindings,
   nativeDiagnostics: Map<number, Error>,
+  observe: (value: object) => void,
 ): ExternalFindings | undefined {
   input = previousDiagnosticInput(input, nativeDiagnostics);
-  if (!canSnapshotWithoutGetters(input, true)) return;
+  if (!canSnapshotWithoutGetters(input, true, observe)) return;
   // Object spread skips a hidden report, but explicitly reading it could run a getter.
   const reportField = Object.getOwnPropertyDescriptor(input, "report");
   if (reportField && !Object.hasOwn(reportField, "value")) return;
@@ -638,18 +665,31 @@ function normalizedPublicationInput(
 ): PublicationSelection {
   const nativeDiagnostics = new Map<number, Error>();
   let native: ExternalFindings | undefined;
+  let plainJson = true;
   try {
-    native = previousNormalizedFindings(input, nativeDiagnostics);
+    native = previousNormalizedFindings(input, nativeDiagnostics, (value) => {
+      if (!plainJson) return;
+      const prototype = Object.getPrototypeOf(value);
+      plainJson =
+        (prototype === null ||
+          prototype === Object.prototype ||
+          prototype === Array.prototype) &&
+        !("toJSON" in value);
+    });
   } catch {
     /* A valid JSON export can contain an uncloneable value. */
   }
-  const priorIds = native ? undefined : previousFindingIds(input);
+  let priorIds = native ? undefined : previousFindingIds(input);
   let current: ExternalFindings;
   let freshError: Error | undefined;
   try {
     current = snapshotNormalizedFindings(input, undefined, "cloud");
   } catch (error) {
-    if (!(error instanceof Error) || !native?.findings.length) throw error;
+    if (
+      (!isNativeError(error) && !(error instanceof Error)) ||
+      !native?.findings.length
+    )
+      throw error;
     freshError = error;
     current = { read: native.read, findings: [], excluded: [] };
   }
@@ -678,13 +718,22 @@ function normalizedPublicationInput(
         }
       }
       if (freshError) throw freshError;
+      priorIds = previousFindingIds(native);
       native = undefined;
       break;
     }
   }
-  const reader = freshError
-    ? undefined
-    : previousReaderSelection(input, current, native ?? null);
+  // A Cloud depth error can interrupt a local reader's JSON export. Its plain,
+  // independently captured output can still verify the original reader selection.
+  const readerOutput = freshError
+    ? freshError instanceof CloudEvidenceDepthError &&
+      plainJson &&
+      !nativeDiagnostics.size &&
+      native
+    : current;
+  const reader = readerOutput
+    ? previousReaderSelection(input, readerOutput, native ?? null)
+    : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
   try {
@@ -958,6 +1007,18 @@ async function preparePublicationInput(
       ? inputDigest
       : hash("sha256", wireJson(legacyIdentity));
   const previousKey = originalKey;
+  function matchesSavedDestination(requests: FindingImportRequest[]): boolean {
+    return (
+      requests.length > 0 &&
+      requests.every(
+        (batch) =>
+          batch.repository.id === destination.id &&
+          batch.repository.repo_connector_id ===
+            destination.repo_connector_id &&
+          wireJson(batch.source) === wireJson(source),
+      )
+    );
+  }
   function readSaved(
     content: SavedSubmission | null | undefined,
   ): SavedSubmission {
@@ -969,15 +1030,8 @@ async function preparePublicationInput(
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    for (const submission of content.requests) {
-      if (
-        submission.repository.id !== destination.id ||
-        submission.repository.repo_connector_id !==
-          destination.repo_connector_id ||
-        wireJson(submission.source) !== wireJson(source)
-      )
-        throw new Error("Saved import destination does not match.");
-    }
+    if (!matchesSavedDestination(content.requests))
+      throw new Error("Saved import destination does not match.");
     return content;
   }
 
@@ -1255,21 +1309,29 @@ async function preparePublicationInput(
   const cannotCaptureOriginal =
     !input.original &&
     (potentialIds === null || !!(potentialIds?.length || uncertainMembership));
+  const possibleBufferExport =
+    options.provider === "github" && original && !changedCapture;
   function potentialOriginal(record: SavedSubmission, fileKey: string) {
     const projection = record.inputProjection;
-    if (
-      !projection ||
+    if (record.accountId !== credentials.account_id) return false;
+    if (!projection) {
+      // Locale-era requests had no projection. Their scoped occurrence IDs
+      // can stop an opaque retry but cannot authorize replay.
+      if (!cannotCaptureOriginal || record.wireKey !== undefined) return false;
+    } else if (
       !/^[a-f0-9]{64}$/u.test(projection.inputDigest) ||
       !/^[a-f0-9]{64}$/u.test(projection.savedEvidenceDigest) ||
-      (projection.identityFormat === 2 && !record.legacyApproval) ||
-      record.accountId !== credentials.account_id
+      (projection.identityFormat === 2 && !record.legacyApproval)
     )
       return false;
     try {
+      // Older evidence may fail today's limits. Scope and selection can still
+      // identify an outstanding approval and prevent a duplicate submission.
+      if (!matchesSavedDestination(record.requests)) return false;
       const rows = submissionFindings(record.requests);
       const savedWire = wireJson(rows);
       if (
-        !record.wireKey &&
+        projection &&
         projection.savedEvidenceDigest === hash("sha256", savedWire)
       ) {
         // Matching old digests reconstruct its scoped filename. A report from
@@ -1284,14 +1346,34 @@ async function preparePublicationInput(
         if (
           identity &&
           (reportFree ||
-            projection.inputDigest === hash("sha256", wireJson(identity))) &&
-          fileKey !== scopeKey(identity, false) &&
-          fileKey !== localeKey(rows)
+            projection.inputDigest === hash("sha256", wireJson(identity)))
+        ) {
+          if (
+            record.wireKey
+              ? record.wireKey !== scopeKey(identity, true)
+              : fileKey !== scopeKey(identity, false) &&
+                fileKey !== localeKey(rows)
+          )
+            return false;
+          if (
+            possibleBufferExport &&
+            projection.inputDigest !== inputDigest &&
+            sameLegacyJson(identity, currentIdentity, previousBufferJson)
+          ) {
+            return true;
+          }
+        }
+        if (
+          !record.wireKey &&
+          reportFree &&
+          original &&
+          originalWire !== savedWire
         )
           return false;
-        if (reportFree && original && originalWire !== savedWire) return false;
       }
+      if (record.wireKey && !cannotCaptureOriginal) return false;
       if (
+        projection &&
         original &&
         !record.wireKey &&
         fileKey !== (originalKey ?? key) &&
@@ -1336,7 +1418,6 @@ async function preparePublicationInput(
           })
         )
           return false;
-        readSaved(record);
         return true;
       }
       const candidates = original?.parsed.findings ?? parsed.findings;
@@ -1354,10 +1435,9 @@ async function preparePublicationInput(
           ))
       )
         return false;
-      readSaved(record);
       // An opaque serializer can add a report or replace every visible field.
       // Only scoped, independently known occurrences can rule out its old request.
-      if (cannotCaptureOriginal) return true;
+      if (cannotCaptureOriginal || !projection) return true;
       if (
         projection.inputDigest === projection.savedEvidenceDigest &&
         parsed.report !== undefined
@@ -1378,7 +1458,11 @@ async function preparePublicationInput(
           if (wireJson(savedFields) !== wireJson(selectedFields)) return false;
           // Once the original SDK discarded boxed positions, a plain JSON export
           // alone cannot attribute a new numeric spelling to that saved request.
-          return sameNonNumericJson(savedData, selectedData);
+          return sameLegacyJson(
+            savedData,
+            selectedData,
+            (value) => typeof value === "number",
+          );
         })
       );
     } catch {
@@ -1428,7 +1512,10 @@ async function preparePublicationInput(
         return selected;
       }
       if (record?.wireKey !== undefined && record.wireKey !== key) {
-        if (cannotCaptureOriginal && potentialOriginal(record, fileKey))
+        if (
+          (cannotCaptureOriginal || possibleBufferExport) &&
+          potentialOriginal(record, fileKey)
+        )
           unprovenOriginal = true;
         return selected;
       }
@@ -1947,7 +2034,12 @@ async function preparePublicationInput(
       return await underLocks(lockKeys, async () => {
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
-        const selected = await selectedCheckpoint(saved ? fileKey : undefined);
+        const selected = await selectedCheckpoint(
+          saved ? fileKey : undefined,
+        ).catch((error: unknown) => {
+          if (!submission.receipts?.length) throw error;
+          throw interruptedPreview(errorMessage(error), error);
+        });
         const pending = selected?.content;
         const current = pending ?? submission;
         const adoptProjectMap =

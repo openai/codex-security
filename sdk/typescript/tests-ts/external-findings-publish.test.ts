@@ -109,6 +109,40 @@ const normalized = (id = "vendor-1", severity = "high") => ({
   },
 });
 
+test.each(["local", "cloud"] as const)(
+  "checks raw numbers before capturing normalized evidence and reports on %s",
+  (target) => {
+    const raw = (JSON as JSON & { rawJSON(token: string): unknown }).rawJSON;
+    const capture = (metric: unknown, inReport = false) => {
+      const data: ExternalFindings = {
+        read: 1,
+        findings: [
+          { ...normalized(), evidence: { title: "Example", severity: "high" } },
+        ],
+        excluded: [],
+      };
+      if (inReport) data.report = { metric };
+      else data.findings[0]!.evidence.source_data = { metric };
+      return snapshotNormalizedFindings(data, undefined, target);
+    };
+    for (const inReport of [true, false]) {
+      for (const token of ["1.0000000000000001", "-1e-400"])
+        expect(() => capture(raw(token), inReport)).toThrow("loses precision");
+      expect(() => capture(raw("1e400"), inReport)).toThrow("finite JSON");
+      expect(() => capture(raw("9007199254740993"), inReport)).toThrow(
+        "safe integer",
+      );
+    }
+    expect(capture(raw("12.50E-1")).findings[0]?.evidence.source_data).toEqual({
+      metric: 1.25,
+    });
+    expect(capture(1e-7, true).report).toEqual({ metric: 1e-7 });
+    expect(capture(raw('"1.0000000000000001"'), true).report).toEqual({
+      metric: "1.0000000000000001",
+    });
+  },
+);
+
 test("Cloud stops before expanding a shared subtree beyond its JSON depth limit", async () => {
   const f = await fixture();
   let reads = 0;
@@ -2910,6 +2944,68 @@ test.each(["request", "counts", "length", "schema"])(
   },
 );
 
+test("an opaque retry preserves a released partial submission whose final row exceeds the corrected limit", async () => {
+  const f = await fixture();
+  const rows = Array.from({ length: 101 }, (_, i) => {
+    const row = normalized(`item-${i}`);
+    return { ...row, evidence: { ...row.evidence, severity: "high" as const } };
+  });
+  const pad = "x".repeat(261872);
+  Object.assign(rows[100]!.evidence, {
+    source_data: {
+      get score() {
+        return Object.assign(new Number(1e-7), { toJSON: () => 0 });
+      },
+      pad,
+    },
+  });
+  const prepare = (selected = rows, sourceKey = options.sourceKey) =>
+    prepareNormalizedExternalPublication(
+      { read: selected.length, findings: selected, excluded: [] },
+      { ...options, sourceKey },
+      releasedDependencies(f),
+    );
+  const ready = await prepare();
+  const [first, last] = ready.preview.requests;
+  const [acknowledged] = (await (await prepare(rows.slice(0, 100))).publish())
+    .receipts;
+
+  // Rebuild the released SDK's checkpoint, including its first 100 acknowledged items.
+  first!.request_id = "353fb2dc-0e4a-4be5-b825-5755e4678aa5";
+  last!.request_id = "66da2566-e3c5-4557-aef2-10ffd179982d";
+  last!.items[0]!.evidence.source_data = {
+    score: 1e-7,
+    pad,
+  };
+  const digest =
+    "ae9fd2d8c0f71c489d99604663201894d8d2fe91550bb949035177c8bd0595ef";
+  const saved = JSON.stringify({
+    accountId: "synthetic-account",
+    requests: [first, last],
+    receipts: [{ ...acknowledged, id: first!.request_id }],
+    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+  });
+  expect(hash("sha256", saved)).toBe(
+    "4ca49c21887a29fdb56ea1bcb8197ef5fed02c68f7aacfaa0cc06d9c9b5a128a",
+  );
+  const path = join(
+    f.root,
+    "state",
+    "external-finding-publications",
+    "b8d2c1dda3201683c738fb810639279ba8e30a5dfd1402288a5d7017f7b572e8.pending.json",
+  );
+  await writeFile(path, saved, { mode: 0o600 });
+
+  await expect(prepare()).rejects.toThrow("checkpoint was preserved");
+  await expect(ready.publish()).rejects.toThrow("checkpoint was preserved");
+  f.reports.clear(); // The separate source has no prior findings.
+  expect((await prepare(rows, "tenant-example/other")).preview.resumed).toBe(
+    false,
+  );
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(path, "utf8")).toBe(saved);
+});
+
 test("a held retry reports the acknowledged batch after another resumer retires the checkpoint", async () => {
   const f = await fixture(
     Array.from({ length: 101 }, (_, index) => normalized(`item-${index}`)),
@@ -4448,7 +4544,7 @@ async function oldScoreApproval(field: string, stageApproval = true) {
   return { f, prepare, directory, path, filename, request, saved };
 }
 
-test.each(["invalid title", "unsafe number"])(
+test.each(["invalid title", "unsafe number", "cross-realm serializer error"])(
   "a fresh %s can only publish its verified older request",
   async (kind) => {
     const { f, path, saved, request } = await oldScoreApproval(
@@ -4457,7 +4553,13 @@ test.each(["invalid title", "unsafe number"])(
     );
     const score = new Number(2.5);
     const selected = scoredFindings(score);
-    if (kind === "unsafe number") {
+    if (kind === "cross-realm serializer error") {
+      Object.defineProperty(score, "toJSON", {
+        value: runInNewContext(
+          '() => { throw new TypeError("invalid metric") }',
+        ),
+      });
+    } else if (kind === "unsafe number") {
       Object.defineProperty(score, "toJSON", { value: () => 2 ** 53 });
     } else {
       Object.setPrototypeOf(selected.findings[0]!.evidence, {
@@ -5533,6 +5635,37 @@ test("checking a released canonical approval preserves ambiguous boxed report me
   ]);
 });
 
+test("a second matching checkpoint preserves the receipts shown at preview", async () => {
+  const prior = await oldScoreApproval("unreported");
+  prior.f.state.brokenReadback = true;
+  await expect((await prior.prepare(2.5)).publish()).rejects.toThrow(
+    "Readback unavailable",
+  );
+  const receipts = [prior.f.receipts.get(prior.request.request_id)!];
+  const saved = JSON.stringify({ ...JSON.parse(prior.saved), receipts });
+  await writeFile(prior.path, saved);
+  const held = await prior.prepare(2.5);
+  const competing = await oldScoreApproval("evidence");
+  await competing.prepare(new Number(2.5));
+  const tagged = await readFile(competing.path, "utf8");
+  const otherPath = join(prior.directory, competing.filename);
+  await writeFile(otherPath, tagged);
+
+  const error = await held.publish().catch((cause: unknown) => cause);
+  expect(error).toBeInstanceOf(ExternalPublicationError);
+  if (!(error instanceof ExternalPublicationError)) throw error;
+  expect(error.message).toContain("Two saved imports match");
+  expect(error.result).toMatchObject({
+    status: "interrupted",
+    receipts,
+    counts: { updated: 1 },
+    unacknowledged: 0,
+  });
+  expect(prior.f.posts).toEqual([JSON.stringify(prior.request)]);
+  expect(await readFile(prior.path, "utf8")).toBe(saved);
+  expect(await readFile(otherPath, "utf8")).toBe(tagged);
+});
+
 test("matching released primitive and boxed approvals preserve both requests", async () => {
   const primitive = await oldScoreApproval("unreported");
   const boxed = await oldScoreApproval("evidence", false);
@@ -5801,6 +5934,15 @@ test.each([Error, TypeError])(
         new Diagnostic("scanner message", { cause: "scanner failure" }),
         { code: "E_TEST" },
       );
+    const exportedDiagnostic = Object.assign(diagnostic(), {
+      toJSON: () => ({ code: "TIMEOUT" }),
+    });
+    const prepareExported = () =>
+      prepare(2.5, { errors: [exportedDiagnostic] });
+    await expect(prepareExported()).rejects.toThrow("cannot be matched");
+    expect(await readFile(path, "utf8")).toBe(saved);
+    expect(f.posts).toEqual([]);
+
     const uncertain = diagnostic();
     let stackReads = 0;
     Object.defineProperty(uncertain, "stack", {
@@ -5877,6 +6019,9 @@ test.each([Error, TypeError])(
       errors: [{ message: "scanner message" }],
     });
     expect(f.posts).toEqual([JSON.stringify(request)]);
+    expect((await prepareExported()).preview.report?.["errors"]).toEqual([
+      { code: "TIMEOUT" },
+    ]);
     const fresh = await prepare(2.5, report);
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.report?.["errors"]).toEqual([
@@ -7371,6 +7516,138 @@ test("a normalized Buffer at the Cloud depth limit resumes only its released req
   expect((await recovered.publish()).receipts[0]!.id).toBe(request.request_id);
   expect(f.posts).toEqual([serialized]);
 });
+
+test("the local GitHub reader recovers its released Buffer at the Cloud depth limit", async () => {
+  const { normalizeGitHubCodeScanningAlerts } =
+    await import("../src/github-findings.js");
+  const f = await fixture();
+  const selected = (leaf: unknown) => {
+    const row = importedAlert();
+    let payload = leaf;
+    for (let i = 0; i < 16; i++) payload = { nested: payload };
+    Object.assign(row.alert, { payload });
+    return normalizeGitHubCodeScanningAlerts([row], "local");
+  };
+  const prepare = (input: ReturnType<typeof selected>) =>
+    prepareNormalizedExternalPublication(
+      input,
+      { ...options, provider: "github" },
+      releasedDependencies(f),
+    );
+  await expect(prepare(selected(Buffer.from([1])))).rejects.toThrow(
+    "Cloud JSON depth limit of 20",
+  );
+
+  // The released publisher sent the native byte without the Buffer's JSON envelope.
+  const request = {
+    ...(await prepare(selected({ 0: 1 }))).preview.requests[0]!,
+    request_id: "3681fc33-491a-4ef4-877c-4cdd6f7dac6c",
+  };
+  const wire = JSON.stringify(request);
+  expect(hash("sha256", wire)).toBe(
+    "0603739963094b95e0f454f2cfd70ec9ee9f7abf891d43d536a67ad27dcf7b95",
+  );
+  const directory = join(f.root, "state", "external-finding-publications");
+  const path = join(
+    directory,
+    "0f045c3b26dc68db90c2d4e8462be50efa7a758d256398e22f13d1fe070e552a.pending.json",
+  );
+  const digest =
+    "85488c56d0f48bb7dff1f931e69603aa4aa75c1ef287bf612fd84dc7df369aa2";
+  const saved = JSON.stringify({
+    accountId: "synthetic-account",
+    requests: [request],
+    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+  });
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, saved, { mode: 0o600 });
+
+  const edited = selected(Buffer.from([1]));
+  edited.findings[0]!.evidence.title = "Edited after the local read";
+  await expect(prepare(edited)).rejects.toThrow("Cloud JSON depth limit of 20");
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toHaveLength(0);
+
+  const resumed = await prepare(selected(Buffer.from([1])));
+  expect(resumed.preview.resumed).toBe(true);
+  expect((await resumed.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([wire]);
+});
+
+test.each([
+  [
+    "cloned",
+    ["main"],
+    "0e174a52fb4c08c30d5b452239859f60186b2e5f3ea11476b7c174712b5f9dca",
+    "f97a11da51b2461c09e003c6167239198cde1e28a0b0ec97d8e40a512f396c99",
+  ],
+  [
+    "reversed",
+    ["a", "b"],
+    "a64d3d2ca1432fae7c53f2880f7e6719f4e4f673ce61e85f8084980d95bc55ae",
+    "28c71167a82f47a1f038e6469f36a8f740fe3584ba67f8d4a52d5dbcbdff44d5",
+  ],
+] as const)(
+  "preserves a released GitHub Buffer checkpoint with %s reader output",
+  async (kind, refs, key, digest) => {
+    const { normalizeGitHubCodeScanningAlerts } =
+      await import("../src/github-findings.js");
+    const f = await fixture();
+    const prepare = (bytes: unknown) => {
+      const rows = refs.map((ref) => {
+        const row = importedAlert(`refs/heads/${ref}`);
+        Object.assign(row.alert, { bytes });
+        return row;
+      });
+      const result = normalizeGitHubCodeScanningAlerts(rows);
+      if (kind === "reversed") result.findings.reverse();
+      return prepareNormalizedExternalPublication(
+        kind === "cloned" ? structuredClone(result) : result,
+        { ...options, provider: "github" },
+        releasedDependencies(f),
+      );
+    };
+    // The released reader cloned each Buffer into a Uint8Array before publication.
+    const requests = (await prepare({ 0: 1 })).preview.requests;
+    const checkpoint = {
+      accountId: "synthetic-account",
+      requests,
+      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    };
+    const directory = join(f.root, "state", "external-finding-publications");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, `${key}.pending.json`);
+    const saved = JSON.stringify(checkpoint);
+    await writeFile(path, saved, { mode: 0o600 });
+    await expect(prepare(Buffer.from([1]))).rejects.toThrow(
+      "checkpoint was preserved",
+    );
+    expect(await readFile(path, "utf8")).toBe(saved);
+    expect(f.posts).toHaveLength(0);
+    if (kind === "cloned") {
+      expect((await prepare(Buffer.from([2]))).preview.resumed).toBe(false);
+
+      // A migrated approval can be linked to its scoped wire key from an older filename.
+      const linkedPath = join(directory, `${"a".repeat(64)}.pending.json`);
+      await fs.rename(path, linkedPath);
+      const linked = {
+        ...checkpoint,
+        wireKey: key,
+        inputProjection: { ...checkpoint.inputProjection, identityFormat: 2 },
+      };
+      await writeFile(
+        linkedPath,
+        JSON.stringify({ ...linked, legacyApproval: true }),
+      );
+      await expect(prepare(Buffer.from([1]))).rejects.toThrow(
+        "checkpoint was preserved",
+      );
+      // A format-2 request for the plain indexed object is an independent selection.
+      await writeFile(linkedPath, JSON.stringify(linked));
+      expect((await prepare(Buffer.from([1]))).preview.resumed).toBe(false);
+    }
+  },
+);
 
 test("the GitHub reader resumes a released boxed score whose Buffer fit the Cloud request", async () => {
   const { normalizeGitHubCodeScanningAlerts } =

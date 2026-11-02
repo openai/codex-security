@@ -1635,9 +1635,14 @@ test("a normalized Wiz retry requires a known locale to reuse its acknowledged r
     "original deployment and locale",
   );
   await expect(prepare()).rejects.toThrow("original deployment and locale");
+  const opaque = await readVendorFindings(f.file);
+  const getter = opaque.findings[0]!.evidence.source_data!;
+  Object.defineProperty(getter, "Z", { get: () => 1 });
+  Object.defineProperty(getter, "toJSON", { value: () => ({ ...data, Z: 9 }) });
+  await expect(prepare(opaque)).rejects.toThrow("cannot be matched");
   expect(f.posts).toHaveLength(1);
   expect(await readFile(foreign, "utf8")).toBe(savedPreview);
-  const distinct = await prepare(JSON.parse(JSON.stringify(input)));
+  const distinct = await prepare(JSON.parse(JSON.stringify(opaque)));
   expect(distinct.preview.resumed).toBe(false);
 
   await rename(foreign, join(f.directory, localPreviewFilename()));

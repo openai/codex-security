@@ -229,6 +229,35 @@ export const validateSourceReports =
   validator<SourceReportPage>("SourceReportPage");
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
+// Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
+export function canonicalNumber(token: string): string {
+  const [, sign = "", integer, fraction = "", exponent = "0"] =
+    /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
+  const significant = (integer + fraction).replace(/^0+/u, "");
+  if (!significant) return "0";
+  let end = significant.length;
+  while (significant[end - 1] === "0") end--;
+  const digits = significant.slice(0, end);
+  const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= 21n) {
+    const split = Number(point);
+    if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
+    if (split >= digits.length) return sign + digits.padEnd(split, "0");
+    return sign + digits.slice(0, split) + "." + digits.slice(split);
+  }
+  const trailing = digits.slice(1);
+  const scientific = point - 1n;
+  return (
+    sign +
+    digits.charAt(0) +
+    (trailing ? "." + trailing : "") +
+    "e" +
+    (scientific >= 0n ? "+" : "") +
+    scientific
+  );
+}
+
 export function requireSafeJsonInteger(value: number, label: string): void {
   if (Number.isInteger(value) && !Number.isSafeInteger(value))
     throw new Error(
@@ -247,11 +276,7 @@ export function validateExternalReport(
   report: Record<string, unknown> | undefined,
 ): void {
   if (report === undefined) return;
-  JSON.stringify(report, (_key, value: unknown) => {
-    if (isNumberObject(value)) value = +value;
-    if (typeof value === "number") requireJsonNumber(value, "Scanner report");
-    return value;
-  });
+  serializeImportJson(report, checkReportNumber);
 }
 
 export function validateExternalEvidenceFields(
@@ -384,6 +409,33 @@ const evidenceNumber: ValidateNumber = (value) =>
 const rawJson = JSON as JSON & {
   isRawJSON?(value: unknown): value is { rawJSON: string };
 };
+/** Check the numeric value JSON emits before parsing can round a raw decimal. */
+export function checkEmittedJsonNumber(
+  value: unknown,
+  check: ValidateNumber,
+): number | undefined {
+  if (typeof value === "number") {
+    check(value);
+    return value;
+  }
+  if (!rawJson.isRawJSON?.(value)) return;
+  const token: unknown = JSON.parse(value.rawJSON);
+  if (typeof token !== "number") return;
+  check(token);
+  if (canonicalNumber(value.rawJSON) !== String(token))
+    throw new Error(
+      "Raw JSON number loses precision when converted to a JavaScript number. Export the value as a string to preserve it exactly.",
+    );
+  return token;
+}
+
+const reportNumber: ValidateNumber = (value) =>
+  requireJsonNumber(value, "Scanner report");
+
+export function checkReportNumber(value: unknown): void {
+  checkEmittedJsonNumber(value, reportNumber);
+}
+
 export class CloudEvidenceDepthError extends Error {
   constructor() {
     super("Evidence exceeds the Cloud JSON depth limit of 20.");
@@ -408,7 +460,7 @@ export function requireCloudEvidenceDepth(
 
 function serializeImportJson(
   input: unknown,
-  number: ValidateNumber,
+  validate: (value: unknown) => void,
   limitDepth = false,
 ): string {
   const parents: object[] = [];
@@ -420,11 +472,7 @@ function serializeImportJson(
     }
     // JSON applies Number conversion to wrappers after calling toJSON.
     if (isNumberObject(value)) value = +value;
-    if (typeof value === "number") number(value);
-    else if (rawJson.isRawJSON?.(value)) {
-      const token: unknown = JSON.parse(value.rawJSON);
-      if (typeof token === "number") number(token);
-    }
+    validate(value);
     return value;
   });
 }
@@ -533,15 +581,16 @@ export function validateExternalEvidenceJson(
   observe?: (previousBytes: number, currentBytes: number) => void,
 ): number {
   let adjustment = 0;
-  const validateNumber = (value: number) => {
+  const validateNumber = (value: unknown) => {
     try {
-      evidenceNumber(value);
+      const number = checkEmittedJsonNumber(value, evidenceNumber);
+      if (target === "cloud" && number !== undefined)
+        adjustment += cloudNumberByteAdjustment(number);
     } catch (error) {
       // The released walk checked primitive numeric fields, not JSON-emitted wrappers.
       if (error instanceof Error) previousAdmissions.set(error, "uncertain");
       throw error;
     }
-    if (target === "cloud") adjustment += cloudNumberByteAdjustment(value);
   };
   // Keep local serialization before the raw walk. If an emitted number is invalid,
   // ordinary invalid primitive fields still give a definitive historical exclusion.
@@ -622,10 +671,10 @@ export function exportedGitHubRecord(
   let invalid: unknown;
   const text = serializeImportJson(
     { [index]: value },
-    (number) => {
+    (value) => {
       if (!invalid)
         try {
-          evidenceNumber(number);
+          checkEmittedJsonNumber(value, evidenceNumber);
         } catch (error) {
           invalid = error;
         }

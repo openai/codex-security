@@ -49,7 +49,9 @@ defines the fields the reader can populate.
 
 Use finite JSON numbers in evidence and report metadata. Supply integers outside
 JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
-primitive numbers in plain data fields for predictable JSON exports.
+primitive numbers in plain data fields for predictable JSON exports. Supply
+precise decimals as strings if converting a `JSON.rawJSON()` number to a
+JavaScript number would round its value.
 
 When you supply normalized findings to the SDK, new imports use their JSON
 representation. For example, `new Number(7)` exports as `7`. If its `toJSON()`

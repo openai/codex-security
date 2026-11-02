@@ -212,6 +212,43 @@ test.each(["group", "trace"] as const)(
   },
 );
 
+test.each([
+  { score: 0.00001, bytes: 262_145, freshCount: 2, priorCount: 1 },
+  { score: 1e-7, bytes: 262_144, freshCount: 1, priorCount: 2 },
+])(
+  "retains exact singleton membership at $bytes bytes",
+  ({ score, bytes, freshCount, priorCount }) => {
+    const input = opengrepJson();
+    const stable = normalize(input, options).findings[0]!;
+    const candidate = {
+      ...input.results[0]!,
+      check_id: "example.boundary",
+      score: new Number(score),
+      padding: "",
+    };
+    const selected = normalize({ ...input, results: [candidate] }, options)
+      .findings[0]!;
+    candidate.padding = "x".repeat(
+      bytes - Buffer.byteLength(JSON.stringify(selected.evidence)),
+    );
+    input.results.push(candidate);
+    const current = normalize(input, options);
+    expect(current.findings).toHaveLength(freshCount);
+    const prior = previousReaderSelection(
+      current,
+      JSON.parse(JSON.stringify(current)),
+    );
+    const expectedIds =
+      priorCount === 1
+        ? [stable.source_finding_id]
+        : [stable.source_finding_id, selected.source_finding_id].sort();
+    expect(
+      prior?.snapshot?.findings.map((row) => row.source_finding_id),
+    ).toEqual(expectedIds);
+    expect(prior?.uncertainFindingIds).toBeUndefined();
+  },
+);
+
 test("an oversized trace leaves the publishable traces at its source occurrence", () => {
   const input = opengrepJson();
   const valid = input.results[0]!;

@@ -1,7 +1,7 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { isProxy } from "node:util/types";
+import { isBoxedPrimitive, isDate, isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
@@ -385,12 +385,16 @@ function normalizeRecords(
   const uncertainIds = new Set<string>();
   const unidentifiedRows = new Set<number>();
   let independentlyObserved = Infinity;
+  let ranRootSerializer = false;
   let largeLocalSelection = false;
   const potentialIds: string[] = [];
   const prefixes = new Set<string>();
   let uncertain = false;
   const identities = new Set<string>();
   for (const [index, input] of records.entries()) {
+    const afterRootSerializer = ranRootSerializer;
+    const keySensitive = previous !== undefined && maySerialize(input);
+    ranRootSerializer ||= keySensitive;
     let exported = input;
     // The released reader measured the caller's source_data JSON before native capture.
     // Its byte count can be reconstructed for plain JSON containing ordinary Buffers.
@@ -414,7 +418,10 @@ function normalizeRecords(
           }
           // Native capture drops non-enumerable fields the released vendor mapper could read.
           if (
-            (prototype === Object.prototype || prototype === null) &&
+            !Array.isArray(value) &&
+            !ArrayBuffer.isView(value) &&
+            !isBoxedPrimitive(value) &&
+            !isDate(value) &&
             Object.getOwnPropertyNames(value).some(
               (key) =>
                 key !== "toJSON" &&
@@ -450,6 +457,12 @@ function normalizeRecords(
       if (priorId) uncertainIds.add(priorId);
       else if (!priorPrefix) unidentifiedRows.add(index);
     }
+    // The old reader called a root serializer with "source_data" rather than its
+    // array index. That code could change a later occurrence before it was read.
+    if (afterRootSerializer) {
+      possible();
+      unidentifiedRows.add(index);
+    }
     const exclusion = (record: unknown, reason: string) => ({
       position: index + 1,
       source_finding_id: text(asRecord(record)?.["url"]),
@@ -467,9 +480,12 @@ function normalizeRecords(
         exported = source.record;
         if (previous) {
           prefix ??= codeOccurrencePrefix(exported);
+          // A serializer or Buffer can expand a native record that fit the approved request.
           if (
             target === "local" &&
-            (largeLocalRow || source.bytes > 256 * 1024)
+            (largeLocalRow ||
+              (source.bytes > 256 * 1024 &&
+                (!before || (plainBufferWire && !buffers))))
           ) {
             largeLocalSelection = true;
             possible();
@@ -493,7 +509,7 @@ function normalizeRecords(
               target === "local" ||
               !rawSizeExcludes ||
               !canSnapshotWithoutGetters(input, true) ||
-              maySerialize(input)
+              keySensitive
             ) {
               possible();
               possibleFreshId = true;
@@ -505,13 +521,12 @@ function normalizeRecords(
                 ),
               );
           } else {
-            checks.push({ input, before, uncertain: possible });
             if (hiddenFields || source.skippedRawValue) possible();
             try {
               const row = mapRecord(before);
               const knownOldId = row.source_finding_id;
               priorId = knownOldId;
-              unidentifiedRows.delete(index);
+              if (!afterRootSerializer) unidentifiedRows.delete(index);
               rowIds.add(knownOldId);
               if (rowUncertain) uncertainIds.add(knownOldId);
               const evidence = validateExternalEvidenceFields(
@@ -519,7 +534,6 @@ function normalizeRecords(
                 target,
               );
               if (source.previousInvalid) throw source.previousInvalid;
-              const keySensitive = maySerialize(input);
               if (keySensitive) possible();
               const reason =
                 keySensitive || target === "local"
@@ -531,6 +545,7 @@ function normalizeRecords(
                     );
               if (reason) previous.excluded.push(exclusion(before, reason));
               else {
+                checks.push({ input, before, uncertain: possible });
                 previous.findings.push({
                   source_finding_id: knownOldId,
                   evidence,
@@ -617,7 +632,7 @@ function normalizeRecords(
           try {
             const id = mapRecord(before).source_finding_id;
             priorId = id;
-            unidentifiedRows.delete(index);
+            if (!afterRootSerializer) unidentifiedRows.delete(index);
             potentialIds.push(id);
             uncertainIds.add(id);
           } catch {
