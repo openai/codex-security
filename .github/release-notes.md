@@ -87,6 +87,9 @@
 - prepare Veracode selection filters once per report ([#2248](https://github.com/openai/codex-security/pull/2248))
 - index saved sessions by parent when reading scan logs ([#2237](https://github.com/openai/codex-security/pull/2237))
 - share SARIF evidence projection for Semgrep and Endor ([#2233](https://github.com/openai/codex-security/pull/2233))
+- share projection and validation logic ([#2183](https://github.com/openai/codex-security/pull/2183))
+- reconcile unacknowledged findings uploads ([#2211](https://github.com/openai/codex-security/pull/2211))
+- reuse scoped GitHub connections for finding intake ([#2223](https://github.com/openai/codex-security/pull/2223))
 
 <!-- release-section: highlights:end -->
 
