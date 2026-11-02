@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { classificationRunsSchema } from "./severity-review.js";
+import { severityRubricSchema } from "./severity-rubric.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
@@ -1121,6 +1122,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  rubricPath?: string;
+  severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
@@ -4614,6 +4617,11 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          rubric: optionValue("--rubric")
+            .optional()
+            .describe(
+              "Use this Markdown file to grade findings. Takes precedence over the default severity rubric.",
+            ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append scan instructions from FILE."),
@@ -4786,6 +4794,10 @@ export async function main(
           outcome = await runScan(
             {
               ...settings,
+              rubricPath:
+                options.rubric === undefined
+                  ? undefined
+                  : resolveCliPath(directory, options.rubric),
               codexOverrides: config.codexOverrides,
               projectConfig: provenance,
               workflowId: options.workflowId,
@@ -7604,6 +7616,10 @@ async function prepareScanArgumentsFromRecipe(
   }
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
+  const severityRubric =
+    operation === "rerun"
+      ? severityRubricSchema.optional().parse(recipe["severityRubric"])
+      : undefined;
   if (
     (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
     (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
@@ -7632,6 +7648,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
     ownerSuggestions: ownerSuggestions.data,
+    ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
@@ -9866,6 +9883,12 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.rubricPath === undefined
+        ? {}
+        : { rubricPath: arguments_.rubricPath }),
+      ...(arguments_.severityRubric === undefined
+        ? {}
+        : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}

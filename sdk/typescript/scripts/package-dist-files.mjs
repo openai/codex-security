@@ -21,6 +21,7 @@ const distModules = [
   "severity-store",
   "severity-review",
   "default-severity-rubric",
+  "severity-rubric",
   "cloud-endpoint",
   "cloud-publish",
   "external-findings",
