@@ -63,7 +63,10 @@ for (const deferLast of [false, true]) {
           summary: `Verified ${candidate.ruleId} against its cited sink.`,
           limitations: ["Synthetic review."],
         },
-        provenance: { source: "local_plugin", candidateId: candidate.ruleId },
+        provenance: {
+          source: "local_plugin",
+          candidateId: `candidate-${candidate.ruleId}`,
+        },
       }),
     );
     const withheld = candidates.at(-1)!;
