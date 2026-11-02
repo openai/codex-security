@@ -615,10 +615,10 @@ function checkedEvidenceJson<T>(
   while (pending.length) {
     const value = pending.pop();
     const depth = depths?.pop() ?? 0;
-    const indirect = indirectPaths?.pop() ?? false;
     if (target === "cloud" && depth > 20)
       throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
     if (value !== null && typeof value === "object") {
+      const indirect = indirectPaths?.pop() ?? false;
       if (failed) {
         ancestors.length = depth;
         if (ancestors.includes(value)) throw failed.reason;
@@ -640,15 +640,26 @@ function checkedEvidenceJson<T>(
         continue;
       }
       const ordinary = canCopyFields(value);
-      for (const [key, child] of Object.entries(value)) {
+      const keys = Object.getOwnPropertyNames(value);
+      const start = pending.length;
+      let count = 0;
+      // Collect enumerable values in order before inspecting their descriptors.
+      // A getter can remove or change a later field.
+      for (const key of keys) {
+        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+        keys[count++] = key;
+        pending.push(Reflect.get(value, key));
+      }
+      for (let i = 0; i < count; i++) {
+        const child = pending[start + i];
         if (isNumberObject(child)) numberOwners.add(value);
         if (typeof child === "function" && !isNumberObject(value))
           hasFunction = true;
-        const getter = Object.getOwnPropertyDescriptor(value, key)?.get;
+        const getter = Object.getOwnPropertyDescriptor(value, keys[i]!)?.get;
         if (getter) (getters ??= new Set()).add(value);
-        pending.push(child);
         depths?.push(depth + 1);
-        indirectPaths!.push(indirect || !ordinary || !!getter);
+        if (child !== null && typeof child === "object")
+          indirectPaths!.push(indirect || !ordinary || !!getter);
       }
     } else if (typeof value === "number") {
       requireJsonNumber(value, "Evidence");

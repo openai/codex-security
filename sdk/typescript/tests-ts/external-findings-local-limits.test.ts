@@ -390,29 +390,59 @@ test("Cloud measures caller fields at their retained numeric size", () => {
   }
 });
 
-test("local numeric samples fit in a 64 MiB Node heap", async () => {
+test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", async () => {
   const bundle = await Bun.build({
-    entrypoints: [
-      join(import.meta.dir, "..", "src", "external-import-contract.ts"),
-    ],
+    entrypoints: ["external-import-contract", "github-findings"].map((source) =>
+      join(import.meta.dir, "..", "src", source + ".ts"),
+    ),
     target: "node",
     format: "cjs",
   });
   expect(bundle.success).toBe(true);
-  const output = execFileSync(
-    "node",
-    ["--max-old-space-size=64", "--input-type=commonjs"],
-    {
-      input: `${await bundle.outputs[0]!.text()}
-      const samples = Array.from({length: 400_000}, (_, index) => index % 10);
-      const input = {title: "Samples", severity: "low", source_data: {samples}};
-      const result = module.exports.validateExternalEvidence(input, "local");
-      process.stdout.write(String(result.source_data.samples.length));
-    `,
-      encoding: "utf8",
-    },
+  async function run(entrypoint: string, script: string) {
+    const source = bundle.outputs.find((output) =>
+      output.path.endsWith(entrypoint + ".js"),
+    )!;
+    return execFileSync(
+      "node",
+      ["--max-old-space-size=64", "--input-type=commonjs"],
+      {
+        input: `${await source.text()}\n{${script}}`,
+        encoding: "utf8",
+      },
+    );
+  }
+  const direct = await run(
+    "external-import-contract",
+    `
+    const samples = Array.from({length: 400_000}, (_, index) => index % 10);
+    const input = {title: "Samples", severity: "low", source_data: {samples}};
+    const result = module.exports.validateExternalEvidence(input, "local");
+    process.stdout.write(String(result.source_data.samples.length));
+  `,
   );
-  expect(output).toBe("400000");
+  expect(direct).toBe("400000");
+
+  for (const kind of ["alert", "advisory"] as const) {
+    const alert = kind === "alert";
+    const record = alert ? importedAlert() : importedAdvisory();
+    const reader = alert
+      ? "normalizeGitHubCodeScanningAlerts"
+      : "normalizeGitHubAdvisories";
+    const samples = alert
+      ? "Array(650_000).fill(1)"
+      : "Buffer.alloc(512 * 1024)";
+    const count = await run(
+      "github-findings",
+      `
+      const record = ${JSON.stringify(record)};
+      record.${kind}.samples = ${samples};
+      const result = module.exports.${reader}([record], "local");
+      process.stdout.write(String(result.findings[0].evidence.source_data.${kind}.samples.length));
+    `,
+    );
+    expect(count).toBe(alert ? "650000" : "524288");
+  }
 });
 
 test("local evidence validation keeps structure, paths, links and numeric integrity", () => {
