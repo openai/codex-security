@@ -1,6 +1,6 @@
 import { throws } from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { closeSync, createWriteStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 import { main, runCodexSkillCommand } from "../../src/cli.js";
@@ -355,6 +355,15 @@ try {
     });
     await notify({ event: "cleanup-ready" });
     await nextControl();
+  }
+  if (
+    ["pty-quiet-success", "pty-oversized", "pty-cleanup-sigwinch"].includes(
+      scenario,
+    )
+  ) {
+    // The harness has hung up this PTY. Close it after all CLI observations so
+    // older Node releases do not abort restoring it during native shutdown.
+    process.once("exit", () => closeSync(2));
   }
   controls.close();
   sync.end();

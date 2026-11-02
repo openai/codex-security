@@ -45,6 +45,9 @@ afterEach(cleanup);
 const result = (results: HarnessResult[], scenario: string) =>
   results.find((entry) => entry.scenario === scenario)!;
 
+const diagnostics = (entry: HarnessResult) =>
+  `${entry.scenario} (exit ${entry.exit})\nstderr: ${entry.stderr}\nevents: ${JSON.stringify(entry.events)}`;
+
 const completeEvent = (entry: HarnessResult) =>
   entry.events.find((event) => event["event"] === "complete")!;
 
@@ -186,11 +189,12 @@ test.skipIf(process.platform === "win32")(
     expect(exitCode, stderr).toBe(0);
     const results = JSON.parse(stdout) as HarnessResult[];
     expect(results).toHaveLength(scenarioCount);
-    expect(results.every((entry) => entry.blocked === false)).toBe(true);
+    for (const entry of results)
+      expect(entry.blocked, diagnostics(entry)).toBe(false);
     for (const entry of results.filter(
       ({ scenario }) => !scenario.startsWith("single-saved-progress"),
     )) {
-      expect(completeEvent(entry)).toMatchObject({
+      expect(completeEvent(entry), diagnostics(entry)).toMatchObject({
         sigintListeners: 0,
         sigtermListeners: 0,
         stderrErrorListeners: 0,
@@ -205,7 +209,7 @@ test.skipIf(process.platform === "win32")(
       "pty-backpressure-success",
     ]) {
       const entry = result(results, scenario);
-      expect(entry.exit).toBe(0);
+      expect(entry.exit, diagnostics(entry)).toBe(0);
       expect(
         JSON.parse(entry.stdout).results.map(({ id }: { id: string }) => id),
       ).toEqual(["occ_0", "occ_1", "occ_2"]);
@@ -219,7 +223,7 @@ test.skipIf(process.platform === "win32")(
     if (hasFullDevice) workerFailures.push("full-device");
     for (const scenario of workerFailures) {
       const failure = result(results, scenario);
-      expect(failure.exit).toBe(2);
+      expect(failure.exit, diagnostics(failure)).toBe(2);
       expect(JSON.parse(failure.stdout)).toEqual({
         status: "failed",
         code: "VERIFICATION_FAILED",
@@ -234,7 +238,7 @@ test.skipIf(process.platform === "win32")(
     });
 
     const text = result(results, "pty-text-update");
-    expect(text.exit).toBe(0);
+    expect(text.exit, diagnostics(text)).toBe(0);
     expect(text.events).toContainEqual({ event: "update-checked" });
     expect(text.stderr).not.toContain("update available");
     expect(text.stdout.trimEnd().split("\n")).toEqual(
@@ -244,7 +248,7 @@ test.skipIf(process.platform === "win32")(
     );
 
     const oversized = result(results, "pty-oversized");
-    expect(oversized.exit).toBe(2);
+    expect(oversized.exit, diagnostics(oversized)).toBe(2);
     expect(JSON.parse(oversized.stdout).message).toContain(
       "Finding occ_0 cannot fit",
     );
@@ -257,7 +261,7 @@ test.skipIf(process.platform === "win32")(
       ["pty-backpressure-sigterm", 143],
     ] as const) {
       const entry = result(results, scenario);
-      expect(entry.exit).toBe(expectedExit);
+      expect(entry.exit, diagnostics(entry)).toBe(expectedExit);
       expect(entry.stdout).toBe("");
       expect(entry.drained).toBe(0);
       expect(typeof entry.workerPid).toBe("number");
@@ -272,14 +276,14 @@ test.skipIf(process.platform === "win32")(
       ["pty-backpressure-mixed-sigterm-sigint", 130],
     ] as const) {
       const entry = result(results, scenario);
-      expect(entry.exit).toBe(expectedExit);
+      expect(entry.exit, diagnostics(entry)).toBe(expectedExit);
       expect(entry.stdout).toBe("");
       expect(typeof entry.workerPid).toBe("number");
       expect(entry.workerAlive).toBe(false);
     }
 
     const cleanupSignal = result(results, "pty-cleanup-sigwinch");
-    expect(cleanupSignal.exit).toBe(0);
+    expect(cleanupSignal.exit, diagnostics(cleanupSignal)).toBe(0);
     expect(
       cleanupSignal.events
         .filter((event) => event["event"] === "invocation-complete")
@@ -312,9 +316,9 @@ test.skipIf(process.platform === "win32")(
     const interactive = result(results, "single-saved-progress-interactive");
     const noninteractive = result(results, "single-saved-progress-ci");
     for (const entry of [interactive, noninteractive]) {
-      expect(entry.exit).toBe(0);
+      expect(entry.exit, diagnostics(entry)).toBe(0);
       expect(JSON.parse(entry.stdout).results).toHaveLength(3);
-      expect(completeEvent(entry)).toMatchObject({
+      expect(completeEvent(entry), diagnostics(entry)).toMatchObject({
         sigintListeners: 0,
         sigtermListeners: 0,
         stderrErrorListeners: 0,
@@ -331,7 +335,7 @@ test.skipIf(process.platform === "win32")(
     expect(noninteractive.stderr).toContain("rg authorization src/guard.ts");
 
     const repeated = result(results, "repeated-main");
-    expect(repeated.exit).toBe(0);
+    expect(repeated.exit, diagnostics(repeated)).toBe(0);
     expect(
       repeated.events.find((event) => event["event"] === "invocation-complete"),
     ).toMatchObject({
@@ -339,7 +343,7 @@ test.skipIf(process.platform === "win32")(
       exitCode: 0,
       stderrErrorListeners: 0,
     });
-    expect(completeEvent(repeated)).toMatchObject({
+    expect(completeEvent(repeated), diagnostics(repeated)).toMatchObject({
       exitCode: 0,
       stderrErrorListeners: 0,
     });

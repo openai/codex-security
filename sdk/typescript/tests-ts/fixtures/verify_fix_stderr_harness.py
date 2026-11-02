@@ -41,7 +41,8 @@ def wait(process: subprocess.Popen, timeout: float = 10):
 
 
 class RunningProcess:
-    def __init__(self, scenario: str, stderr: int | None = subprocess.PIPE):
+    def __init__(self, scenario: str, stderr, label: str):
+        self.label = label
         sync_read, sync_write = os.pipe()
         environment = os.environ.copy()
         environment["VERIFY_FIX_SYNC_FD"] = str(sync_write)
@@ -98,7 +99,16 @@ class RunningProcess:
     def event_until(self, name: str, worker: int | None = None):
         events = []
         while True:
-            event = self._next_event()
+            try:
+                event = self._next_event()
+            except (AssertionError, TimeoutError) as error:
+                # Give an exiting fixture time to report its own status, then reap its group.
+                wait(self.process, 1)
+                self.stop()
+                raise AssertionError(
+                    f"{self.label}: {error} waiting for {name!r} (worker {worker}); "
+                    f"exit {self.process.returncode}, events: {events}, stderr: {self.read_stderr()}"
+                ) from error
             events.append(event)
             if event.get("event") == name and (
                 worker is None or event.get("worker") == worker
@@ -113,6 +123,7 @@ class RunningProcess:
         try:
             os.killpg(self.process_group, sent_signal)
         except ProcessLookupError:
+            # The process group can already be gone when cleanup runs.
             pass
 
     def stop(self):
@@ -136,6 +147,12 @@ class RunningProcess:
             chunks.append(chunk)
         return [json.loads(line) for line in b"".join(chunks).splitlines() if line]
 
+    def read_stderr(self):
+        stream = self.process.stderr
+        if stream is None or stream.closed:
+            return ""
+        return stream.read().decode(errors="replace")
+
     def collect(self, events, blocked: bool = False):
         if self.process.poll() is None:
             self.process.wait()
@@ -145,16 +162,11 @@ class RunningProcess:
             if self.process.stdout is not None
             else ""
         )
-        stderr = (
-            self.process.stderr.read().decode()
-            if self.process.stderr is not None and not self.process.stderr.closed
-            else ""
-        )
         return {
             "exit": self.process.returncode,
             "blocked": blocked,
             "stdout": stdout,
-            "stderr": stderr,
+            "stderr": self.read_stderr(),
             "events": events,
         }
 
@@ -173,16 +185,17 @@ class RunningProcess:
                 stream.close()
         try:
             os.close(self.sync_fd)
-        except OSError:
-            pass
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
 
 
 @contextmanager
-def running(scenario: str, stderr: int | None = subprocess.PIPE):
+def running(scenario: str, stderr=subprocess.PIPE, *, label: str | None = None):
     def timeout(_signal_number, _frame):
         raise TimeoutError(f"Verification fixture timed out: {scenario}")
 
-    fixture = RunningProcess(scenario, stderr)
+    fixture = RunningProcess(scenario, stderr, label or scenario)
     signal.signal(signal.SIGALRM, timeout)
     signal.alarm(int(SCENARIO_TIMEOUT))
     try:
@@ -245,15 +258,16 @@ def process_exists(pid: int):
 
 
 def disconnected_pipe(scenario: str):
-    with running(scenario) as fixture:
+    name = f"pipe-{scenario}"
+    with running(scenario, label=name) as fixture:
         events = fixture.event_until("worker-started", 2)
         fixture.process.stderr.close()
         fixture.send()
-        return {"scenario": f"pipe-{scenario}", **fixture.finish(events)}
+        return {"scenario": name, **fixture.finish(events)}
 
 
 def connected_output(scenario: str, name: str, stderr=subprocess.PIPE):
-    with running(scenario, stderr) as fixture:
+    with running(scenario, stderr, label=name) as fixture:
         events = fixture.event_until("worker-started", 2)
         fixture.send()
         return {"scenario": name, **fixture.finish(events)}
@@ -262,12 +276,15 @@ def connected_output(scenario: str, name: str, stderr=subprocess.PIPE):
 def fill_output(fd: int):
     os.set_blocking(fd, False)
     try:
-        for chunk in (b"x" * 4096, b"x"):
+        chunk = b"x" * 4096
+        while True:
             try:
-                while True:
-                    os.write(fd, chunk)
+                os.write(fd, chunk)
             except BlockingIOError:
-                pass
+                if len(chunk) == 1:
+                    # Even a one-byte write would block.
+                    return
+                chunk = b"x"
     finally:
         os.set_blocking(fd, True)
 
@@ -306,14 +323,22 @@ def disconnected_pty(scenario: str):
             os.close(master)
 
 
+def release_with_full_terminal(fixture: RunningProcess, slave: int):
+    events = fixture.event_until("worker-started", 2)
+    # Use a separate file description so the fixture's stderr stays blocking.
+    with open(os.ttyname(slave), "wb", buffering=0) as filler:
+        fill_output(filler.fileno())
+    fixture.send()
+    return events
+
+
 def paused_pty(scenario: str, sent_signal: signal.Signals | None):
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
+            events = release_with_full_terminal(fixture, slave)
             os.close(slave)
             slave = -1
-            events = fixture.event_until("worker-started", 2)
-            fixture.send()
             events.extend(fixture.event_until("progress-queued"))
             worker_pid = None
             if sent_signal is not None:
@@ -346,13 +371,9 @@ def full_terminal(scenario: str):
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
-            events = fixture.event_until("worker-started", 2)
-            # Open a separate description so the worker's stderr stays blocking.
-            with open(os.ttyname(slave), "wb", buffering=0) as filler:
-                fill_output(filler.fileno())
+            events = release_with_full_terminal(fixture, slave)
             os.close(slave)
             slave = -1
-            fixture.send()
             if scenario == "pty-text-update":
                 result = fixture.finish(events)
                 # Inspect the terminal only after verification has exited.
@@ -378,10 +399,9 @@ def mixed_signals(first: signal.Signals, second: signal.Signals):
     master, slave = open_pty()
     try:
         with running(scenario, slave) as fixture:
+            events = release_with_full_terminal(fixture, slave)
             os.close(slave)
             slave = -1
-            events = fixture.event_until("worker-started", 2)
-            fixture.send()
             events.extend(fixture.event_until("progress-queued"))
             worker_pid = wait_for_worker(fixture.state)
             os.kill(fixture.process.pid, first)
