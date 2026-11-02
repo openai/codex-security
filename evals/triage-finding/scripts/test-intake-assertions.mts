@@ -135,6 +135,7 @@ for (const [behavior, text] of [
 const githubContext = (behavior: string) => ({
   vars: {
     expected_github_rest_behavior: behavior,
+    expected_default_ref: "refs/heads/trunk",
     target_repo: "https://github.com/example/project",
   },
 });
@@ -198,11 +199,11 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
 const codeScanning = {
   alerts: {
     path: "/repos/example/project/code-scanning/alerts",
-    parameters: { state: "open", per_page: 100 },
+    parameters: { state: "open", per_page: 100, ref: "refs/heads/trunk" },
   },
   instances: {
     path: "/repos/example/project/code-scanning/alerts/{alert_number}/instances",
-    parameters: { per_page: 100 },
+    parameters: { per_page: 100, ref: "refs/heads/trunk" },
   },
   source_type: "sarif",
 };
@@ -221,6 +222,25 @@ for (const repository of ["{owner}/{repo}", "example/project"]) {
     expectGitHub("code_scanning", text);
   }
 }
+for (const [request, parameter, value, pass] of [
+  ["instances", "ref", undefined, false],
+  ["instances", "ref", "trunk", true],
+  ["instances", "ref", "refs/tags/trunk", false],
+  ["instances", "ref", "refs/heads/other", false],
+  ["alerts", "ref", "refs/heads/trunk", true],
+  ["alerts", "ref", undefined, false],
+  ["alerts", "ref", "trunk", true],
+  ["alerts", "ref", "refs/pull/123/merge", false],
+  ["alerts", "ref", "refs/heads/other", false],
+  ["instances", "per_page", undefined, false],
+  ["instances", "per_page", 1000, false],
+  ["alerts", "state", "closed", false],
+  ["alerts", "per_page", undefined, false],
+] as const) {
+  const answer = JSON.parse(JSON.stringify(codeScanning));
+  answer[request].parameters[parameter] = value;
+  expectGitHub("code_scanning", JSON.stringify(answer), pass);
+}
 for (const invalid of [
   null,
   [],
@@ -229,28 +249,12 @@ for (const invalid of [
   { ...codeScanning, findings: [] },
   { ...codeScanning, schema_version: "triage-finding/v0", findings: [] },
   { ...codeScanning, findings: [{ verdict: "confirmed" }] },
-  { ...codeScanning, instances: { ...codeScanning.instances, parameters: {} } },
-  {
-    ...codeScanning,
-    instances: { ...codeScanning.instances, parameters: { per_page: 1000 } },
-  },
   {
     ...codeScanning,
     instances: {
       ...codeScanning.instances,
       path: "/repos/example/other/code-scanning/alerts/{alert_number}/instances",
     },
-  },
-  {
-    ...codeScanning,
-    alerts: {
-      ...codeScanning.alerts,
-      parameters: { state: "closed", per_page: 100 },
-    },
-  },
-  {
-    ...codeScanning,
-    alerts: { ...codeScanning.alerts, parameters: { state: "open" } },
   },
 ]) {
   expectGitHub("code_scanning", JSON.stringify(invalid), false);
@@ -311,83 +315,65 @@ for (const emphasis of ["**", "*", "__", "_", "***"]) {
   );
 }
 
-const decision = {
-  transport: "github_connector_read_only",
-  fallback: "explain_and_request_rest_approval",
-  scope: {
-    account: "user_specified_or_approved",
-    repository: "example/project",
+const route = {
+  transport: "direct_https",
+  auth: "ALERT_READ_TOKEN",
+  url: "https://scm.example.test/api/v3/repos/example/project/code-scanning/alerts",
+  alerts_ref: "refs/heads/release",
+  instances_ref: "refs/heads/release",
+};
+const routeContext = {
+  vars: {
+    expected_github_rest_behavior: "transport",
+    expected_decision: route,
   },
 };
-const connectorJson = JSON.stringify(decision);
-for (const text of [connectorJson, `\`\`\`json\n${connectorJson}\n\`\`\``]) {
-  expectGitHub("explicit_connector", text);
+const pullRoute = {
+  ...route,
+  alerts_ref: "refs/pull/7/merge",
+  instances_ref: "refs/pull/7/merge",
+};
+expectPass(github, JSON.stringify(pullRoute), {
+  vars: { ...routeContext.vars, expected_decision: pullRoute },
+});
+const routeJson = JSON.stringify(route);
+for (const text of [routeJson, `\`\`\`json\n${routeJson}\n\`\`\``])
+  expectPass(github, text, routeContext);
+for (const key of ["alerts_ref", "instances_ref"]) {
+  expectPass(
+    github,
+    JSON.stringify({ ...route, [key]: "release" }),
+    routeContext,
+  );
 }
 for (const invalid of [
   null,
-  [],
   {},
-  ...["transport", "fallback", "scope"].map((key) => ({
-    ...decision,
-    [key]: undefined,
-  })),
-  ...["rest", "other", "unknown"].map((transport) => ({
-    ...decision,
-    transport,
-  })),
-  ...["automatic_rest", "stop", "unknown"].map((fallback) => ({
-    ...decision,
-    fallback,
-  })),
-  { ...decision, scope: { ...decision.scope, account: "any" } },
-  { ...decision, scope: { ...decision.scope, repository: "example/other" } },
-  { ...decision, explanation: "additional field" },
-  { ...decision, scope: { ...decision.scope, extra: true } },
+  { ...route, auth: undefined },
+  { ...route, transport: "gh_api" },
+  { ...route, auth: "GH_ENTERPRISE_TOKEN" },
+  { ...route, alerts_ref: undefined },
+  { ...route, alerts_ref: "refs/tags/release" },
+  { ...route, instances_ref: "refs/heads/hotfix" },
+  { ...route, url: route.url.replace("/project/", "/another/") },
+  {
+    ...route,
+    url: route.url.replace("scm.example.test/api/v3", "api.github.com"),
+  },
+  { ...route, findings: [] },
 ]) {
-  expectGitHub("explicit_connector", JSON.stringify(invalid), false);
+  expectPass(github, JSON.stringify(invalid), routeContext, false);
 }
-for (const text of [
-  "not JSON",
-  `\`\`\`json\n${connectorJson}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``,
-]) {
-  expectGitHub("explicit_connector", text, false);
+for (const extra of ["null", "true", "42", '"extra"', "{}", triage]) {
+  expectPass(github, `${routeJson}\n${extra}`, routeContext, false);
+  expectPass(
+    github,
+    `\`\`\`json\n${routeJson}\n\`\`\`\n\`\`\`json\n${extra}\n\`\`\``,
+    routeContext,
+    false,
+  );
 }
-const restJson = JSON.stringify({ transport: "rest" });
-for (const text of [restJson, `\`\`\`json\n${restJson}\n\`\`\``]) {
-  expectGitHub("default_rest", text);
-}
-for (const invalid of [
-  null,
-  [],
-  {},
-  decision,
-  { transport: "other" },
-  { transport: "rest", findings: [] },
-]) {
-  expectGitHub("default_rest", JSON.stringify(invalid), false);
-}
-for (const [behavior, answer] of [
-  ["explicit_connector", connectorJson],
-  ["default_rest", restJson],
-]) {
-  for (const extra of [
-    "null",
-    "true",
-    "42",
-    '"extra"',
-    "{}",
-    triage,
-    "{'verdict': 'confirmed'}",
-    '{schema_version: "triage-finding/v0", findings: []}',
-  ]) {
-    for (const text of [
-      `${answer}\n${extra}`,
-      `\`\`\`json\n${answer}\n\`\`\`\n\`\`\`json\n${extra}\n\`\`\``,
-    ]) {
-      expectGitHub(behavior, text, false);
-    }
-  }
-}
+expectGitHub("transport", "{}", false);
 
 for (const behavior of ["", "code_scaning", "constructor"]) {
   expectGitHub(behavior, "arbitrary text", false);
@@ -400,10 +386,8 @@ for (const repository of [
   "git@github.com:example/project.git",
   "ssh://git@github.com/example/project.git",
 ]) {
-  const context = githubContext("explicit_connector");
+  const context = githubContext("dependabot_malware");
   context.vars.target_repo = repository;
-  expectPass(github, connectorJson, context);
-  context.vars.expected_github_rest_behavior = "dependabot_malware";
   expectPass(
     github,
     'GET /repos/example/project/dependabot/alerts?classification=malware&state=open&per_page=100. {"source_type":"advisory"}',
