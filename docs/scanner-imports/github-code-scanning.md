@@ -9,6 +9,7 @@ Sign in with `gh auth login`. A fine-grained token needs **Code scanning alerts:
 A classic token needs `security_events`, or `public_repo` for a public repository.
 [GitHub API permissions](https://docs.github.com/en/rest/code-scanning/code-scanning#list-code-scanning-alerts-for-a-repository)
 For GitHub Enterprise, set `GH_HOST` to the host you signed in to.
+If `gh` is unavailable, the SDK accepts `githubHost` and a `githubToken` for that host.
 
 From the destination checkout root, set `repo` to its GitHub repository. Set
 `source_key` to your existing code scanning key exactly, including case. For a

@@ -170,7 +170,8 @@ and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
 Choose a compatible model available to your project and select Daybreak Blue
-explicitly:
+explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
+with built-in pricing so the scan can enforce the limit.
 
 ```bash
 codex-security scan /path/to/repository \
@@ -183,11 +184,8 @@ Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan
 The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
-The previously documented `gpt-daybreak-blue-latest` alias is
-[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
-Use a current model available to your project. `access_programs.cyber` is a
-Responses API field; use the supported selector instead of passing it as a
-`--codex` configuration key.
+`access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
+instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
@@ -2142,7 +2140,8 @@ marks shortened text. Other template columns keep their original values.
 
 The output defaults to `servicenow-avit.csv`. Upload the completed file in the
 same ServiceNow screen. Each upload creates a new penetration-test form for the
-application. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
+application. If the submission result is unclear, check its status and log notes
+on the Vulnerability Integration Push Queues page before uploading again. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
 
 ### Export a threat model
 
@@ -2280,7 +2279,8 @@ and preview findings. All three use `--provider github`. Keep a separate source
 key for each family. Saving locally or publishing to Cloud requires the
 [external-import opt-in](#import-vendor-findings-locally).
 
-The code-scanning collector uses the GitHub CLI login and `GH_HOST`. A GitHub
+The code-scanning and advisory CLI collectors use `gh` to authenticate for
+`GH_HOST` (default `github.com`). A GitHub
 plugin connection can select alerts but does not sign the CLI in.
 Collection retains the selected ref's instance. Branches keep separate
 evidence. An alert-wide dismissal takes precedence over the selected instance's
@@ -2373,6 +2373,7 @@ import {
 const findings = await importGitHubCodeScanningAlerts({
   repository: "example/repository",
   alertNumbers: [12, 18], // Omit for all open alerts on the default branch.
+  githubHost: "github.com",
   githubToken: process.env["GH_TOKEN"],
 });
 
@@ -2391,8 +2392,9 @@ try {
 ```
 
 SDK options include `state` (default `"open"`), `ref`, and `signal`.
-Supply `githubToken` or use `gh auth token` credentials, including GitHub CLI
-token environment variables. `githubHost` defaults to `GH_HOST` or `github.com`.
+Without `gh`, pass a `githubToken` issued for the selected `githubHost`.
+If you omit the token, the SDK asks the GitHub CLI for credentials, including
+its supported token environment variables. `githubHost` defaults to `GH_HOST` or `github.com`.
 The token needs code-scanning read access; access failures reject the import.
 
 ## Validate and patch findings

@@ -46,6 +46,10 @@ same source key for subsequent exports in this format.
 
 ## Reference
 
+Use the saved report for an earlier scan. `snyk test` and the Studio plugin’s
+`snyk-findings-export` scan the current workspace. Evo MCP’s `query_issues`
+retrieves AI asset policy violations. [Studio export scope](https://github.com/snyk/studio-recipes/blob/3752dd05a462184dcce44af3c247f287b41e35de/plugins/codex/skills/snyk-findings-export/SKILL.md#L15-L20) · [Evo MCP tools](https://docs.snyk.io/agent-security/evo-by-snyk/platform-surfaces/evo-mcp-server#policies-and-issues)
+
 ### Native CLI JSON
 
 To create a report, run the authenticated Snyk CLI with the project's package

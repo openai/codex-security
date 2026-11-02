@@ -49,7 +49,7 @@ jobs:
       - name: Upload reused native payload for this commit
         if: steps.restore.outputs.cache-hit == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
+        with: &upload-universal-native
           name: native-universal-${{ inputs.ref || github.sha }}
           path: native/
           if-no-files-found: error
@@ -96,12 +96,7 @@ jobs:
           path: native
       - name: Upload universal native payload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-universal-${{ inputs.ref || github.sha }}
-          path: native/
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
+        with: *upload-universal-native
       - name: Save verified native payload from main
         if: >-
           github.ref == 'refs/heads/main' &&
