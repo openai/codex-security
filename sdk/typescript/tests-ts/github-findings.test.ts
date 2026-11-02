@@ -16,6 +16,83 @@ import {
   importedAdvisory,
 } from "./support/github-import-fixtures.js";
 
+test("captures a record-root serializer with its selection index once", () => {
+  const row = importedAlert(),
+    keys: string[] = [];
+  const instance = row.alert["most_recent_instance"] as Record<string, unknown>;
+  Object.setPrototypeOf(row, {
+    toJSON(key: string) {
+      keys.push(key);
+      return {
+        ...row,
+        alert: {
+          ...row.alert,
+          most_recent_instance: { ...instance, ref: "refs/heads/" + key },
+        },
+      };
+    },
+  });
+  const output = normalizeGitHubCodeScanningAlerts([row]);
+  expect(output.findings[0]?.evidence.branch).toBe("refs/heads/0");
+  expect(keys).toEqual(["0"]);
+  const old = legacyGitHubFindings(output, structuredClone(output));
+  expect(old?.sourceFindingIds).toHaveLength(1);
+  expect(old?.snapshot).toBeUndefined();
+});
+
+test.each([7, 2 ** 53])(
+  "a compact export with a deeply shared raw number %i checks that leaf once",
+  (value) => {
+    const row = importedAlert();
+    let reads = 0;
+    let graph: unknown = {
+      get score() {
+        reads++;
+        return new Number(value);
+      },
+    };
+    for (let i = 0; i < 28; i++) graph = { left: graph, right: graph };
+    Object.assign(row.alert, { extension: { graph, toJSON: () => "summary" } });
+    const output = normalizeGitHubCodeScanningAlerts([row]);
+    expect(reads).toBe(1);
+    if (Number.isSafeInteger(value)) expect(output.findings).toHaveLength(1);
+    else expect(output.excluded[0]?.reason).toContain("safe integer");
+  },
+);
+
+test.each(["local", "cloud"] as const)(
+  "maps the exported GitHub occurrence and checks its identity on %s",
+  (target) => {
+    const rows = ["main", "review"].map((ref) => {
+      const row = importedAlert("refs/heads/" + ref);
+      const instance = row.alert["most_recent_instance"] as Record<
+        string,
+        unknown
+      >;
+      Object.setPrototypeOf(instance, {
+        toJSON(this: typeof instance) {
+          return { ...this, ref: "refs/heads/exported" };
+        },
+      });
+      return row;
+    });
+    const plain = JSON.parse(JSON.stringify(rows));
+    const read = normalizeGitHubCodeScanningAlerts([rows[0]!], target);
+    expect(read).toEqual(normalizeGitHubCodeScanningAlerts([plain[0]], target));
+    expect(read.findings[0]!.evidence.branch).toBe("refs/heads/exported");
+    expect(() => normalizeGitHubCodeScanningAlerts(rows, target)).toThrow(
+      "Duplicate source finding id",
+    );
+    if (target === "cloud") {
+      const old = legacyGitHubFindings(read, structuredClone(read))?.snapshot;
+      expect(old?.findings[0]!.evidence.branch).toBe("refs/heads/main");
+      expect(old?.findings[0]!.source_finding_id).not.toBe(
+        read.findings[0]!.source_finding_id,
+      );
+    }
+  },
+);
+
 test.each(["local", "cloud"] as const)(
   "retains exactly the exported GitHub values on %s",
   (target) => {

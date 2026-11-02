@@ -388,6 +388,7 @@ function rawJsonNumbers(
   const depths: number[] = [0];
   const ancestors: object[] = [];
   let adjustment = 0;
+  let checked = target === "local" ? new WeakSet<object>() : undefined;
   while (pending.length) {
     const value = pending.pop();
     const depth = depths.pop()!;
@@ -397,6 +398,10 @@ function rawJsonNumbers(
       adjustment = Infinity;
     }
     if (value !== null && typeof value === "object") {
+      // After a historical rejection, aliases only need one raw numeric check.
+      if (adjustment === Infinity) checked ??= new WeakSet();
+      if (checked?.has(value)) continue;
+      checked?.add(value);
       ancestors.length = depth;
       if (ancestors.includes(value)) {
         if (oldSize) adjustment = Infinity;
@@ -453,41 +458,53 @@ export function validateExternalEvidenceJson(
   );
 }
 
-/** Capture the exported GitHub evidence and report whether the released Cloud
- * reader would have admitted the original row before its native SDK snapshot. */
-export function exportedGitHubEvidence(
-  input: ExternalFindingEvidence,
+/** Observe the exported vendor record once. An original evidence envelope also
+ * supplies the old reader's wire size when its root uses ordinary JSON. */
+export function exportedGitHubRecord(
+  value: unknown,
+  index: number,
   target: ExternalImportTarget,
-  previous?: (exclusion?: string) => void,
-): ExternalFindingEvidence {
+  original?: ExternalFindingEvidence,
+  previous?: (exclusion: string | undefined, exact: boolean) => void,
+): unknown {
+  // An array item receives its index as toJSON's key. The released reader
+  // serialized the record under source_data, so that hook cannot prove both.
+  const useEnvelope =
+    original && !(value && typeof value === "object" && "toJSON" in value);
+  if (original && !useEnvelope) previous?.(undefined, false);
+  const envelope = useEnvelope ? original : { [index]: value };
   let invalid: unknown;
   function serialize() {
-    return serializeImportJson(input, (value) => {
+    return serializeImportJson(envelope, (number) => {
       if (!invalid)
         try {
-          evidenceNumber(value);
+          evidenceNumber(number);
         } catch (error) {
           invalid = error;
         }
     });
   }
-  // Preserve the historical getter order before the batch-wide retry snapshot.
   let text = target === "local" ? serialize() : undefined;
-  const adjustment = rawJsonNumbers(input, target, evidenceNumber, !!previous);
+  const adjustment = rawJsonNumbers(
+    original ?? envelope,
+    target,
+    evidenceNumber,
+    target === "cloud",
+  );
   text ??= serialize();
-  if (previous)
+  if (useEnvelope && previous)
     previous(
       adjustment === Infinity
         ? "Evidence exceeds the Cloud JSON depth limit of 20."
         : Buffer.byteLength(text) + adjustment > 256 * 1024
           ? "Evidence exceeds the Cloud limit of 256 KiB."
           : undefined,
+      true,
     );
   if (invalid) throw invalid;
-  // All later validation and sizing sees plain JSON including serializer-produced subtrees.
-  const retained = validateExternalEvidenceFields(JSON.parse(text), target);
-  if (target === "cloud") validateExternalEvidenceJson(retained, target);
-  return retained;
+  return (JSON.parse(text) as Record<string, unknown>)[
+    useEnvelope ? "source_data" : index
+  ];
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {

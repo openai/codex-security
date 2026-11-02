@@ -4234,6 +4234,17 @@ function scoredFindings(
   };
 }
 
+function releasedDependencies(f: Awaited<ReturnType<typeof fixture>>) {
+  return {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+      CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+    },
+  };
+}
+
 // These filenames, request IDs and projections were recorded by the old SDK.
 async function oldScoreApproval(field: string, stageApproval = true) {
   const f = await fixture();
@@ -4247,14 +4258,11 @@ async function oldScoreApproval(field: string, stageApproval = true) {
     const input = scoredFindings(score, report, field === "aliased");
     if (flag !== undefined)
       Object.assign(input.findings[0]!.evidence.source_data, { flag });
-    return prepareNormalizedExternalPublication(input, options, {
-      ...f.deps,
-      environment: {
-        ...f.environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: undefined,
-        CODEX_SECURITY_CLOUD_WEB_URL: undefined,
-      },
-    });
+    return prepareNormalizedExternalPublication(
+      input,
+      options,
+      releasedDependencies(f),
+    );
   };
   const request = {
     request_id: requestId,
@@ -4285,6 +4293,84 @@ async function oldScoreApproval(field: string, stageApproval = true) {
   }
   return { f, prepare, directory, path, filename, request, saved };
 }
+
+test.each(["getter", "data property"])(
+  "a JSON hook cannot replace a %s score to match a released approval",
+  async (kind) => {
+    const { f, path, saved } = await oldScoreApproval("evidence");
+    const input = scoredFindings(undefined);
+    const data = input.findings[0]!.evidence.source_data;
+    const score = Object.assign(new Number(8), {
+      toJSON() {
+        Object.defineProperty(data, "score", { value: new Number(2.5) });
+        return 9;
+      },
+    });
+    if (kind === "getter")
+      Object.defineProperty(data, "score", {
+        configurable: true,
+        enumerable: true,
+        get: () => score,
+      });
+    else data.score = score;
+
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        options,
+        releasedDependencies(f),
+      ),
+    ).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe(saved);
+    expect(f.posts).toHaveLength(0);
+  },
+);
+
+test("a shared rule in report metadata resumes the released request", async () => {
+  const f = await fixture();
+  const rule = { name: "example-rule" };
+  const input = scoredFindings(new Number(2.5), { rule });
+  Object.assign(input.findings[0]!.evidence, {
+    details: { kind: "sast", repository: { url: f.destination().url }, rule },
+  });
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      input,
+      options,
+      releasedDependencies(f),
+    );
+  const request = {
+    ...(await prepare()).preview.requests[0]!,
+    request_id: "0697e266-e0a5-4aa5-b30b-3b89cbd48ac1",
+  };
+  expect(hash("sha256", JSON.stringify(request))).toBe(
+    "8c76780e8aca7582a293dee9483002401d6907e51833fc806cd1a058fe54b855",
+  );
+  const directory = join(f.root, "state", "external-finding-publications");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(
+      directory,
+      "749e46bc07036abe74f047011264147993bd96f384099bcf1b729c8c2634a1b0.pending.json",
+    ),
+    JSON.stringify({
+      accountId: boxedNumberCheckpoints.accountId,
+      requests: [request],
+      inputProjection: {
+        inputDigest:
+          "49cf7aa8362d8967c5638238b719d925e7e1814d48a4a7a0844e69ef9260b869",
+        savedEvidenceDigest:
+          "a2d3adb20cf97c597828fd54ec361490a8a34e479a42d01d3b85ff245b0b384b",
+      },
+    }),
+    { mode: 0o600 },
+  );
+
+  const resumed = await prepare();
+  expect(resumed.preview.resumed).toBe(true);
+  expect((await resumed.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+});
 
 test("a boxed JSON hook keeps the released request and applies to fresh normalized publication", async () => {
   const { f, prepare, path, request, saved } =
@@ -6281,7 +6367,7 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
 
   // Rebuild the released request without storing the 256 KiB row in the fixture.
   const priorReader = { ...normalize() };
-  priorReader.findings[0]!.evidence.source_data = row;
+  priorReader.findings[0]!.evidence.source_data = { ...row };
   const template = await prepare();
   const request = JSON.parse(JSON.stringify(template.preview.requests[0]));
   request.request_id = "5e640fea-52f8-43c2-ba4c-a0822c040458";

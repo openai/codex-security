@@ -12,7 +12,7 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { isBoxedPrimitive } from "node:util/types";
+import { isBoxedPrimitive, isProxy } from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -455,24 +455,68 @@ interface PublicationSelection extends ExternalPublicationInput {
   freshSizeError?: Error;
 }
 
+// Capture before JSON hooks can change their source. If native capture would
+// invoke caller code too, the original bytes cannot be observed independently.
+function previousNormalizedFindings(
+  input: ExternalFindings,
+): ExternalFindings | undefined {
+  const seen = new Set<object>();
+  const pending: unknown[] = [input];
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    if (isProxy(value)) return;
+    if (
+      isBoxedPrimitive(value) ||
+      ArrayBuffer.isView(value) ||
+      value instanceof Date
+    )
+      continue;
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (
+      !Array.isArray(value) &&
+      prototype !== Object.prototype &&
+      prototype !== null
+    )
+      return;
+    for (const name of Object.keys(value)) {
+      const field = Object.getOwnPropertyDescriptor(value, name)!;
+      if (!Object.hasOwn(field, "value")) return;
+      pending.push(field.value);
+    }
+  }
+  // Object spread skips a hidden report, but explicitly reading it could run a getter.
+  const reportField = Object.getOwnPropertyDescriptor(input, "report");
+  if (reportField && !Object.hasOwn(reportField, "value")) return;
+  const { report, ...parsed } = input;
+  const snapshot: ExternalFindings = structuredClone(parsed);
+  if (report !== undefined) snapshot.report = structuredClone(report);
+  return snapshot;
+}
+
 function normalizedPublicationInput(
   input: ExternalFindings,
 ): PublicationSelection {
+  let original: ExternalFindings | undefined;
+  try {
+    original = previousNormalizedFindings(input);
+  } catch {
+    /* A valid JSON export can contain an uncloneable value. */
+  }
   const current = snapshotNormalizedFindings(input);
   validateExternalReport(current.report);
   const reader = legacyGitHubFindings(input, current);
-  let original: ExternalFindings | undefined;
+  if (reader) original = reader.snapshot;
   try {
-    // This is the SDK's former normalized-input capture. It can recover an
-    // approved request, but an object unsupported by native clone is still valid JSON.
-    original = reader ? reader.snapshot : structuredClone(input);
     if (original) {
-      for (const finding of original.findings) {
+      // The released SDK cloned the report separately, then detached each raw
+      // finding before Cloud validation defaulted its typed evidence in place.
+      for (const finding of original.findings)
         if (finding.evidence.source_data !== undefined)
           finding.evidence.source_data = structuredClone(
             finding.evidence.source_data,
           );
-      }
       for (const finding of original.findings)
         finding.evidence = validateExternalEvidenceShape(finding.evidence);
     }
@@ -534,7 +578,11 @@ function normalizedPublicationInput(
     ...(original
       ? { original: { parsed: original, identity: identityOf(original) } }
       : {}),
-    ...(reader ? { potentialIds: reader.sourceFindingIds } : {}),
+    potentialIds:
+      reader?.sourceFindingIds ??
+      (original
+        ? undefined
+        : current.findings.map((row) => row.source_finding_id)),
   };
 }
 
@@ -1054,7 +1102,8 @@ async function preparePublicationInput(
         return false;
       if (
         potentialIds === undefined &&
-        projection.savedEvidenceDigest === hash("sha256", wireJson(rows))
+        (hasBoxedScalars ||
+          projection.savedEvidenceDigest === hash("sha256", wireJson(rows)))
       )
         return false;
       readSaved(record);

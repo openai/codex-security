@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
-  exportedGitHubEvidence,
+  exportedGitHubRecord,
   validateExternalEvidenceFields,
   validateExternalEvidence,
 } from "./external-import-contract.js";
@@ -277,6 +277,18 @@ export function legacyGitHubFindings(
     : { sourceFindingIds: selection.previous.sourceFindingIds };
 }
 
+function mapRecord(input: unknown) {
+  const record = asRecord(input);
+  if (!record) throw new Error("GitHub finding must be an object.");
+  if (record["source"] === "github-code-scanning")
+    return codeScanningFinding(record);
+  if (record["source"] === "github-security-advisory")
+    return advisoryFinding(record);
+  throw new Error(
+    "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
+  );
+}
+
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
@@ -290,43 +302,51 @@ function normalizeRecords(
   const originals =
     snapshot && target === "cloud" ? ([] as ExternalFinding[]) : undefined;
   const oldExcluded: ExternalFindings["excluded"] = [];
+  let canProvePrevious = true;
   const identities = new Set<string>();
   for (const [index, value] of records.entries()) {
-    const record = asRecord(value);
+    let exported = value;
     let oldChecked = false;
+    function exclusion(input: unknown, reason: string) {
+      return {
+        position: index + 1,
+        source_finding_id: text(asRecord(input)?.["url"]),
+        reason,
+      };
+    }
     try {
-      if (!record) throw new Error("GitHub finding must be an object.");
-      let candidate;
-      if (record["source"] === "github-code-scanning")
-        candidate = codeScanningFinding(record);
-      else if (record["source"] === "github-security-advisory")
-        candidate = advisoryFinding(record);
-      else
-        throw new Error(
-          "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
-        );
-      const id = candidate.source_finding_id;
-      let evidence;
       if (snapshot) {
-        const raw = validateExternalEvidenceFields(candidate.evidence, target);
-        evidence = exportedGitHubEvidence(
-          raw,
+        let previous: ExternalFinding | undefined;
+        if (originals) {
+          try {
+            const mapped = mapRecord(value);
+            previous = {
+              source_finding_id: mapped.source_finding_id,
+              evidence: validateExternalEvidenceFields(mapped.evidence, target),
+            };
+          } catch (error) {
+            // The old mapper rejected this row before it could inspect a serializer.
+            oldExcluded.push(exclusion(value, errorMessage(error)));
+            oldChecked = true;
+          }
+        }
+        exported = exportedGitHubRecord(
+          value,
+          index,
           target,
-          originals
-            ? (exclusion) => {
-                oldChecked = true;
-                if (!exclusion)
-                  originals.push({ source_finding_id: id, evidence: raw });
-                else
-                  oldExcluded.push({
-                    position: index + 1,
-                    source_finding_id: text(record["url"]),
-                    reason: exclusion,
-                  });
-              }
-            : undefined,
+          previous?.evidence,
+          (reason, exact) => {
+            if (!previous) return;
+            if (!exact) canProvePrevious = false;
+            oldChecked = true;
+            if (reason) oldExcluded.push(exclusion(value, reason));
+            else originals!.push(previous);
+          },
         );
-      } else evidence = validateExternalEvidence(candidate.evidence, target);
+      }
+      const mapped = mapRecord(exported);
+      const id = mapped.source_finding_id;
+      const evidence = validateExternalEvidence(mapped.evidence, target);
       if (identities.has(id))
         throw new CodexSecurityError(
           `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
@@ -335,19 +355,15 @@ function normalizeRecords(
       result.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
-      const excluded = {
-        position: index + 1,
-        source_finding_id: text(record?.["url"]),
-        reason: errorMessage(error),
-      };
-      result.excluded.push(excluded);
-      if (originals && !oldChecked) oldExcluded.push({ ...excluded });
+      const reason = errorMessage(error);
+      result.excluded.push(exclusion(exported, reason));
+      if (originals && !oldChecked) oldExcluded.push(exclusion(value, reason));
     }
   }
   if (originals?.length) {
     let native: ExternalFinding[] | undefined;
     try {
-      native = structuredClone(originals);
+      if (canProvePrevious) native = structuredClone(originals);
     } catch {
       /* No complete previous SDK snapshot could be reproduced. */
     }
