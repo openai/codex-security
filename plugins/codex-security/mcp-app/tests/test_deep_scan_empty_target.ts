@@ -51,49 +51,58 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
 after(() => temporaryDirectories.cleanup());
 
 for (const cancel of [false, true]) {
-  test(
-    `POSIX admission consumes one entry and closes its handle, cancel=${cancel}`,
-    { skip: process.platform === "win32" },
-    async () => {
-      const fixture = await fixtureRun();
-      await mkdir(fixture.run.targetPath, { recursive: true });
-      const controller = new AbortController();
-      let reads = 0,
-        closes = 0;
-      const handle = {
-        async read() {
-          reads++;
-          if (cancel) controller.abort("Canceled directory read");
-          return { name: "source.py" };
+  test(`admission consumes one entry and closes its handle, cancel=${cancel}`, async () => {
+    const fixture = await fixtureRun();
+    await mkdir(fixture.run.targetPath, { recursive: true });
+    const controller = new AbortController();
+    let reads = 0,
+      closes = 0;
+    const handle = {
+      async read() {
+        reads++;
+        if (cancel) controller.abort("Canceled directory read");
+        return { name: "source.py" };
+      },
+      async close() {
+        closes++;
+      },
+    };
+    const { checkSelectedTargets } = await importSource(
+      "src/deep-scan/target-admission.ts",
+      {
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL(
+              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+              import.meta.url,
+            ).href,
+          ),
         },
-        async close() {
-          closes++;
-        },
-      };
-      const { checkSelectedTargets } = await importSource(
-        "src/deep-scan/target-admission.ts",
-      );
-      const opener = mock.method(
-        filesystem,
-        "opendir",
-        async () => handle as unknown as Dir,
-      );
+      },
+    );
+    const opener = mock.method(
+      filesystem,
+      "opendir",
+      async (_path: unknown, options: unknown) => {
+        assert.deepEqual(options, { bufferSize: 1 });
+        return handle as unknown as Dir;
+      },
+    );
+    syncBuiltinESMExports();
+    try {
+      if (cancel)
+        await assert.rejects(
+          checkSelectedTargets(fixture.run, controller.signal),
+          (error) => error === "Canceled directory read",
+        );
+      else await checkSelectedTargets(fixture.run, controller.signal);
+      assert.equal(reads, 1);
+      assert.equal(closes, 1);
+    } finally {
+      opener.mock.restore();
       syncBuiltinESMExports();
-      try {
-        if (cancel)
-          await assert.rejects(
-            checkSelectedTargets(fixture.run, controller.signal),
-            (error) => error === "Canceled directory read",
-          );
-        else await checkSelectedTargets(fixture.run, controller.signal);
-        assert.equal(reads, 1);
-        assert.equal(closes, 1);
-      } finally {
-        opener.mock.restore();
-        syncBuiltinESMExports();
-      }
-    },
-  );
+    }
+  });
 }
 
 for (const nonempty of [false, true]) {

@@ -1,5 +1,5 @@
 import { opendir } from "node:fs/promises";
-import { windowsFiles } from "../helpers/resolve-security-md.js";
+import { encodeGitPath } from "../helpers/inventory-git.js";
 import { scopePath } from "../helpers/generate-inventory.js";
 import { fsPath, regular } from "../helpers/inventory-paths.js";
 import type { DeepScanRunState } from "./types.js";
@@ -24,22 +24,17 @@ export async function checkSelectedTargets(
     signal.throwIfAborted();
     try {
       if (regular(target)) return;
-      if (process.platform === "win32") {
-        const entries = windowsFiles().entriesWithTypes(
-          Buffer.from(target, "utf16le"),
-        );
+      const directory = await opendir(
+        process.platform === "win32" ? encodeGitPath(target) : fsPath(target),
+        { bufferSize: 1 },
+      );
+      try {
         signal.throwIfAborted();
-        if (entries.length > 0) return;
-      } else {
-        const directory = await opendir(fsPath(target));
-        try {
-          signal.throwIfAborted();
-          const entry = await directory.read();
-          signal.throwIfAborted();
-          if (entry !== null) return;
-        } finally {
-          await directory.close();
-        }
+        const entry = await directory.read();
+        signal.throwIfAborted();
+        if (entry !== null) return;
+      } finally {
+        await directory.close();
       }
     } catch (error) {
       signal.throwIfAborted();
