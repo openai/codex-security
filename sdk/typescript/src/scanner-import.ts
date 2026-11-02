@@ -241,6 +241,11 @@ export function sarifRunResults(
   const { rules: _rules, ...driverContext } = driver;
   const { driver: _driver, ...toolContext } = tool;
   const selectRunContext = sarifRunContextSelector(runContext);
+  // JS callers may supply lazy metadata. Preserve each adapter's original traversal order.
+  const metadataInReadOrder =
+    producer === "Semgrep"
+      ? [driverContext, toolContext, documentContext]
+      : [documentContext, driverContext, toolContext];
   const context = {
     rulesById,
     runContext,
@@ -250,13 +255,7 @@ export function sarifRunResults(
     ) {
       return structuredClone({
         documentContext,
-        runContext: selectRunContext(
-          result,
-          rule,
-          documentContext,
-          driverContext,
-          toolContext,
-        ),
+        runContext: selectRunContext(result, rule, ...metadataInReadOrder),
         driverContext,
         toolContext,
         ...(rule ? { rule } : {}),
@@ -270,19 +269,38 @@ export function sarifRunResults(
   }));
 }
 
-export function matchesSarifRuleReference(
-  reference: Record<string, unknown>,
+/** The top-level index and nested descriptor must agree with the selected driver rule. */
+export function validateSarifRuleReference(
+  result: Record<string, unknown>,
   ruleId: string,
   selected: IndexedSarifRule | undefined,
+  producer: "Endor" | "Semgrep" | "Snyk",
 ) {
-  return (
-    reference["toolComponent"] === undefined &&
-    (reference["id"] === undefined || reference["id"] === ruleId) &&
-    (reference["index"] === undefined ||
-      reference["index"] === selected?.index) &&
-    (reference["guid"] === undefined ||
-      reference["guid"] === selected?.rule["guid"])
+  // Snyk's original diagnostics use unqualified SARIF field names.
+  const label = producer === "Snyk" ? "Result" : producer;
+  if (
+    result["ruleIndex"] !== undefined &&
+    result["ruleIndex"] !== selected?.index
+  )
+    throw new Error(`${label} ruleIndex and ruleId disagree.`);
+  if (result["rule"] === undefined) return;
+  const reference = record(
+    result["rule"],
+    producer === "Snyk" ? "Rule reference" : `${producer} rule reference`,
   );
+  if (
+    reference["toolComponent"] !== undefined ||
+    (reference["id"] !== undefined && reference["id"] !== ruleId) ||
+    (reference["index"] !== undefined &&
+      reference["index"] !== selected?.index) ||
+    (reference["guid"] !== undefined &&
+      reference["guid"] !== selected?.rule["guid"])
+  )
+    throw new Error(
+      producer === "Snyk"
+        ? "Result uses an inconsistent or external rule reference."
+        : `Inconsistent or external ${producer} rule reference.`,
+    );
 }
 
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
