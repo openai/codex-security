@@ -31,6 +31,8 @@ import {
   readVendorFindings,
   readVendorFindingsForPublication,
 } from "../src/wiz-findings.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import previewCheckpoint from "./fixtures/wiz-preview-checkpoint.json" with { type: "json" };
@@ -181,6 +183,32 @@ test.each(["local", "cloud"] as const)(
       current.findings.map((finding) => finding.source_finding_id),
     ).toEqual(["package"]);
     expect(current.excluded.map((finding) => finding.position)).toEqual([2, 3]);
+    if (target === "local") {
+      await using local = await localFindingsFixture();
+      const prepare = () =>
+        prepareLocalExternalImport(
+          file,
+          {
+            repository: local.repository,
+            sourceKey: "synthetic-project",
+            provider: "wiz",
+          },
+          { environment: local.environment },
+        );
+      const prepared = await prepare();
+      expect(prepared.preview.findings).toEqual(current.findings);
+      expect(prepared.preview.excluded).toEqual(current.excluded);
+      expect((await prepared.import()).counts).toEqual({
+        created: 1,
+        updated: 0,
+        unchanged: 0,
+      });
+      expect((await (await prepare()).import()).counts).toEqual({
+        created: 0,
+        updated: 0,
+        unchanged: 1,
+      });
+    }
     await expect(
       readVendorFindingsForPublication(file, target),
     ).rejects.toThrow('Duplicate source finding id "sast:occurrence-1"');

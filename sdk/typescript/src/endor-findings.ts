@@ -5,7 +5,6 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
-  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -14,6 +13,7 @@ import {
   sarifResultContext,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
@@ -219,17 +219,8 @@ export function normalizeEndorSarif(
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
         );
-      const { rule, index: ruleIndex } = selectedRule;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Endor ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const reference = record(result["rule"], "Endor rule reference");
-        if (!matchesSarifRuleReference(reference, ruleId, selectedRule))
-          throw new Error("Inconsistent or external Endor rule reference.");
-      }
+      const { rule } = selectedRule;
+      validateSarifRuleReference(result, ruleId, selectedRule, "Endor");
       const message = record(result["message"], "Endor message");
       const short = record(
         rule["shortDescription"] ?? {},
