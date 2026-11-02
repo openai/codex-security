@@ -428,6 +428,42 @@ def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
     assert not inventory.exists()
 
 
+@pytest.mark.parametrize("lease_is_live", (True, False))
+def test_coordinator_claim_repairs_legacy_admitted_scan_progress(
+    tmp_path: Path, lease_is_live: bool
+) -> None:
+    state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex-home", tmp_path / "target"
+    target.mkdir()
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    scan_id = str(run["scanId"])
+
+    claimed = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
+    assert (claimed["phase"], claimed["coordinatorGeneration"]) == ("setup", 2)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET phase = 'discovery' WHERE id = ?", (scan_id,))
+        if not lease_is_live:
+            connection.execute(
+                "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
+                ("2000-01-01T00:00:00Z", scan_id),
+            )
+        before = connection.execute(
+            "SELECT phase, updated_at FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+    assert before is not None and before[0] == "setup"
+
+    recovered = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
+    assert recovered["coordinatorDisposition"] == ("observing" if lease_is_live else "adopted")
+    assert recovered["deepScan"]["phase"] == "discovery"
+    assert recovered["deepScan"]["coordinatorGeneration"] == (2 if lease_is_live else 3)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        after = connection.execute(
+            "SELECT phase, updated_at FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+    assert after is not None and after[0] == "discovery"
+    if lease_is_live:
+        assert after[1] == before[1]
+
+
 @pytest.mark.cross_platform
 def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
     tmp_path: Path,

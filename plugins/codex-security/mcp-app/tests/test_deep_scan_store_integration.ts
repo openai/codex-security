@@ -57,7 +57,8 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testEmptyTargetAdmissionAcrossCoordinatorClaimOrders();
-await testDurableAdmissionPreservesZeroHistoryRecovery();
+await testDurableAdmissionPreservesZeroHistoryRecovery("current");
+await testDurableAdmissionPreservesZeroHistoryRecovery("legacy");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -138,79 +139,111 @@ async function testEmptyTargetAdmissionAcrossCoordinatorClaimOrders() {
   }
 }
 
-async function testDurableAdmissionPreservesZeroHistoryRecovery() {
-  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
-    "deep-scan-admitted-zero-history-",
-  );
-  const selected = path.join(targetPath, "selected");
-  await mkdir(selected);
-  const source = path.join(selected, "source.py");
-  await writeFile(source, "print('selected')\n");
-  const runWorkbench = createWorkbenchRunner(environment);
-  const creator = new WorkbenchDeepScanStore(runWorkbench);
-  const scanRoot = path.join(fixtureRoot, "scans");
-  const threadId = "admitted-zero-history-owner";
-  try {
-    const run = await creator.begin({
-      targetPath: selected,
-      scope: ".",
-      threadId,
-      scanRoot,
-    });
-    const claimed = await creator.claimCoordinator({
-      scanId: run.scanId,
-      threadId,
-    });
-    assert.equal(claimed.acquired, true);
-    await creator.updateProgress({
-      scanId: run.scanId,
-      phase: "discovery",
-    });
-    const admitted = await creator.get(run.scanId, threadId);
-    assert.equal(admitted.phase, "discovery");
-    assert.equal(admitted.dispatchedCount, 0);
-    assert.deepEqual(admitted.persistedWorkers, []);
-
+async function testDurableAdmissionPreservesZeroHistoryRecovery(
+  recordVersion: "current" | "legacy",
+) {
+  for (const firstCaller of ["creator", "joiner"] as const) {
+    const { fixtureRoot, targetPath, environment } =
+      await createWorkbenchFixture(
+        `deep-scan-${recordVersion}-admitted-${firstCaller}-`,
+      );
+    const selected = path.join(targetPath, "selected");
+    await mkdir(selected);
+    const source = path.join(selected, "source.py");
+    await writeFile(source, "print('selected')\n");
+    const runWorkbench = createWorkbenchRunner(environment);
+    const initialStore = new WorkbenchDeepScanStore(runWorkbench);
+    const scanRoot = path.join(fixtureRoot, "scans");
+    const threadId = `${recordVersion}-${firstCaller}-zero-history-owner`;
     const python = process.env.PYTHON?.trim() || "python3";
-    await execFileAsync(
-      python,
-      [
-        "-c",
-        "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
-        path.join(fixtureRoot, "state", "workbench.sqlite3"),
-        run.scanId,
-      ],
-      { env: environment },
-    );
-    await rm(selected, { recursive: true });
+    const databasePath = path.join(fixtureRoot, "state", "workbench.sqlite3");
+    try {
+      const run = await initialStore.begin({
+        targetPath: selected,
+        scope: ".",
+        threadId,
+        scanRoot,
+      });
+      const claimed = await initialStore.claimCoordinator({
+        scanId: run.scanId,
+        threadId,
+      });
+      assert.equal(claimed.acquired, true);
+      if (recordVersion === "current") {
+        await initialStore.updateProgress({
+          scanId: run.scanId,
+          phase: "discovery",
+        });
+      } else {
+        await execFileAsync(
+          python,
+          [
+            "-c",
+            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE scans SET phase = 'discovery' WHERE id = ?\", (sys.argv[2],)); c.commit()",
+            databasePath,
+            run.scanId,
+          ],
+          { env: environment },
+        );
+      }
+      const admitted = await initialStore.get(run.scanId, threadId);
+      assert.equal(
+        admitted.phase,
+        recordVersion === "current" ? "discovery" : "setup",
+      );
+      assert.equal(admitted.dispatchedCount, 0);
+      assert.deepEqual(admitted.persistedWorkers, []);
 
-    const replacement = new WorkbenchDeepScanStore(runWorkbench);
-    const joined = await replacement.begin({
-      scanId: run.scanId,
-      threadId,
-      scanRoot,
-    });
-    assert.equal(joined.phase, "discovery");
-    const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-    const { coordinator } = await startDeepScanEngine({
-      run: joined,
-      store: replacement,
-      registry: registryWithExecutor(executor),
-      runWorkbench,
-      pluginRoot,
-      pythonCommand: python,
-      parentSandbox: { filesystemDenies: [] },
-      threadId,
-    });
-    await executor.discoveryStarted.promise;
-    assert.equal(executor.discoveryCalls, 1);
-    coordinator.cancel("fixture complete");
-    assert.equal(
-      (await coordinator.wait(undefined, 30_000))?.status,
-      "canceled",
-    );
-  } finally {
-    await rm(fixtureRoot, { recursive: true, force: true });
+      await execFileAsync(
+        python,
+        [
+          "-c",
+          "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
+          databasePath,
+          run.scanId,
+        ],
+        { env: environment },
+      );
+      await rm(selected, { recursive: true });
+
+      const creator = new WorkbenchDeepScanStore(runWorkbench);
+      const joiner = new WorkbenchDeepScanStore(runWorkbench);
+      const creatorRun = await creator.begin({
+        scanId: run.scanId,
+        threadId,
+        scanRoot,
+      });
+      const joinerRun = await joiner.begin({
+        scanId: run.scanId,
+        threadId,
+        scanRoot,
+      });
+      const replacement = firstCaller === "creator" ? creator : joiner;
+      const joined = firstCaller === "creator" ? creatorRun : joinerRun;
+      const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+      const { coordinator } = await startDeepScanEngine({
+        run: joined,
+        store: replacement,
+        registry: registryWithExecutor(executor),
+        runWorkbench,
+        pluginRoot,
+        pythonCommand: python,
+        parentSandbox: { filesystemDenies: [] },
+        threadId,
+      });
+      await executor.discoveryStarted.promise;
+      assert.equal(executor.discoveryCalls, 1);
+      const recovered = await replacement.get(run.scanId, threadId);
+      assert.equal(recovered.phase, "discovery");
+      assert.ok(recovered.dispatchedCount > 0);
+      coordinator.cancel("fixture complete");
+      assert.equal(
+        (await coordinator.wait(undefined, 30_000))?.status,
+        "canceled",
+      );
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
   }
 }
 

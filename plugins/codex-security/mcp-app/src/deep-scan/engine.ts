@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import type { Dir, Dirent } from "node:fs";
+import type { Dir } from "node:fs";
 import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
@@ -106,12 +106,16 @@ export async function checkFreshTarget(
 
   for (const selectedPath of run.includePaths ?? [run.scope]) {
     if (signal.aborted) return;
-    if (exactFiles.has(selectedPath)) return;
 
     const target = join(run.targetPath, selectedPath);
     try {
-      const metadata = await fs.stat(target);
+      const metadata = await abortableFilesystemOperation(
+        fs.stat(target),
+        signal,
+      );
+      if (metadata === filesystemOperationAborted) return;
       if (signal.aborted) return;
+      if (exactFiles.has(selectedPath)) return;
       if (!metadata.isDirectory()) return;
       const hasEntry = await directoryHasEntry(target, signal);
       if (signal.aborted) return;
@@ -128,53 +132,96 @@ export async function checkFreshTarget(
   );
 }
 
-const directoryReadAborted = Symbol("directoryReadAborted");
+const filesystemOperationAborted = Symbol("filesystemOperationAborted");
 
 async function directoryHasEntry(
   target: string,
   signal: AbortSignal,
 ): Promise<boolean> {
-  const directory = await fs.opendir(target);
+  const open = fs.opendir(target);
+  const directory = await abortableFilesystemOperation(open, signal);
+  if (directory === filesystemOperationAborted) {
+    void open.then(closeDirectoryEventually, () => {});
+    return false;
+  }
+  let closeStarted = false;
+  const close = async (wait: boolean): Promise<void> => {
+    if (closeStarted) return;
+    closeStarted = true;
+    let closing: Promise<void>;
+    try {
+      closing = directory.close();
+    } catch (error) {
+      if (wait && !signal.aborted) throw error;
+      return;
+    }
+    if (!wait) {
+      void closing.catch(() => {});
+      return;
+    }
+    await abortableFilesystemOperation(closing, signal);
+  };
   let operationError: unknown;
   try {
     if (signal.aborted) return false;
-    const entry = await readDirectoryEntry(directory, signal);
-    return entry !== directoryReadAborted && entry !== null;
+    const read = directory.read();
+    const entry = await abortableFilesystemOperation(read, signal);
+    if (entry === filesystemOperationAborted) {
+      void close(false);
+      return false;
+    }
+    return entry !== null;
   } catch (error) {
     operationError = error;
     throw error;
   } finally {
-    try {
-      await directory.close();
-    } catch (error) {
-      if (operationError === undefined && !signal.aborted) throw error;
+    if (!closeStarted) {
+      try {
+        await close(true);
+      } catch (error) {
+        if (operationError === undefined && !signal.aborted) throw error;
+      }
     }
   }
 }
 
-async function readDirectoryEntry(
-  directory: Dir,
+async function abortableFilesystemOperation<T>(
+  operation: Promise<T>,
   signal: AbortSignal,
-): Promise<Dirent | null | typeof directoryReadAborted> {
-  if (signal.aborted) return directoryReadAborted;
-  const read = directory.read();
+): Promise<T | typeof filesystemOperationAborted> {
   return await new Promise((resolve, reject) => {
+    let settled = false;
     const cleanup = () => signal.removeEventListener("abort", onAbort);
     const onAbort = () => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      resolve(directoryReadAborted);
+      resolve(filesystemOperationAborted);
     };
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
-    void read.then(
-      (entry) => {
+    void operation.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
         cleanup();
-        resolve(entry);
+        resolve(value);
       },
       (error: unknown) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(error);
       },
     );
   });
+}
+
+async function closeDirectoryEventually(directory: Dir): Promise<void> {
+  try {
+    await directory.close();
+  } catch {
+    // Cancellation won before the open completed. The handle is no longer part
+    // of admission, and a late close failure must not become unhandled.
+  }
 }

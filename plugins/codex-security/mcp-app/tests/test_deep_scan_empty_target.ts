@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import {
@@ -162,6 +163,20 @@ for (const replacement of ["file", "directory"] as const) {
   });
 }
 
+test("a deleted exact-file selection retains its filesystem diagnostic", async () => {
+  const fixture = await fixtureRun();
+  fixture.run.includePaths = ["selected.py"];
+  fixture.run.filePaths = ["selected.py"];
+  await mkdir(fixture.run.targetPath, { recursive: true });
+
+  const { coordinator, executor } = await startFixture(fixture);
+  const terminal = await coordinator.wait(undefined, 10_000);
+  assert.equal(terminal?.status, "failed");
+  assert.match(terminal?.error ?? "", /ENOENT|no such file/iu);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+});
+
 test(
   "an unreadable selected directory retains its filesystem diagnostic",
   { skip: permissionTestUnavailable },
@@ -296,11 +311,13 @@ test("explicit cancellation during admission remains canceled", async () => {
   assert.equal(completed, 0);
 });
 
-test("a deadline during the single-entry probe closes its directory handle", async (t) => {
+test("a deadline during the single-entry probe does not await queued close", async (t) => {
   const fixture = await fixtureRun();
   await mkdir(fixture.run.targetPath, { recursive: true });
   const realOpen = fs.opendir.bind(fs);
   const readStarted = Promise.withResolvers<void>();
+  const readFinished = Promise.withResolvers<null>();
+  const closeFinished = Promise.withResolvers<void>();
   let closeCalls = 0;
   t.mock.method(
     fs,
@@ -310,10 +327,11 @@ test("a deadline during the single-entry probe closes its directory handle", asy
       return {
         read: async () => {
           readStarted.resolve();
-          return await new Promise<never>(() => {});
+          return await readFinished.promise;
         },
         close: async () => {
           closeCalls += 1;
+          await closeFinished.promise;
           await directory.close();
         },
       } as unknown as Awaited<ReturnType<typeof fs.opendir>>;
@@ -324,39 +342,180 @@ test("a deadline during the single-entry probe closes its directory handle", asy
   await readStarted.promise;
   controller.abort("deep_scan_discovery_deadline_reached");
 
-  await check;
+  await completesWithin(check);
+  assert.equal(closeCalls, 1);
+  readFinished.reject(new Error("late directory read failure"));
+  closeFinished.resolve();
+  await delay(0);
   assert.equal(closeCalls, 1);
 });
 
 test("an abort racing listener registration closes its directory handle", async (t) => {
   const fixture = await fixtureRun();
   await mkdir(fixture.run.targetPath, { recursive: true });
+  const readFinished = Promise.withResolvers<null>();
   let closeCalls = 0;
   t.mock.method(fs, "opendir", async () => {
     return {
-      read: async () => await new Promise<never>(() => {}),
+      read: async () => await readFinished.promise,
       close: async () => void (closeCalls += 1),
     } as unknown as Awaited<ReturnType<typeof fs.opendir>>;
   });
   let aborted = false;
+  let listenerRegistrations = 0;
   const signal = {
     get aborted() {
       return aborted;
     },
     addEventListener() {
-      aborted = true;
+      listenerRegistrations += 1;
+      if (listenerRegistrations === 3) aborted = true;
     },
     removeEventListener() {},
   } as unknown as AbortSignal;
 
   await checkFreshTarget(fixture.run, signal);
   assert.equal(closeCalls, 1);
+  readFinished.resolve(null);
+});
+
+test("cancellation interrupts pending metadata and ignores its late rejection", async (t) => {
+  const fixture = await fixtureRun();
+  const statStarted = Promise.withResolvers<void>();
+  const statFinished =
+    Promise.withResolvers<Awaited<ReturnType<typeof fs.stat>>>();
+  t.mock.method(fs, "stat", async () => {
+    statStarted.resolve();
+    return await statFinished.promise;
+  });
+  const controller = new AbortController();
+  const check = checkFreshTarget(fixture.run, controller.signal);
+  await statStarted.promise;
+  controller.abort("fixture cancellation");
+
+  await completesWithin(check);
+  statFinished.reject(new Error("late metadata failure"));
+  await delay(0);
+});
+
+test("cancellation interrupts pending open and closes a late directory handle", async (t) => {
+  const fixture = await fixtureRun();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const openStarted = Promise.withResolvers<void>();
+  const openFinished =
+    Promise.withResolvers<Awaited<ReturnType<typeof fs.opendir>>>();
+  let closeCalls = 0;
+  t.mock.method(fs, "opendir", async () => {
+    openStarted.resolve();
+    return await openFinished.promise;
+  });
+  const controller = new AbortController();
+  const check = checkFreshTarget(fixture.run, controller.signal);
+  await openStarted.promise;
+  controller.abort("fixture cancellation");
+
+  await completesWithin(check);
+  openFinished.resolve({
+    close: async () => void (closeCalls += 1),
+  } as Awaited<ReturnType<typeof fs.opendir>>);
+  await waitFor(() => closeCalls === 1);
+});
+
+test("cancellation interrupts a pending close and ignores its late rejection", async (t) => {
+  const fixture = await fixtureRun();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const closeStarted = Promise.withResolvers<void>();
+  const closeFinished = Promise.withResolvers<void>();
+  t.mock.method(fs, "opendir", async () => {
+    return {
+      read: async () => ({ name: "source.py" }),
+      close: async () => {
+        closeStarted.resolve();
+        await closeFinished.promise;
+      },
+    } as Awaited<ReturnType<typeof fs.opendir>>;
+  });
+  const controller = new AbortController();
+  const check = checkFreshTarget(fixture.run, controller.signal);
+  await closeStarted.promise;
+  controller.abort("fixture cancellation");
+
+  await completesWithin(check);
+  closeFinished.reject(new Error("late close failure"));
+  await delay(0);
+});
+
+test("filesystem admission removes abort listeners after normal operations", async (t) => {
+  const fixture = await fixtureRun();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const listeners = new Set<unknown>();
+  const signal = {
+    aborted: false,
+    addEventListener(_type: string, listener: unknown) {
+      listeners.add(listener);
+    },
+    removeEventListener(_type: string, listener: unknown) {
+      listeners.delete(listener);
+    },
+  } as unknown as AbortSignal;
+  t.mock.method(fs, "opendir", async () => {
+    return {
+      read: async () => ({ name: "source.py" }),
+      close: async () => {},
+    } as Awaited<ReturnType<typeof fs.opendir>>;
+  });
+
+  await checkFreshTarget(fixture.run, signal);
+  assert.equal(listeners.size, 0);
+});
+
+test("a real directory read does not make aborted admission await queued close", async (t) => {
+  const fixture = await fixtureRun();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  await writeFile(path.join(fixture.run.targetPath, "source.py"), "pass\n");
+  const realOpen = fs.opendir.bind(fs);
+  const readStarted = Promise.withResolvers<void>();
+  let readSettled = false;
+  let closeCalls = 0;
+  t.mock.method(
+    fs,
+    "opendir",
+    async (...args: Parameters<typeof fs.opendir>) => {
+      const directory = await realOpen(...args);
+      const realRead = directory.read.bind(directory);
+      const realClose = directory.close.bind(directory);
+      return {
+        read: () => {
+          const read = realRead();
+          readStarted.resolve();
+          void read.then(
+            () => void (readSettled = true),
+            () => void (readSettled = true),
+          );
+          return read;
+        },
+        close: async () => {
+          closeCalls += 1;
+          await realClose();
+        },
+      } as Awaited<ReturnType<typeof fs.opendir>>;
+    },
+  );
+  const controller = new AbortController();
+  const check = checkFreshTarget(fixture.run, controller.signal);
+  await readStarted.promise;
+  assert.equal(readSettled, false);
+  controller.abort("fixture cancellation");
+
+  await completesWithin(check);
+  await waitFor(() => closeCalls === 1);
+  assert.equal(closeCalls, 1);
 });
 
 test("a large flat directory is admitted with one entry read", async (t) => {
   const fixture = await fixtureRun();
   await mkdir(fixture.run.targetPath, { recursive: true });
-  const fileCount = 5_000;
+  const fileCount = 20_000;
   for (let offset = 0; offset < fileCount; offset += 250) {
     await Promise.all(
       Array.from({ length: Math.min(250, fileCount - offset) }, (_, index) =>
@@ -472,4 +631,34 @@ async function runGit(repository: string, ...arguments_: string[]) {
     { cwd: repository, encoding: "utf8" },
   );
   return stdout.trim();
+}
+
+async function completesWithin<T>(operation: Promise<T>): Promise<T> {
+  return await new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error("filesystem admission did not respond to cancellation"),
+        ),
+      1_000,
+    );
+    void operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await delay(10);
+  }
+  assert.fail("eventual directory cleanup did not finish");
 }

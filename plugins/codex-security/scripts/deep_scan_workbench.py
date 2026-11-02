@@ -25,6 +25,7 @@ from workbench_validation import optional_text, require_uuid, user_context_argum
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
 DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR = "\nOriginal Deep Scan failure:\n"
+LEGACY_ADMITTED_SCAN_PHASES = frozenset(("discovery", "validation", "attack_path", "reporting"))
 
 
 _dependencies: Any = None
@@ -921,6 +922,17 @@ def claim_deep_scan_coordinator_locked(
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
         run, _ = require_running_deep_scan(connection, scan_id)
+        if run["phase"] == "setup" and scan["phase"] in LEGACY_ADMITTED_SCAN_PHASES:
+            # Before deep_scan_runs.phase was advanced with scan progress, a process
+            # could stop after durable discovery admission but before dispatching a
+            # worker. Repair that legacy split-brain state without renewing its
+            # coordinator lease or re-running fresh-target admission.
+            connection.execute(
+                "UPDATE deep_scan_runs SET phase = 'discovery' "
+                "WHERE scan_id = ? AND phase = 'setup'",
+                (scan_id,),
+            )
+            run, _ = require_running_deep_scan(connection, scan_id)
         timestamp = dependencies().now()
         if args.coordinator_generation is not None:
             require_current_coordinator(run, args)
