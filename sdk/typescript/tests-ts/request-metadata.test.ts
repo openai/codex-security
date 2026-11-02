@@ -116,7 +116,8 @@ test("native table overrides preserve inherited literal metadata and opt-outs", 
     codexPath: resolveCodexCommand({}).command,
     // Native descendants can hold their working directory open on Windows.
     cwd: dirname(home),
-    configOverrides: [context.configOverride],
+    // Marketplace sync can leave a Git process in CODEX_HOME during cleanup.
+    configOverrides: ["features.plugins=false", context.configOverride],
     env: {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],

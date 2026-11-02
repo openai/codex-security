@@ -224,6 +224,32 @@ export function indexSarifRules(
   return byId;
 }
 
+/** Keep the report and producer context shared by individual SARIF results. */
+export function sarifResultContext(
+  document: Record<string, unknown>,
+  run: Record<string, unknown>,
+  tool: Record<string, unknown>,
+  driver: Record<string, unknown>,
+  producer: "Endor" | "Semgrep",
+) {
+  const rules = array(driver["rules"] ?? [], `${producer} rules`).map((rule) =>
+    record(rule, `${producer} rule`),
+  );
+  const rulesById = indexSarifRules(rules.entries());
+  const { runs: _runs, ...documentContext } = document;
+  const { results: _results, tool: _tool, ...runContext } = run;
+  const { rules: _rules, ...driverContext } = driver;
+  const { driver: _driver, ...toolContext } = tool;
+  return {
+    rulesById,
+    selectRunContext: sarifRunContextSelector(runContext),
+    documentContext,
+    runContext,
+    driverContext,
+    toolContext,
+  };
+}
+
 export function matchesSarifRuleReference(
   reference: Record<string, unknown>,
   ruleId: string,

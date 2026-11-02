@@ -5,14 +5,13 @@ import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
-  indexSarifRules,
   matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextSelector,
+  sarifResultContext,
   strings,
   text,
 } from "./scanner-import.js";
@@ -199,23 +198,10 @@ export function normalizeEndorSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Endor SARIF report.");
-    const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
-      record(r, "Endor rule"),
-    );
-    const rulesById = indexSarifRules(rules.entries());
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
-    const selectRunContext = sarifRunContextSelector(runContext);
+    const context = sarifResultContext(document, run, tool, driver, "Endor");
     return array(run["results"] ?? [], "Endor results").map((result) => ({
       result,
-      rulesById,
-      selectRunContext,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
+      ...context,
     }));
   });
   return normalizeRecords(
