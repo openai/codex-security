@@ -7169,7 +7169,11 @@ export async function main(
       ["github-advisories", "semgrep", "snyk", "sonar"].includes(
         subcommand ?? "",
       );
-    if (command === "import" && frameworkFlags.rawCollector) {
+    if (
+      command === "import" &&
+      subcommand !== "sonar" &&
+      frameworkFlags.rawCollector
+    ) {
       // Incur's skill-sync notice turns a saved collector array into an object.
       cliOptions.sync = false;
     }
