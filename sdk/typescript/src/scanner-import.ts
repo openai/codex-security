@@ -224,8 +224,8 @@ export function indexSarifRules(
   return byId;
 }
 
-/** Keep the report and producer context shared by individual SARIF results. */
-export function sarifResultContext(
+/** Pair each result with its shared run context and original evidence. */
+export function sarifRunResults(
   document: Record<string, unknown>,
   run: Record<string, unknown>,
   tool: Record<string, unknown>,
@@ -240,14 +240,34 @@ export function sarifResultContext(
   const { results: _results, tool: _tool, ...runContext } = run;
   const { rules: _rules, ...driverContext } = driver;
   const { driver: _driver, ...toolContext } = tool;
-  return {
+  const selectRunContext = sarifRunContextSelector(runContext);
+  const context = {
     rulesById,
-    selectRunContext: sarifRunContextSelector(runContext),
-    documentContext,
     runContext,
-    driverContext,
-    toolContext,
+    sourceData(
+      result: Record<string, unknown>,
+      rule?: Record<string, unknown>,
+    ) {
+      return structuredClone({
+        documentContext,
+        runContext: selectRunContext(
+          result,
+          rule,
+          documentContext,
+          driverContext,
+          toolContext,
+        ),
+        driverContext,
+        toolContext,
+        ...(rule ? { rule } : {}),
+        result,
+      });
+    },
   };
+  return array(run["results"] ?? [], `${producer} results`).map((result) => ({
+    result,
+    context,
+  }));
 }
 
 export function matchesSarifRuleReference(

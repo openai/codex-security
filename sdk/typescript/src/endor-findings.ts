@@ -11,7 +11,7 @@ import {
   record,
   relativePath,
   requiredText,
-  sarifResultContext,
+  sarifRunResults,
   strings,
   text,
 } from "./scanner-import.js";
@@ -198,15 +198,11 @@ export function normalizeEndorSarif(
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Endor SARIF report.");
-    const context = sarifResultContext(document, run, tool, driver, "Endor");
-    return array(run["results"] ?? [], "Endor results").map((result) => ({
-      result,
-      ...context,
-    }));
+    return sarifRunResults(document, run, tool, driver, "Endor");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, selectRunContext, ...context }) => {
+    ({ result: value, context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -214,7 +210,7 @@ export function normalizeEndorSarif(
       );
       requiredText(properties["project-uuid"], "Endor project-uuid");
       const ruleId = requiredText(result["ruleId"], "Endor ruleId");
-      const selectedRule = rulesById.get(ruleId);
+      const selectedRule = context.rulesById.get(ruleId);
       if (!selectedRule)
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
@@ -300,18 +296,7 @@ export function normalizeEndorSarif(
               locations.map((location) => [JSON.stringify(location), location]),
             ).values(),
           ],
-          source_data: structuredClone({
-            ...context,
-            runContext: selectRunContext(
-              result,
-              rule,
-              context.documentContext,
-              context.driverContext,
-              context.toolContext,
-            ),
-            rule,
-            result,
-          }),
+          source_data: context.sourceData(result, rule),
         },
         target,
       );
