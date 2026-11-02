@@ -14,7 +14,17 @@
           "type": "object",
           "properties": {
             "name": { "type": "string", "minLength": 1 },
-            "version": { "type": "string", "minLength": 1 }
+            "version": { "type": "string", "minLength": 1 },
+            "instructionDigests": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 71,
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "uniqueItems": true
+            }
           },
           "required": ["name", "version"]
         },

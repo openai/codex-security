@@ -476,5 +476,14 @@
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
     ]
+  },
+  {
+    "version": 59,
+    "name": "record scan and worker instruction digests",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN instruction_digest TEXT;",
+      "ALTER TABLE scans ADD COLUMN prepared_instruction_digests_json TEXT;",
+      "ALTER TABLE deep_scan_workers ADD COLUMN instruction_digest TEXT;"
+    ]
   }
 ]

@@ -70,6 +70,20 @@ version (`bundledPluginVersion`), and Codex runtime and SDK pins (`codexVersion`
 and `codexSdkVersion`). If you used a marketplace plugin, a plugin supplied by
 path, or a custom Codex executable, include its version separately.
 
+To compare the bundled instructions selected by native scans, compare
+`scan.producer.instructionDigests` in their sealed `scan-manifest.json` files.
+The first entry identifies the plugin Markdown selected at registration. Each
+Deep Scan coordinator measures its references and compiled role templates when
+it claims a lease. A worker whose bundle differs can add another entry. The
+workbench receives that digest with the worker's first start record. If the
+digest is unavailable when that write is dispatched, the scan omits the list.
+These digests identify bundle snapshots. Workers can read individual files later.
+Older scans, imports, and mock runs also omit the list. Custom validation
+records the SHA when the skill and reference bytes used to build its discovery
+prompt match the selected bundle at registration. A previously accepted manifest
+keeps its original producer metadata. Compare user prompts, models, and settings
+separately.
+
 For example, `npm view @openai/codex-security@0.1.5 gitHead dist.integrity`
 shows the registry's source commit and tarball digest. Compare `gitHead` with
 the commit for tag `npm-v0.1.5`. `npm pack @openai/codex-security@0.1.5` downloads

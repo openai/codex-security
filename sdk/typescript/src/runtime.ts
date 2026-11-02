@@ -1732,7 +1732,13 @@ export async function runWorkbench(
             script,
             ...(framedArguments ? [] : arguments_),
           ],
-      pluginHelperEnvironment(node?.environment ?? options.environment),
+      pluginHelperEnvironment({
+        ...(node?.environment ?? options.environment),
+        _CODEX_SECURITY_INSTRUCTION_ROOT:
+          arguments_[0] === "register-cli-scan"
+            ? options.pluginRoot
+            : undefined,
+      }),
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
         ? JSON.stringify(

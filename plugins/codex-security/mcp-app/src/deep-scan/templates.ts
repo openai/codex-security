@@ -1,5 +1,13 @@
-import discoveryTemplate from "../../templates/deep-scan/discovery.md";
-import dedupTemplate from "../../templates/deep-scan/dedup.md";
+import { createHash } from "node:crypto";
+import discoveryTemplate from "../../../references/deep-scan/discovery.md";
+import dedupTemplate from "../../../references/deep-scan/dedup.md";
+
+export function deepRoleDigests() {
+  return {
+    discovery: createHash("sha256").update(discoveryTemplate).digest("hex"),
+    dedup: createHash("sha256").update(dedupTemplate).digest("hex"),
+  };
+}
 
 export interface DiscoveryPromptInput {
   scanId: string;

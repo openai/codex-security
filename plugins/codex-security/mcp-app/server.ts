@@ -34,6 +34,7 @@ import {
   type DeepWorkerParentSandbox,
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
+import { deepRoleDigests } from "./src/deep-scan/templates.js";
 import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
 import type { DeepScanRunState } from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
@@ -497,7 +498,10 @@ export function createCodexSecurityServer(): McpServer {
   >();
   // Serialize start-or-join so a scan creates only one coordinator.
   const deepScanStartLock = new AsyncLock();
-  const deepScanStore = new WorkbenchDeepScanStore(runWorkbench);
+  const deepScanStore = new WorkbenchDeepScanStore(runWorkbench, {
+    pluginRoot: PLUGIN_ROOT,
+    roleDigests: deepRoleDigests(),
+  });
   const authenticatedArtifactClaims = new Map<
     string,
     {
@@ -505,8 +509,10 @@ export function createCodexSecurityServer(): McpServer {
       threadId: string;
     }
   >();
-  server.server.onclose = () =>
+  server.server.onclose = () => {
+    deepScanStore.stopInstructionMeasurements();
     deepScanCoordinators.shutdown("mcp_transport_closed");
+  };
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
   const destructiveAnnotations = {

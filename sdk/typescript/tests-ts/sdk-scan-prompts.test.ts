@@ -1,5 +1,15 @@
+import { Database } from "bun:sqlite";
+import { runWorkbench } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { captureCli } from "./support/cli-run.js";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  mkdir,
+  readFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/index.js";
@@ -22,6 +32,101 @@ import { workbenchCommand } from "./support/workbench-command.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
+
+test("SDK registration measures the shell-visible instructions separately from user prompts", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const state = join(root, "state");
+  const codexHome = join(root, "codex-home");
+  const plugin = join(root, "shell-plugin");
+  const reference = join(plugin, "references", "core-scan.md");
+  await mkdir(repository);
+  await mkdir(codexHome);
+  await mkdir(plugin);
+  await writeFile(join(repository, "example.ts"), "export {};");
+  for (const dir of ["scripts", "shared", "schemas", "skills", "references"]) {
+    await cp(join(PLUGIN_ROOT, dir), join(plugin, dir), { recursive: true });
+  }
+  const runtime = preparedRuntime(codexHome);
+  runtime.plugin.pluginRoot = plugin;
+  const installed = join(root, "installed-plugin");
+  for (const entry of ["skills", "references", ".mcp.json"]) {
+    await cp(join(PLUGIN_ROOT, entry), join(installed, entry), {
+      recursive: true,
+    });
+  }
+  runtime.plugin.installedRoot = installed;
+  const register = async (
+    options: { scanPrompt?: string; validationPrompt?: string },
+    beforeRegistration?: () => Promise<void>,
+  ) => {
+    const scanDir = await temporaryDirectory();
+    let digest: string | null | undefined;
+    await using client = TestClient.withDependencies({
+      environment: {
+        CODEX_SECURITY_STATE_DIR: state,
+        _CODEX_SECURITY_INSTRUCTION_ROOT: PLUGIN_ROOT,
+      },
+      prepareRuntime: async () => runtime,
+      resolvePluginPython: async () =>
+        Bun.which("python3") ?? Bun.which("python")!,
+      prepareOutputDir: async () => scanDir,
+      runWorkbench: async (workbench, args, input) => {
+        if (args[0] !== "register-cli-scan") return mockWorkbench(args, input);
+        await beforeRegistration?.();
+        const { scanId } = await runWorkbench(workbench, args, input);
+        const db = new Database(join(state, "workbench.sqlite3"), {
+          readonly: true,
+        });
+        try {
+          digest = db
+            .query<{ instruction_digest: string | null }, [string]>(
+              "SELECT instruction_digest FROM scans WHERE id = ?",
+            )
+            .get(String(scanId))!.instruction_digest;
+        } finally {
+          db.close();
+        }
+        throw new Error("registration recorded");
+      },
+    });
+    await expect(client.run(repository, options)).rejects.toThrow(
+      "registration recorded",
+    );
+    return digest;
+  };
+  const original = await register({});
+  expect(original).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(await register({ scanPrompt: "Focus on synthetic cases." })).toBe(
+    original,
+  );
+  expect(
+    await register({ validationPrompt: "Validate synthetic candidates." }),
+  ).toBe(original);
+  await appendFile(reference, "\n");
+  const edited = await register({});
+  expect(edited).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(edited).not.toBe(original);
+  expect(
+    await register({ validationPrompt: "Validate synthetic candidates." }),
+  ).toBeNull();
+  // The adapter already rendered the installed core before both copies agree on a new version.
+  const installedCore = join(installed, "references", "core-scan.md");
+  const originalCore = await readFile(installedCore, "utf8");
+  await writeFile(reference, originalCore);
+  const changedEol = originalCore.includes("\r\n")
+    ? originalCore.replaceAll("\r\n", "\n")
+    : originalCore.replaceAll("\n", "\r\n");
+  const custom = { validationPrompt: "Validate synthetic candidates." };
+  expect(
+    await register(custom, async () => {
+      await Promise.all(
+        [reference, installedCore].map((path) => writeFile(path, changedEol)),
+      );
+    }),
+  ).toBeNull();
+  expect(await register(custom)).toMatch(/^sha256:[0-9a-f]{64}$/);
+});
 
 test("rerun recognizes unchanged context after the workbench serializes its recipe", async () => {
   const root = await temporaryDirectory();

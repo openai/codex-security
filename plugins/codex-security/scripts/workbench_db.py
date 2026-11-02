@@ -48,6 +48,7 @@ from finalize_scan_contract import (
     ContractError,
     RecoverableContractError,
     _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
@@ -77,6 +78,7 @@ from workbench_constants import (
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
+from workbench_instruction_digest import bundled_instruction_digest
 from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
     archive_scan,
@@ -337,8 +339,37 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
+def scan_instruction_digests(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str] | None:
+    if (prepared := scan["prepared_instruction_digests_json"]) is not None:
+        return json.loads(prepared)
+    parent = scan["instruction_digest"]
+    if parent is None:
+        return None
+    digests = [parent]
+    if scan["mode"] == "deep":
+        workers = connection.execute(
+            """
+            SELECT instruction_digest FROM deep_scan_workers
+            WHERE scan_id = ? AND kind IN ('discovery', 'dedup') AND started_at IS NOT NULL
+            GROUP BY instruction_digest
+            -- A whole UTC second sorts before its fractions once the trailing Z is removed.
+            ORDER BY MIN(rtrim(started_at, 'Z')), instruction_digest
+            """,
+            (scan["id"],),
+        )
+        for (digest,) in workers:
+            if digest is None:
+                return None
+            if digest != parent:
+                digests.append(digest)
+    return digests
+
+
 def workbench_completion_binding(
-    scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    completed_at: str,
+    manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
@@ -378,15 +409,71 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
-    return scan_history.preserve_sealed_completion(binding, manifest)
+    if (digests := scan_instruction_digests(connection, scan)) is not None:
+        binding["producer"]["instructionDigests"] = digests
+    manifest_scan = manifest.get("scan") if manifest is not None else None
+    if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+        # Keep the original producer; finalization still validates schema, seal and owner.
+        binding["startedAt"] = manifest_scan.get("startedAt")
+        binding["completedAt"] = manifest_scan.get("completedAt")
+        producer = manifest_scan.get("producer")
+        verify_sealed_instruction_digests(scan, manifest_scan, connection)
+        if isinstance(producer, dict):
+            binding["producer"]["version"] = producer.get("version")
+            if "instructionDigests" in producer:
+                binding["producer"]["instructionDigests"] = producer["instructionDigests"]
+            else:
+                binding["producer"].pop("instructionDigests", None)
+    return binding
 
 
-def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
+def pin_prepared_instruction_digests(
+    connection: sqlite3.Connection, scan_id: str, producer: dict[str, Any]
+) -> None:
+    connection.execute(
+        """UPDATE scans SET prepared_instruction_digests_json = ?
+           WHERE id = ? AND prepared_instruction_digests_json IS NULL""",
+        (json.dumps(producer.get("instructionDigests")), scan_id),
+    )
+
+
+def verify_sealed_instruction_digests(
+    scan: sqlite3.Row, manifest_scan: dict[str, Any], connection: sqlite3.Connection
+) -> None:
+    # SQL NULL is unprepared. JSON null pins the absence of a list in an admitted seal.
+    prepared = scan["prepared_instruction_digests_json"]
+    producer = manifest_scan.get("producer")
+    if prepared is not None:
+        if not isinstance(producer, dict) or json.loads(prepared) != producer.get(
+            "instructionDigests"
+        ):
+            raise SystemExit("manifest.scan.producer.instructionDigests changed after preparation.")
+    elif isinstance(producer, dict) and "instructionDigests" in producer:
+        if (recorded := scan["seal_manifest_digest"]) is not None:
+            manifest, raw = _read_scan_local_json_bytes(
+                Path(scan["scan_dir"]), ARTIFACTS["manifest"], "scan manifest"
+            )
+            if (
+                f"sha256:{hashlib.sha256(raw).hexdigest()}" != recorded
+                or manifest.get("scan") != manifest_scan
+            ):
+                raise SystemExit("The sealed scan manifest changed after completion.")
+        elif producer["instructionDigests"] != scan_instruction_digests(connection, scan):
+            raise SystemExit(
+                "manifest.scan.producer.instructionDigests must match the workbench scan."
+            )
+
+
+def verify_manifest_binding(
+    scan: sqlite3.Row, manifest: dict[str, Any], connection: sqlite3.Connection
+) -> None:
     manifest_scan = manifest.get("scan")
     if not isinstance(manifest_scan, dict):
         raise SystemExit("scan-manifest.json scan must be an object.")
     if manifest_scan.get("id") != scan["id"]:
         raise SystemExit("scan-manifest.json scan.id must match the workbench scan ID.")
+    if manifest_is_sealed(manifest_scan):
+        verify_sealed_instruction_digests(scan, manifest_scan, connection)
     target = manifest_scan.get("target")
     if not isinstance(target, dict):
         raise SystemExit("scan-manifest.json scan.target must be an object.")
@@ -620,6 +707,12 @@ def scan_target_root(scan_root: str | None, target: Path) -> Path:
     return target_root
 
 
+def selected_instruction_digest(expected_sources: dict[str, str] | None = None) -> str | None:
+    return bundled_instruction_digest(
+        os.environ.get("_CODEX_SECURITY_INSTRUCTION_ROOT"), expected_sources=expected_sources
+    )
+
+
 def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     manages_transaction = not connection.in_transaction
@@ -674,6 +767,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         )
         target_root = scan_target_root(args.scan_root, target)
         create_private_directory(target_root)
+        instruction_digest = selected_instruction_digest()
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
@@ -724,6 +818,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
+            instruction_digest=instruction_digest,
             timestamp=timestamp,
             model=args.model,
             reasoning_effort=args.reasoning_effort,
@@ -773,6 +868,7 @@ def _start_prompt_driven_scan(
     )
     target_root = scan_target_root(args.scan_root, target)
 
+    instruction_digest = selected_instruction_digest()
     busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
@@ -887,6 +983,7 @@ def _start_prompt_driven_scan(
                 target_root=target_root,
                 target_summary=target_summary,
                 scope_file_count=scope_file_count,
+                instruction_digest=instruction_digest,
                 timestamp=timestamp,
                 handoff_status="delivered",
                 model=args.model,
@@ -1202,7 +1299,9 @@ def complete_scan_locked(
         and isinstance(current_manifest.get("scan"), dict)
         and manifest_is_sealed(current_manifest["scan"])
     )
-    completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
+    completion_binding = workbench_completion_binding(
+        connection, scan, completion_timestamp, current_manifest
+    )
     if scan["recipe_json"] is not None:
         missing_drafts = []
         for file_name in (
@@ -1269,13 +1368,18 @@ def complete_scan_locked(
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
         with connection:
+            prepared_scan = prepared.manifest["scan"]
+            if prepared.was_sealed:
+                published_manifest_digest(scan_dir, prepared.manifest)
+            else:
+                # Bind the producer before a new seal can become visible.
+                pin_prepared_instruction_digests(connection, scan_id, prepared_scan["producer"])
             if warnings != json.loads(scan["completion_warnings_json"]):
                 # Retain pre-publication diagnostics even if output writes fail.
                 connection.execute(
                     "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
                     (json.dumps(warnings), scan_id),
                 )
-            prepared_scan = prepared.manifest["scan"]
             if scan["mode"] == "deep" and (
                 not prepared.was_sealed
                 or "coverageRef" in prepared_scan
@@ -1319,6 +1423,8 @@ def complete_scan_locked(
             )
             if updated.rowcount != 1:
                 raise SystemExit("Only a running scan can be prepared for completion.")
+            if prepared.was_sealed:
+                pin_prepared_instruction_digests(connection, scan_id, manifest["scan"]["producer"])
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
         return context
@@ -1359,6 +1465,8 @@ def complete_scan_locked(
             claim_token,
             error_message="Scan completion is owned by another continuation.",
         )
+        if prepared.was_sealed:
+            pin_prepared_instruction_digests(connection, scan_id, manifest["scan"]["producer"])
         connection.execute("DELETE FROM scan_artifacts WHERE scan_id = ?", (scan["id"],))
         for kind, path in artifacts.items():
             if path is not None:
@@ -1429,8 +1537,10 @@ def register_cli_scan(
         scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
+    custom_validation_sources = None
     if args.registration_json_stdin:
         registration = json.load(sys.stdin)
+        custom_validation_sources = registration.get("customValidationSources")
         recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
         user_context = registration.get("userContext")
         workflow_id = registration.get("workflowId")
@@ -1460,6 +1570,12 @@ def register_cli_scan(
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
+    instruction_digest = None
+    if not recipe.get("mock") and "import" not in recipe:
+        if recipe.get("validationMode") != "custom":
+            instruction_digest = selected_instruction_digest()
+        elif isinstance(custom_validation_sources, dict) and custom_validation_sources:
+            instruction_digest = selected_instruction_digest(custom_validation_sources)
     target_identity = scan_target_identity(repository, diff_target)
     source_scopes = capture_source_scopes(
         repository,
@@ -1541,6 +1657,7 @@ def register_cli_scan(
                 target_root=scan_dir.parent,
                 target_summary=None,
                 scope_file_count=scope_file_count,
+                instruction_digest=instruction_digest,
                 timestamp=timestamp,
                 handoff_status="delivered",
                 scan_dir=scan_dir,
@@ -1656,9 +1773,11 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     return recipe
 
 
-def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
+def coverage_summary_for_history(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, Any]:
     return scan_history.coverage_summary_for_history(
-        _WORKBENCH_DB_CONTEXT, scan, require_canonical_scan_directory
+        _WORKBENCH_DB_CONTEXT, connection, scan, require_canonical_scan_directory
     )
 
 
@@ -2421,7 +2540,9 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
         try:
-            result["scan"] = dict(result["scan"], coverage=coverage_summary_for_history(scan))
+            result["scan"] = dict(
+                result["scan"], coverage=coverage_summary_for_history(connection, scan)
+            )
         except (OSError, RuntimeError, SystemExit):
             pass  # Historical artifacts may no longer be available or verifiable.
     return result
@@ -2494,7 +2615,7 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
-    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, scan)
+    model_fields = saved_results.threat_model_fields(_WORKBENCH_DB_CONTEXT, connection, scan)
     if path := model_fields.get("threatModelPath"):
         artifacts["threatModel"] = path
     occurrence_rows = scan_history.finding_occurrence_rows(
@@ -2640,12 +2761,14 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     try:
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
-        verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
+        verify_manifest_binding(
+            scan, read_json_object(scan_dir / ARTIFACTS["manifest"]), connection
+        )
         manifest, findings_document, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
+            verify_manifest=lambda manifest: verify_manifest_binding(scan, manifest, connection),
         )
-        verify_manifest_binding(scan, manifest)
         manifest_digest = published_manifest_digest(scan_dir, manifest)
     except (ContractError, OSError, SystemExit, ValueError):
         return
@@ -3093,6 +3216,11 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         preserve_stopped_results=preserve_stopped_results_after_transition,
     )
     deep_scan.configure(command_context)
+    if args.command == "measure-deep-scan-instructions":
+        selected = json.load(sys.stdin)
+        digest = bundled_instruction_digest(selected["pluginRoot"], selected["roleDigests"])
+        print(json.dumps({"instructionDigest": digest}))
+        return
     if args.command == "resolve-scan-root":
         print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
         return

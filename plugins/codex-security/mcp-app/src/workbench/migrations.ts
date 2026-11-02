@@ -35,8 +35,11 @@ function addColumn(database: DatabaseSync, statement: string): void {
 }
 
 function repairAdditive(database: DatabaseSync, version: number): void {
-  for (const statement of migration(version).statements)
-    addColumn(database, statement);
+  for (const statement of migration(version).statements) {
+    if (statement.startsWith("CREATE INDEX IF NOT EXISTS "))
+      database.exec(statement);
+    else addColumn(database, statement);
+  }
 }
 
 function normalizeHistory(database: DatabaseSync): void {
@@ -225,7 +228,7 @@ export function applyMigrations(
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
         if (
-          [2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58].includes(
+          [2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59].includes(
             item.version,
           )
         )

@@ -26,8 +26,8 @@ const { createCodexSecurityServer } = await importModule({
     contents: source
       .replace("new DeepScanCoordinatorRegistry()", `${fixtureAccess}.registry`)
       .replace(
-        "new WorkbenchDeepScanStore(runWorkbench)",
-        `${fixtureAccess}.store`,
+        'import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";',
+        `class WorkbenchDeepScanStore { constructor() { return ${fixtureAccess}.store; } }`,
       )
       .replace(
         'import { resolvePythonCommand } from "./src/python_command.js";',
@@ -68,6 +68,7 @@ try {
       const fixture = await fixtureRun();
       const registry = new DeepScanCoordinatorRegistry();
       const store = new FakeStore(fixture.run);
+      const stopInstructionMeasurements = mock.fn();
       const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
@@ -86,6 +87,7 @@ try {
           registry,
           executor,
           store: Object.assign(store, {
+            stopInstructionMeasurements,
             begin: async () => {
               if (stage === "begin" || stage === "queued") await hold();
               return structuredClone(store.run);
@@ -162,6 +164,7 @@ try {
           await secondStarted.promise;
         }
         await client.close();
+        assert.equal(stopInstructionMeasurements.mock.callCount(), 1);
         assert.ok(signals.every((signal) => signal.aborted));
         release.resolve();
         // Client rejection precedes handler completion when the transport closes.

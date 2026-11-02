@@ -1,17 +1,24 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { importSource } from "./import-module.ts";
 
-const { renderDedupPrompt, renderDiscoveryPrompt } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/templates.ts"),
-  { loader: { ".md": "text" } },
-);
+const { deepRoleDigests, renderDedupPrompt, renderDiscoveryPrompt } =
+  await importSource(
+    join(import.meta.dirname, "../src/deep-scan/templates.ts"),
+    { loader: { ".md": "text" } },
+  );
 
-for (const name of ["discovery", "dedup"]) {
+const roleDigests = deepRoleDigests();
+for (const name of ["discovery", "dedup"] as const) {
   const template = await readFile(
-    new URL(`../templates/deep-scan/${name}.md`, import.meta.url),
+    new URL(`../../references/deep-scan/${name}.md`, import.meta.url),
     "utf8",
+  );
+  assert.equal(
+    roleDigests[name],
+    createHash("sha256").update(template).digest("hex"),
   );
   for (const key of template.match(/\{\{[A-Z0-9_]+\}\}/g) ?? []) {
     assert.equal(key, `{{${name.toUpperCase()}_CONTEXT_JSON}}`);

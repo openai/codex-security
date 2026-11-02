@@ -2273,14 +2273,14 @@ export class CodexSecurity {
             authentication.credentialType === "api_key")) &&
         (this.#dependencies.canRunDirectDeepScan?.() ??
           !process.versions["bun"]);
-      const discoveryPrompt =
+      const customDiscovery =
         options.validationPrompt === undefined
           ? undefined
           : await customDiscoveryPrompt(
               runtime.plugin.installedRoot,
               skillName,
             );
-      if (discoveryPrompt !== undefined)
+      if (customDiscovery !== undefined)
         session.sessionConfig = await customValidationConfig(
           resolveCodexProfile(session.sessionConfig),
           runtime.plugin.installedRoot,
@@ -2612,6 +2612,7 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
+                customValidationSources: customDiscovery?.sourceDigests,
                 userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
@@ -2867,7 +2868,7 @@ export class CodexSecurity {
           ? registration["userContext"]
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
-        discoveryPrompt,
+        customDiscovery?.prompt,
         modelProvider,
         options.ownerSuggestions,
       );
