@@ -11,7 +11,7 @@ contents:
     - busybox=1.38.0-r3
     - c-ares=1.34.9-r0
     - ca-certificates-bundle=20261020-r0
-    - codex-security=0.7.0-r1
+    - "@LOCAL_PACKAGE@"
     - cyrus-sasl-heimdal-libs=2.1.28-r58
     - gdbm=1.26-r8
     - git=2.56.0-r3
@@ -95,3 +95,6 @@ work-dir: /state
 entrypoint:
   command: /usr/local/bin/codex-security-entrypoint
 cmd: --help
+annotations:
+  # @RECIPE_REVISION@
+  io.openai.codex-security.payload-sha256: "@PAYLOAD_SHA256@"

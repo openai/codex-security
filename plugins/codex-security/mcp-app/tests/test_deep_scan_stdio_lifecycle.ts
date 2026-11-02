@@ -15,6 +15,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -767,6 +768,7 @@ model_reasoning_summary = "none"
     assertNoError(started);
     const resumedScan = started.result.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
+    await chmod(resumedScan.scanDir, 0o755);
     const handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
       [
@@ -999,6 +1001,7 @@ model_reasoning_summary = "none"
         threadId: resumedThreadId,
       });
       assert.equal(finished.status, "succeeded");
+      assert.equal((await stat(resumedScan.scanDir)).mode & 0o777, 0o755);
       assert.equal(
         finished.coordinatorGeneration,
         partial!.coordinatorGeneration + 1,
@@ -1287,7 +1290,8 @@ async function testCliDeepScanEngine({
   const threadId = "cli-engine-session";
   const register = async (name: string, scoped = false) => {
     const scanDir = path.join(canonicalRoot, name);
-    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(scanDir, { mode: 0o775 });
+    await chmod(scanDir, 0o775);
     const registration = await runWorkbench(
       environment,
       [
@@ -1400,6 +1404,7 @@ async function testCliDeepScanEngine({
     code: "ENOENT",
   });
   await launch(completed.scanId);
+  assert.equal((await stat(completed.scanDir)).mode & 0o777, 0o775);
   assert.equal(
     (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length,
     count,

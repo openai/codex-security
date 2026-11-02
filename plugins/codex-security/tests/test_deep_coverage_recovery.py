@@ -13,8 +13,10 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    select_checkpoint,
     write_checkpoint,
     write_completed_contract,
+    write_result_draft,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -26,9 +28,7 @@ def worker(root: Path, name: str, draft: dict):
     output = root / "artifacts" / "deep_discovery" / "workers" / name / "output"
     (output / "artifacts").mkdir(parents=True)
     (output / "artifacts/review.md").write_text(f"{name} source review\n")
-    result = output / "result.json"
-    result.write_text(json.dumps(draft))
-    os.utime(result, ns=(100, 100))
+    write_result_draft(output / "result.json", draft, mtime_ns=100)
     return saved_discovery_worker(output, name, 1)
 
 
@@ -104,7 +104,6 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
         )
         workers.append(source)
 
-    head = tmp_path / "checkpoint-head.json"
     for name, observed, pending in [("first", 200, ["Review second."]), ("second", 300, [])]:
         rejection = {
             "id": name,
@@ -116,8 +115,7 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
         checkpoint = write_checkpoint(
             tmp_path / "checkpoints", saved_draft("coverage-scan", surfaces=[rejection])
         )
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        select_checkpoint(tmp_path, checkpoint, mtime_ns=observed)
         documents = recover(tmp_path, workers, project=True)
         assert [
             row["reason"] for row in documents[2]["deferred"] if row["id"] != "scan-stopped"
@@ -196,11 +194,8 @@ def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_
     source = worker(tmp_path, "first", closed)
     output = Path(source["artifact_dir"])
     for modified, draft in [(100, pending), (200, closed)]:
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+        checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
+    select_checkpoint(output, checkpoint, mtime_ns=200)
     os.utime(output / "result.json", ns=(200, 200))
     parent = saved_draft("coverage-scan")
     parent["coverage"] = {
@@ -233,11 +228,9 @@ def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
     question = {"question": "Which routes are public?"}
     earlier = saved_draft(scan_id, surfaces=[surface])
     earlier["coverage"]["openQuestions"] = [question]
-    head = tmp_path / "checkpoint-head.json"
     for observed, draft in [(100_000, earlier), (200_000, saved_draft(scan_id))]:
         checkpoint = write_checkpoint(tmp_path / "checkpoints", draft)
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(observed, observed))
+        select_checkpoint(tmp_path, checkpoint, mtime_ns=observed)
         saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
 
     finding_path = (
@@ -337,11 +330,8 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
         surfaces=[{**surface, "disposition": "no_issue_found"}],
         closures=[{"id": "review", "reason": "Review completed."}],
     )
-    checkpoint = write_checkpoint(output / "checkpoints", closed)
-    os.utime(checkpoint, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(400, 400))
+    checkpoint = write_checkpoint(output / "checkpoints", closed, mtime_ns=300)
+    select_checkpoint(output, checkpoint, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
     documents = recover(tmp_path, [source])
     replay = recover(tmp_path, [source], frozen=documents[0]["scan"]["preservedSources"])
@@ -383,8 +373,7 @@ def test_parent_surface_fallback_uses_current_snapshot(
     older["coverage"]["surfaces"][0].update(label=old_label, receiptRefs=["artifacts/old.md"])
     for name, draft, modified in [("old", older, 50), ("new", current, 100)]:
         (output / "artifacts" / f"{name}.md").write_text(f"{name} evidence\n")
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
+        write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
         parent = copy.deepcopy(draft)
         parent["coverage"]["surfaces"][0].update(
             id="first/api",
@@ -394,12 +383,9 @@ def test_parent_surface_fallback_uses_current_snapshot(
         parent["coverage"]["deferred"] = [
             {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
         ]
-        parent_path = write_checkpoint(tmp_path / "checkpoints", parent)
-        os.utime(parent_path, ns=(modified + 100, modified + 100))
+        parent_path = write_checkpoint(tmp_path / "checkpoints", parent, mtime_ns=modified + 100)
     if selected_parent:
-        head = tmp_path / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": parent_path.name}))
-        os.utime(head, ns=(250, 250))
+        select_checkpoint(tmp_path, parent_path, mtime_ns=250)
     else:
         write_saved_parent(tmp_path, parent, 200)
     template = tmp_path / "template"
@@ -410,11 +396,9 @@ def test_parent_surface_fallback_uses_current_snapshot(
     selected = write_checkpoint(
         output / "checkpoints",
         saved_draft("coverage-scan", complete=complete_worker, findings=[finding]),
+        mtime_ns=300,
     )
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     result = recover(tmp_path, [source])
@@ -462,8 +446,7 @@ def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mod
             {**writer, "receiptRefs": [f"artifacts/{historical_name}", "artifacts/missing.md"]}
         ],
     )
-    checkpoint = write_checkpoint(output / "checkpoints", older)
-    os.utime(checkpoint, ns=(50, 50))
+    write_checkpoint(output / "checkpoints", older, mtime_ns=50)
     parent = copy.deepcopy(draft)
     for row in parent["coverage"]["surfaces"]:
         row.update(
@@ -483,11 +466,9 @@ def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mod
     selected = write_checkpoint(
         output / "checkpoints",
         saved_draft("coverage-scan", complete=True, surfaces=selected_surfaces),
+        mtime_ns=300,
     )
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
     result = recover(tmp_path, [source], warnings=warnings)
@@ -526,15 +507,13 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
     if earlier_identity is not None:
         older = copy.deepcopy(draft)
         older["coverage"]["surfaces"][-1]["id"] = earlier_identity
-        checkpoint = write_checkpoint(Path(source["artifact_dir"]) / "checkpoints", older)
-        os.utime(checkpoint, ns=(50, 50))
+        checkpoint = write_checkpoint(
+            Path(source["artifact_dir"]) / "checkpoints", older, mtime_ns=50
+        )
     if selected_checkpoint:
         output = Path(source["artifact_dir"])
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(300, 300))
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(head, ns=(400, 400))
+        checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=300)
+        select_checkpoint(output, checkpoint, mtime_ns=400)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][-1].update(id=published_id, workerId="first")
     if colliding_candidate:
@@ -590,11 +569,8 @@ def test_parent_only_task_keeps_link_to_explicit_worker_surface(
                 "label"
             ] = expected_label
         output = Path(source["artifact_dir"])
-        selected_path = write_checkpoint(output / "checkpoints", selected)
-        os.utime(selected_path, ns=(300, 300))
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": selected_path.name}))
-        os.utime(head, ns=(400, 400))
+        selected_path = write_checkpoint(output / "checkpoints", selected, mtime_ns=300)
+        select_checkpoint(output, selected_path, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
 
     result = recover(tmp_path, [source])
@@ -683,11 +659,9 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
     selected = write_checkpoint(
         output / "checkpoints",
         saved_draft("coverage-scan", complete=True, deferred=selected_tasks),
+        mtime_ns=300,
     )
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     result = recover(tmp_path, [source])
@@ -719,15 +693,11 @@ def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_par
     output = Path(source["artifact_dir"])
     older = copy.deepcopy(draft)
     older["coverage"]["surfaces"][0]["id"] = "restored"
-    checkpoint = write_checkpoint(output / "checkpoints", older)
-    os.utime(checkpoint, ns=(50, 50))
+    checkpoint = write_checkpoint(output / "checkpoints", older, mtime_ns=50)
     selected = copy.deepcopy(older)
     selected["coverage"]["surfaces"][0]["notes"] = "Updated review."
-    checkpoint = write_checkpoint(output / "checkpoints", selected)
-    os.utime(checkpoint, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(400, 400))
+    checkpoint = write_checkpoint(output / "checkpoints", selected, mtime_ns=300)
+    select_checkpoint(output, checkpoint, mtime_ns=400)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
     parent["coverage"]["deferred"] = [
@@ -775,16 +745,14 @@ def test_parent_link_recovery_leaves_malformed_collection_for_existing_finalizer
     parent["coverage"]["deferred"] = [
         {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
     ]
-    checkpoint = write_checkpoint(tmp_path / "checkpoints", parent)
-    os.utime(checkpoint, ns=(150, 150))
+    write_checkpoint(tmp_path / "checkpoints", parent, mtime_ns=150)
     parent["coverage"]["surfaces"] = {"malformed": True}
     write_saved_parent(tmp_path, parent, 200)
     output = Path(source["artifact_dir"])
-    selected = write_checkpoint(output / "checkpoints", saved_draft("coverage-scan", complete=True))
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    selected = write_checkpoint(
+        output / "checkpoints", saved_draft("coverage-scan", complete=True), mtime_ns=300
+    )
+    select_checkpoint(output, selected, mtime_ns=400)
 
     result = saved.merge_saved_results(
         tmp_path,
@@ -847,8 +815,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
     output = Path(source["artifact_dir"])
     older = copy.deepcopy(draft)
     older["coverage"]["surfaces"][0]["id"] = "restored"
-    checkpoint = write_checkpoint(output / "checkpoints", older)
-    os.utime(checkpoint, ns=(50, 50))
+    checkpoint = write_checkpoint(output / "checkpoints", older, mtime_ns=50)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][0].update(
         id="first/0",
@@ -874,11 +841,8 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
         ],
         closures=[] if repair_only else [{"id": "review", "reason": "Worker review completed."}],
     )
-    checkpoint = write_checkpoint(output / "checkpoints", replacement)
-    os.utime(checkpoint, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(400, 400))
+    checkpoint = write_checkpoint(output / "checkpoints", replacement, mtime_ns=300)
+    select_checkpoint(output, checkpoint, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     frozen = None
     for _ in range(2):
@@ -993,11 +957,9 @@ def test_distinct_anonymous_checkpoint_tasks_survive_reconciliation_before_proje
         checkpoint = write_checkpoint(
             output / "checkpoints",
             saved_draft("coverage-scan", deferred=[{"reason": reason}], complete=False),
+            mtime_ns=index * 100,
         )
-        os.utime(checkpoint, ns=(index * 100, index * 100))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(250, 250))
+    select_checkpoint(output, checkpoint, mtime_ns=250)
     source = saved_discovery_worker(output, "first", 1)
     result = recover(tmp_path, [source], project=True)
     replay = recover(tmp_path, [source], project=True, frozen=result[0]["scan"]["preservedSources"])
@@ -1122,9 +1084,7 @@ def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, e
     checkpoint = write_checkpoint(
         output / "checkpoints", saved_draft("coverage-scan", complete=True, surfaces=[rejection])
     )
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(200, 200))
+    select_checkpoint(output, checkpoint, mtime_ns=200)
 
     _, findings, coverage = recover(tmp_path, [first, second], project=True, warnings=[])
     collision = earlier_ref != ref
@@ -1348,8 +1308,7 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
         complete=True,
         surfaces=[{**surface, "receiptRefs": ["artifacts/replacement.md"]}],
     )
-    checkpoint = write_checkpoint(output / "checkpoints", current)
-    os.utime(checkpoint, ns=(300, 300))
+    write_checkpoint(output / "checkpoints", current, mtime_ns=300)
     warnings = []
     documents = saved.merge_saved_results(
         tmp_path,
@@ -1411,8 +1370,7 @@ def test_superseded_surface_cannot_reserve_historical_receipt(tmp_path, projecte
         ],
         closures=[{"id": "review-reader", "reason": "Reader review complete."}],
     )
-    (output / "result.json").write_text(json.dumps(current))
-    os.utime(output / "result.json", ns=(300, 300))
+    write_result_draft(output / "result.json", current, mtime_ns=300)
     prefix = archive.relative_to(tmp_path).as_posix() + "/"
     if projected_parent:
         parent = copy.deepcopy(old)
@@ -1487,17 +1445,19 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
             ),
         ]:
             checkpoint = write_checkpoint(
-                output / "checkpoints", saved_draft("coverage-scan", surfaces=[row])
+                output / "checkpoints",
+                saved_draft("coverage-scan", surfaces=[row]),
+                mtime_ns=modified,
             )
-            os.utime(checkpoint, ns=(modified, modified))
         missing_path = output / "artifacts/missing.md"
     else:
         archive = output.parent / "attempts/attempt-01"
         (archive / "artifacts").mkdir(parents=True)
-        (archive / "result.json").write_text(
-            json.dumps(saved_draft("coverage-scan", complete=True, surfaces=[surface]))
+        write_result_draft(
+            archive / "result.json",
+            saved_draft("coverage-scan", complete=True, surfaces=[surface]),
+            mtime_ns=100,
         )
-        os.utime(archive / "result.json", ns=(100, 100))
         missing_path = archive / "artifacts/missing.md"
         accepted = saved_draft(
             "coverage-scan",
@@ -1511,10 +1471,8 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
                 }
             ],
         )
-        checkpoint = write_checkpoint(output / "checkpoints", accepted)
-        os.utime(checkpoint, ns=(200, 200))
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
-        os.utime(output / "checkpoint-head.json", ns=(250, 250))
+        checkpoint = write_checkpoint(output / "checkpoints", accepted, mtime_ns=200)
+        select_checkpoint(output, checkpoint, mtime_ns=250)
         (output / "result.json").write_text(json.dumps(accepted))
         pending = saved_draft(
             "coverage-scan",
@@ -1527,8 +1485,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
                 }
             ],
         )
-        checkpoint = write_checkpoint(output / "checkpoints", pending)
-        os.utime(checkpoint, ns=(400, 400))
+        checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=400)
         source["attempt"] = 2
     os.utime(output / "result.json", ns=(300, 300))
     if not missing:
@@ -1575,30 +1532,28 @@ def test_receipt_repair_does_not_promote_unselected_checkpoint_evidence(
     output = Path(source["artifact_dir"])
     if accepted_receipt_exists:
         (output / "artifacts/accepted.md").write_text("Accepted receipt.\n")
-        historical = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft(
                 "coverage-scan",
                 complete=True,
                 surfaces=[{**surface, "receiptRefs": ["artifacts/missing.md"]}],
             ),
+            mtime_ns=100,
         )
-        os.utime(historical, ns=(100, 100))
-    selected = write_checkpoint(output / "checkpoints", accepted)
-    os.utime(selected, ns=(200, 200))
-    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(output / "checkpoint-head.json", ns=(250, 250))
+    selected = write_checkpoint(output / "checkpoints", accepted, mtime_ns=200)
+    select_checkpoint(output, selected, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     (output / "artifacts/unselected.md").write_text("Unselected interrupted observation.\n")
-    pending = write_checkpoint(
+    write_checkpoint(
         output / "checkpoints",
         saved_draft(
             "coverage-scan",
             complete=False,
             surfaces=[{**surface, "receiptRefs": ["artifacts/unselected.md"]}],
         ),
+        mtime_ns=400,
     )
-    os.utime(pending, ns=(400, 400))
     originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     frozen = None
     for _ in range(2):
@@ -1659,10 +1614,8 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
         ("distinct.md", "Independent receipt bytes."),
     ):
         (output / "artifacts" / name).write_text(text)
-    selected = write_checkpoint(output / "checkpoints", accepted)
-    os.utime(selected, ns=(200, 200))
-    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(output / "checkpoint-head.json", ns=(250, 250))
+    selected = write_checkpoint(output / "checkpoints", accepted, mtime_ns=200)
+    select_checkpoint(output, selected, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     if checkpoint != "absent":
         name = {
@@ -1670,14 +1623,14 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
             "conflicting": unselected_name,
             "distinct": "distinct.md",
         }[checkpoint]
-        pending = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft(
                 "coverage-scan",
                 surfaces=[{**surface, "receiptRefs": [f"artifacts/{name}"]}],
             ),
+            mtime_ns=400,
         )
-        os.utime(pending, ns=(400, 400))
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     documents = recover(tmp_path, [source], project=True)
     replay = recover(
@@ -1720,17 +1673,15 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
         "coverage-scan", complete=True, surfaces=[surface("writer", ["Review.md", "missing.md"])]
     )
     for modified, draft in [(100, history), (200, accepted)]:
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
-    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(output / "checkpoint-head.json", ns=(250, 250))
+        checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
+    select_checkpoint(output, checkpoint, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     if unselected:
         checkpoint = write_checkpoint(
             output / "checkpoints",
             saved_draft("coverage-scan", surfaces=[surface("reader", ["review.md"])]),
+            mtime_ns=400,
         )
-        os.utime(checkpoint, ns=(400, 400))
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
     documents = saved.merge_saved_results(
@@ -1823,10 +1774,8 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         ],
     )
     for modified, draft in [(100, history), (200, accepted)]:
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(modified, modified))
-    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(output / "checkpoint-head.json", ns=(250, 250))
+        checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
+    select_checkpoint(output, checkpoint, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     originals = {p: p.read_bytes() for p in output.rglob("*") if p.is_file()}
     warnings = []
@@ -1883,3 +1832,32 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     )
     assert replay[2] == documents[2]
     assert all(path.read_bytes() == content for path, content in originals.items())
+
+
+def test_reducer_relinks_its_deferred_task_when_reusing_a_worker_result(tmp_path):
+    upstream = {"id": "route", "label": "Upstream", "disposition": "no_issue_found"}
+    previous = {**upstream, "id": "upstream/route", "workerId": "upstream"}
+    published = {**previous, "id": "local/upstream/route", "workerId": "local"}
+    task = {"id": "review", "reason": "Pending review", "surfaceIds": [published["id"]]}
+    first = worker(tmp_path, "upstream", saved_draft("coverage-scan", surfaces=[upstream]))
+    local = worker(
+        tmp_path,
+        "local",
+        saved_draft(
+            "coverage-scan", complete=True, surfaces=[previous, published], deferred=[task]
+        ),
+    )
+    result = str(Path(local["artifact_dir"]) / "result.json")
+    local.update(status="succeeded", result_manifest_path=result)
+    reducer = worker(tmp_path, "reducer", saved_draft("coverage-scan"))
+    reducer.update(kind="dedup", status="succeeded", completed_at="", result_manifest_path=result)
+    workers = [first, local, reducer]
+    docs = recover(tmp_path, workers, project=True)
+    replay = recover(tmp_path, workers, project=True, frozen=docs[0]["scan"]["preservedSources"])
+    for coverage in (docs[2], replay[2]):
+        reducer_task = next(row for row in coverage["deferred"] if row["id"] == task["id"])
+        (surface_id,) = reducer_task["surfaceIds"]
+        surface = next(row for row in coverage["surfaces"] if row["id"] == surface_id)
+        assert surface["workerId"] == previous["workerId"]
+        assert surface["provenance"]["workerId"] == local["id"]
+        assert surface["provenance"]["sourceId"] == previous["id"]

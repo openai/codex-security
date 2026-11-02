@@ -11,6 +11,7 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
+- Declare plugin app connections with `required: false` so local scans work without them.
 - Pass Codex-owned settings through existing SDK configuration interfaces.
   Accept reasoning-effort values as strings and pass them through unchanged.
   Do not maintain wrapper-owned model or reasoning-effort enums or allowlists;
@@ -86,6 +87,12 @@ variables, and defaults as public API.
   choices are unclear.
 - Update relevant help, schemas, documentation, and tests in the same change.
   Describe the public CLI change in the pull request.
+
+## Published documentation
+
+For changes to how developers use the CLI, SDK, or plugin, update the affected
+docs and examples in this repository. Maintainers update the [published docs](https://learn.chatgpt.com/docs/security).
+To suggest a website edit, name the page or workflow and describe the change in your PR.
 
 ## Pull request labels
 

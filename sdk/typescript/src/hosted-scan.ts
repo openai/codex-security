@@ -1,6 +1,10 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readScanFile, safeScopePath } from "./contract.js";
+import {
+  readScanFile,
+  safeScopePath,
+  validatedFileDigests,
+} from "./contract.js";
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
 import {
@@ -287,11 +291,12 @@ export async function runHostedScan(
     )
       throw new Error("Completed artifacts do not match the requested scope.");
     const sources = result.manifest.scan["preservedSources"];
+    const sealedDigests = validatedFileDigests.get(result.manifest)!;
     const names = new Set([
       "scan-manifest.json",
       "findings.json",
       "report.md",
-      ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
+      ...result.manifest.scan.artifacts.map(({ path }) => path),
       ...(isRecord(sources) ? Object.keys(sources) : []),
     ]);
     if (result.ownerSuggestionsPath !== undefined)
@@ -301,11 +306,20 @@ export async function runHostedScan(
         const contents = await readScanFile(outputDirectory, path, path);
         return {
           path,
-          sha256: createHash("sha256").update(contents).digest("hex"),
-          bytes: Buffer.byteLength(contents),
+          sha256: hash("sha256", contents),
+          bytes: contents.byteLength,
         };
       }),
     );
+    // Report a seal mismatch after the concurrent reads have closed their files.
+    for (const { path, sha256 } of artifacts) {
+      const expected = sealedDigests.get(path);
+      if (expected !== undefined && expected !== sha256) {
+        throw new Error(
+          `The sealed file ${path} changed before the hosted receipt was created.`,
+        );
+      }
+    }
     return {
       ...base(),
       status: "completed" as const,
