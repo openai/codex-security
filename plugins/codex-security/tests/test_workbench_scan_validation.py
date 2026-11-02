@@ -20,7 +20,9 @@ def test_snapshot_reports_unreadable_tracked_file(
 ) -> None:
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
-    (repository / ".gitattributes").write_bytes(b"* invalid\x1b[2J\xff\n")
+    (repository / ".gitattributes").write_bytes(
+        b"* invalid\x1b[2J\xff" + "é\u202e\U000e0001\n".encode()
+    )
     source = repository / "README.md"
     source.write_text("Changed contents.\n")
     mode = source.stat().st_mode
@@ -34,7 +36,7 @@ def test_snapshot_reports_unreadable_tracked_file(
     diagnostic = str(error.value)
     assert "README.md" in diagnostic
     assert "Permission denied" in diagnostic
-    assert r"invalid\x1b[2J\xff" in diagnostic
+    assert r"invalid\x1b[2J\xffé\u202e\U000e0001" in diagnostic
 
 
 @pytest.mark.parametrize("kind", ["directory", "git", "dirty", "working_tree", "refs"])

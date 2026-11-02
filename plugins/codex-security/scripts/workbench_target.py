@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
@@ -464,6 +465,14 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _visible_git_character(char: str) -> str:
+    if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
+        return char
+    if ord(char) <= 0xFF:
+        return f"\\x{ord(char):02x}"
+    return ascii(char)[1:-1]
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -485,11 +494,7 @@ def _update_digest_field_from_git(
             detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
                 "\r\n", "\n"
             )
-            detail = re.sub(
-                r"[\x00-\x08\x0b-\x1f\x7f-\x9f]",
-                lambda control: f"\\x{ord(control[0]):02x}",
-                detail,
-            )
+            detail = "".join(map(_visible_git_character, detail))
             raise SystemExit(
                 f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
             )
