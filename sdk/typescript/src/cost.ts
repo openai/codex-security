@@ -268,6 +268,8 @@ export class ScanCostTracker {
         try {
           await readSessionUsage(path, session, repository);
         } catch (error) {
+          // Descriptor exhaustion affects the whole process, so later opens cannot help.
+          if (isRecord(error) && error["code"] === "EMFILE") throw error;
           if (
             this.#options.maxCostUsd !== undefined &&
             session.threadId === null
@@ -352,7 +354,11 @@ export class ScanCostTracker {
           session = replayed;
           this.#sessions.set(path, session);
         } catch (error) {
-          if (this.#options.maxCostUsd !== undefined) throw error;
+          if (
+            this.#options.maxCostUsd !== undefined ||
+            (isRecord(error) && error["code"] === "EMFILE")
+          )
+            throw error;
           failure ??= { error };
           failures.push(error);
         }

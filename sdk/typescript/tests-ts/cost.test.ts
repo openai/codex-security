@@ -1357,11 +1357,11 @@ describe("live scan cost tracking", () => {
       { input_tokens: 20 },
       { parent: "scan-thread" },
     );
-    const first = Object.assign(new Error("Synthetic first EMFILE"), {
-      code: "EMFILE",
+    const first = Object.assign(new Error("Synthetic first EIO"), {
+      code: "EIO",
     });
-    const second = Object.assign(new Error("Synthetic second EMFILE"), {
-      code: "EMFILE",
+    const second = Object.assign(new Error("Synthetic second EIO"), {
+      code: "EIO",
     });
     const opened = filesystem.open;
     const listed = filesystem.readdir;
@@ -1391,6 +1391,35 @@ describe("live scan cost tracking", () => {
     } finally {
       opening.mockRestore();
       listing.mockRestore();
+      await tracker.stop();
+    }
+  });
+
+  test("stops after process-wide descriptor exhaustion without opening every log", async () => {
+    const home = await codexHome();
+    for (let index = 0; index < 12; index++)
+      await writeSession(
+        home,
+        `worker-${index}`,
+        { input_tokens: 10 },
+        { parent: "scan-thread" },
+      );
+    const failure = Object.assign(
+      new Error("Synthetic descriptor exhaustion"),
+      { code: "EMFILE" },
+    );
+    const opening = spyOn(filesystem, "open").mockRejectedValue(failure);
+    const errors: unknown[] = [];
+    const tracker = costTracker(home, {
+      onError: (error) => errors.push(error),
+    });
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toBe(failure);
+      expect(opening).toHaveBeenCalledTimes(1);
+      expect(errors).toEqual([]);
+    } finally {
+      opening.mockRestore();
       await tracker.stop();
     }
   });
