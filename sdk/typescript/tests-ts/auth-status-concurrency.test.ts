@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, mock, spyOn, test } from "bun:test";
+import type { JsonObject } from "../src/index.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 for (const surface of ["CLI", "SDK"] as const) {
@@ -206,8 +207,6 @@ test(verificationAbort, async () => {
     CODEX_HOME: join(root, "ambient"),
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
-  const controller = new AbortController();
-  const reason = new Error("Verification interrupted");
   const signals: Array<AbortSignal | undefined> = [];
   const targets = { ...(await import("../src/targets.js")) };
   const runtime = { ...(await import("../src/runtime.js")) };
@@ -235,38 +234,69 @@ test(verificationAbort, async () => {
     ...args: Parameters<typeof start>
   ) => {
     const child = start(...args);
-    child.stdout!.once("data", () => controller.abort(reason));
+    child.stdout!.once("data", () => {
+      if (process.platform === "win32") process.emit("SIGINT");
+      else process.kill(process.pid, "SIGINT");
+    });
     return child;
   }) as typeof start);
   try {
     await fs.mkdir(directory);
-    const { runCodexSkillCommand } = await import("../src/cli.js");
-    const sink = { write: () => true };
-    await expect(
-      runCodexSkillCommand(
-        [],
-        {
-          auth: "chatgpt",
-          command: "verify-fix",
-          directory,
-          signal: controller.signal,
-          stdout: sink,
-          stderr: sink,
+    const { main, runCodexSkillCommand } = await import("../src/cli.js");
+    const { capture, dependencies, fakeResult } =
+      await import("./cli-fixtures.js");
+    const result = fakeResult(["high", "high"]);
+    result.findings.findings.forEach((finding, index) => {
+      Object.assign(finding, {
+        occurrenceId: `occ_${index}`,
+        findingId: `csf_${index}`,
+        codeEvidence: [{ path: "source.ts", code: "a".repeat(600_000) }],
+      });
+    });
+    const deps = dependencies({
+      result,
+      environment,
+      onWorkbench: () => ({
+        scan: {
+          scanId: "scan",
+          targetPath: directory,
+          findings: result.findings.findings as unknown as JsonObject[],
         },
-        {
-          command: process.execPath,
-          args: [
-            "-e",
-            "if (process.argv.slice(-2).join(' ') !== 'login status') process.exit(1); " +
-              "process.on('SIGTERM', () => {}); process.stdout.write('ready'); " +
-              "setTimeout(() => process.exit(1), 4_000);",
-            "--",
-          ],
-        },
-        environment,
-      ),
-    ).rejects.toMatchObject({ name: "AbortError" });
-    expect(signals).toEqual([controller.signal, controller.signal]);
+      }),
+      onCodex: (args, output) =>
+        runCodexSkillCommand(
+          args,
+          output,
+          {
+            command: process.execPath,
+            args: [
+              "-e",
+              "if (process.argv.slice(-2).join(' ') !== 'login status') process.exit(1); " +
+                // Acknowledge the first interrupt with a second real signal while the probe is still running.
+                "process.on('SIGTERM', () => process.kill(process.ppid, 'SIGTERM')); " +
+                "process.stdout.write('ready'); setTimeout(() => process.exit(1), 4_000);",
+              "--",
+            ],
+          },
+          environment,
+        ),
+    });
+    const stdout = capture();
+    const stderr = capture();
+    const exit = await main(
+      ["verify-fix", "--scan", "scan", "--auth", "chatgpt", "--json"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...deps,
+        addSignalListener: (signal, listener) => process.on(signal, listener),
+        removeSignalListener: (signal, listener) =>
+          process.off(signal, listener),
+      },
+    );
+    expect(exit, stdout.text() + stderr.text()).toBe(130);
+    expect(signals).toEqual([signals[0], signals[0]]);
+    expect(signals[0]?.reason).toBe("SIGINT");
     expect(probes).toHaveBeenCalledTimes(1);
     const probe = probes.mock.results[0]!.value as ReturnType<typeof start>;
     if (process.platform !== "win32") expect(probe.signalCode).toBe("SIGKILL");

@@ -2102,6 +2102,7 @@ export async function main(
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
   let batchedVerification = false;
+  let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -6131,8 +6132,12 @@ export async function main(
         let failureReported = false;
         const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = async (chunk: string): Promise<void> => {
-          if (!batchedVerification || !structured || frameworkFlags.tokenOutput)
+          if (structured) {
+            if (!batchedVerification || frameworkFlags.tokenOutput)
+              deferredVerificationDiagnostic = chunk;
+          } else {
             await writeCliOutput(errorOutput, chunk).catch(() => {});
+          }
         };
         try {
           if (options.host)
@@ -6217,17 +6222,6 @@ export async function main(
               : undefined;
             const removeSignals =
               controller && listenForAbort(dependencies, controller);
-            let restoration: Promise<void> | undefined;
-            const stopProgress = () => {
-              if (!restoration) {
-                progress.stop();
-                restoration = Promise.resolve().then(removeSignals);
-              }
-              return restoration;
-            };
-            controller?.signal.addEventListener("abort", stopProgress, {
-              once: true,
-            });
             try {
               if (presentProgress) progress.startVerification();
               for (const findings of batches) {
@@ -6296,8 +6290,8 @@ export async function main(
             } catch (error) {
               if (!controller?.signal.aborted) throw error;
             } finally {
-              const stopped = stopProgress();
-              if (output.isTTY) await stopped;
+              progress.stop();
+              removeSignals?.();
             }
             if (controller?.signal.aborted) {
               exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
@@ -7396,11 +7390,13 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined && !batchedVerification) {
+  const writeUpdateNotice = () => {
+    if (notice === undefined || batchedVerification) return;
     try {
       errorOutput.write(formatUpdateNotice(notice));
     } catch {}
-  }
+  };
+  if (deferredVerificationDiagnostic === undefined) writeUpdateNotice();
   if (frameworkExit !== undefined) {
     if (disabledImportInvocation && exitCode === 0) {
       reportPublicationError(externalImportsDisabledMessage, undefined);
@@ -7420,7 +7416,8 @@ export async function main(
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&
-    filteredScanFailure === undefined
+    filteredScanFailure === undefined &&
+    deferredVerificationDiagnostic === undefined
   )
     return exitCode;
   try {
@@ -7460,6 +7457,18 @@ export async function main(
   } catch (error) {
     errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
+  } finally {
+    if (deferredVerificationDiagnostic !== undefined) {
+      // Token output can omit the diagnostic. Otherwise a buffered stderr
+      // write is optional once the complete structured failure is on stdout.
+      const written = writeCliOutput(
+        errorOutput,
+        deferredVerificationDiagnostic,
+      ).catch(() => {});
+      if (frameworkFlags.tokenOutput || !(errorOutput instanceof NodeWritable))
+        await written;
+      writeUpdateNotice();
+    }
   }
 }
 

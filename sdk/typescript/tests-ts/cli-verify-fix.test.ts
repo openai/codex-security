@@ -1097,6 +1097,51 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
     },
   );
 
+  test.each([false, true])(
+    "writes a structured selection failure before stderr drains (token count: %s)",
+    async (tokenCount) => {
+      const stdout = capture();
+      const writeStarted = Promise.withResolvers<() => void>();
+      let diagnostic = "";
+      const stderr = new Writable({
+        write(chunk, _encoding, callback) {
+          diagnostic += chunk.toString();
+          writeStarted.resolve(callback);
+        },
+      });
+      let finished = false;
+      const operation = main(
+        [
+          "verify-fix",
+          "--scan",
+          "latest",
+          "--json",
+          ...(tokenCount ? ["--token-count"] : []),
+        ],
+        stdout.stream,
+        stderr,
+        dependencies({ onWorkbench: () => ({ scans: [] }) }),
+      ).then((code) => {
+        finished = true;
+        return code;
+      });
+
+      const finishWrite = await writeStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const beforeDrain = stdout.text();
+      const finishedBeforeDrain = finished;
+      finishWrite();
+      expect(await operation).toBe(2);
+      expect(finishedBeforeDrain).toBe(!tokenCount);
+      expect(diagnostic).toContain("No saved scan was found");
+      if (tokenCount) expect(beforeDrain).toMatch(/^\d+\n$/u);
+      else
+        expect(JSON.parse(beforeDrain).message).toContain(
+          "No saved scan was found",
+        );
+    },
+  );
+
   test("waits for a single worker's stderr diagnostic", async () => {
     const message = "One worker failed.\n";
     const writeStarted = Promise.withResolvers<() => void>();
