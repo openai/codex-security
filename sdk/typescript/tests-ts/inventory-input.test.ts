@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -883,13 +884,118 @@ for (const ignoreName of [".ignore", ".rgignore"]) {
         .map((row) => row.path),
     ).toEqual(["selected/tracked.py"]);
     f.write(ignoreName, "tracked.py\n");
-    expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual(
-      [],
-    );
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual(["selected/tracked.py"]);
+    expect(
+      f.success("generate-in-scope-files", ["--scope", "selected"]).trim(),
+    ).toBe("selected/tracked.py");
   });
 }
 
-test("scope input checks only candidate ancestors for nested ignore rules", () => {
+for (const name of [".ignore", ".rgignore"])
+  test(`scope input honors higher-precedence ${name} re-inclusions`, () => {
+    const f = fixture();
+    f.write(".gitignore", "*.py\n**/.ignore\n**/.rgignore\n");
+    f.write(`selected/${name}`, "!source.py\n");
+    f.write("selected/source.py");
+    expect(
+      f
+        .rows("make-repo-scope-input", f.scopeArgs("selected"))
+        .map((row) => row.path),
+    ).toEqual(["selected/source.py"]);
+  });
+
+test("scope input keeps distinct hard-link names under their own ignore rules", () => {
+  const f = fixture();
+  f.write(".gitignore", "ignored.py\n");
+  f.write(".ignore", "tracked.py\n");
+  const tracked = f.write("selected/tracked.py");
+  git(f.repo, "add", "selected/tracked.py");
+  linkSync(tracked, join(f.repo, "selected", "ignored.py"));
+  expect(f.rows("make-repo-scope-input", f.scopeArgs("selected"))).toEqual([]);
+});
+
+test("scope input keeps directory filtering off the process command line", () => {
+  const f = fixture();
+  f.write(".gitignore", "selected/deps-*/\n");
+  f.write(".ignore", "unrelated/\n");
+  f.write("selected/visible.py");
+  git(f.repo, "add", "selected/visible.py");
+  for (let index = 0; index < 420; index++)
+    f.write(`selected/deps-${index}-${"x".repeat(90)}/hidden.py`);
+  expect(
+    f
+      .rows("make-repo-scope-input", f.scopeArgs("selected"))
+      .map((row) => row.path),
+  ).toEqual(["selected/visible.py"]);
+});
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "scope input retains readable source beside a nested Git warning",
+  () => {
+    const f = fixture();
+    f.write(".ignore", "private/\n");
+    f.write("selected/visible.py");
+    git(f.repo, "add", "selected/visible.py");
+    f.write("selected/nested/private/source.py");
+    git(join(f.repo, "selected", "nested"), "init", "-q");
+    const blocked = join(f.repo, "selected", "nested", "private");
+    chmodSync(blocked, 0);
+    try {
+      expect(
+        f
+          .rows("make-repo-scope-input", f.scopeArgs("selected"))
+          .map((row) => row.path),
+      ).toEqual(["selected/visible.py"]);
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
+for (const kept of [false, true])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `standalone fallback preserves read errors with kept=${kept}`,
+    () => {
+      const f = fixture();
+      const standalone = join(f.root, "standalone");
+      const blocked = join(standalone, "private");
+      mkdirSync(blocked, { recursive: true });
+      writeFileSync(join(blocked, "source.py"), "value = 1\n");
+      if (kept) writeFileSync(join(standalone, "kept.py"), "value = 2\n");
+      const tools = join(f.root, "no-tools");
+      mkdirSync(tools);
+      writeFileSync(f.out, "previous\n");
+      chmodSync(blocked, 0);
+      try {
+        const result = f.run(
+          "make-repo-scope-input",
+          ["--repo", standalone, ...f.scopeArgs(".")],
+          { ...f.toolEnvironment, PATH: tools },
+        );
+        if (kept) {
+          expect(result.status, result.stderr).toBe(0);
+          expect(
+            readFileSync(f.out, "utf8")
+              .trim()
+              .split(/\r?\n/u)
+              .map((line) => JSON.parse(line).path),
+          ).toEqual(["kept.py"]);
+        } else {
+          expect(result.status).toBe(1);
+          expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+          expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+        }
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
+test("scope input does not synchronously traverse Git-excluded directories", () => {
   const f = fixture();
   f.write(".gitignore", "selected/vendor/\n");
   f.write("selected/visible.py");

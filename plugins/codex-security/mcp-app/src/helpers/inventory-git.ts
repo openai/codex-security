@@ -488,11 +488,12 @@ function killToolProcess(child: ReturnType<typeof spawnTool>["child"]): void {
   }
 }
 
-export async function git(repo: string, args: string[]) {
+export async function git(repo: string, args: string[], input?: Buffer) {
   try {
     const execution = gitProcess(repo, args);
     if (execution) {
-      execution.child.stdin!.end();
+      execution.child.stdin!.on("error", () => {});
+      execution.child.stdin!.end(input);
       return await collect(execution);
     }
   } catch (error) {
@@ -624,9 +625,71 @@ export async function directoryPaths(
     }
   }
   // Stale index entries, metadata and links do not make a warned listing usable.
-  if (listingResult.stderr.trim() && ![...found].some(regular))
+  if (
+    diagnostics === undefined &&
+    listingResult.stderr.trim() &&
+    ![...found].some(regular)
+  )
     throw new Error(listingResult.stderr.trim());
   return [...found];
+}
+
+export async function directoryFilteringRoot(target: string): Promise<string> {
+  const ignored = await git(
+    target,
+    ["--no-literal-pathspecs", "check-ignore", "--no-index", "--stdin", "-z"],
+    encodeGitPath(target + "\0"),
+  );
+  if (ignored.status !== 0) return target;
+  const root = canonical(
+    gitLine(
+      requireSuccess(await git(target, ["rev-parse", "--show-toplevel"])),
+    ),
+  );
+  const parents: string[] = [];
+  for (const parent of ancestors(target)) {
+    inside(root, parent);
+    parents.push(parent);
+    if (sameFile(parent, root)) break;
+  }
+  const result = await git(
+    target,
+    ["--no-literal-pathspecs", "check-ignore", "--no-index", "--stdin", "-z"],
+    encodeGitPath(parents.join("\0") + "\0"),
+  );
+  if (result.status === 1) return target;
+  const excluded = paths(requireSuccess(result)).map((path) =>
+    canonical(isAbsolute(path) ? path : append(target, path)),
+  );
+  const outermost = excluded.sort(
+    (left, right) =>
+      inside(root, left).split("/").length -
+      inside(root, right).split("/").length,
+  )[0];
+  return outermost === undefined || sameFile(outermost, root)
+    ? root
+    : dirname(outermost);
+}
+
+export async function configuredIgnoreFile(
+  repo: string,
+): Promise<string | undefined> {
+  const configured = await git(repo, [
+    "config",
+    "--null",
+    "--path",
+    "--get",
+    "core.excludesFile",
+  ]);
+  if (configured.status !== 0) return undefined;
+  const path = decodeGitPath(configured.stdout).replace(/\0$/u, "");
+  if (!path) return "";
+  if (isAbsolute(path)) return path;
+  const root = await git(repo, ["rev-parse", "--show-toplevel"]);
+  return append(
+    root.status === 0 ? canonical(gitLine(root.stdout)) : repo,
+    path,
+  );
 }
 
 export interface Change {

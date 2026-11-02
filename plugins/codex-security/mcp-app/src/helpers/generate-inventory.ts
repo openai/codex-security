@@ -23,12 +23,11 @@ import {
   ancestors,
   append,
   directory,
-  directoryEntries,
   exists,
   fsPath,
-  fileIdentity,
   inside,
   lstat,
+  linkedParent,
   regular,
   sameFile,
   rejectStreams,
@@ -40,8 +39,10 @@ import {
 import {
   blobSamples,
   changedPaths,
+  configuredIgnoreFile,
   decodeGitPath,
   directoryPaths,
+  directoryFilteringRoot,
   encodeGitPath,
   git,
   runRipgrep,
@@ -124,60 +125,44 @@ function scopePath(
 async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
   if (regular(scope)) return [scope];
   const diagnostics: string[] = [];
-  const indexed = await directoryPaths(scope, diagnostics);
-  const finish = (paths: string[]) => {
-    if (diagnostics.length && !paths.some(regular))
-      throw new Error(diagnostics.join("\n"));
-    return paths;
-  };
-  const candidates = indexed?.filter(regular);
-  const parents = new Map<string, string>();
-  const visited = new Set<string>();
-  for (const path of candidates ?? [])
-    for (const parent of ancestors(dirname(path))) {
-      inside(scope, parent);
-      if (visited.has(parent)) break;
-      visited.add(parent);
-      const identity = fileIdentity(parent);
-      if (parents.has(identity)) break;
-      parents.set(identity, parent);
-      if (sameFile(parent, scope)) break;
-    }
-  const ripgrepIgnoreNames = [".ignore", ".rgignore"];
-  const isIgnoreFile = (path: string) => {
+  const usable = (path: string) => {
     try {
-      return stat(path).isFile();
+      inside(scope, path);
+    } catch {
+      return false;
+    }
+    try {
+      return !linkedParent(scope, path) && regular(path);
     } catch (error) {
       if (isMissingPathError(error)) return false;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES" || code === "EPERM") {
+        diagnostics.push(
+          error instanceof Error ? error.message : String(error),
+        );
+        return false;
+      }
       throw error;
     }
   };
-  const usesRipgrepIgnoreRules = [
-    ...new Set([...ancestors(scope), ...parents.values()]),
-  ].some((path) =>
-    ripgrepIgnoreNames.some((name) => isIgnoreFile(append(path, name))),
-  );
-  if (
-    candidates !== undefined &&
-    (!usesRipgrepIgnoreRules || !candidates.length)
-  )
-    return finish(candidates);
-  const pruning: string[] = [];
-  if (indexed !== undefined) {
-    const selectedParents = [scope];
-    for (const parent of selectedParents)
-      for (const child of directoryEntries(parent, true)) {
-        const metadata = lstat(child);
-        if (!metadata.isDirectory()) continue;
-        if (
-          ("isNameSurrogate" in metadata && metadata.isNameSurrogate()) ||
-          !parents.has(fileIdentity(child))
-        ) {
-          const pattern = inside(repo, child).replace(/[\\*?[\]{}!]/gu, "\\$&");
-          pruning.push("--glob", `!/${pattern}`);
-        } else selectedParents.push(child);
-      }
+  const filteringRoot = await directoryFilteringRoot(scope);
+  const configuredIgnore = await configuredIgnoreFile(repo);
+  let extraIgnore: string | undefined;
+  if (configuredIgnore !== undefined && configuredIgnore !== "") {
+    try {
+      if (stat(configuredIgnore).isFile()) extraIgnore = configuredIgnore;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
   }
+  const finish = (paths: string[]) => {
+    const selected = [
+      ...new Set(paths.filter(usable).map((path) => canonical(path))),
+    ];
+    if (!selected.length && diagnostics.length)
+      throw new Error(diagnostics.join("\n"));
+    return selected;
+  };
   let result;
   try {
     result = await runRipgrep(
@@ -185,34 +170,115 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "--files",
         "--hidden",
         "--no-require-git",
-        ...(indexed === undefined ? [] : ["--no-ignore-vcs"]),
+        ...(configuredIgnore === undefined ? [] : ["--no-ignore-global"]),
+        ...(extraIgnore === undefined ? [] : ["--ignore-file", extraIgnore]),
         "--null",
         "--glob",
         "!**/{.git,.svn}",
         "--glob",
         "!**/{.git,.svn}/**",
-        ...pruning,
         "--",
-        relative(repo, scope) || ".",
+        relative(repo, filteringRoot) || ".",
       ],
       repo,
     );
   } catch {
-    const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
+    const isIgnoreFile = (path: string) => {
+      try {
+        return stat(path).isFile();
+      } catch (error) {
+        if (isMissingPathError(error)) return false;
+        throw error;
+      }
+    };
+    const dotRules = [".ignore", ".rgignore"];
+    const inheritedRules = [...ancestors(scope)].some((parent) =>
+      dotRules.some((name) => isIgnoreFile(append(parent, name))),
+    );
+    const indexed = await directoryPaths(scope, diagnostics);
+    if (indexed !== undefined) {
+      let unsupported = inheritedRules;
+      const roots = [
+        scope,
+        ...indexed.filter((path) => {
+          const info = lstat(path);
+          return (
+            info.isDirectory() &&
+            !info.isSymbolicLink() &&
+            !("isNameSurrogate" in info && info.isNameSurrogate()) &&
+            exists(append(path, ".git"))
+          );
+        }),
+      ];
+      for (const root of roots) {
+        const ignored = await git(root, [
+          "--no-literal-pathspecs",
+          "ls-files",
+          "--cached",
+          "--others",
+          "--ignored",
+          "--exclude-standard",
+          "-z",
+          "--",
+          ":(literal).ignore",
+          ":(literal).rgignore",
+          ":(glob)**/.ignore",
+          ":(glob)**/.rgignore",
+        ]);
+        const rules = [
+          ...indexed.filter((path) =>
+            dotRules.some((name) => path.endsWith(sep + name)),
+          ),
+          ...(ignored.status === 0
+            ? decodeGitPath(ignored.stdout)
+                .split("\0")
+                .filter(Boolean)
+                .map((path) => append(root, path))
+            : []),
+        ];
+        for (const path of rules) {
+          if (!isIgnoreFile(path)) continue;
+          const parent = dirname(path);
+          if (sameFile(parent, scope)) {
+            unsupported = true;
+            break;
+          }
+          const excluded = await git(root, [
+            "--no-literal-pathspecs",
+            "check-ignore",
+            "--quiet",
+            "--",
+            parent,
+          ]);
+          if (excluded.status !== 0) {
+            unsupported = true;
+            break;
+          }
+        }
+        if (unsupported) break;
+      }
+      if (unsupported)
+        throw new Error(
+          "Could not safely enumerate ignored scoped files without Git or ripgrep.",
+        );
+      return finish(indexed);
+    }
+    const ignoreNames = [".gitignore", ...dotRules];
     let ignored =
-      usesRipgrepIgnoreRules ||
+      inheritedRules ||
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
-      [...ancestors(scope)].some((path) => {
+      [...ancestors(scope)].some((parent) => {
         try {
-          inside(repo, path);
+          inside(repo, parent);
         } catch {
           return false;
         }
-        return ignoreNames.some((name) => isIgnoreFile(append(path, name)));
+        return ignoreNames.some((name) => isIgnoreFile(append(parent, name)));
       });
+    const errors: unknown[] = [];
     const files: string[] = [];
     if (!ignored)
-      for (const path of walk(scope, false, true)) {
+      for (const path of walk(scope, true, true, errors)) {
         if (
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
           isIgnoreFile(path)
@@ -226,23 +292,47 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       throw new Error(
         "Could not safely enumerate ignored scoped files without Git or ripgrep.",
       );
-    return files;
+    if (!files.some(usable) && errors.length) throw errors[0];
+    return finish(files);
   }
-  if (result.status !== 0 && result.status !== 1)
+  const failed = result.status !== 0 && result.status !== 1;
+  if (failed && (result.status !== 2 || result.signal !== null))
     throw new Error(
-      `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
+      "Could not enumerate scoped repository files" +
+        (result.signal ? " (" + result.signal + ")" : "") +
+        ": " +
+        result.stderr.trim(),
     );
   const selected = decodePosixBytes(result.stdout)
     .split("\0")
     .filter(Boolean)
     .map((path) => append(repo, path));
-  if (candidates === undefined) return selected;
-  const included = new Set(candidates.map(fileIdentity));
-  return finish(
-    selected.filter(
-      (path) => regular(path) && included.has(fileIdentity(path)),
-    ),
-  );
+  // Match the existing inventory command's override for Git-ignored tracked files.
+  const tracked = await git(scope, [
+    "ls-files",
+    "--cached",
+    "--ignored",
+    "--exclude-standard",
+    "-z",
+    "--",
+    ".",
+  ]);
+  if (tracked.status === 0)
+    selected.push(
+      ...decodeGitPath(tracked.stdout)
+        .split("\0")
+        .filter(Boolean)
+        .map((path) => append(scope, path)),
+    );
+  if (failed) {
+    diagnostics.push(
+      result.stderr.trim() ||
+        "ripgrep could not finish enumerating the selected files",
+    );
+    if (!selected.some(usable)) throw new Error(diagnostics.join("\n"));
+  }
+  if (!selected.some(usable)) await directoryPaths(scope, diagnostics);
+  return finish(selected);
 }
 
 function loadScopes(path: string): string[] {

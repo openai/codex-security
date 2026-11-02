@@ -105,16 +105,8 @@ export function linkedParent(scope: string, path: string): boolean {
   }
   return false;
 }
-export function fileIdentity(path: string): string {
-  if (windows) {
-    const value = windowsFiles().identity(Buffer.from(path, "utf16le"));
-    return `${value.volume}:${value.fileId.toString("hex")}`;
-  }
-  const value = statSync(fsPath(path), { bigint: true });
-  return `${value.dev}:${value.ino}`;
-}
 export const sourceMetadata = new Set([".git", ".svn"]);
-export function directoryEntries(path: string, skipMetadata = false): string[] {
+function directoryEntries(path: string, skipMetadata = false): string[] {
   const names = windows
     ? windowsFiles()
         .entriesWithTypes(Buffer.from(path, "utf16le"))
@@ -131,12 +123,14 @@ export function* walk(
   path: string,
   skipMetadata = false,
   ignoreDirectoryReadErrors = false,
+  diagnostics?: unknown[],
 ): Iterable<string> {
   let children: string[];
   try {
     children = directoryEntries(path, skipMetadata);
   } catch (error) {
     if (!ignoreDirectoryReadErrors) throw error;
+    diagnostics?.push(error);
     return;
   }
   yield* children;
@@ -146,7 +140,7 @@ export function* walk(
       info.isDirectory() &&
       !("isNameSurrogate" in info && info.isNameSurrogate())
     )
-      yield* walk(child, skipMetadata, ignoreDirectoryReadErrors);
+      yield* walk(child, skipMetadata, ignoreDirectoryReadErrors, diagnostics);
   }
 }
 export function executable(path: string): boolean {
