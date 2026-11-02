@@ -6,7 +6,11 @@ import {
   semgrepReferenceMatches,
   semgrepSelectionRepository,
 } from "./semgrep-platform-findings.js";
-import { hostedRepositoryMatches } from "./hosted-git-repository.js";
+import {
+  gitPathToHttpPath,
+  gitTransportBytes,
+  hostedRepositoryMatches,
+} from "./hosted-git-repository.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
@@ -206,16 +210,8 @@ function remoteRepository(
   }
 
   // Git passes the original path (including dot segments, '?' and '#') to upload-pack.
-  const literal = (raw: string) => {
-    const bytes = Buffer.from(raw).toString("latin1");
-    return scpStyle
-      ? bytes
-      : bytes.replace(/%(?!00)([\da-f]{2})/giu, (_, hex: string) =>
-          String.fromCharCode(parseInt(hex, 16)),
-        );
-  };
   if (!scpStyle && !transport) return { key: value };
-  const gitPath = literal(transport?.[2] ?? path);
+  const gitPath = gitTransportBytes(transport?.[2] ?? path, scpStyle);
   const login = scpStyle
     ? /^([^@/:\s?#]+)@/u.exec(value)?.[1]
     : /^(.*)@/u.exec(authority ?? "")?.[1];
@@ -223,14 +219,7 @@ function remoteRepository(
     /^\/?~(?:\/|$)/u.test(gitPath) || (scpStyle && !/^[~/]/u.test(gitPath));
   const suffix = /[?#].*$/su.exec(gitPath);
   // Express upload-pack bytes as a URL path for comparison with the HTTP source.
-  const name = gitPath
-    .slice(0, suffix?.index)
-    .replace(/^\//u, "")
-    .replace(
-      /[%\x00-\x20\x7f-\xff]/gu,
-      (byte) =>
-        "%" + byte.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"),
-    );
+  const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
   const repository = suffix
     ? key(origin + name + "?") +
       "\0" +
@@ -238,7 +227,7 @@ function remoteRepository(
     : key(origin + name);
   return {
     key: repository,
-    account: ssh && login ? literal(login) : undefined,
+    account: ssh && login ? gitTransportBytes(login, scpStyle) : undefined,
     // GitHub serves the same repository path through its SCP and SSH URLs.
     homeRelative:
       ssh && provider !== "github" && !isGitHubCloudHost(hostname.toLowerCase())
