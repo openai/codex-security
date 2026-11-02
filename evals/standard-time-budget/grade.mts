@@ -43,7 +43,7 @@ function validRange(location: SourceLocation, fixture: Fixture) {
 function overlaps(location: SourceLocation, expected: SourceCase) {
   return (
     posix.normalize(location.path) === expected.path &&
-    location.startLine <= expected.line &&
+    location.startLine <= (expected.endLine ?? expected.line) &&
     (location.endLine ?? location.startLine) >= expected.line
   );
 }

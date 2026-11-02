@@ -50,8 +50,11 @@ traversal, reflected HTML, and server-side request forgery (SSRF). Each case
 has a safe control. The SSRF pair checks whether a tenant can choose the
 destination of a server-side status request. The billing route accepts only
 the two approved URLs. Both routes return the status of the first response,
-including redirects. The model receives source and deployment context. The
-evaluator holds the gold labels and locations.
+including redirects. The statement-download routes both confine file paths,
+but only one derives the tenant directory from the session. The grant routes
+both verify a signed tenant grant. One consumes the first submitted element
+and the other uses the verified element. The model receives source and
+deployment context. The evaluator holds the gold labels and locations.
 
 Each arm runs in an opaque temporary directory outside the artifact tree; pair
 and variant labels appear only in evaluator reports and archives. After the
@@ -61,6 +64,36 @@ comparison stops before another arm starts. Gold labels and prior-arm results
 are not next to the model's working directory or included in prompts. This is layout separation, not a filesystem
 security boundary: production API-key authentication and root-read permissions
 remain unchanged. This eval does not test resumption or external publication.
+
+## Focused investigator exercise
+
+Materialize the application source in a fresh directory from the repository root:
+
+```sh
+node --experimental-strip-types --input-type=module <<'JS'
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { writeFixture } from "./evals/secret-discovery/fixtures.mts";
+import { createFixture } from "./evals/standard-time-budget/fixtures.mts";
+const dir = await mkdtemp(join(tmpdir(), "portal-review-"));
+await writeFixture(dir, createFixture());
+console.log(dir);
+JS
+```
+
+Start a fresh read-only Codex session in the printed directory. Supply the **Shared Worker
+Instructions** and **Focused Investigator Prompt** blocks from the revision of
+[`core-scan.md`](../../plugins/codex-security/references/core-scan.md) under test,
+then give the investigator this single packet:
+
+> Review `src/statements.py`, using `README.md` and `src/app.py` for context. Can a download request escape the resolved statement directory by path traversal?
+
+Grade without the revision label. Both routes contain the path. Credit the
+independent finding if it connects the request-selected tenant to another
+tenant’s private statement and distinguishes the session-selected sibling.
+For comparisons, keep the fixture, model, effort and packet fixed and record
+incomplete attempts separately.
 
 ## Results
 
@@ -82,11 +115,15 @@ scan archival, cleanup, and grading, but not subsequent evaluator JSON writing.
 A canonical scan that misses a bug still completed successfully. The runner
 exits nonzero for execution failures, not low recall.
 
-The grader counts unique gold cases with matching CWE, a `root_control` or
-`sink` source location, and authentic source evidence. Other or missing roles
-do not earn automatic recall; unmatched findings require adjudication. It
-consumes the production contract's repository-relative POSIX paths. Duplicates
-do not increase recall.
+Automatic recall uses a finite set of accepted CWEs and source locations for
+each case. Credit requires a `root_control` or `sink` location with authentic
+source evidence. The statement routes send the file where they select the tenant.
+For the grant case, the discarded verification result and the next line that
+uses the unchecked tenant identify the vulnerable route. Both routes call the
+same invoice query, so a citation to that query alone needs manual review.
+A different CWE, another equivalent source location, or an omitted role can
+leave a valid finding unmatched. Adjudicate these reports before counting
+discovery misses. Duplicates do not increase recall.
 Safe-control overlaps, unmatched findings, and citation errors are separate
 signals; overlaps and unmatched findings require adjudication, not automatic
 false-positive labels. Free-text location roles can flag benign context
@@ -123,7 +160,7 @@ capture, and parent-plus-worker usage. CI reuses its host native build, builds
 the plugin with `build_mcp_app.mjs --native host`, and links it at
 `sdk/typescript/_bundled_plugin`; universal release artifacts are not required.
 
-A second integration test sends synthetic findings for the five fixture cases
+A second integration test sends synthetic findings for every positive fixture case
 through the shipped draft tool and the real workbench. It checks that an empty
 terminal draft preserves previously accepted findings, source evidence, and
 validation details in the sealed scan. Each accepted finding must appear in

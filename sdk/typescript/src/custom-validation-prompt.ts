@@ -10,6 +10,7 @@ import { PLUGIN_NAME } from "./runtime.js";
 const SOURCES = {
   "references/core-scan.md": [
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
+    "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
   ],
   "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
