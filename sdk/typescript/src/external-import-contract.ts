@@ -1,6 +1,5 @@
 import { isIP } from "node:net";
-import { errorMessage } from "./errors.js";
-import { isBoxedPrimitive, isNumberObject } from "node:util/types";
+import { isNumberObject } from "node:util/types";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
@@ -237,7 +236,7 @@ export function requireSafeJsonInteger(value: number, label: string): void {
     );
 }
 
-function requireJsonNumber(value: number, label: string): void {
+export function requireJsonNumber(value: number, label: string): void {
   if (!Number.isFinite(value))
     throw new Error(`${label} must contain finite JSON numbers.`);
   requireSafeJsonInteger(value, label);
@@ -255,10 +254,9 @@ export function validateExternalReport(
   });
 }
 
-export function validateExternalEvidence(
+export function validateExternalEvidenceFields(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-  batch?: EvidenceNumberBatch,
 ): ExternalFindingEvidence {
   const result = (
     target === "local" ? localEvidence : validateExternalEvidenceShape
@@ -336,207 +334,16 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
-  return checkedEvidenceJson(result, target, 0, true, batch).retained;
+  return result;
 }
 
-/** Return the validated Cloud wire size, or zero for local evidence. */
-export function validateExternalEvidenceJson(
+export function validateExternalEvidence(
   input: unknown,
-  target: ExternalImportTarget,
-  additionalCloudBytes = 0,
-): number {
-  return checkedEvidenceJson(input, target, additionalCloudBytes).bytes;
-}
-
-function hasCustomNumberHooks(value: Number): boolean {
-  if ("toJSON" in value || Symbol.toPrimitive in value) return true;
-  let owner: object | null = value;
-  while (owner && !Object.hasOwn(owner, "valueOf"))
-    owner = Object.getPrototypeOf(owner);
-  return owner === value || !isNumberObject(owner);
-}
-
-function snapshotJsonEvidence<T>(input: T): T {
-  const views = new WeakMap<object, object>();
-  const json = JSON as JSON & { isRawJSON?(value: unknown): boolean };
-  return json.parse(
-    json.stringify(input, (_key, value: unknown) => {
-      if (
-        value === null ||
-        typeof value !== "object" ||
-        isBoxedPrimitive(value) ||
-        json.isRawJSON?.(value)
-      )
-        return value;
-      const cached = views.get(value);
-      if (cached) return cached;
-      const handler: ProxyHandler<object> = {
-        get(_target, key) {
-          const field: unknown = Reflect.get(value, key);
-          const result = isNumberObject(field)
-            ? Number.prototype.valueOf.call(field)
-            : field;
-          if (typeof result === "number") requireJsonNumber(result, "Evidence");
-          return result;
-        },
-      };
-      const array = Array.isArray(value);
-      if (!array) {
-        handler.ownKeys = () => Object.keys(value);
-        handler.getOwnPropertyDescriptor = () => ({
-          enumerable: true,
-          configurable: true,
-        });
-      }
-      const view = new Proxy(array ? [] : {}, handler);
-      views.set(value, view);
-      return view;
-    }),
-  ) as T;
-}
-
-function snapshotEvidence<T>(input: T): T {
-  try {
-    return structuredClone(input);
-  } catch (error) {
-    if (!(error instanceof DOMException) || error.name !== "DataCloneError")
-      throw error;
-    return snapshotJsonEvidence(input);
-  }
-}
-
-function tryNativeEvidence<T>(input: T): T | undefined {
-  try {
-    return structuredClone(input);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Hold shared getter-backed numbers until every selected row has
- * been read, then capture their graph once as the SDK does before publication. */
-export class EvidenceNumberBatch {
-  readonly changed = new Set<object>();
-  readonly #deferred: ExternalFindingEvidence[] = [];
-  readonly #outsideWireLimit = new WeakSet<ExternalFindingEvidence>();
-  readonly #owners = new WeakMap<object, ExternalFindingEvidence>();
-  readonly #linked = new Map<
-    ExternalFindingEvidence,
-    Set<ExternalFindingEvidence>
-  >();
-
-  record(
-    input: ExternalFindingEvidence,
-    getters: Set<object> | undefined,
-    snapshot: boolean,
-    outsideWireLimit: boolean,
-  ): void {
-    if (outsideWireLimit) this.#outsideWireLimit.add(input);
-    if (snapshot) this.#deferred.push(input);
-    const links = new Set<ExternalFindingEvidence>();
-    this.#linked.set(input, links);
-    for (const object of getters ?? []) {
-      const owner = this.#owners.get(object);
-      if (owner) {
-        links.add(owner);
-        this.#linked.get(owner)!.add(input);
-      } else this.#owners.set(object, input);
-    }
-  }
-
-  finish(
-    target: ExternalImportTarget,
-  ): Map<ExternalFindingEvidence, string | ExternalFindingEvidence> {
-    const captured = new Map<
-      ExternalFindingEvidence,
-      string | ExternalFindingEvidence
-    >();
-    if (!this.#deferred.length) return captured;
-    // A shared getter must run once across the affected rows, in selection order.
-    const needed = new Set(this.#deferred);
-    for (const input of needed)
-      for (const other of this.#linked.get(input)!) needed.add(other);
-    // Older readers excluded oversized rows before SDK capture. Preserve that
-    // group first so a rejected sibling cannot change its numbers or getters.
-    const inputs = [...this.#linked.keys()].filter((input) =>
-      needed.has(input),
-    );
-    for (const outside of [false, true]) {
-      const rows = inputs.filter(
-        (input) => this.#outsideWireLimit.has(input) === outside,
-      );
-      if (!rows.length) continue;
-      let native = rows;
-      let values = tryNativeEvidence(native);
-      if (!values && native.length > 1) {
-        // Keep the cloneable rows together, even if another row requires JSON.
-        native = native.filter((input) => tryNativeEvidence(input));
-        values = tryNativeEvidence(native);
-      }
-      const snapshots = new Map(
-        native.map((input, index) => [input, values?.[index]]),
-      );
-      for (const input of rows) {
-        try {
-          const evidence = snapshots.get(input) ?? snapshotEvidence(input);
-          checkedEvidenceJson(evidence, target, 0, false);
-          captured.set(input, evidence);
-        } catch (error) {
-          captured.set(input, errorMessage(error));
-        }
-      }
-    }
-    return captured;
-  }
-}
-
-function canCopyFields(value: object): boolean {
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return (
-    Array.isArray(value) || prototype === null || prototype === Object.prototype
-  );
-}
-
-/** @internal Replace changed numeric fields together so common source objects and
- * their getters stay shared until the SDK snapshots the selected batch. */
-export function retainNumberFields<T>(input: T, changed: Set<object>): T {
-  const captures = new WeakMap<object, object>();
-  function retain(value: unknown): unknown {
-    if (!value || typeof value !== "object") return value;
-    const found = captures.get(value);
-    if (found) return found;
-    if (changed.has(value)) {
-      const number = new Number(Number.prototype.valueOf.call(value));
-      captures.set(value, number);
-      return number;
-    }
-    if (!canCopyFields(value)) return value;
-    let changedFields: Map<PropertyKey, PropertyDescriptor> | undefined;
-    for (const key of Object.keys(value)) {
-      const property = Object.getOwnPropertyDescriptor(value, key);
-      if (!property || !Object.hasOwn(property, "value")) continue;
-      const next = retain(property.value);
-      if (next !== property.value) {
-        property.value = next;
-        (changedFields ??= new Map()).set(key, property);
-      }
-    }
-    if (!changedFields) return value;
-    const retained: object = Array.isArray(value)
-      ? []
-      : Object.create(Object.getPrototypeOf(value) as object | null);
-    for (const key of Reflect.ownKeys(value)) {
-      const descriptor =
-        changedFields.get(key) ?? Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor) continue;
-      if (typeof key === "string" && descriptor.get)
-        descriptor.get = descriptor.get.bind(value);
-      Object.defineProperty(retained, key, descriptor);
-    }
-    captures.set(value, retained);
-    return retained;
-  }
-  return retain(input) as T;
+  target: ExternalImportTarget = "cloud",
+): ExternalFindingEvidence {
+  const result = validateExternalEvidenceFields(input, target);
+  validateExternalEvidenceJson(result, target);
+  return result;
 }
 
 function cloudNumberByteAdjustment(value: number): number {
@@ -549,168 +356,138 @@ function cloudNumberByteAdjustment(value: number): number {
   return cloud.length - wire.length;
 }
 
-function checkedEvidenceJson<T>(
-  input: T,
-  target: ExternalImportTarget,
-  additionalCloudBytes: number,
-  captureNumbers = true,
-  batch?: EvidenceNumberBatch,
-): { retained: T; bytes: number } {
-  // Only substitute fields the raw provider walk actually saw. A serializer
-  // can create a new object whose own numeric representation is the wire value.
-  let getters: Set<object> | undefined;
-  function retained(bytes: number, snapshot = false, outsideWireLimit = false) {
-    if (batch && (snapshot || getters))
-      batch.record(
-        input as ExternalFindingEvidence,
-        getters,
-        snapshot,
-        outsideWireLimit,
-      );
-    return { retained: input, bytes };
-  }
-  const wireMatches = new Map<object, boolean>();
-  const numberOwners = new WeakSet<object>();
-  const indirectNumbers = new Set<object>();
-  let hasFunction = false;
-  let numericByteAdjustment = 0;
-  let originalNumericByteAdjustment = 0;
-  let useOriginalWire = false;
-  function wireValue(this: object, key: string, value: unknown) {
-    const raw: unknown =
-      batch &&
-      (target === "local" || numberOwners.has(this)) &&
-      Object.getOwnPropertyDescriptor(this, key)?.value;
+type ValidateNumber = (value: number) => void;
+const evidenceNumber: ValidateNumber = (value) =>
+  requireJsonNumber(value, "Evidence");
+
+const rawJson = JSON as JSON & {
+  isRawJSON?(value: unknown): value is { rawJSON: string };
+};
+function serializeImportJson(input: unknown, number: ValidateNumber): string {
+  return JSON.stringify(input, (_key, value: unknown) => {
+    // JSON applies Number conversion to wrappers after calling toJSON.
     if (isNumberObject(value)) value = +value;
-    if (isNumberObject(raw)) {
-      const intrinsic = Number.prototype.valueOf.call(raw) as number;
-      if (target === "cloud") requireJsonNumber(intrinsic, "Evidence");
-      wireMatches.set(
-        raw,
-        value === intrinsic && wireMatches.get(raw) !== false,
-      );
-      if (!useOriginalWire) value = intrinsic;
-    }
-    if (target === "cloud" && typeof value === "number") {
-      numericByteAdjustment += cloudNumberByteAdjustment(value);
+    if (typeof value === "number") number(value);
+    else if (rawJson.isRawJSON?.(value)) {
+      const token: unknown = JSON.parse(value.rawJSON);
+      if (typeof token === "number") number(token);
     }
     return value;
-  }
-  let json: string | undefined;
-  let failed: { reason: unknown } | undefined;
-  function serialize() {
-    try {
-      json = JSON.stringify(
-        input,
-        batch || target === "cloud" ? wireValue : undefined,
-      );
-    } catch (reason) {
-      failed = { reason };
-    }
-  }
-  // Keep the provider's two reads in their original order. A saved SDK request
-  // can contain the value a shared getter returned immediately afterward.
-  if (target === "local") serialize();
-  const ancestors: object[] = [];
-  let customNumber = false;
+  });
+}
+
+// Validate original numeric fields even if a serializer omits them. Object.values
+// reads siblings before descending, as the released provider reader did.
+function rawJsonNumbers(
+  input: unknown,
+  target: ExternalImportTarget,
+  number: ValidateNumber,
+  oldSize = false,
+): number {
   const pending: unknown[] = [input];
-  const depths = target === "cloud" || failed ? [0] : undefined;
-  const indirectPaths = batch && [false];
+  const depths: number[] = [0];
+  const ancestors: object[] = [];
+  let adjustment = 0;
   while (pending.length) {
     const value = pending.pop();
-    const depth = depths?.pop() ?? 0;
-    if (target === "cloud" && depth > 20)
-      throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
+    const depth = depths.pop()!;
+    if (target === "cloud" && depth > 20) {
+      if (!oldSize)
+        throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
+      adjustment = Infinity;
+    }
     if (value !== null && typeof value === "object") {
-      const indirect = indirectPaths?.pop() ?? false;
-      if (failed) {
-        ancestors.length = depth;
-        if (ancestors.includes(value)) throw failed.reason;
-        ancestors[depth] = value;
-      }
-
-      if (isNumberObject(value)) {
-        requireJsonNumber(Number.prototype.valueOf.call(value), "Evidence");
-        if (captureNumbers && hasCustomNumberHooks(value)) {
-          customNumber = true;
-          if (batch && indirect) indirectNumbers.add(value);
-        }
-      }
-      if (!batch) {
-        for (const child of Object.values(value)) {
-          pending.push(child);
-          depths?.push(depth + 1);
-        }
+      ancestors.length = depth;
+      if (ancestors.includes(value)) {
+        if (oldSize) adjustment = Infinity;
         continue;
       }
-      const ordinary = canCopyFields(value);
-      const keys = Object.getOwnPropertyNames(value);
-      const start = pending.length;
-      let count = 0;
-      // Collect enumerable values in order before inspecting their descriptors.
-      // A getter can remove or change a later field.
-      for (const key of keys) {
-        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
-        keys[count++] = key;
-        pending.push(Reflect.get(value, key));
-      }
-      for (let i = 0; i < count; i++) {
-        const child = pending[start + i];
-        if (isNumberObject(child)) numberOwners.add(value);
-        if (typeof child === "function" && !isNumberObject(value))
-          hasFunction = true;
-        const getter = Object.getOwnPropertyDescriptor(value, keys[i]!)?.get;
-        if (getter) (getters ??= new Set()).add(value);
-        depths?.push(depth + 1);
-        if (child !== null && typeof child === "object")
-          indirectPaths!.push(indirect || !ordinary || !!getter);
+      ancestors[depth] = value;
+      if (isNumberObject(value)) number(Number.prototype.valueOf.call(value));
+      for (const child of Object.values(value)) {
+        if (typeof child === "number") {
+          number(child);
+          if (oldSize) adjustment += cloudNumberByteAdjustment(child);
+        }
+        if (child !== null && typeof child === "object") {
+          pending.push(child);
+          depths.push(depth + 1);
+        } else if (target === "cloud" && depth >= 20) {
+          if (!oldSize)
+            throw new Error(
+              "Evidence exceeds the Cloud JSON depth limit of 20.",
+            );
+          adjustment = Infinity;
+        }
       }
     } else if (typeof value === "number") {
-      requireJsonNumber(value, "Evidence");
-      if (batch && target === "cloud")
-        originalNumericByteAdjustment += cloudNumberByteAdjustment(value);
+      number(value);
+      if (oldSize) adjustment += cloudNumberByteAdjustment(value);
     }
   }
-  if (target === "cloud") {
-    // Rows that may need native capture must be grouped by the JSON the older
-    // reader actually admitted, before replacing numeric hooks with intrinsic values.
-    useOriginalWire =
-      !!batch && customNumber && (hasFunction || indirectNumbers.size > 0);
-    serialize();
-  }
-  if (customNumber && !batch)
-    return checkedEvidenceJson(
-      snapshotEvidence(input),
-      target,
-      additionalCloudBytes,
-      false,
-    );
-  const wireBytes =
-    target === "cloud" && !failed
-      ? Buffer.byteLength(json!) + additionalCloudBytes
-      : 0;
-  const bytes = wireBytes + numericByteAdjustment;
-  if (
-    customNumber &&
-    (failed ||
-      ((hasFunction || useOriginalWire) &&
-        [...wireMatches.values()].includes(false)) ||
-      [...indirectNumbers].some((number) => wireMatches.get(number) !== true))
-  ) {
-    return retained(
-      0,
-      true,
-      target === "cloud" &&
-        (!!failed || wireBytes + originalNumericByteAdjustment > 256 * 1024),
-    );
-  }
-  if (failed) throw failed.reason;
+  return adjustment;
+}
+
+function checkEvidenceSize(bytes: number): number {
   if (bytes > 256 * 1024)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
-  if (batch && customNumber)
-    for (const [number, equal] of wireMatches)
-      if (!equal) batch.changed.add(number);
-  return retained(bytes);
+  return bytes;
+}
+
+/** Return the validated Cloud wire size, or zero for local evidence. */
+export function validateExternalEvidenceJson(
+  input: unknown,
+  target: ExternalImportTarget,
+  additionalCloudBytes = 0,
+): number {
+  if (target === "local") JSON.stringify(input);
+  rawJsonNumbers(input, target, evidenceNumber);
+  if (target === "local") return 0;
+  let adjustment = 0;
+  const text = serializeImportJson(input, (value) => {
+    evidenceNumber(value);
+    adjustment += cloudNumberByteAdjustment(value);
+  });
+  return checkEvidenceSize(
+    Buffer.byteLength(text) + adjustment + additionalCloudBytes,
+  );
+}
+
+/** Capture the exported GitHub evidence and report whether the released Cloud
+ * reader would have admitted the original row before its native SDK snapshot. */
+export function exportedGitHubEvidence(
+  input: ExternalFindingEvidence,
+  target: ExternalImportTarget,
+  previous?: (exclusion?: string) => void,
+): ExternalFindingEvidence {
+  let invalid: unknown;
+  function serialize() {
+    return serializeImportJson(input, (value) => {
+      if (!invalid)
+        try {
+          evidenceNumber(value);
+        } catch (error) {
+          invalid = error;
+        }
+    });
+  }
+  // Preserve the historical getter order before the batch-wide retry snapshot.
+  let text = target === "local" ? serialize() : undefined;
+  const adjustment = rawJsonNumbers(input, target, evidenceNumber, !!previous);
+  text ??= serialize();
+  if (previous)
+    previous(
+      adjustment === Infinity
+        ? "Evidence exceeds the Cloud JSON depth limit of 20."
+        : Buffer.byteLength(text) + adjustment > 256 * 1024
+          ? "Evidence exceeds the Cloud limit of 256 KiB."
+          : undefined,
+    );
+  if (invalid) throw invalid;
+  // All later validation and sizing sees plain JSON including serializer-produced subtrees.
+  const retained = validateExternalEvidenceFields(JSON.parse(text), target);
+  if (target === "cloud") validateExternalEvidenceJson(retained, target);
+  return retained;
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {

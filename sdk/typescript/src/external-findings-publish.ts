@@ -35,6 +35,7 @@ import { canonicalJson, isRecord } from "./record.js";
 import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
+import { legacyGitHubFindings } from "./github-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { snykRepositoryUrls } from "./snyk-findings.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
@@ -47,6 +48,7 @@ import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
   snapshotImportOptions,
+  snapshotNormalizedFindings,
   type ExternalFindings,
   type ExternalPublicationInput,
 } from "./external-findings.js";
@@ -54,6 +56,7 @@ import {
   cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
+  validateExternalEvidenceShape,
   validateExternalReport,
   validateImportReceipt,
   validateRepositories,
@@ -217,6 +220,24 @@ function submissionFindings(
   return requests.flatMap((batch) => batch.items.map(wireFinding));
 }
 
+function sameNonNumericJson(saved: unknown, current: unknown): boolean {
+  // JSON serialization can replace a boxed number with any value, or omit its property.
+  if (typeof saved === "number") return true;
+  if (saved === current) return true;
+  if (Array.isArray(saved) && Array.isArray(current))
+    return (
+      saved.length === current.length &&
+      saved.every((child, i) => sameNonNumericJson(child, current[i]))
+    );
+  if (!isRecord(saved) || !isRecord(current)) return false;
+  return (
+    Object.keys(current).every((key) => Object.hasOwn(saved, key)) &&
+    Object.keys(saved).every((key) =>
+      sameNonNumericJson(saved[key], current[key]),
+    )
+  );
+}
+
 function sameFindingSelection(
   left: ExternalFindings["findings"],
   right: ExternalFindings["findings"],
@@ -241,7 +262,7 @@ function reportForJson(report: ExternalFindings["report"]) {
   const errors = report?.["errors"];
   if (!Array.isArray(errors)) return report;
   const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { message: entry.message } : entry,
+    entry instanceof Error ? { ...entry, message: entry.message } : entry,
   );
   return { ...report, errors: JSON.parse(json) as unknown[] };
 }
@@ -428,23 +449,37 @@ export async function prepareNormalizedExternalPublication(
   );
 }
 
+interface PublicationSelection extends ExternalPublicationInput {
+  original?: { parsed: ExternalFindings; identity: unknown };
+  potentialIds?: string[];
+  freshSizeError?: Error;
+}
+
 function normalizedPublicationInput(
   input: ExternalFindings,
-): ExternalPublicationInput {
-  // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const { report, ...parsed } = input;
-  const current: ExternalFindings = structuredClone(parsed);
-  if (report !== undefined) {
-    current.report = structuredClone(report);
-    validateExternalReport(current.report);
+): PublicationSelection {
+  const current = snapshotNormalizedFindings(input);
+  validateExternalReport(current.report);
+  const reader = legacyGitHubFindings(input, current);
+  let original: ExternalFindings | undefined;
+  try {
+    // This is the SDK's former normalized-input capture. It can recover an
+    // approved request, but an object unsupported by native clone is still valid JSON.
+    original = reader ? reader.snapshot : structuredClone(input);
+    if (original) {
+      for (const finding of original.findings) {
+        if (finding.evidence.source_data !== undefined)
+          finding.evidence.source_data = structuredClone(
+            finding.evidence.source_data,
+          );
+      }
+      for (const finding of original.findings)
+        finding.evidence = validateExternalEvidenceShape(finding.evidence);
+    }
+  } catch {
+    original = undefined;
   }
-  // structuredClone preserves aliases. Detach every raw record before adding
-  // typed defaults, including aliases shared with another finding's evidence.
-  for (const finding of current.findings)
-    if (finding.evidence.source_data !== undefined)
-      finding.evidence.source_data = structuredClone(
-        finding.evidence.source_data,
-      );
+  let freshSizeError: Error | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
     const id = finding.source_finding_id;
@@ -457,17 +492,49 @@ function normalizedPublicationInput(
         `Duplicate source finding id ${JSON.stringify(id)}.`,
       );
     identities.add(id);
-    finding.evidence = validateExternalEvidence(finding.evidence);
+    try {
+      finding.evidence = validateExternalEvidence(finding.evidence);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "Evidence exceeds the Cloud limit of 256 KiB." ||
+        !original
+      )
+        throw error;
+      // A previous normalized SDK input can contain a Buffer whose captured
+      // request fits even when the fresh Buffer JSON exceeds the limit.
+      const prior = original.findings.find(
+        (row) => row.source_finding_id === id,
+      );
+      if (!prior || wireJson(prior.evidence) === wireJson(finding.evidence))
+        throw error;
+      try {
+        validateExternalEvidence(prior.evidence);
+      } catch {
+        throw error;
+      }
+      freshSizeError = error;
+    }
   }
-  const identity =
-    current.report === undefined
-      ? current.findings
-      : { findings: current.findings, report: reportForJson(current.report) };
+  function identityOf(parsed: ExternalFindings) {
+    return parsed.report === undefined
+      ? parsed.findings
+      : {
+          findings: parsed.findings,
+          report: reportForJson(parsed.report),
+        };
+  }
+  const identity = identityOf(current);
   return {
     current,
     legacy: current,
     currentIdentity: identity,
+    freshSizeError,
     legacyIdentity: identity,
+    ...(original
+      ? { original: { parsed: original, identity: identityOf(original) } }
+      : {}),
+    ...(reader ? { potentialIds: reader.sourceFindingIds } : {}),
   };
 }
 
@@ -512,7 +579,7 @@ function verifiableLegacyMetadata(
 }
 
 async function preparePublicationInput(
-  input: ExternalPublicationInput,
+  input: PublicationSelection,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
 ): Promise<PreparedExternalPublication> {
@@ -529,18 +596,24 @@ async function preparePublicationInput(
     );
   }
   progress({ phase: "reading", completed: 0 });
-  const {
+  let {
     current: parsed,
     legacy: legacyParsed,
     currentIdentity,
     legacyIdentity,
   } = input;
-  if (parsed.findings.length === 0) {
+  function noFindings(): never {
     const diagnostics = reportForJson(parsed.report)?.["errors"];
     throw new CodexSecurityError(
       `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
     );
   }
+  if (
+    !parsed.findings.length &&
+    !input.original?.parsed.findings.length &&
+    !input.potentialIds?.length
+  )
+    noFindings();
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
   requireExternalImports(environment);
@@ -634,24 +707,58 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
+  function scopeKey(identity: unknown, wire: boolean) {
+    return hash(
+      "sha256",
+      (wire ? wireJson : canonicalJson)([...checkpointIdentity, identity]),
+    );
+  }
+  const freshKey = scopeKey(currentIdentity, true);
+  const original = input.original;
+  const originalIdentity = original?.identity ?? currentIdentity;
   let hasBoxedScalars = false;
-  const inputDigest = hash(
-    "sha256",
-    canonicalJson(currentIdentity, undefined, (value) => {
-      if (!isBoxedPrimitive(value)) return false;
-      hasBoxedScalars = true;
-      return true;
-    }),
-  );
+  const originalWire = canonicalJson(originalIdentity, undefined, (value) => {
+    if (!isBoxedPrimitive(value)) return false;
+    hasBoxedScalars = true;
+    return true;
+  });
+  const changedCapture = original && originalWire !== wireJson(currentIdentity);
+  const originalKey =
+    changedCapture || hasBoxedScalars
+      ? scopeKey(originalIdentity, false)
+      : undefined;
+  let historicalOnly = false;
+  const originalWireKey = changedCapture
+    ? scopeKey(originalIdentity, true)
+    : undefined;
+  if (changedCapture && originalKey && originalWireKey) {
+    // A released SDK could stage either spelling. A modern approval for the
+    // fresh JSON can occupy the very same historical filename.
+    for (const pathKey of new Set([originalKey, originalWireKey])) {
+      const bytes = await readOptionalFile(
+        join(state, `${pathKey}.pending.json`),
+      );
+      if (bytes === undefined) continue;
+      const record = JSON.parse(bytes) as SavedSubmission | null;
+      if (
+        record?.wireKey === originalWireKey ||
+        (record?.wireKey === undefined &&
+          record?.inputProjection?.identityFormat !== 2)
+      ) {
+        parsed = legacyParsed = original.parsed;
+        currentIdentity = legacyIdentity = original.identity;
+        historicalOnly = true;
+        break;
+      }
+    }
+  }
+  if (input.freshSizeError && !historicalOnly) throw input.freshSizeError;
+  const inputDigest = hash("sha256", wireJson(currentIdentity));
   const legacyInputDigest =
     currentIdentity === legacyIdentity
       ? inputDigest
       : hash("sha256", wireJson(legacyIdentity));
-  // The shipped SDK sorted a boxed primitive as an object. Only its exact
-  // deployment-bound key is a candidate for recovering an older approval.
-  const previousKey = hasBoxedScalars
-    ? hash("sha256", canonicalJson([...checkpointIdentity, currentIdentity]))
-    : undefined;
+  const previousKey = originalKey;
   function readSaved(
     content: SavedSubmission | null | undefined,
   ): SavedSubmission {
@@ -695,7 +802,8 @@ async function preparePublicationInput(
       );
     // Older file readers can have a different, explicitly bound projection.
     // A corrected numeric checkpoint must carry the selected evidence verbatim.
-    const exactWire = hasBoxedScalars || content.wireKey !== undefined;
+    const exactWire =
+      historicalOnly || hasBoxedScalars || content.wireKey !== undefined;
     if (
       (!projection || exactWire) &&
       wire !== wireJson(exactWire ? expected.map(wireFinding) : expected)
@@ -707,7 +815,7 @@ async function preparePublicationInput(
       !legacy &&
       hasBoxedScalars &&
       projection?.identityFormat !== 2 &&
-      !verifiableLegacyMetadata(parsed, true)
+      !verifiableLegacyMetadata(original?.parsed ?? parsed, true)
     )
       throw unmatchedPreviousNumbers();
     return content;
@@ -724,7 +832,8 @@ async function preparePublicationInput(
     const savedWire = wireJson(submissionFindings(content.requests));
     const wireDigest = hash("sha256", savedWire);
     if (
-      projection?.inputDigest !== hash("sha256", canonicalJson(currentIdentity))
+      projection?.inputDigest !==
+      hash("sha256", canonicalJson(originalIdentity))
     )
       throw unmatchedPreviousNumbers();
     if (projection.identityFormat === 2) {
@@ -732,7 +841,7 @@ async function preparePublicationInput(
       if (projection.savedEvidenceDigest === wireDigest) return undefined;
       throw unmatchedPreviousNumbers();
     }
-    const selected = parsed.findings.map(wireFinding);
+    const selected = (original?.parsed ?? parsed).findings.map(wireFinding);
     if (
       projection.savedEvidenceDigest !== hash("sha256", canonicalJson(selected))
     )
@@ -742,7 +851,10 @@ async function preparePublicationInput(
       if (wireDigest === projection.savedEvidenceDigest) return undefined;
       return "different-wire";
     }
-    if (!verifiableLegacyMetadata(parsed, false))
+    if (
+      (changedCapture && !historicalOnly) ||
+      !verifiableLegacyMetadata(original?.parsed ?? parsed, false)
+    )
       throw unmatchedPreviousNumbers();
     content.inputProjection = {
       identityFormat: 2,
@@ -756,10 +868,7 @@ async function preparePublicationInput(
       "The older saved import cannot be matched to the selected input. Its checkpoint was preserved without uploading.",
     );
   }
-  const key = hash(
-    "sha256",
-    wireJson([...checkpointIdentity, currentIdentity]),
-  );
+  const key = historicalOnly ? scopeKey(currentIdentity, true) : freshKey;
   const canonicalPath = join(state, `${key}.pending.json`);
   const lookupPath = join(state, `${key}.lookup.json`);
   // A lookup only suggests a regular file to validate. A missing or stale hint
@@ -837,11 +946,19 @@ async function preparePublicationInput(
           if (
             hasBoxedScalars &&
             legacyParsed.report !== undefined &&
-            legacyKey ===
-              hash("sha256", canonicalJson([...checkpointIdentity, rows])) &&
-            projection.inputDigest === hash("sha256", canonicalJson(rows)) &&
+            legacyKey === scopeKey(original?.parsed.findings ?? rows, false) &&
+            projection.inputDigest ===
+              hash(
+                "sha256",
+                canonicalJson(original?.parsed.findings ?? rows),
+              ) &&
             projection.savedEvidenceDigest ===
-              hash("sha256", canonicalJson(rows.map(wireFinding))) &&
+              hash(
+                "sha256",
+                canonicalJson(
+                  (original?.parsed.findings ?? rows).map(wireFinding),
+                ),
+              ) &&
             sameFindingSelection(
               submissionFindings(readSaved(prior).requests),
               rows,
@@ -902,6 +1019,64 @@ async function preparePublicationInput(
     historical: boolean;
     checkedCanonical?: true;
   }
+  // Some getter-backed batches cannot reproduce a released filename. Their IDs
+  // can stop a conflicting upload, but never authorize replay of a saved request.
+  const potentialIds =
+    input.potentialIds ??
+    (changedCapture
+      ? original?.parsed.findings.map((row) => row.source_finding_id)
+      : undefined);
+  function potentialOriginal(record: SavedSubmission) {
+    const projection = record.inputProjection;
+    if (
+      !projection ||
+      !/^[a-f0-9]{64}$/u.test(projection.inputDigest) ||
+      !/^[a-f0-9]{64}$/u.test(projection.savedEvidenceDigest) ||
+      projection.identityFormat === 2 ||
+      record.accountId !== credentials.account_id
+    )
+      return false;
+    try {
+      const rows = submissionFindings(record.requests);
+      const candidates = original?.parsed.findings ?? parsed.findings;
+      const ids =
+        potentialIds ?? parsed.findings.map((row) => row.source_finding_id);
+      if (
+        !ids.length ||
+        rows.length !== ids.length ||
+        !rows.every((row, i) => row.source_finding_id === ids[i])
+      )
+        return false;
+      if (
+        projection.inputDigest === projection.savedEvidenceDigest &&
+        parsed.report !== undefined
+      )
+        return false;
+      if (
+        potentialIds === undefined &&
+        projection.savedEvidenceDigest === hash("sha256", wireJson(rows))
+      )
+        return false;
+      readSaved(record);
+      return (
+        !sameFindingSelection(rows, candidates) ||
+        rows.every((row, i) => {
+          const { source_data: savedData, ...savedFields } = row.evidence;
+          const { source_data: selectedData, ...selectedFields } =
+            candidates[i]!.evidence;
+          if (wireJson(savedFields) !== wireJson(selectedFields)) return false;
+          // Once the original SDK discarded boxed positions, a plain JSON export
+          // alone cannot attribute a new numeric spelling to that saved request.
+          return (
+            potentialIds !== undefined ||
+            sameNonNumericJson(savedData, selectedData)
+          );
+        })
+      );
+    } catch {
+      return false;
+    }
+  }
   async function selectedCheckpoint(knownFileKey?: string, preparing = false) {
     const directory = await validatePreparedOutputDir(
       state,
@@ -916,6 +1091,7 @@ async function preparePublicationInput(
       [key, previousKey, knownFileKey].filter((value) => value !== undefined),
     );
     let unidentified = false;
+    let unprovenOriginal = false;
     let incomplete = false;
     let differentOldWire = false;
     let stagingPathOccupied = false;
@@ -950,6 +1126,7 @@ async function preparePublicationInput(
         record?.wireKey === undefined &&
         fileKey === previousKey;
       if (fileKey !== key && record?.wireKey !== key && !historical) {
+        if (record && potentialOriginal(record)) unprovenOriginal = true;
         // Some early locale filenames carry no deployment identity. Never guess their target.
         if (record && !record.inputProjection && !legacyKeys.has(fileKey)) {
           try {
@@ -1031,7 +1208,8 @@ async function preparePublicationInput(
       if (!known.has(fileKey))
         selected = await readCandidate(fileKey, selected);
     }
-    if (!selected && differentOldWire) throw unmatchedPreviousNumbers();
+    if (!selected && (differentOldWire || unprovenOriginal))
+      throw unmatchedPreviousNumbers();
     if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
     if (!selected && unidentified)
       throw new CodexSecurityError(
@@ -1126,6 +1304,8 @@ async function preparePublicationInput(
     });
   }
   const saved = selected?.content ?? recovered;
+  if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
+  if (!parsed.findings.length) noFindings();
   if (saved) {
     const content = saved;
     for (const submission of content.requests) {
@@ -1368,7 +1548,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview: structuredClone(preview),
+    preview: snapshotNormalizedFindings(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
@@ -1401,7 +1581,7 @@ async function preparePublicationInput(
           read: parsed.read,
           ...(parsed.report === undefined
             ? {}
-            : { report: structuredClone(parsed.report) }),
+            : snapshotNormalizedFindings({ report: parsed.report })),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,

@@ -1,4 +1,3 @@
-import { isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import {
   forwardExternalImportSetting,
@@ -6,6 +5,7 @@ import {
 } from "./external-imports-feature.js";
 import {
   snapshotImportOptions,
+  snapshotNormalizedFindings,
   snapshotSourceRepositories,
   type ExternalFindings,
   type ExternalSourceRepository,
@@ -124,6 +124,14 @@ function requireIdentity(
     throw new CodexSecurityError(
       `${field} must be nonempty and contain no NUL characters.`,
     );
+}
+
+function checkStoredNumber(value: number): void {
+  if (!Number.isFinite(value))
+    throw new TypeError(
+      "Stored finding JSON cannot contain non-finite numbers.",
+    );
+  requireSafeJsonInteger(value, "Stored finding JSON");
 }
 
 const gitTransportPorts: Readonly<Record<string, string>> = {
@@ -651,7 +659,7 @@ export async function prepareLocalImport(
   fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const current = structuredClone(input);
+  const current = snapshotNormalizedFindings(input, checkStoredNumber);
   validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
@@ -904,7 +912,7 @@ export async function prepareLocalImport(
   );
   dependencies.signal?.throwIfAborted();
   const preview = {
-    ...structuredClone(current),
+    ...snapshotNormalizedFindings(current),
     repository,
     source: { provider: options.provider, source_key: options.sourceKey },
   };
@@ -919,14 +927,7 @@ export async function prepareLocalImport(
       })),
     },
     (_key, value: unknown) => {
-      if (isNumberObject(value)) value = +value;
-      if (typeof value === "number") {
-        if (!Number.isFinite(value))
-          throw new TypeError(
-            "Stored finding JSON cannot contain non-finite numbers.",
-          );
-        requireSafeJsonInteger(value, "Stored finding JSON");
-      }
+      if (typeof value === "number") checkStoredNumber(value);
       return value;
     },
   );
@@ -973,7 +974,7 @@ export async function prepareLocalImport(
         read: current.read,
         ...(current.report === undefined
           ? {}
-          : { report: structuredClone(current.report) }),
+          : snapshotNormalizedFindings({ report: current.report })),
         ready: current.findings.length,
         excluded: structuredClone(current.excluded),
         findings: result["findings"] as unknown as StoredExternalFinding[],

@@ -5,6 +5,7 @@ import { importGitHubCodeScanningAlerts } from "../src/github.js";
 import { importGitHubAdvisories } from "../src/github-advisories.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
 import {
+  legacyGitHubFindings,
   normalizeGitHubCodeScanningAlerts,
   normalizeGitHubAdvisories,
 } from "../src/github-findings.js";
@@ -16,300 +17,133 @@ import {
 } from "./support/github-import-fixtures.js";
 
 test.each(["local", "cloud"] as const)(
-  "validates intrinsic numbers and retains vendor evidence on %s",
+  "retains exactly the exported GitHub values on %s",
   (target) => {
-    const normalize = (extension: unknown) => {
-      const selected = importedAlert();
-      Object.assign(selected.alert, { extension: [extension] });
-      return normalizeGitHubCodeScanningAlerts([selected], target);
-    };
-    // Cross-realm wrappers still serialize as numbers. Ordinary objects with
-    // user-defined coercion or a Number tag retain their normal JSON shape.
-    const unsafe = runInNewContext("new Number(2 ** 53)");
-    expect(normalize(2 ** 53).excluded[0]?.reason).toContain("safe integer");
-    const spoof = { [Symbol.toStringTag]: "Number", valueOf: () => NaN };
-    expect(normalize(unsafe).excluded[0]?.reason).toContain("safe integer");
-    expect(normalize(spoof).findings).toHaveLength(1);
-    expect(normalize(new Number(Infinity)).excluded[0]?.reason).toContain(
-      "finite JSON numbers",
-    );
-    const captured = (extension: unknown) => {
-      const data = normalize(extension).findings[0]!.evidence.source_data;
-      return (data?.["alert"] as { extension: unknown[] }).extension[0];
-    };
-    const plain = { score: new Number(7) };
-    expect(captured(plain)).toBe(plain);
     const score = Object.assign(new Number(7), {
-      unit: "ms",
-      toJSON: () => 2 ** 53,
+      toJSON: (key: string) => (key === "score" ? 9 : 1e-7),
     });
-    class Score extends Number {
-      get unit() {
-        return "ms";
-      }
-    }
-    class Metrics {
-      #unit = "ms";
-      score = score;
-      get unit() {
-        return this.#unit;
-      }
-    }
-    const input = {
-      score,
-      elapsed: new Score(7),
-      metrics: new Metrics(),
-      get unit() {
-        return this.elapsed.unit;
-      },
-      get privateUnit() {
-        return this.metrics.unit;
-      },
-      nested: {
-        get scores() {
-          return [score];
-        },
-      },
-      bytes: Buffer.from([1, 2]),
-    };
-    // Capture from the original receivers, then return ordinary stored data.
-    const retained = captured(input);
-    expect(JSON.parse(JSON.stringify(retained))).toEqual({
-      score: 7,
-      elapsed: 7,
-      metrics: { score: 7 },
-      unit: "ms",
-      privateUnit: "ms",
-      nested: { scores: [7] },
-      bytes: { "0": 1, "1": 2 },
-    });
-    expect(JSON.stringify(input.score)).toBe(String(2 ** 53));
-    // An own serializer is not structured-cloneable but can provide JSON.
-    expect(
-      captured({
-        score,
-        bytes: input.bytes,
-        detail: { toJSON: () => "retained" },
-      }),
-    ).toEqual({
-      score: 7,
-      bytes: { type: "Buffer", data: [1, 2] },
-      detail: "retained",
-    });
-    let reads = 0;
-    const fallback = captured({
-      first: {
-        get ordinal() {
-          return ++reads;
-        },
-      },
-      get score() {
-        reads++;
-        return Object.assign(new Number(reads), { toJSON: () => 9 });
-      },
-      detail: { toJSON: () => "retained" },
-    });
-    expect(fallback).toEqual({
-      first: { ordinal: reads - 1 },
-      score: reads,
-      detail: "retained",
-    });
-    const throwing = Object.assign(new Number(7), {
+    class Samples extends Array<number> {
       toJSON() {
-        throw new Error("vendor numeric hook");
-      },
-    });
-    expect(JSON.stringify(captured(throwing))).toBe("7");
-    class SerializedMetrics {
-      #unit = "ms";
-      score = runInNewContext("new Number(7)");
-      toJSON() {
-        return { score: this.score, unit: this.#unit };
+        return { count: this.length };
       }
     }
-    const metrics = new SerializedMetrics();
-    expect(captured(metrics)).toBe(metrics);
-    expect(JSON.parse(JSON.stringify(metrics))).toEqual({
-      score: 7,
-      unit: "ms",
-    });
-    const changing = {
+    const extension = {
       score,
-      get update() {
-        this.score = Object.assign(new Number(2 ** 53), {
-          unit: "ms",
-          toJSON: () => 7,
-        });
-        return true;
-      },
-    };
-    expect(normalize(changing).excluded[0]?.reason).toContain("safe integer");
-    expect(
-      normalize(Object.assign(new Number(2 ** 53), { toJSON: () => 12 }))
-        .excluded[0]?.reason,
-    ).toContain("safe integer");
-    expect(
-      normalize(Object.assign(new Number(Infinity), { valueOf: () => 12 }))
-        .excluded[0]?.reason,
-    ).toContain("finite JSON numbers");
-    expect(
-      normalize(Object.assign(new Number(7), { hidden: Infinity })).excluded[0]
-        ?.reason,
-    ).toContain("finite JSON numbers");
-  },
-);
-
-test.each([7, 9])(
-  "preserves shared GitHub source evidence when a boxed seven serializes as %i",
-  (wireScore) => {
-    let reads = 0;
-    const shared = {
-      score: Object.assign(new Number(7), { toJSON: () => wireScore }),
-      warning: Object.assign(new Error("scanner warning"), {
-        code: "E_SCAN",
-        context: { rule: "r1" },
-      }),
-      bytes: Buffer.alloc(32 * 1024),
-      get sample() {
-        return { id: ++reads };
-      },
-    };
-    const rows = ["refs/heads/main", "refs/heads/review"].map((ref) => {
-      const row = importedAlert(ref);
-      Object.assign(row.alert, { shared });
-      return row;
-    });
-    const result = normalizeGitHubCodeScanningAlerts(rows);
-    expect(result.excluded).toEqual([]);
-    expect(reads).toBe(4);
-    const retained = result.findings.map(
-      ({ evidence }) =>
-        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
-    );
-    expect(retained[0]).toBe(retained[1]);
-    const [first, second] = structuredClone(retained);
-    expect([first!.sample.id, second!.sample.id]).toEqual([5, 5]);
-    expect(JSON.parse(JSON.stringify(retained[0]))).toMatchObject({
-      score: 7,
-      warning: { code: "E_SCAN", context: { rule: "r1" } },
-      bytes: { type: "Buffer" },
-    });
-    expect(JSON.stringify(shared.score)).toBe(String(wireScore));
-  },
-);
-
-test("snapshots shared evidence even when only one GitHub row needs numeric capture", () => {
-  let reads = 0;
-  const shared = {
-    get sample() {
-      return { id: ++reads };
-    },
-  };
-  const first = importedAlert();
-  const second = importedAlert("refs/heads/review");
-  class Metrics {
-    score = Object.assign(new Number(7), { toJSON: () => 9 });
-  }
-  Object.assign(first.alert, { extra: new Metrics(), shared });
-  Object.assign(second.alert, { shared });
-  const separate = importedAlert("refs/heads/separate");
-  Object.assign(separate.alert, {
-    rule: first.alert["rule"],
-    warning: Object.assign(new Error("warning"), { context: { rule: "r1" } }),
-    bytes: Buffer.from([1, 2]),
-  });
-  const result = normalizeGitHubCodeScanningAlerts([first, second, separate]);
-  expect(result.excluded).toEqual([]);
-  const retained = result.findings
-    .slice(0, 2)
-    .map(
-      ({ evidence }) =>
-        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
-    );
-  expect(retained[0]).toBe(retained[1]);
-  expect(retained.map((value) => value.sample.id)).toEqual([5, 5]);
-  expect(Object.is(result.findings[2]!.evidence.source_data, separate)).toBe(
-    true,
-  );
-  expect(JSON.parse(JSON.stringify(separate.alert))).toMatchObject({
-    warning: { context: { rule: "r1" } },
-    bytes: { type: "Buffer", data: [1, 2] },
-  });
-});
-
-test.each([{ toJSON: () => "formatted" }, new WeakMap()])(
-  "an oversized uncloneable sibling preserves the accepted numeric snapshot",
-  (extra) => {
-    let reads = 0;
-    const score = Object.assign(new Number(7), { toJSON: () => 9 });
-    const shared = {
-      get score() {
+      get alias() {
         return score;
       },
-      get sample() {
-        return ++reads;
-      },
+      samples: new Samples(1, 2),
+      warning: Object.assign(new Error("scanner warning"), { code: "W1" }),
+      bytes: Buffer.from([1, 2]),
     };
-    const rows = ["main", "review", "discarded"].map((ref) => {
-      const row = importedAlert(`refs/heads/${ref}`);
-      Object.assign(row.alert, { shared });
-      return row;
+    const row = importedAlert();
+    Object.assign(row.alert, { extension });
+    const read = normalizeGitHubCodeScanningAlerts([row], target);
+    expect(read.excluded).toEqual([]);
+    const alert = read.findings[0]!.evidence.source_data!["alert"] as Record<
+      string,
+      unknown
+    >;
+    expect(alert["extension"]).toEqual({
+      score: 9,
+      alias: 1e-7,
+      samples: { count: 2 },
+      warning: { code: "W1" },
+      bytes: { type: "Buffer", data: [1, 2] },
     });
-    Object.assign(rows[2]!.alert, { extra, padding: "x".repeat(256 * 1024) });
-    const result = normalizeGitHubCodeScanningAlerts(rows);
-    expect(
-      result.excluded.map(({ position, reason }) => [position, reason]),
-    ).toEqual([[3, "Evidence exceeds the Cloud limit of 256 KiB."]]);
-    const retained = result.findings.map(
-      ({ evidence }) =>
-        (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
-    );
-    expect(retained[0]).toBe(retained[1]);
-    expect(retained[0]!.score).toBeInstanceOf(Number);
-    expect(retained[0]!.sample).toBe(7);
+    extension.warning.code = "later";
+    expect(alert["extension"]).toMatchObject({ warning: { code: "W1" } });
   },
 );
 
-test("groups rows by the original wire size before native numeric capture", () => {
-  const shape = importedAlert("refs/heads/review");
-  Object.assign(shape.alert, {
-    metrics: { score: 9, sample: { id: 1 } },
-    reducer: 0,
-    warning: { detail: "" },
-  });
-  const bytes = Buffer.byteLength(
-    JSON.stringify(
-      normalizeGitHubCodeScanningAlerts([shape]).findings[0]!.evidence,
-    ),
-  );
-  let reads = 0;
+test.each(["local", "cloud"] as const)(
+  "rejects unsafe original and exported GitHub numbers on %s",
+  (target) => {
+    function reason(value: unknown) {
+      const row = importedAlert();
+      Object.assign(row.alert, { metric: value });
+      return normalizeGitHubCodeScanningAlerts([row], target).excluded[0]
+        ?.reason;
+    }
+    for (const value of [
+      2 ** 53,
+      runInNewContext("new Number(2 ** 53)"),
+      Object.assign(new Number(2 ** 53), { toJSON: () => 7 }),
+      Object.assign(new Number(7), { toJSON: () => 2 ** 53 }),
+    ])
+      expect(reason(value)).toContain("safe integer");
+    for (const value of [
+      { toJSON: () => NaN },
+      Object.assign(new Number(7), { hidden: Infinity }),
+    ])
+      expect(reason(value)).toContain("finite JSON");
+  },
+);
+
+test("retains the original accepted native batch only for historical verification", () => {
   const score = Object.assign(new Number(7), { toJSON: () => 9 });
+  let reads = 0;
   const shared = {
-    get score() {
-      return score;
-    },
+    score,
     get sample() {
-      return { id: ++reads };
+      return ++reads;
     },
   };
-  const first = importedAlert(),
-    second = importedAlert("refs/heads/review");
-  Object.assign(first.alert, { metrics: shared });
-  Object.assign(second.alert, {
-    metrics: shared,
-    reducer: Object.assign(new Number(123456789012345), { toJSON: () => 0 }),
-    warning: Object.assign(new Error("warning"), {
-      detail: "x".repeat(256 * 1024 - bytes),
-    }),
+  const rows = ["main", "review", "excluded"].map((name) => {
+    const row = importedAlert("refs/heads/" + name);
+    Object.assign(row.alert, { shared });
+    return row;
   });
-  const output = normalizeGitHubCodeScanningAlerts([first, second]);
-  expect(output.excluded).toEqual([]);
-  const retained = output.findings.map(
+  Object.assign(rows[2]!.alert, {
+    extra: { toJSON: () => "retained" },
+    pad: "x".repeat(256 * 1024),
+  });
+  const output = normalizeGitHubCodeScanningAlerts(rows);
+  const fresh = output.findings.map(
     ({ evidence }) =>
-      (evidence.source_data!["alert"] as { metrics: typeof shared }).metrics,
+      (
+        evidence.source_data!["alert"] as {
+          shared: { score: number; sample: number };
+        }
+      ).shared,
   );
-  expect(retained[0]).toBe(retained[1]);
-  expect(retained.map((value) => value.sample.id)).toEqual([5, 5]);
+  expect(fresh).toEqual([
+    { score: 9, sample: 2 },
+    { score: 9, sample: 4 },
+  ]);
+  const previous = legacyGitHubFindings(
+    output,
+    structuredClone(output),
+  )?.snapshot;
+  expect(previous?.excluded.map((row) => row.position)).toEqual([3]);
+  const old = previous!.findings.map(
+    ({ evidence }) =>
+      (evidence.source_data!["alert"] as { shared: typeof shared }).shared,
+  );
+  expect(old[0]).toBe(old[1]);
+  expect(old[0]!.score).toBeInstanceOf(Number);
+  expect(old[0]!.sample).toBe(7);
+  output.read++;
+  expect(
+    legacyGitHubFindings(output, structuredClone(output))?.snapshot,
+  ).toBeUndefined();
+});
+
+test("an exported row over the Cloud byte limit can have an exact historical selection", () => {
+  const row = importedAlert(),
+    raw = { score: new Number(1e-7), bytes: Buffer.from([1]), pad: "" };
+  Object.assign(row.alert, { raw });
+  const read = () => normalizeGitHubCodeScanningAlerts([row]);
+  const size = Buffer.byteLength(JSON.stringify(read().findings[0]!.evidence));
+  raw.pad = "x".repeat(256 * 1024 - size - 1);
+  expect(read().findings).toHaveLength(1);
+  raw.pad += "x";
+  const current = read();
+  expect(current.findings).toHaveLength(0);
+  expect(current.excluded[0]?.reason).toContain("256 KiB");
+  const old = legacyGitHubFindings(current, structuredClone(current))?.snapshot;
+  expect(old?.findings).toHaveLength(1);
+  expect(old?.excluded).toEqual([]);
 });
 
 test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {

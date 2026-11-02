@@ -1,5 +1,7 @@
+import { isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalPublicationOptions } from "./external-findings-publish.js";
+import { requireJsonNumber } from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 
 /** A provider occurrence and its evidence, independent of a Codex assessment. */
@@ -30,6 +32,66 @@ export interface ExternalFindings {
     source_finding_id: string | null;
     reason: string;
   }[];
+}
+
+/** @internal Capture fresh input once, so preview, limits and storage use the same JSON. */
+export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
+  input: T,
+  checkEvidenceNumber = (value: number) => requireJsonNumber(value, "Evidence"),
+): T {
+  const parents: { key: string; value: object }[] = [];
+  const errors: { path: string[]; error: Error }[] = [];
+  const json = JSON.stringify(
+    input,
+    function (this: object, key, value: unknown) {
+      while (parents.length && parents.at(-1)!.value !== this) parents.pop();
+      if (isNumberObject(value)) value = +value;
+      if (typeof value === "number") {
+        if (parents[1]?.key === "report")
+          requireJsonNumber(value, "Scanner report");
+        if (parents[1]?.key === "findings" && parents[3]?.key === "evidence")
+          checkEvidenceNumber(value);
+      }
+      if (value !== null && typeof value === "object") {
+        // The SDK exposes native Errors in report.errors and renders their messages
+        // in saved receipts. Remember only those paths during the actual JSON read.
+        if (
+          value instanceof Error &&
+          parents[1]?.key === "report" &&
+          parents[2]?.key === "errors" &&
+          Array.isArray(parents[2].value)
+        ) {
+          let error = new Error();
+          if (!Object.prototype.propertyIsEnumerable.call(value, "message")) {
+            try {
+              error = structuredClone(value);
+            } catch {
+              // A hidden, noncloneable cause does not prevent JSON export.
+              error = new Error(value.message);
+            }
+          }
+          errors.push({
+            path: [...parents.slice(1).map((p) => p.key), key],
+            error,
+          });
+        }
+        parents.push({ key, value });
+      }
+      return value;
+    },
+  );
+  const result = JSON.parse(json) as T;
+  for (const { path, error } of errors) {
+    const key = path.pop()!;
+    let parent = result as unknown as Record<string, unknown>;
+    for (const field of path) parent = parent[field] as Record<string, unknown>;
+    Object.defineProperties(
+      error,
+      Object.getOwnPropertyDescriptors(parent[key] as object),
+    );
+    parent[key] = error;
+  }
+  return result;
 }
 
 /** @internal Keep earlier provider projections only for immutable request replay. */

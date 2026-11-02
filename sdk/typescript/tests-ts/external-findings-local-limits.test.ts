@@ -367,9 +367,10 @@ test.each([1e-7, 0.00001])(
   },
 );
 
-test("Cloud measures caller fields at their retained numeric size", () => {
+test("Cloud measures caller fields at their exported numeric size", () => {
   const limit = 256 * 1024;
-  const padding = limit - validateExternalEvidenceJson({ score: 1 }, "cloud");
+  const padding =
+    limit - validateExternalEvidenceJson({ score: 1e-7 }, "cloud");
   const score = Object.assign(new Number(1), { toJSON: () => 1e-7 });
   class Metrics {
     score = score;
@@ -443,11 +444,12 @@ test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", asyn
       if (Array.isArray(samples)) samples[samples.length - 1] = score;
       const result = module.exports.${reader}([record], "local");
       const row = result.findings[0].evidence.source_data.${kind};
-      process.stdout.write(JSON.stringify([row.samples.length, row.samples.at(-1), row.score]));
+      const values = Array.isArray(row.samples) ? row.samples : row.samples.data;
+      process.stdout.write(JSON.stringify([values.length, values.at(-1), row.score]));
     `,
     );
     expect(JSON.parse(retained)).toEqual(
-      alert ? [650_000, 7, 7] : [524_288, 0, 7],
+      alert ? [650_000, 9, 9] : [524_288, 0, 9],
     );
   }
 });

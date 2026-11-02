@@ -1,10 +1,11 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
-  EvidenceNumberBatch,
-  retainNumberFields,
+  exportedGitHubEvidence,
+  validateExternalEvidenceFields,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
@@ -14,7 +15,7 @@ import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import { asRecord } from "./record.js";
+import { asRecord, canonicalJson } from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 
 function repositoryName(value: unknown): string {
@@ -52,11 +53,10 @@ function severity(value: unknown): string {
     : "unknown";
 }
 
-function codeScanningFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-  captures?: EvidenceNumberBatch,
-): ExternalFinding {
+function codeScanningFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
   const repository = repositoryName(record["repository"]);
   const alert = asRecord(record["alert"]);
   const number = record["number"];
@@ -112,53 +112,46 @@ function codeScanningFinding(
   const sourceId = `${host}/${repository.toLowerCase()}/code-scanning/${number}/${hash("sha256", ref)}`;
   return {
     source_finding_id: sourceId,
-    evidence: validateExternalEvidence(
-      {
-        title:
-          text(rule?.["name"]) ??
-          text(rule?.["description"]) ??
-          `GitHub code-scanning alert #${number}`,
-        severity: severity(rule?.["security_severity_level"]),
-        description:
-          [...new Set([message, description].filter(Boolean))].join("\n\n") ||
-          null,
-        url,
-        locations: path
-          ? [{ path, line: location?.["start_line"] ?? null }]
-          : [],
-        branch: ref,
-        code_revision: text(instance?.["commit_sha"]),
-        source_updated_at: sourceTimestamp(alert["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "sast",
-          repository: {
-            url: `${origin}/${repository}`,
-            name: repository,
-          },
-          // Dismissal covers every branch; detection state belongs to the selected ref.
-          source_status:
-            alert["state"] === "dismissed"
-              ? "dismissed"
-              : (text(instance?.["state"]) ?? text(alert["state"])),
-          scanner_origin: text(tool?.["name"]),
-          rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
-          weakness_ids: weaknessIds,
-          remediation_instructions: text(rule?.["help"]),
-          code: path ? { end_line: location?.["end_line"] ?? null } : null,
+    evidence: {
+      title:
+        text(rule?.["name"]) ??
+        text(rule?.["description"]) ??
+        `GitHub code-scanning alert #${number}`,
+      severity: severity(rule?.["security_severity_level"]),
+      description:
+        [...new Set([message, description].filter(Boolean))].join("\n\n") ||
+        null,
+      url,
+      locations: path ? [{ path, line: location?.["start_line"] ?? null }] : [],
+      branch: ref,
+      code_revision: text(instance?.["commit_sha"]),
+      source_updated_at: sourceTimestamp(alert["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "sast",
+        repository: {
+          url: `${origin}/${repository}`,
+          name: repository,
         },
+        // Dismissal covers every branch; detection state belongs to the selected ref.
+        source_status:
+          alert["state"] === "dismissed"
+            ? "dismissed"
+            : (text(instance?.["state"]) ?? text(alert["state"])),
+        scanner_origin: text(tool?.["name"]),
+        rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
+        weakness_ids: weaknessIds,
+        remediation_instructions: text(rule?.["help"]),
+        code: path ? { end_line: location?.["end_line"] ?? null } : null,
       },
-      target,
-      captures,
-    ),
+    },
   };
 }
 
-function advisoryFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-  captures?: EvidenceNumberBatch,
-): ExternalFinding {
+function advisoryFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
   const repository = repositoryName(record["repository"]);
   const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
@@ -230,100 +223,150 @@ function advisoryFinding(
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
     source_finding_id: `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`,
-    evidence: validateExternalEvidence(
-      {
-        title: text(advisory["summary"]) ?? id,
-        severity: severity(advisory["severity"]),
-        description: text(advisory["description"]),
-        url,
-        advisory_ids: [...new Set(advisoryIds)],
-        packages,
-        source_updated_at: sourceTimestamp(advisory["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "advisory",
-          advisory: { source: selection },
-          ...(selection === "repository"
-            ? {
-                repository: {
-                  url: `${origin}/${repository}`,
-                  name: repository,
-                },
-              }
-            : {}),
-          source_status: text(advisory["withdrawn_at"])
-            ? "withdrawn"
-            : (text(advisory["state"]) ??
-              (selection === "global" ? "published" : null)),
-          scanner_origin: "GitHub Security Advisories",
-          weakness_ids: cwes
-            .map((value) => text(asRecord(value)?.["cwe_id"]))
-            .filter((value): value is string => value !== null),
-        },
+    evidence: {
+      title: text(advisory["summary"]) ?? id,
+      severity: severity(advisory["severity"]),
+      description: text(advisory["description"]),
+      url,
+      advisory_ids: [...new Set(advisoryIds)],
+      packages,
+      source_updated_at: sourceTimestamp(advisory["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "advisory",
+        advisory: { source: selection },
+        ...(selection === "repository"
+          ? {
+              repository: {
+                url: `${origin}/${repository}`,
+                name: repository,
+              },
+            }
+          : {}),
+        source_status: text(advisory["withdrawn_at"])
+          ? "withdrawn"
+          : (text(advisory["state"]) ??
+            (selection === "global" ? "published" : null)),
+        scanner_origin: "GitHub Security Advisories",
+        weakness_ids: cwes
+          .map((value) => text(asRecord(value)?.["cwe_id"]))
+          .filter((value): value is string => value !== null),
       },
-      target,
-      captures,
-    ),
+    },
   };
+}
+
+interface LegacyGitHubSelection {
+  sourceFindingIds: string[];
+  snapshot?: ExternalFindings;
+}
+const previousSelections = new WeakMap<
+  ExternalFindings,
+  { exported: string; previous: LegacyGitHubSelection }
+>();
+
+/** Only unchanged SDK output can identify an older, differently serialized selection. */
+export function legacyGitHubFindings(
+  input: ExternalFindings,
+  current: ExternalFindings,
+): LegacyGitHubSelection | undefined {
+  const selection = previousSelections.get(input);
+  if (!selection) return undefined;
+  return hash("sha256", canonicalJson(current)) === selection.exported
+    ? selection.previous
+    : { sourceFindingIds: selection.previous.sourceFindingIds };
 }
 
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget = "cloud",
-  captures?: EvidenceNumberBatch,
+  snapshot = false,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
   };
+  const originals =
+    snapshot && target === "cloud" ? ([] as ExternalFinding[]) : undefined;
+  const oldExcluded: ExternalFindings["excluded"] = [];
   const identities = new Set<string>();
-  const selected = Array.from(records, (value) => {
+  for (const [index, value] of records.entries()) {
     const record = asRecord(value);
+    let oldChecked = false;
     try {
       if (!record) throw new Error("GitHub finding must be an object.");
-      let finding: ExternalFinding;
+      let candidate;
       if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record, target, captures);
+        candidate = codeScanningFinding(record);
       else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record, target, captures);
+        candidate = advisoryFinding(record);
       else
         throw new Error(
           "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
         );
-      return finding;
+      const id = candidate.source_finding_id;
+      let evidence;
+      if (snapshot) {
+        const raw = validateExternalEvidenceFields(candidate.evidence, target);
+        evidence = exportedGitHubEvidence(
+          raw,
+          target,
+          originals
+            ? (exclusion) => {
+                oldChecked = true;
+                if (!exclusion)
+                  originals.push({ source_finding_id: id, evidence: raw });
+                else
+                  oldExcluded.push({
+                    position: index + 1,
+                    source_finding_id: text(record["url"]),
+                    reason: exclusion,
+                  });
+              }
+            : undefined,
+        );
+      } else evidence = validateExternalEvidence(candidate.evidence, target);
+      if (identities.has(id))
+        throw new CodexSecurityError(
+          `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
+        );
+      identities.add(id);
+      result.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
-      return errorMessage(error);
+      const excluded = {
+        position: index + 1,
+        source_finding_id: text(record?.["url"]),
+        reason: errorMessage(error),
+      };
+      result.excluded.push(excluded);
+      if (originals && !oldChecked) oldExcluded.push({ ...excluded });
     }
-  });
-  const completed = captures?.finish(target);
-  for (const [index, candidate] of selected.entries()) {
-    let reason: string;
-    if (typeof candidate === "string") reason = candidate;
-    else {
-      const captured = completed?.get(candidate.evidence);
-      if (typeof captured === "string") reason = captured;
-      else {
-        if (captured) candidate.evidence = captured;
-        const id = candidate.source_finding_id;
-        if (identities.has(id))
-          throw new CodexSecurityError(
-            `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
-          );
-        identities.add(id);
-        result.findings.push(candidate);
-        continue;
-      }
-    }
-    result.excluded.push({
-      position: index + 1,
-      source_finding_id: text(asRecord(records[index])?.["url"]),
-      reason,
-    });
   }
-  if (captures?.changed.size)
-    result.findings = retainNumberFields(result.findings, captures.changed);
+  if (originals?.length) {
+    let native: ExternalFinding[] | undefined;
+    try {
+      native = structuredClone(originals);
+    } catch {
+      /* No complete previous SDK snapshot could be reproduced. */
+    }
+    if (!isDeepStrictEqual(native, result.findings)) {
+      const previous: LegacyGitHubSelection = {
+        sourceFindingIds: originals.map((row) => row.source_finding_id),
+      };
+      if (native)
+        previous.snapshot = {
+          read: result.read,
+          findings: native,
+          excluded: oldExcluded,
+        };
+      previousSelections.set(result, {
+        exported: hash("sha256", canonicalJson(result)),
+        previous,
+      });
+    }
+  }
   return result;
 }
 
@@ -332,7 +375,7 @@ export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts, target, new EvidenceNumberBatch());
+  return normalizeRecords(alerts, target, true);
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
@@ -340,7 +383,7 @@ export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories, target, new EvidenceNumberBatch());
+  return normalizeRecords(advisories, target, true);
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */

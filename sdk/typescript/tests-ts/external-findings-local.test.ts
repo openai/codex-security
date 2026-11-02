@@ -896,16 +896,18 @@ describe("local normalized scanner findings", () => {
       }),
     };
     data.findings[0]!.evidence.source_data = sourceData;
+    data.report = { value: sourceData.value, alias: sourceData.value };
     const prepared = await prepareNormalizedLocalImport(
       data,
       { repository, ...source },
       { environment },
     );
-    const expected = { scores: [3], section: [1, 1], value: 9 };
+    const expected = { scores: [3], section: [1, 1], value: 0 };
     expect(reads).toBe(1);
     const preview = prepared.preview.findings[0]!.evidence.source_data!;
     expect(JSON.parse(JSON.stringify(preview))).toEqual(expected);
-    await prepared.import();
+    expect(prepared.preview.report).toEqual({ value: 0, alias: 9 });
+    expect((await prepared.import()).report).toEqual(prepared.preview.report);
     const rows = await listLocalExternalFindings(
       { repository },
       { environment },
@@ -943,8 +945,7 @@ describe("local normalized scanner findings", () => {
       { environment },
     );
     expect(reads).toBe(1);
-    // Direct normalized imports snapshot caller data with structuredClone.
-    const expected = { scores: { score: 3, getterScore: 1 } };
+    const expected = { scores: { score: 3, getterScore: 5 } };
     expect(
       JSON.parse(
         JSON.stringify(prepared.preview.findings[0]!.evidence.source_data),

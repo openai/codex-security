@@ -51,12 +51,10 @@ Use finite JSON numbers in evidence and report metadata. Supply integers outside
 JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
 primitive numbers in plain data fields for predictable JSON exports.
 
-The SDK uses the underlying numeric value of a JavaScript `Number` object in
-evidence. If a record also uses getters or custom serialization, the reader
-may capture their values during normalization. Readers that clone raw records
-require cloneable input and can copy a `Buffer` as a `Uint8Array`. Values created by a
-serializer use their emitted JSON for the Cloud byte limit. Use stable getters
-and serializers when you need to reproduce a saved request.
+When you supply normalized findings to the SDK, new imports use their JSON
+representation. For example, `new Number(7)` exports as `7`. If its `toJSON()`
+returns `9`, the new import uses `9`. The GitHub code-scanning and advisory
+readers also apply the Cloud size limit to the evidence they return.
 
 ## Operate the two destinations
 
@@ -103,15 +101,14 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Changing the findings prepares a new submission. Use the same SDK version for
-a submission and its retries.
+Use the same SDK version throughout a submission when possible.
 
-If an earlier SDK saved a normalized submission containing `Number` objects,
-retry with the original input. Once the SDK recognizes the saved request,
-later retries can use equivalent primitive numbers. Older checkpoints could
-record a boxed report value as `{}`. If the SDK cannot verify a boxed retry
-against that record, it preserves the checkpoint and stops before uploading.
-If another pending import already uses the same filename, finish that import first.
+After an SDK upgrade, retry with the original input. An older SDK could approve
+different bytes from those its JSON export contained. When the SDK verifies
+the old selection and request bytes, it resumes with the original request IDs
+and skips batches that already have receipts. If it finds a matching checkpoint
+but cannot verify what was approved, it preserves the checkpoint and stops
+before uploading. If you kept the original normalized findings, retry with them.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

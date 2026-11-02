@@ -4286,6 +4286,31 @@ async function oldScoreApproval(field: string, stageApproval = true) {
   return { f, prepare, directory, path, filename, request, saved };
 }
 
+test("a boxed JSON hook keeps the released request and applies to fresh normalized publication", async () => {
+  const { f, prepare, path, request, saved } =
+    await oldScoreApproval("evidence");
+  const score = (native: number) =>
+    Object.assign(new Number(native), { toJSON: () => 9 });
+
+  await expect(prepare(score(8))).rejects.toThrow();
+  for (const plain of [2.5, JSON.parse(JSON.stringify(score(2.5))), "7.00"])
+    await expect(prepare(plain)).rejects.toThrow();
+  expect(await readFile(path, "utf8")).toBe(saved);
+  expect(f.posts).toHaveLength(0);
+
+  const resumed = await prepare(score(2.5));
+  expect(resumed.preview.resumed).toBe(true);
+  expect((await resumed.publish()).receipts[0]!.id).toBe(request.request_id);
+  expect(f.posts).toEqual([JSON.stringify(request)]);
+
+  const fresh = await prepare(score(2.5));
+  expect(fresh.preview.resumed).toBe(false);
+  expect((await fresh.publish()).verified).toBe(1);
+  expect(JSON.parse(f.posts[1]!).items[0].evidence.source_data).toEqual({
+    score: 9,
+  });
+});
+
 test.each([
   { first: "reported", reportedScore: 2.5 },
   { first: "report-free", reportedScore: 2.5 },
@@ -4866,14 +4891,16 @@ test("normalized SDK publication rejects unserializable report metadata before u
 
 test("publication JSON retains native Error messages and scanner diagnostics", async () => {
   const scannerErrors = opengrepJson().errors;
-  const error = new Error("Scanner rule timed out.");
+  const error = Object.assign(new Error("Scanner rule timed out."), {
+    code: "RULE_TIMEOUT",
+  });
   const nested = {
     path: "src/example.ts",
     cause: new Error("Parser stopped."),
   };
   const report = { errors: [error, nested, ...scannerErrors] };
   const jsonErrors = [
-    { message: error.message },
+    { code: error.code, message: error.message },
     { path: nested.path, cause: { message: nested.cause.message } },
     ...scannerErrors,
   ];
@@ -4903,11 +4930,16 @@ test("publication JSON retains native Error messages and scanner diagnostics", a
     f.deps,
   );
   const original = structuredClone(report);
+  Object.assign(original.errors[0]!, { code: error.code });
   nested.cause.message = "Caller changed the diagnostic.";
   const completed = await prepared.publish();
   expect(completed.verified).toBe(1);
   for (const value of [prepared.preview.report, completed.report]) {
     expect(value).toEqual(original);
+    expect((value?.["errors"] as Error[])[0]).toHaveProperty(
+      "code",
+      error.code,
+    );
     expect(value?.["errors"]).toEqual([
       expect.any(Error),
       { path: nested.path, cause: expect.any(Error) },
@@ -6226,4 +6258,80 @@ test("preparing across a checkpoint handoff returns the observed approval", asyn
     reads.mockRestore();
     await Promise.allSettled([waiting]);
   }
+});
+
+test("the GitHub reader resumes a released boxed score whose Buffer fit the Cloud request", async () => {
+  const { normalizeGitHubCodeScanningAlerts } =
+    await import("../src/github-findings.js");
+  const f = await fixture();
+  const row = importedAlert();
+  const extension = {
+    score: new Number(1e-7),
+    bytes: Buffer.from([1]),
+    pad: "",
+  };
+  Object.assign(row.alert, { extension });
+  const normalize = () => normalizeGitHubCodeScanningAlerts([row], "cloud");
+  const prepare = (input = normalize()) =>
+    prepareNormalizedExternalPublication(
+      input,
+      { ...options, provider: "github" },
+      f.deps,
+    );
+
+  // Rebuild the released request without storing the 256 KiB row in the fixture.
+  const priorReader = { ...normalize() };
+  priorReader.findings[0]!.evidence.source_data = row;
+  const template = await prepare();
+  const request = JSON.parse(JSON.stringify(template.preview.requests[0]));
+  request.request_id = "5e640fea-52f8-43c2-ba4c-a0822c040458";
+  extension.pad = "x".repeat(260303);
+  const wire = request.items[0].evidence;
+  wire.source_data.alert.extension.bytes = { "0": 1 };
+  wire.source_data.alert.extension.pad = extension.pad;
+  expect(
+    Buffer.byteLength(JSON.stringify(priorReader.findings[0]!.evidence)),
+  ).toBe(256 * 1024);
+  const bodyHash =
+    "69a99d16710c9dc0710268e00b91ecdbb45df094d2918ec9797163332bcd37c5";
+  expect(Buffer.byteLength(JSON.stringify(wire))).toBe(262123);
+  expect(hash("sha256", JSON.stringify(request))).toBe(bodyHash);
+  await expect(prepare()).rejects.toThrow("Cloud limit of 256 KiB");
+  await expect(prepare(priorReader)).rejects.toThrow("Cloud limit of 256 KiB");
+  expect(f.posts).toHaveLength(0);
+
+  const directory = join(f.root, "state", "external-finding-publications");
+  const digest =
+    "6d0cd82bed91273c26d2d9cd6eea9814f7ce3ac33af58a266f6554617d560362";
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(
+      directory,
+      "c03e748fff72692564d445fc232317c164f16cf16fc5b1969bbee80d98bdb97e.pending.json",
+    ),
+    JSON.stringify({
+      accountId: "synthetic-account",
+      requests: [request],
+      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    }),
+    { mode: 0o600 },
+  );
+
+  const resumed = await prepare(priorReader);
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.excluded).toEqual([]);
+  f.state.brokenReadback = true;
+  await expect(resumed.publish()).rejects.toThrow("Readback unavailable");
+  f.state.brokenReadback = false;
+  const completed = await (await prepare()).publish();
+  expect(completed).toMatchObject({
+    status: "complete",
+    ready: 1,
+    excluded: [],
+    unacknowledged: 0,
+    counts: { created: 1 },
+    verified: 1,
+  });
+  expect(completed.receipts.map(({ id }) => id)).toEqual([request.request_id]);
+  expect(f.posts.map((body) => hash("sha256", body))).toEqual([bodyHash]);
 });
