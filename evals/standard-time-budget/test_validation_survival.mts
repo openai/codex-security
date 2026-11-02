@@ -73,8 +73,8 @@ for (const deferLast of [false, true]) {
     const deferred = deferLast
       ? [
           {
-            id: withheld.ruleId,
-            candidateId: withheld.ruleId,
+            id: `verify-${withheld.ruleId}`,
+            candidateId: `candidate-${withheld.ruleId}`,
             candidate: withheld,
             reason: `Verify ${withheld.title}.`,
             paths: [withheld.locations[0]!.path],
@@ -143,12 +143,10 @@ for (const deferLast of [false, true]) {
             _meta: { "openai/threadId": threadId },
           });
           assert.notEqual(result.isError, true, JSON.stringify(result.content));
-          if (!complete) {
-            const progress = await readCheckpoint(env.CODEX_SECURITY_SCAN_DIR!);
-            assert.equal(progress.complete, false);
-            assertAcceptedFindings(progress.findings);
-            assert.deepEqual(progress.reviewState.deferred, deferred);
-          }
+          const checkpoint = await readCheckpoint(env.CODEX_SECURITY_SCAN_DIR!);
+          assert.equal(checkpoint.complete !== false, complete);
+          assertAcceptedFindings(checkpoint.findings);
+          assert.deepEqual(checkpoint.reviewState.deferred, deferred);
         }
       } finally {
         await client.close();
