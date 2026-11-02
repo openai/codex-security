@@ -12,7 +12,12 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { isBoxedPrimitive, isNativeError, isProxy } from "node:util/types";
+import {
+  isBoxedPrimitive,
+  isNativeError,
+  isProxy,
+  isStringObject,
+} from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -56,6 +61,7 @@ import {
   cloneImportPreview,
   nativeErrorStackGetter,
   snapshotNormalizedFindings,
+  type ExternalFinding,
   type ExternalFindings,
   type ExternalPublicationInput,
 } from "./external-findings.js";
@@ -458,8 +464,43 @@ async function withImportLocks<T>(
   }
 }
 
+// A caller's serializer may deliberately omit an ID accessor. Inspect stored
+// IDs here and check the actual exported rows after normalization.
+function storedFindingId(finding: ExternalFinding): string {
+  const seen = new Set<object>();
+  for (
+    let owner: object | null = finding;
+    owner && !seen.has(owner);
+    owner = Object.getPrototypeOf(owner) as object | null
+  ) {
+    const property = Object.getOwnPropertyDescriptor(
+      owner,
+      "source_finding_id",
+    );
+    if (property) {
+      const id: unknown = property.value;
+      return typeof id === "string" || isStringObject(id)
+        ? String.prototype.valueOf.call(id)
+        : "";
+    }
+    seen.add(owner);
+  }
+  return "";
+}
+
 function rejectLocalSelections(input: ExternalFindings): void {
-  if (input.findings.some(isSemgrepSelectionEvidence))
+  const rows = input?.findings;
+  if (!Array.isArray(rows)) return;
+  if (
+    rows.some(
+      (row) =>
+        row &&
+        isSemgrepSelectionEvidence({
+          source_finding_id: storedFindingId(row),
+          evidence: row.evidence,
+        }),
+    )
+  )
     throw new CodexSecurityError(
       "Semgrep Platform selections require a local import.",
     );
@@ -750,6 +791,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
+  if (original) rejectLocalSelections(original.parsed);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -762,6 +804,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
+  rejectLocalSelections(current);
   const identity = publicationIdentity(current);
   return {
     current,

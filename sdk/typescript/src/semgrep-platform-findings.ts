@@ -439,7 +439,7 @@ const generatedId = /^semgrep-platform:[0-9a-f]{64}$/u;
 
 /** Recognize retained Platform evidence after an SDK caller projects away wrapper fields. */
 export function isSemgrepSelectionEvidence(finding: ExternalFinding): boolean {
-  const data = finding.evidence.source_data;
+  const data = finding.evidence?.source_data;
   return (
     generatedId.test(finding.source_finding_id) ||
     data?.["format"] === semgrepSelectionFormat ||
