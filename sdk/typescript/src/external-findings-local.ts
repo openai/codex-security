@@ -15,7 +15,6 @@ import {
   cloudRepositoryUrlKey,
   requireSafeJsonInteger,
   repositoryUrlKey,
-  validateExternalReport,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -661,7 +660,6 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
-  validateExternalReport(current.report);
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -917,21 +915,15 @@ export async function prepareLocalImport(
     repository,
     source: { provider: options.provider, source_key: options.sourceKey },
   };
-  const payload = JSON.stringify(
-    {
-      repository,
-      provider: options.provider,
-      sourceKey: options.sourceKey,
-      findings: current.findings.map(({ source_finding_id, evidence }) => ({
-        source_finding_id,
-        evidence,
-      })),
-    },
-    (_key, value: unknown) => {
-      if (typeof value === "number") checkStoredNumber(value);
-      return value;
-    },
-  );
+  const payload = JSON.stringify({
+    repository,
+    provider: options.provider,
+    sourceKey: options.sourceKey,
+    findings: current.findings.map(({ source_finding_id, evidence }) => ({
+      source_finding_id,
+      evidence,
+    })),
+  });
   return {
     matchesRepositoryRemote,
     preview,

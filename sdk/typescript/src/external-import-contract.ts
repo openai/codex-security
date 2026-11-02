@@ -211,9 +211,7 @@ function validator<T>(
   };
 }
 
-export const validateExternalEvidenceShape = validator<ExternalFindingEvidence>(
-  "ImportedFindingEvidence",
-);
+const evidence = validator<ExternalFindingEvidence>("ImportedFindingEvidence");
 const localEvidence = validator<ExternalFindingEvidence>(
   "ImportedFindingEvidence",
   "local",
@@ -283,9 +281,7 @@ export function validateExternalEvidenceFields(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindingEvidence {
-  const result = (
-    target === "local" ? localEvidence : validateExternalEvidenceShape
-  )(input);
+  const result = (target === "local" ? localEvidence : evidence)(input);
   for (const location of result.locations ?? []) {
     const path = location.path.replaceAll("\\", "/");
     if (
@@ -510,57 +506,51 @@ function* dataValues(value: object, skipped?: () => void): Generator<unknown> {
 function rawJsonNumbers(
   input: unknown,
   target: ExternalImportTarget,
-  number: ValidateNumber,
   oldSize = false,
   dataOnly = false,
   skipped?: () => void,
 ): number {
-  const pending: unknown[] = [input];
-  const depths: number[] = [0];
-  const ancestors: object[] = [];
   let adjustment = 0;
+  function countNumber(value: number) {
+    evidenceNumber(value);
+    if (target === "cloud") adjustment += cloudNumberByteAdjustment(value);
+  }
+  function exceedDepth() {
+    if (!oldSize)
+      throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
+    adjustment = Infinity;
+  }
+
+  if (input === null || typeof input !== "object") {
+    if (typeof input === "number") countNumber(input);
+    return adjustment;
+  }
+  const pending: object[] = [input];
+  const depths = [0];
+  const ancestors: object[] = [];
   let checked = target === "local" ? new WeakSet<object>() : undefined;
   while (pending.length) {
-    const value = pending.pop();
+    const value = pending.pop()!;
     const depth = depths.pop()!;
-    if (target === "cloud" && depth > 20) {
-      if (!oldSize)
-        throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
-      adjustment = Infinity;
+    if (target === "cloud" && depth > 20) exceedDepth();
+    // After a historical rejection, aliases only need one raw numeric check.
+    if (adjustment === Infinity) checked ??= new WeakSet();
+    if (checked?.has(value)) continue;
+    checked?.add(value);
+    ancestors.length = depth;
+    if (ancestors.includes(value)) {
+      if (oldSize) adjustment = Infinity;
+      continue;
     }
-    if (value !== null && typeof value === "object") {
-      // After a historical rejection, aliases only need one raw numeric check.
-      if (adjustment === Infinity) checked ??= new WeakSet();
-      if (checked?.has(value)) continue;
-      checked?.add(value);
-      ancestors.length = depth;
-      if (ancestors.includes(value)) {
-        if (oldSize) adjustment = Infinity;
-        continue;
-      }
-      ancestors[depth] = value;
-      for (const child of dataOnly
-        ? dataValues(value, skipped)
-        : Object.values(value)) {
-        if (typeof child === "number") {
-          number(child);
-          if (target === "cloud")
-            adjustment += cloudNumberByteAdjustment(child);
-        }
-        if (child !== null && typeof child === "object") {
-          pending.push(child);
-          depths.push(depth + 1);
-        } else if (target === "cloud" && depth >= 20) {
-          if (!oldSize)
-            throw new Error(
-              "Evidence exceeds the Cloud JSON depth limit of 20.",
-            );
-          adjustment = Infinity;
-        }
-      }
-    } else if (typeof value === "number") {
-      number(value);
-      if (target === "cloud") adjustment += cloudNumberByteAdjustment(value);
+    ancestors[depth] = value;
+    for (const child of dataOnly
+      ? dataValues(value, skipped)
+      : Object.values(value)) {
+      if (typeof child === "number") countNumber(child);
+      if (child !== null && typeof child === "object") {
+        pending.push(child);
+        depths.push(depth + 1);
+      } else if (target === "cloud" && depth >= 20) exceedDepth();
     }
   }
   return adjustment;
@@ -603,11 +593,11 @@ export function validateExternalEvidenceJson(
         throw error;
       invalid = error;
     }
-    rawJsonNumbers(input, target, evidenceNumber);
+    rawJsonNumbers(input, target);
     if (invalid) throw invalid;
     return 0;
   }
-  const rawAdjustment = rawJsonNumbers(input, target, evidenceNumber);
+  const rawAdjustment = rawJsonNumbers(input, target);
   let text: string;
   try {
     text = serializeImportJson(input, validateNumber, true);
@@ -629,13 +619,7 @@ export function validatePreviousCloudEvidence(
   const evidence = validateExternalEvidenceFields(input, "cloud");
   // Older validation counted enumerable primitive numbers, while JSON encoded
   // the native wrappers. Check depth before serializing a possibly shared graph.
-  const adjustment = rawJsonNumbers(
-    evidence,
-    "cloud",
-    evidenceNumber,
-    true,
-    true,
-  );
+  const adjustment = rawJsonNumbers(evidence, "cloud", true, true);
   if (!Number.isFinite(adjustment)) throw new CloudEvidenceDepthError();
   checkEvidenceSize(Buffer.byteLength(JSON.stringify(evidence)) + adjustment);
   return evidence;
@@ -657,7 +641,6 @@ export function exportedGitHubRecord(
       adjustment = rawJsonNumbers(
         { source_data: value },
         target,
-        evidenceNumber,
         target === "cloud",
         true,
         () => {
@@ -706,10 +689,8 @@ export function previousGitHubExclusion(
     return "Evidence exceeds the Cloud JSON depth limit of 20.";
   const envelope = { ...evidence, source_data: null };
   const bytes = Buffer.byteLength(JSON.stringify(envelope)) - 4 + sourceBytes;
-  return bytes +
-    adjustment +
-    rawJsonNumbers(envelope, "cloud", evidenceNumber, true) >
-    256 * 1024
+  return bytes + adjustment + rawJsonNumbers(envelope, "cloud", true) >
+    CLOUD_EVIDENCE_BYTES
     ? "Evidence exceeds the Cloud limit of 256 KiB."
     : undefined;
 }

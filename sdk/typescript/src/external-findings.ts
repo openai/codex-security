@@ -81,46 +81,67 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
   checkEvidenceNumber = (value: number) => requireJsonNumber(value, "Evidence"),
   target: ExternalImportTarget = "local",
 ): T {
-  const parents: { key: string; value: object }[] = [];
+  const fields = new Map<string, unknown>();
   const errors: { path: string[]; error: Error }[] = [];
-  const json = JSON.stringify(
-    input,
-    function (this: object, key, value: unknown) {
-      while (parents.length && parents.at(-1)!.value !== this) parents.pop();
-      if (
-        target === "cloud" &&
-        parents[1]?.key === "findings" &&
-        parents[3]?.key === "evidence"
-      )
-        requireCloudEvidenceDepth(parents.length - 3, this, value);
-      if (isNumberObject(value)) value = +value;
-      if (
-        parents[1]?.key === "report" ||
-        (parents.length === 1 && key === "report")
-      )
-        checkReportNumber(value);
-      if (parents[1]?.key === "findings" && parents[3]?.key === "evidence")
-        checkEmittedJsonNumber(value, checkEvidenceNumber);
-      if (value !== null && typeof value === "object") {
-        // The SDK exposes native Errors in report.errors and renders their messages
-        // in saved receipts. Remember only those paths during the actual JSON read.
-        if (
-          isScannerError(value) &&
-          parents[1]?.key === "report" &&
-          parents[2]?.key === "errors" &&
-          Array.isArray(parents[2].value)
-        ) {
-          errors.push({
-            path: [...parents.slice(1).map((p) => p.key), key],
-            error: value,
-          });
+  let root: unknown;
+
+  function captureField(field: string, observed: unknown): string | undefined {
+    const parents: { key: string; value: object }[] = [];
+    // The outer traversal already called this field's toJSON with its real key.
+    // Returning that value from the wrapper keeps JSON from calling it twice.
+    return JSON.stringify(
+      { toJSON: () => observed },
+      function (this: object, key, value: unknown) {
+        while (parents.length && parents.at(-1)!.value !== this) parents.pop();
+        const evidence = field === "findings" && parents[2]?.key === "evidence";
+        if (evidence && target === "cloud")
+          requireCloudEvidenceDepth(parents.length - 2, this, value);
+        if (isNumberObject(value)) value = +value;
+        if (field === "report") checkReportNumber(value);
+        if (evidence) checkEmittedJsonNumber(value, checkEvidenceNumber);
+        if (value !== null && typeof value === "object") {
+          if (value === root) {
+            const path = [field, ...parents.slice(1).map((p) => p.key)];
+            if (parents.length) path.push(key);
+            throw new TypeError(
+              `Converting circular structure to JSON at ${JSON.stringify(path)}`,
+            );
+          }
+          if (
+            field === "report" &&
+            parents[1]?.key === "errors" &&
+            Array.isArray(parents[1].value) &&
+            isScannerError(value)
+          ) {
+            errors.push({
+              path: [field, ...parents.slice(1).map((p) => p.key), key],
+              error: value,
+            });
+          }
+          parents.push({ key, value });
         }
-        parents.push({ key, value });
+        return value;
+      },
+    );
+  }
+
+  // Capture each member in native property order. A report and a findings
+  // payload can each fit in a string while their combined JSON does not.
+  const envelope = JSON.stringify(
+    input,
+    function (this: object, field, value: unknown) {
+      if (this !== root) {
+        root = value;
+        return value;
       }
-      return value;
+      const json = captureField(field, value);
+      if (json === undefined) return undefined;
+      fields.set(field, JSON.parse(json));
+      return null;
     },
   );
-  const result = JSON.parse(json) as T;
+  const result = JSON.parse(envelope);
+  for (const [key, value] of fields) result[key] = value;
   for (const { path, error: source } of errors) {
     const key = path.pop()!;
     let parent = result as unknown as Record<string, unknown>;
@@ -137,10 +158,11 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
 
 /** @internal Clone owned values without serializing the evidence again in every preview view. */
 export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
-  const copy = structuredClone(input);
-  if (input.report !== undefined)
-    copy.report = snapshotNormalizedFindings({ report: input.report }).report;
-  return copy;
+  if (input.report === undefined) return structuredClone(input);
+  return {
+    ...structuredClone({ ...input, report: undefined }),
+    ...snapshotNormalizedFindings({ report: input.report }),
+  };
 }
 
 /** @internal Keep earlier provider projections only for immutable request replay. */

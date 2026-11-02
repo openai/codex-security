@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isBoxedPrimitive, isProxy } from "node:util/types";
 import type { ExternalFindings } from "./external-findings.js";
-import { canSnapshotWithoutGetters, canonicalJson } from "./record.js";
+import { canonicalJson, cloneWithoutGetters } from "./record.js";
 
 export interface LegacyReaderSelection {
   sourceFindingIds: string[];
@@ -20,17 +20,6 @@ const previousSelections = new WeakMap<
     previous: LegacyReaderSelection;
   }
 >();
-
-function nativeSelection(
-  value: ExternalFindings,
-): ExternalFindings | undefined {
-  if (!canSnapshotWithoutGetters(value, true)) return;
-  try {
-    return structuredClone(value);
-  } catch {
-    return;
-  }
-}
 
 // The registry digest is process-local. Frame both ordered lists separately so a
 // local import never needs one JSON string containing all its findings.
@@ -69,7 +58,7 @@ export function rememberPreviousSelection(
       : undefined;
   const selection = {
     exported,
-    native: exported ? nativeSelection(result) : undefined,
+    native: exported ? cloneWithoutGetters(result) : undefined,
     previous: prior,
   };
   previousSelections.set(result, selection);
@@ -89,7 +78,7 @@ export function previousReaderSelection(
         Object.getOwnPropertyDescriptor(input, "findings")?.value,
       ));
   if (!selection) return undefined;
-  const observed = native === undefined ? nativeSelection(input) : native;
+  const observed = native === undefined ? cloneWithoutGetters(input) : native;
   if (selection.native && observed && selection.exported) {
     // Callers can attach a report after normalizing rows. Historical validation
     // and the saved approval still bind the independently captured report.

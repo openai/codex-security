@@ -15,13 +15,11 @@ import {
   sourceRepositoryUrl,
 } from "./native-json-findings.js";
 import {
-  appendReaderFinding,
+  trackReaderSelection,
   array,
   readScannerJson,
   record,
   relativePath,
-  rememberReaderUncertainty,
-  finishReaderSizeSelection,
   requiredText,
   stableId,
 } from "./scanner-import.js";
@@ -61,13 +59,14 @@ export function normalizeOpenGrepFindings(
     excluded: [],
     report: structuredClone(report),
   };
+  const selection = trackReaderSelection(output);
   type Observation = {
     position: number;
     parsed: ReturnType<typeof parseNativeJsonResult>;
   };
   function exclude(position: number, id: string | null, error: unknown) {
     if (id && error instanceof Error && previousAdmission(error) !== undefined)
-      rememberReaderUncertainty(output, id);
+      selection.uncertainIds.add(id);
     output.excluded.push({
       position,
       source_finding_id: id,
@@ -139,7 +138,7 @@ export function normalizeOpenGrepFindings(
         );
       } catch (error) {
         if (error instanceof Error && previousAdmission(error) !== undefined)
-          rememberReaderUncertainty(output, id);
+          selection.uncertainIds.add(id);
         singletonErrors.set(observation, errorMessage(error));
       }
     }
@@ -200,7 +199,7 @@ export function normalizeOpenGrepFindings(
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     if (observations.length === 1) {
-      appendReaderFinding(output, observations[0]!.position, id, () =>
+      selection.append(observations[0]!.position, id, () =>
         projectGroup(observations),
       );
       continue;
@@ -217,7 +216,7 @@ export function normalizeOpenGrepFindings(
             0,
             (previousBytes, currentBytes) => {
               if (previousBytes !== currentBytes)
-                rememberReaderUncertainty(output, id);
+                selection.uncertainIds.add(id);
             },
           );
           observation.parsed.result = result;
@@ -244,8 +243,7 @@ export function normalizeOpenGrepFindings(
         if (retained.length === ordered.length) throw error;
         evidence = projectGroup(retained);
       }
-      if (previousAdmission(evidence) === null)
-        rememberReaderUncertainty(output, id);
+      if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
       output.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       for (const observation of retained)
@@ -253,7 +251,7 @@ export function normalizeOpenGrepFindings(
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
-  return finishReaderSizeSelection(output);
+  return selection.finish();
 }
 
 export async function readOpenGrepFindings(

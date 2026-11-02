@@ -1,7 +1,11 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  snapshotNormalizedFindings,
+  type ExternalFindings,
+} from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
@@ -388,6 +392,51 @@ test("Cloud measures caller fields at their exported numeric size", () => {
     expect(() =>
       validateExternalEvidenceJson(input, "cloud", padding + 1),
     ).toThrow("256 KiB");
+  }
+});
+
+test("local reports and findings need only fit in separate JSON strings", () => {
+  const padding = "x".repeat(3_000);
+  const observations: string[] = [];
+  const report = {
+    toJSON(key: string) {
+      observations.push(key);
+      return {
+        padding,
+        toJSON() {
+          throw new Error("Report was serialized twice");
+        },
+      };
+    },
+  };
+  const input: ExternalFindings = {
+    report,
+    get findings() {
+      observations.push("findings");
+      return [
+        {
+          ...normalized(),
+          evidence: { ...normalized().evidence, source_data: { padding } },
+        },
+      ];
+    },
+    read: 1,
+    excluded: [],
+  };
+  const stringify = JSON.stringify;
+  // Exercise the string boundary in CI without allocating hundreds of MiB.
+  const bounded = spyOn(JSON, "stringify").mockImplementation((...args) => {
+    const json: string = Reflect.apply(stringify, JSON, args);
+    if (json?.length > 4_000) throw new RangeError("Invalid string length");
+    return json;
+  });
+  try {
+    const snapshot = snapshotNormalizedFindings(input);
+    expect(snapshot.report).toEqual({ padding });
+    expect(snapshot.findings[0]!.evidence.source_data).toEqual({ padding });
+    expect(observations).toEqual(["report", "findings"]);
+  } finally {
+    bounded.mockRestore();
   }
 });
 

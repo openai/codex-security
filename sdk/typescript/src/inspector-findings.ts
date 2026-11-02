@@ -671,7 +671,10 @@ export function normalizeInspectorFindings(
     claims: repositoryClaims(finding),
   }));
   checkReportScope(rows, target, projectMap);
-  function checkRetainedScope(result: ExternalFindings) {
+  function checkRetainedScope(
+    result: ExternalFindings,
+    removedIds?: Set<string>,
+  ) {
     if (!result.excluded.length || !result.findings.length) return;
     // Only surviving rows can supply shared provider and host evidence on replay.
     const skipped = new Set(result.excluded.map((row) => row.position));
@@ -685,9 +688,11 @@ export function normalizeInspectorFindings(
         reason: errorMessage(error),
       });
     });
-    result.findings = result.findings.filter(
-      (_, i) => !skipped.has(retained[i]!.position),
-    );
+    result.findings = result.findings.filter((finding, i) => {
+      if (!skipped.has(retained[i]!.position)) return true;
+      removedIds?.add(finding.source_finding_id);
+      return false;
+    });
     result.excluded.sort((a, b) => a.position - b.position);
   }
   return normalizeRecords(

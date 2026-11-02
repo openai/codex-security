@@ -48,13 +48,18 @@ import {
   type ExternalPublicationOptions,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
+  type NormalizedExternalPublicationOptions,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
 import {
   snapshotNormalizedFindings,
   type ExternalFindings,
 } from "../src/external-findings.js";
-import { readGitHubFindings } from "../src/github-findings.js";
+import {
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
+  readGitHubFindings,
+} from "../src/github-findings.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
 import {
   cloudRepositoryUrlKey,
@@ -392,10 +397,10 @@ test("Dependabot keeps an older approval when an emitted boxed number excludes a
   const a = githubDependabotAlert(1);
   const b = { ...githubDependabotAlert(2), score: new Number(NaN) };
   const prepare = (rows: unknown[], target: "local" | "cloud" = "cloud") =>
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       normalizeGitHubDependabotAlerts(rows, target),
       selection,
-      releasedDependencies(f),
     );
   expect((await prepare([a, b])).preview.requests[0]!.items).toHaveLength(1);
 
@@ -407,20 +412,13 @@ test("Dependabot keeps an older approval when an emitted boxed number excludes a
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "c26b480acaefaa832105d472abf05a372c9eb3d7c0749c15700e802466cb4b3a",
   );
-  const digest =
-    "7b23cc522ea792cfa321415c62c5732421fb63f5c1efbba9fa6f81fb086c9e7f";
-  const saved = JSON.stringify({
-    accountId: "synthetic-account",
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "a79e3af4845c4c7b5e0abffb5ed37054bb2debdf57b8a8b10acf3d7bd36a5e9f.pending.json",
     requests: [request],
-    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    inputDigest:
+      "7b23cc522ea792cfa321415c62c5732421fb63f5c1efbba9fa6f81fb086c9e7f",
   });
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const path = join(
-    directory,
-    "a79e3af4845c4c7b5e0abffb5ed37054bb2debdf57b8a8b10acf3d7bd36a5e9f.pending.json",
-  );
-  await writeFile(path, saved, { mode: 0o600 });
 
   for (const target of ["local", "cloud"] as const) {
     await expect(prepare([a, b], target)).rejects.toThrow(
@@ -453,12 +451,7 @@ test("Dependabot retries the approved subset when a numeric size correction admi
     .evidence;
   b.pad = "x".repeat(256 * 1024 + 1 - Buffer.byteLength(JSON.stringify(bare)));
   const normalized = normalizeGitHubDependabotAlerts([a, b], "cloud");
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      normalized,
-      selection,
-      releasedDependencies(f),
-    );
+  const prepare = () => prepareReleased(f, normalized, selection);
   const fresh = (await prepare()).preview.requests[0]!;
   expect(fresh.items).toHaveLength(2);
 
@@ -471,22 +464,13 @@ test("Dependabot retries the approved subset when a numeric size correction admi
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "bdec6e68ba764e63a60c83e14d7b691b03332c7af1c4ac031c2b5ca1cb92c69f",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const digest =
-    "50c57ce23ee63e16bd06580d955f37110cdc827b26b4737c58ae13bfb88c2bca";
-  await writeFile(
-    join(
-      directory,
+  await stageReleasedCheckpoint(f, {
+    filename:
       "c99d3e8e89437eeb0462959cc3504183d1c67b8bc5a07bfe0af58da058bca72d.pending.json",
-    ),
-    JSON.stringify({
-      accountId: "synthetic-account",
-      requests: [request],
-      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
-    }),
-    { mode: 0o600 },
-  );
+    requests: [request],
+    inputDigest:
+      "50c57ce23ee63e16bd06580d955f37110cdc827b26b4737c58ae13bfb88c2bca",
+  });
 
   const resumed = await prepare();
   expect(resumed.preview.resumed).toBe(true);
@@ -1030,14 +1014,6 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   const repository = f.state.repositoryUrl;
   const foreign = repository + "-other";
   const selected = { ...options, provider: "sonar" as const };
-  const deps = {
-    ...f.deps,
-    environment: {
-      ...f.environment,
-      CODEX_SECURITY_CLOUD_BASE_URL: undefined,
-      CODEX_SECURITY_CLOUD_WEB_URL: undefined,
-    },
-  };
   const context = { format: "sonar-issues/v1", repositoryUrl: repository };
   const finding = {
     source_finding_id: "issue-1",
@@ -1058,16 +1034,17 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   };
   const selection = { read: 2, findings: [finding, named], excluded: [] };
   const prepare = (findings = selection.findings) =>
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       { ...selection, findings, report: { ...context, branch: "main" } },
       selected,
-      deps,
     );
+  await expect(prepareReleased(f, selection, selected)).rejects.toThrow(
+    "without a ref",
+  );
   await expect(
-    prepareNormalizedExternalPublication(selection, selected, deps),
-  ).rejects.toThrow("without a ref");
-  await expect(
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       {
         ...rows,
         report: { ...context, branch: "main" },
@@ -1079,14 +1056,13 @@ test("normalized Sonar publication checks retained bindings on preview and retry
         ],
       },
       selected,
-      deps,
     ),
   ).rejects.toThrow("retained Sonar branch");
   await expect(
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       { ...rows, report: { ...context, repositoryUrl: foreign } },
       selected,
-      deps,
     ),
   ).rejects.toThrow("does not match the selected Cloud repository");
   f.state.loseResponse = true;
@@ -1094,10 +1070,10 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     "resume the saved request",
   );
   await expect(
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       { ...selection, report: { ...context, branch: "other" } },
       selected,
-      deps,
     ),
   ).rejects.toThrow("conflicting branch");
   f.state.repositoryUrl = foreign;
@@ -2960,10 +2936,10 @@ test("an opaque retry preserves a released partial submission whose final row ex
     },
   });
   const prepare = (selected = rows, sourceKey = options.sourceKey) =>
-    prepareNormalizedExternalPublication(
+    prepareReleased(
+      f,
       { read: selected.length, findings: selected, excluded: [] },
       { ...options, sourceKey },
-      releasedDependencies(f),
     );
   const ready = await prepare();
   const [first, last] = ready.preview.requests;
@@ -4484,15 +4460,51 @@ function scoredFindings(
   };
 }
 
-function releasedDependencies(f: Awaited<ReturnType<typeof fixture>>) {
-  return {
+type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
+
+// Historical filenames include the deployment. Use the one recorded in these fixtures.
+function prepareReleased(
+  f: PublicationFixture,
+  input: ExternalFindings,
+  selected: NormalizedExternalPublicationOptions = options,
+) {
+  return prepareNormalizedExternalPublication(input, selected, {
     ...f.deps,
     environment: {
       ...f.environment,
       CODEX_SECURITY_CLOUD_BASE_URL: undefined,
       CODEX_SECURITY_CLOUD_WEB_URL: undefined,
     },
+  });
+}
+
+async function stageReleasedCheckpoint(
+  f: PublicationFixture,
+  {
+    filename,
+    requests,
+    inputDigest,
+    savedEvidenceDigest = inputDigest,
+    accountId = boxedNumberCheckpoints.accountId,
+  }: {
+    filename: string;
+    requests: readonly unknown[];
+    inputDigest: string;
+    savedEvidenceDigest?: string;
+    accountId?: string;
+  },
+) {
+  const directory = join(f.root, "state", "external-finding-publications");
+  const path = join(directory, filename);
+  const checkpoint = {
+    accountId,
+    requests,
+    inputProjection: { inputDigest, savedEvidenceDigest },
   };
+  const saved = JSON.stringify(checkpoint);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, saved, { mode: 0o600 });
+  return { checkpoint, directory, path, saved };
 }
 
 // These filenames, request IDs and projections were recorded by the old SDK.
@@ -4508,11 +4520,7 @@ async function oldScoreApproval(field: string, stageApproval = true) {
     const input = scoredFindings(score, report, field === "aliased");
     if (flag !== undefined)
       Object.assign(input.findings[0]!.evidence.source_data, { flag });
-    return prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+    return prepareReleased(f, input);
   };
   const request = {
     request_id: requestId,
@@ -4568,12 +4576,7 @@ test.each(["invalid title", "unsafe number", "cross-realm serializer error"])(
         },
       });
     }
-    const prepare = () =>
-      prepareNormalizedExternalPublication(
-        selected,
-        options,
-        releasedDependencies(f),
-      );
+    const prepare = () => prepareReleased(f, selected);
     await expect(prepare()).rejects.toThrow();
     expect(f.posts).toHaveLength(0);
     await writeFile(path, saved, { mode: 0o600 });
@@ -4605,11 +4608,7 @@ test.each(["deep shared data", "cycle", "row BigInt"])(
       else for (let n = 0; n < 24; n++) content = [content, content];
       input.findings[0]!.evidence.source_data.score = new Compact(content);
     }
-    const preview = await prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+    const preview = await prepareReleased(f, input);
     expect(preview.preview.resumed).toBe(false);
     await preview.publish();
     expect(JSON.parse(f.posts[0]!).items[0].evidence.source_data.score).toBe(4);
@@ -4636,21 +4635,13 @@ test.each(["getter", "data property"])(
       });
     else data.score = score;
 
-    await expect(
-      prepareNormalizedExternalPublication(
-        input,
-        options,
-        releasedDependencies(f),
-      ),
-    ).rejects.toThrow();
+    await expect(prepareReleased(f, input)).rejects.toThrow();
     expect(await readFile(path, "utf8")).toBe(saved);
     expect(f.posts).toHaveLength(0);
   },
 );
 
 test("a shared mutation across two GitHub alerts preserves their released approval", async () => {
-  const { normalizeGitHubCodeScanningAlerts } =
-    await import("../src/github-findings.js");
   const f = await fixture();
   const prepare = () => {
     const counter = { n: new Number(0) };
@@ -4672,11 +4663,10 @@ test("a shared mutation across two GitHub alerts preserves their released approv
       Object.assign(row.alert, { extension });
       return row;
     });
-    return prepareNormalizedExternalPublication(
-      normalizeGitHubCodeScanningAlerts(rows),
-      { ...options, provider: "github" },
-      releasedDependencies(f),
-    );
+    return prepareReleased(f, normalizeGitHubCodeScanningAlerts(rows), {
+      ...options,
+      provider: "github",
+    });
   };
 
   const request = JSON.parse(
@@ -4692,20 +4682,13 @@ test("a shared mutation across two GitHub alerts preserves their released approv
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "8ce6e5a6d4be2062a39ba7325554f7849096b472a67ae1672fd614c681db9a37",
   );
-  const digest =
-    "1fa6cbfd77fccdeec029930585f46595118e9f95b8083480239ac50176fb9a52";
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "a7b6eecd18536c47e5bcd5e1db25a45b3faca1715eab39e2884b06bf67b1e62f.pending.json",
     requests: [request],
-    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    inputDigest:
+      "1fa6cbfd77fccdeec029930585f46595118e9f95b8083480239ac50176fb9a52",
   });
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const path = join(
-    directory,
-    "a7b6eecd18536c47e5bcd5e1db25a45b3faca1715eab39e2884b06bf67b1e62f.pending.json",
-  );
-  await writeFile(path, saved, { mode: 0o600 });
 
   await expect(prepare()).rejects.toThrow("cannot be matched");
   expect(f.posts).toHaveLength(0);
@@ -4741,9 +4724,7 @@ test("a Sonar report resumes its released request after a size change", async ()
   const selection = normalize(raw, repository);
   const f = await fixture();
   const selected = { ...options, provider: "sonar" as const };
-  const dependencies = releasedDependencies(f);
-  const prepare = () =>
-    prepareNormalizedExternalPublication(selection, selected, dependencies);
+  const prepare = () => prepareReleased(f, selection, selected);
   const fresh = await prepare();
   expect(fresh.preview.findings.map((row) => row.source_finding_id)).toEqual([
     "issue-one",
@@ -4759,25 +4740,15 @@ test("a Sonar report resumes its released request after a size change", async ()
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "e6bc41119d363155e2d2388985ce3b476dfd3c6898297b5154a9b09ab192ac95",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(
-      directory,
+  await stageReleasedCheckpoint(f, {
+    filename:
       "bb2529dff62d8c9bb1c064d18f2b649c412b3d310914a8d4221c115a00f71e4c.pending.json",
-    ),
-    JSON.stringify({
-      accountId: "synthetic-account",
-      requests: [request],
-      inputProjection: {
-        inputDigest:
-          "62f0d447578728d3c8afa0ebfa0d1a2d8d7ab5c9d1a96af2855508bc5e6da986",
-        savedEvidenceDigest:
-          "25716f8958e0b38376fe5fdaad85b648ca3b0ed23a86c37a246a1537a75c848d",
-      },
-    }),
-    { mode: 0o600 },
-  );
+    requests: [request],
+    inputDigest:
+      "62f0d447578728d3c8afa0ebfa0d1a2d8d7ab5c9d1a96af2855508bc5e6da986",
+    savedEvidenceDigest:
+      "25716f8958e0b38376fe5fdaad85b648ca3b0ed23a86c37a246a1537a75c848d",
+  });
   const retry = await prepare();
   expect(retry.preview.resumed).toBe(true);
   expect(retry.preview.report).toEqual(selection.report);
@@ -4789,16 +4760,10 @@ test("a Sonar report resumes its released request after a size change", async ()
 });
 
 test("an uncertain newly eligible advisory cannot replace a released subset", async () => {
-  const { normalizeGitHubAdvisories } =
-    await import("../src/github-findings.js");
   const f = await fixture();
   const selected = { ...options, provider: "github" as const };
   const prepare = (rows: ReturnType<typeof importedAdvisory>[]) =>
-    prepareNormalizedExternalPublication(
-      normalizeGitHubAdvisories(rows),
-      selected,
-      releasedDependencies(f),
-    );
+    prepareReleased(f, normalizeGitHubAdvisories(rows), selected);
   const first = importedAdvisory();
   const id = "GHSA-abcd-efgh-5678";
   const url = first.url.replace(first.ghsaId, id);
@@ -4822,23 +4787,13 @@ test("an uncertain newly eligible advisory cannot replace a released subset", as
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "19039224ccc25a9375739c7f16227a26e9fd92cf900de1a32425c20c94697488",
   );
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "6137d904632ecb17ecdf0276e37794699ff19f6e37f6a89b833b56ec0a7c953b.pending.json",
     requests: [request],
-    inputProjection: {
-      inputDigest:
-        "fbba527f5ff2cf86972d97f543de935515cbaa618ab2f1168ddbb3d1ab3ea338",
-      savedEvidenceDigest:
-        "fbba527f5ff2cf86972d97f543de935515cbaa618ab2f1168ddbb3d1ab3ea338",
-    },
+    inputDigest:
+      "fbba527f5ff2cf86972d97f543de935515cbaa618ab2f1168ddbb3d1ab3ea338",
   });
-  const dir = join(f.root, "state", "external-finding-publications");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const path = join(
-    dir,
-    "6137d904632ecb17ecdf0276e37794699ff19f6e37f6a89b833b56ec0a7c953b.pending.json",
-  );
-  await writeFile(path, saved, { mode: 0o600 });
 
   await expect(prepare([first, second])).rejects.toThrow("cannot be matched");
   expect(await readFile(path, "utf8")).toBe(saved);
@@ -4862,14 +4817,7 @@ test("an ambiguous getter cannot start another import after a released approval 
     enumerable: true,
     get: () => score,
   });
-  const publish = async () =>
-    (
-      await prepareNormalizedExternalPublication(
-        input,
-        options,
-        releasedDependencies(f),
-      )
-    ).publish();
+  const publish = async () => (await prepareReleased(f, input)).publish();
   await expect(publish()).rejects.toThrow();
   expect(await readFile(path, "utf8")).toBe(pending);
   expect(f.posts).toEqual([JSON.stringify(request)]);
@@ -4890,11 +4838,7 @@ test("a fresh boxed approval cannot claim a different getter-backed JSON import"
     enumerable: true,
     get: () => 2,
   });
-  const second = await prepareNormalizedExternalPublication(
-    input,
-    options,
-    releasedDependencies(f),
-  );
+  const second = await prepareReleased(f, input);
   expect(second.preview.resumed).toBe(false);
   expect(second.preview.requests[0]!.request_id).not.toBe(
     first.preview.requests[0]!.request_id,
@@ -4906,7 +4850,7 @@ test("a fresh boxed approval cannot claim a different getter-backed JSON import"
 });
 
 test("a root serializer cannot add a report to distinguish a released approval", async () => {
-  const { f, directory, request } = await oldScoreApproval("unreported", false);
+  const { f, request } = await oldScoreApproval("unreported", false);
   const { source_finding_id, evidence } = scoredFindings(2.5).findings[0]!;
   class ScannerBatch {
     read = 1;
@@ -4920,33 +4864,25 @@ test("a root serializer cannot add a report to distinguish a released approval",
     }
   }
   const input = new ScannerBatch();
-  const deps = releasedDependencies(f);
-  const prepare = () =>
-    prepareNormalizedExternalPublication(input, options, deps);
+  const prepare = () => prepareReleased(f, input);
   const held = await prepare();
-  const path = join(
-    directory,
-    "29fc89c807be65a8b3a173feeb64e86595e3debbdb91dc00b1a9cfb6eea869cc.pending.json",
-  );
-  const inputDigest =
-    "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc";
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "29fc89c807be65a8b3a173feeb64e86595e3debbdb91dc00b1a9cfb6eea869cc.pending.json",
     requests: [
       { ...request, request_id: "7e77248b-2906-44a7-b467-5225966ac7a2" },
     ],
-    inputProjection: { inputDigest, savedEvidenceDigest: inputDigest },
+    inputDigest:
+      "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
   });
-  await writeFile(path, saved, { mode: 0o600 });
   await expect(prepare()).rejects.toThrow("cannot be matched");
   await expect(held.publish()).rejects.toThrow("cannot be matched");
   expect(await readFile(path, "utf8")).toBe(saved);
   expect(f.posts).toEqual([]);
-  const independent = await prepareNormalizedExternalPublication(
-    { ...input, report: input.reportForJson() },
-    options,
-    deps,
-  );
+  const independent = await prepareReleased(f, {
+    ...input,
+    report: input.reportForJson(),
+  });
   expect(independent.preview.resumed).toBe(false);
 });
 
@@ -4954,12 +4890,7 @@ test("a finding serializer cannot replace the ID of an older approval", async ()
   const { f, path, saved } = await oldScoreApproval("unreported");
   const input = scoredFindings(2.5);
   const stored = input.findings[0]!;
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+  const prepare = () => prepareReleased(f, input);
   class ScannerFinding {
     exportedId() {
       return "exported-id";
@@ -5004,12 +4935,7 @@ test("a vendor evidence class resumes its released title and exports its JSON ti
   const { f, path, request, saved } = await oldScoreApproval("unreported");
   const input = scoredFindings(2.5);
   input.findings[0]!.evidence = new ScannerEvidence();
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+  const prepare = () => prepareReleased(f, input);
   // Without an independent native capture, the exported title cannot rule out this approval.
   class UncertainEvidence extends ScannerEvidence {
     exportedTitle() {
@@ -5050,12 +4976,7 @@ test("a shared rule in report metadata resumes the released request", async () =
   Object.assign(input.findings[0]!.evidence, {
     details: { kind: "sast", repository: { url: f.destination().url }, rule },
   });
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+  const prepare = () => prepareReleased(f, input);
   const request = {
     ...(await prepare()).preview.requests[0]!,
     request_id: "0697e266-e0a5-4aa5-b30b-3b89cbd48ac1",
@@ -5063,25 +4984,15 @@ test("a shared rule in report metadata resumes the released request", async () =
   expect(hash("sha256", JSON.stringify(request))).toBe(
     "8c76780e8aca7582a293dee9483002401d6907e51833fc806cd1a058fe54b855",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(
-      directory,
+  await stageReleasedCheckpoint(f, {
+    filename:
       "749e46bc07036abe74f047011264147993bd96f384099bcf1b729c8c2634a1b0.pending.json",
-    ),
-    JSON.stringify({
-      accountId: boxedNumberCheckpoints.accountId,
-      requests: [request],
-      inputProjection: {
-        inputDigest:
-          "49cf7aa8362d8967c5638238b719d925e7e1814d48a4a7a0844e69ef9260b869",
-        savedEvidenceDigest:
-          "a2d3adb20cf97c597828fd54ec361490a8a34e479a42d01d3b85ff245b0b384b",
-      },
-    }),
-    { mode: 0o600 },
-  );
+    requests: [request],
+    inputDigest:
+      "49cf7aa8362d8967c5638238b719d925e7e1814d48a4a7a0844e69ef9260b869",
+    savedEvidenceDigest:
+      "a2d3adb20cf97c597828fd54ec361490a8a34e479a42d01d3b85ff245b0b384b",
+  });
 
   const resumed = await prepare();
   expect(resumed.preview.resumed).toBe(true);
@@ -5183,12 +5094,7 @@ test("an opaque retry cannot choose between independent old and new approvals", 
   const nativeRows = opaque.findings;
   Object.defineProperty(opaque, "findings", { get: () => nativeRows });
   Object.defineProperty(opaque, "toJSON", { value: () => exported });
-  const prepare = (input: typeof opaque) =>
-    prepareNormalizedExternalPublication(
-      input,
-      options,
-      releasedDependencies(f),
-    );
+  const prepare = (input: typeof opaque) => prepareReleased(f, input);
 
   const newer = await prepare(exported);
   const request = newer.preview.requests[0]!;
@@ -5251,13 +5157,6 @@ test.each([false, true])(
         },
       );
     // Recorded with the released SDK on deployment one.
-    const directory = join(f.root, "state", "external-finding-publications");
-    const path = join(
-      directory,
-      reported
-        ? "66fdd41e29ebfe07ca8fe9e54689df0027301c08a19b8b17b82254aadb536b44.pending.json"
-        : "b4eed57e616f2289bf467f18fba85e2e9ba305a360a798d9e9d8125b06e148fe.pending.json",
-    );
     const request = {
       ...(await prepare("one")).preview.requests[0]!,
       request_id: reported
@@ -5266,18 +5165,16 @@ test.each([false, true])(
     };
     const digest =
       "01ad76cac2893a22136a81e7e61aeef35edb7a51e97f2944713e744756362721";
-    const saved = JSON.stringify({
-      accountId: boxedNumberCheckpoints.accountId,
+    const { path, saved } = await stageReleasedCheckpoint(f, {
+      filename: reported
+        ? "66fdd41e29ebfe07ca8fe9e54689df0027301c08a19b8b17b82254aadb536b44.pending.json"
+        : "b4eed57e616f2289bf467f18fba85e2e9ba305a360a798d9e9d8125b06e148fe.pending.json",
       requests: [request],
-      inputProjection: {
-        inputDigest: reported
-          ? "af3bca9d5d1b53284f6da3d32b4de04d196cf14f96a0b7a00711dcd6e90e896d"
-          : digest,
-        savedEvidenceDigest: digest,
-      },
+      inputDigest: reported
+        ? "af3bca9d5d1b53284f6da3d32b4de04d196cf14f96a0b7a00711dcd6e90e896d"
+        : digest,
+      savedEvidenceDigest: digest,
     });
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await writeFile(path, saved, { mode: 0o600 });
     expect((await prepare("one")).preview.requests).toEqual([request]);
     const independent = await prepare("two");
     expect(independent.preview.resumed).toBe(false);
@@ -5345,6 +5242,19 @@ test.each([
   },
 );
 
+function failCheckpointReads(unreadable: (path: string) => boolean) {
+  const read = fs.readFile;
+  return spyOn(fs, "readFile").mockImplementation((async (
+    ...args: Parameters<typeof read>
+  ) => {
+    if (unreadable(String(args[0])))
+      throw Object.assign(new Error("Unreadable checkpoint"), {
+        code: "EACCES",
+      });
+    return read(...args);
+  }) as typeof read);
+}
+
 test.each(["released", "fresh"])(
   "a primitive retry uses the lookup for a %s boxed approval without reading unrelated checkpoints",
   async (kind) => {
@@ -5371,32 +5281,19 @@ test.each(["released", "fresh"])(
       JSON.stringify({ ...JSON.parse(saved), accountId: "another-account" }),
       { mode: 0o600 },
     );
-    const read = fs.readFile;
-    const reads = spyOn(fs, "readFile").mockImplementation((async (
-      ...args: Parameters<typeof read>
-    ) => {
-      if (String(args[0]) === unrelated)
-        throw Object.assign(new Error("Unreadable unrelated approval"), {
-          code: "EACCES",
-        });
-      return read(...args);
-    }) as typeof read);
-    try {
-      f.state.brokenReadback = false;
-      const retry = await prepare(2.5);
-      expect(retry.preview.resumed).toBe(true);
-      expect(JSON.stringify(retry.preview.requests)).toBe(
-        JSON.stringify(boxed.preview.requests),
-      );
-      expect((await retry.publish()).receipts[0]!.id).toBe(approved.request_id);
-      expect(f.posts).toEqual([JSON.stringify(approved)]);
-      expect(files).toContain(`${checkpoint.wireKey}.lookup.json`);
-      expect(
-        reads.mock.calls.some(([file]) => String(file) === unrelated),
-      ).toBe(false);
-    } finally {
-      reads.mockRestore();
-    }
+    using reads = failCheckpointReads((path) => path === unrelated);
+    f.state.brokenReadback = false;
+    const retry = await prepare(2.5);
+    expect(retry.preview.resumed).toBe(true);
+    expect(JSON.stringify(retry.preview.requests)).toBe(
+      JSON.stringify(boxed.preview.requests),
+    );
+    expect((await retry.publish()).receipts[0]!.id).toBe(approved.request_id);
+    expect(f.posts).toEqual([JSON.stringify(approved)]);
+    expect(files).toContain(`${checkpoint.wireKey}.lookup.json`);
+    expect(reads.mock.calls.some(([file]) => String(file) === unrelated)).toBe(
+      false,
+    );
   },
 );
 
@@ -5447,14 +5344,12 @@ test("the original boxed approval keeps its filename, request and receipts on a 
   const result = await retry.publish();
   expect(result.verified).toBe(1);
   expect(result.receipts.map(({ id }) => id)).toEqual([request.request_id]);
-  const reads = spyOn(fs, "readFile");
-  try {
+  {
+    using reads = spyOn(fs, "readFile");
     expect(await sibling.publish()).toEqual(result);
     expect(reads.mock.calls.map(([path]) => String(path))).not.toContain(
       unknown,
     );
-  } finally {
-    reads.mockRestore();
   }
   expect(f.posts).toEqual([JSON.stringify(request)]);
   expect(await Bun.file(path).exists()).toBe(false);
@@ -5503,17 +5398,10 @@ test.each(["released", "current"])(
 
     let unreadable = false;
     const statePaths = new Set([directory, await fs.realpath(directory)]);
-    const listings = spyOn(fs, "readdir");
-    const read = fs.readFile;
-    const reads = spyOn(fs, "readFile").mockImplementation((async (
-      ...args: Parameters<typeof read>
-    ) => {
-      if (unreadable && unrelated.has(String(args[0])))
-        throw Object.assign(new Error("Unreadable unrelated approval"), {
-          code: "EACCES",
-        });
-      return read(...args);
-    }) as typeof read);
+    using listings = spyOn(fs, "readdir");
+    using reads = failCheckpointReads(
+      (path) => unreadable && unrelated.has(path),
+    );
     const operations = () => ({
       listed: listings.mock.calls.some(([path]) =>
         statePaths.has(String(path)),
@@ -5522,48 +5410,43 @@ test.each(["released", "current"])(
         unrelated.has(String(path)),
       ),
     });
-    try {
-      if (released) {
-        const original = await prepare(2.5);
-        reads.mockClear();
-        listings.mockClear();
-        await expect(original.publish()).rejects.toThrow("Slow down");
-        expect(operations()).toEqual({ listed: true, readUnrelated: true });
-        expect(f.posts.at(-1)).toBe(JSON.stringify(request));
-      }
-      unreadable = true;
-      f.state.throttle = false;
+    if (released) {
+      const original = await prepare(2.5);
       reads.mockClear();
       listings.mockClear();
-      const retry = await prepare(2.5);
-      expect(retry.preview.resumed).toBe(true);
-      expect(retry.preview.requests[0]!.request_id).toBe(requestId);
-      expect(operations()).toEqual({ listed: false, readUnrelated: false });
-      f.state.brokenReadback = true;
-      await expect(retry.publish()).rejects.toThrow("Readback unavailable");
-      const stored = JSON.parse(await readFile(path, "utf8"));
-      expect(stored.receipts[0].id).toBe(requestId);
-      if (released)
-        expect(f.posts.slice(-2)).toEqual([
-          JSON.stringify(request),
-          JSON.stringify(request),
-        ]);
-      const posted = [...f.posts];
-      f.state.brokenReadback = false;
-      expect((await (await prepare(2.5)).publish()).receipts).toEqual(
-        stored.receipts,
-      );
-      expect(f.posts).toEqual(posted);
-      expect(operations()).toEqual({ listed: false, readUnrelated: false });
-      listings.mockClear();
-      reads.mockClear();
-      // A fresh selection must discover possible historical approvals.
-      await expect(prepare(4)).rejects.toThrow("Unreadable unrelated approval");
+      await expect(original.publish()).rejects.toThrow("Slow down");
       expect(operations()).toEqual({ listed: true, readUnrelated: true });
-    } finally {
-      listings.mockRestore();
-      reads.mockRestore();
+      expect(f.posts.at(-1)).toBe(JSON.stringify(request));
     }
+    unreadable = true;
+    f.state.throttle = false;
+    reads.mockClear();
+    listings.mockClear();
+    const retry = await prepare(2.5);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests[0]!.request_id).toBe(requestId);
+    expect(operations()).toEqual({ listed: false, readUnrelated: false });
+    f.state.brokenReadback = true;
+    await expect(retry.publish()).rejects.toThrow("Readback unavailable");
+    const stored = JSON.parse(await readFile(path, "utf8"));
+    expect(stored.receipts[0].id).toBe(requestId);
+    if (released)
+      expect(f.posts.slice(-2)).toEqual([
+        JSON.stringify(request),
+        JSON.stringify(request),
+      ]);
+    const posted = [...f.posts];
+    f.state.brokenReadback = false;
+    expect((await (await prepare(2.5)).publish()).receipts).toEqual(
+      stored.receipts,
+    );
+    expect(f.posts).toEqual(posted);
+    expect(operations()).toEqual({ listed: false, readUnrelated: false });
+    listings.mockClear();
+    reads.mockClear();
+    // A fresh selection must discover possible historical approvals.
+    await expect(prepare(4)).rejects.toThrow("Unreadable checkpoint");
+    expect(operations()).toEqual({ listed: true, readUnrelated: true });
   },
 );
 
@@ -5579,7 +5462,7 @@ test("a released receipt can finish readback when caching the checkpoint scan fa
   await writeFile(path, JSON.stringify(released));
 
   const rename = fs.rename;
-  const writes = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+  using _writes = spyOn(fs, "rename").mockImplementation(async (from, to) => {
     if (String(to) === path) {
       const { canonicalChecked, ...pending } = JSON.parse(
         await readFile(from, "utf8"),
@@ -5591,30 +5474,26 @@ test("a released receipt can finish readback when caching the checkpoint scan fa
     }
     return rename(from, to);
   });
-  try {
-    const retry = await prepare(2.5);
-    expect(retry.preview.resumed).toBe(true);
-    const interrupted = await retry.publish().catch((error: unknown) => error);
-    if (!(interrupted instanceof ExternalPublicationError)) throw interrupted;
-    expect(interrupted.result).toMatchObject({
-      status: "interrupted",
-      counts: { updated: 1 },
-      receipts,
-      unacknowledged: 0,
-      savedSubmission: path,
-    });
-    expect(await readFile(path, "utf8")).toBe(JSON.stringify(released));
-    f.state.brokenReadback = false;
-    const completed = await (await prepare(2.5)).publish();
-    expect(completed).toMatchObject({
-      status: "complete",
-      verified: 1,
-      receipts,
-    });
-    expect(f.posts).toEqual([JSON.stringify(request)]);
-  } finally {
-    writes.mockRestore();
-  }
+  const retry = await prepare(2.5);
+  expect(retry.preview.resumed).toBe(true);
+  const interrupted = await retry.publish().catch((error: unknown) => error);
+  if (!(interrupted instanceof ExternalPublicationError)) throw interrupted;
+  expect(interrupted.result).toMatchObject({
+    status: "interrupted",
+    counts: { updated: 1 },
+    receipts,
+    unacknowledged: 0,
+    savedSubmission: path,
+  });
+  expect(await readFile(path, "utf8")).toBe(JSON.stringify(released));
+  f.state.brokenReadback = false;
+  const completed = await (await prepare(2.5)).publish();
+  expect(completed).toMatchObject({
+    status: "complete",
+    verified: 1,
+    receipts,
+  });
+  expect(f.posts).toEqual([JSON.stringify(request)]);
 });
 
 test("checking a released canonical approval preserves ambiguous boxed report metadata", async () => {
@@ -5700,19 +5579,10 @@ test("matching released primitive and boxed approvals preserve both requests", a
   }
 
   // A partial check must see the second approval once it becomes readable.
-  const read = fs.readFile;
-  const unreadable = spyOn(fs, "readFile").mockImplementation((async (
-    ...args: Parameters<typeof read>
-  ) => {
-    if (String(args[0]) === boxedPath)
-      throw Object.assign(new Error("Unreadable approval"), { code: "EACCES" });
-    return read(...args);
-  }) as typeof read);
-  try {
+  {
+    using _reads = failCheckpointReads((path) => path === boxedPath);
     primitive.f.state.throttle = true;
     await expect(held.publish()).rejects.toThrow("Slow down");
-  } finally {
-    unreadable.mockRestore();
   }
   await expect(primitive.prepare(2.5)).rejects.toThrow(
     "Two saved imports match",
@@ -5914,21 +5784,15 @@ test.each([Error, TypeError])(
       false,
     );
     request.request_id = "15ab6427-635d-4537-9975-f7f536155b49";
-    const path = join(
-      directory,
-      "19d4eb5e5738ac54ae3d847f50534f09ac60882b0145fa5abc4260299e7f02b6.pending.json",
-    );
-    const saved = JSON.stringify({
-      accountId: boxedNumberCheckpoints.accountId,
+    const { path, saved } = await stageReleasedCheckpoint(f, {
+      filename:
+        "19d4eb5e5738ac54ae3d847f50534f09ac60882b0145fa5abc4260299e7f02b6.pending.json",
       requests: [request],
-      inputProjection: {
-        inputDigest:
-          "603ea14278affa7a9a27fc2a624f5a2ce8fd85460f99175bef69a0572430b59b",
-        savedEvidenceDigest:
-          "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
-      },
+      inputDigest:
+        "603ea14278affa7a9a27fc2a624f5a2ce8fd85460f99175bef69a0572430b59b",
+      savedEvidenceDigest:
+        "875a8aec2f1b7c573a6d05d983f6afa0f964a6e1c96d22c8c8691cc2de824ccc",
     });
-    await writeFile(path, saved, { mode: 0o600 });
     const diagnostic = () =>
       Object.assign(
         new Diagnostic("scanner message", { cause: "scanner failure" }),
@@ -5966,11 +5830,7 @@ test.each([Error, TypeError])(
           return { score: 2 ** 53 };
         },
       });
-      return prepareNormalizedExternalPublication(
-        input,
-        options,
-        releasedDependencies(f),
-      );
+      return prepareReleased(f, input);
     };
     const changed = diagnostic();
     await expect(
@@ -7303,25 +7163,19 @@ test("partially unboxing an approved input resumes its verified wire request", a
     false,
   );
   // This filename, projection and request ID came from the released SDK with b boxed.
-  const oldPath = join(
-    directory,
-    "ad0ce218fdfcfa75455f2fbda30dc6e248a79419190e5fa77a7c12005ead7926.pending.json",
-  );
   request.request_id = "dd905f37-1437-44a3-b559-8c88fe873e52";
   Object.assign(request.items[0]!.evidence.source_data, {
     score: { a: 7, b: 99 },
   });
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
+  const { path: oldPath, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "ad0ce218fdfcfa75455f2fbda30dc6e248a79419190e5fa77a7c12005ead7926.pending.json",
     requests: [request],
-    inputProjection: {
-      inputDigest:
-        "232fbafeda24e0939a033a0d59479908389a8e167612feabc174e36f716303a5",
-      savedEvidenceDigest:
-        "3a5021a32dc41a1fe4b2d8e2f74abfd1238ef63cf5bfb4cf44cb28bb09e5bfad",
-    },
+    inputDigest:
+      "232fbafeda24e0939a033a0d59479908389a8e167612feabc174e36f716303a5",
+    savedEvidenceDigest:
+      "3a5021a32dc41a1fe4b2d8e2f74abfd1238ef63cf5bfb4cf44cb28bb09e5bfad",
   });
-  await writeFile(oldPath, saved, { mode: 0o600 });
   const partial = () => prepare({ a: 7, b: new Number(2) });
   await expect(partial()).rejects.toThrow("cannot be matched");
 
@@ -7404,8 +7258,6 @@ test("preparing across a checkpoint handoff returns the observed approval", asyn
 });
 
 test("a changing GitHub ref cannot expand an older pending publication", async () => {
-  const { normalizeGitHubCodeScanningAlerts } =
-    await import("../src/github-findings.js");
   const f = await fixture();
   const prepare = (
     selected: ReturnType<typeof normalizeGitHubCodeScanningAlerts>,
@@ -7420,9 +7272,9 @@ test("a changing GitHub ref cannot expand an older pending publication", async (
     await prepare(normalizeGitHubCodeScanningAlerts([first], "cloud"))
   ).preview;
   // The released reader excluded the second alert before its rule serializer ran.
-  const digest =
-    "af139e1baa9e9e70a47d4ef0f811cb3960e9c280252affab51c250e7e6f9aa88";
-  const saved = JSON.stringify({
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "0b43d13c77ddf5fa43ce0bb536402595aea270191adde5974f2206753fa607b1.pending.json",
     accountId: preview.accountId,
     requests: [
       {
@@ -7430,18 +7282,12 @@ test("a changing GitHub ref cannot expand an older pending publication", async (
         request_id: "f49f8193-10b0-4c6c-a20d-390304a5f8d0",
       },
     ],
-    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    inputDigest:
+      "af139e1baa9e9e70a47d4ef0f811cb3960e9c280252affab51c250e7e6f9aa88",
   });
   expect(hash("sha256", saved)).toBe(
     "5f17c21d058c685c128d488b5a2a1e466fa5d18e37cc5284268b95ef25307293",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const path = join(
-    directory,
-    "0b43d13c77ddf5fa43ce0bb536402595aea270191adde5974f2206753fa607b1.pending.json",
-  );
-  await writeFile(path, saved, { mode: 0o600 });
 
   const second = importedAlert();
   second.number = second.alert.number = 13;
@@ -7471,11 +7317,7 @@ test("a normalized Buffer at the Cloud depth limit resumes only its released req
     for (let i = 0; i < 17; i++) tree = { nested: tree };
     const selected = scoredFindings(new Number(2.5));
     Object.assign(selected.findings[0]!.evidence.source_data, { tree });
-    return prepareNormalizedExternalPublication(
-      selected,
-      options,
-      releasedDependencies(f),
-    );
+    return prepareReleased(f, selected);
   };
   await expect(prepare(Buffer.from([1]))).rejects.toThrow(
     "Cloud JSON depth limit of 20",
@@ -7490,23 +7332,15 @@ test("a normalized Buffer at the Cloud depth limit resumes only its released req
   expect(hash("sha256", serialized)).toBe(
     "5d105b251af91c09d0b206404bd9332031da8e3cb4bb02a9b8add4e4c21814c4",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  const path = join(
-    directory,
-    "8376bdd00875ba8349ea341fab1c1d7c91eface0f2346d5eacf28e5c534a6d6a.pending.json",
-  );
-  const saved = JSON.stringify({
-    accountId: boxedNumberCheckpoints.accountId,
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "8376bdd00875ba8349ea341fab1c1d7c91eface0f2346d5eacf28e5c534a6d6a.pending.json",
     requests: [request],
-    inputProjection: {
-      inputDigest:
-        "4eace8a1f10136be4258341e48f747f3609919238018ad5f8d84ceebfe469bb2",
-      savedEvidenceDigest:
-        "68702d81bc70bb23815207a069b0780b2b5b1f304250ca4696ecfe129c48e497",
-    },
+    inputDigest:
+      "4eace8a1f10136be4258341e48f747f3609919238018ad5f8d84ceebfe469bb2",
+    savedEvidenceDigest:
+      "68702d81bc70bb23815207a069b0780b2b5b1f304250ca4696ecfe129c48e497",
   });
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(path, saved, { mode: 0o600 });
   await expect(prepare(Buffer.from([2]))).rejects.toThrow();
   expect(await readFile(path, "utf8")).toBe(saved);
   expect(f.posts).toHaveLength(0);
@@ -7518,8 +7352,6 @@ test("a normalized Buffer at the Cloud depth limit resumes only its released req
 });
 
 test("the local GitHub reader recovers its released Buffer at the Cloud depth limit", async () => {
-  const { normalizeGitHubCodeScanningAlerts } =
-    await import("../src/github-findings.js");
   const f = await fixture();
   const selected = (leaf: unknown) => {
     const row = importedAlert();
@@ -7529,11 +7361,7 @@ test("the local GitHub reader recovers its released Buffer at the Cloud depth li
     return normalizeGitHubCodeScanningAlerts([row], "local");
   };
   const prepare = (input: ReturnType<typeof selected>) =>
-    prepareNormalizedExternalPublication(
-      input,
-      { ...options, provider: "github" },
-      releasedDependencies(f),
-    );
+    prepareReleased(f, input, { ...options, provider: "github" });
   await expect(prepare(selected(Buffer.from([1])))).rejects.toThrow(
     "Cloud JSON depth limit of 20",
   );
@@ -7547,20 +7375,13 @@ test("the local GitHub reader recovers its released Buffer at the Cloud depth li
   expect(hash("sha256", wire)).toBe(
     "0603739963094b95e0f454f2cfd70ec9ee9f7abf891d43d536a67ad27dcf7b95",
   );
-  const directory = join(f.root, "state", "external-finding-publications");
-  const path = join(
-    directory,
-    "0f045c3b26dc68db90c2d4e8462be50efa7a758d256398e22f13d1fe070e552a.pending.json",
-  );
-  const digest =
-    "85488c56d0f48bb7dff1f931e69603aa4aa75c1ef287bf612fd84dc7df369aa2";
-  const saved = JSON.stringify({
-    accountId: "synthetic-account",
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "0f045c3b26dc68db90c2d4e8462be50efa7a758d256398e22f13d1fe070e552a.pending.json",
     requests: [request],
-    inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
+    inputDigest:
+      "85488c56d0f48bb7dff1f931e69603aa4aa75c1ef287bf612fd84dc7df369aa2",
   });
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(path, saved, { mode: 0o600 });
 
   const edited = selected(Buffer.from([1]));
   edited.findings[0]!.evidence.title = "Edited after the local read";
@@ -7590,8 +7411,6 @@ test.each([
 ] as const)(
   "preserves a released GitHub Buffer checkpoint with %s reader output",
   async (kind, refs, key, digest) => {
-    const { normalizeGitHubCodeScanningAlerts } =
-      await import("../src/github-findings.js");
     const f = await fixture();
     const prepare = (bytes: unknown) => {
       const rows = refs.map((ref) => {
@@ -7601,24 +7420,20 @@ test.each([
       });
       const result = normalizeGitHubCodeScanningAlerts(rows);
       if (kind === "reversed") result.findings.reverse();
-      return prepareNormalizedExternalPublication(
+      return prepareReleased(
+        f,
         kind === "cloned" ? structuredClone(result) : result,
         { ...options, provider: "github" },
-        releasedDependencies(f),
       );
     };
     // The released reader cloned each Buffer into a Uint8Array before publication.
     const requests = (await prepare({ 0: 1 })).preview.requests;
-    const checkpoint = {
-      accountId: "synthetic-account",
-      requests,
-      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
-    };
-    const directory = join(f.root, "state", "external-finding-publications");
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const path = join(directory, `${key}.pending.json`);
-    const saved = JSON.stringify(checkpoint);
-    await writeFile(path, saved, { mode: 0o600 });
+    const { checkpoint, directory, path, saved } =
+      await stageReleasedCheckpoint(f, {
+        filename: `${key}.pending.json`,
+        requests,
+        inputDigest: digest,
+      });
     await expect(prepare(Buffer.from([1]))).rejects.toThrow(
       "checkpoint was preserved",
     );
@@ -7650,8 +7465,6 @@ test.each([
 );
 
 test("the GitHub reader resumes a released boxed score whose Buffer fit the Cloud request", async () => {
-  const { normalizeGitHubCodeScanningAlerts } =
-    await import("../src/github-findings.js");
   const f = await fixture();
   const row = importedAlert();
   const extension = {
@@ -7689,22 +7502,13 @@ test("the GitHub reader resumes a released boxed score whose Buffer fit the Clou
   await expect(prepare(priorReader)).rejects.toThrow("Cloud limit of 256 KiB");
   expect(f.posts).toHaveLength(0);
 
-  const directory = join(f.root, "state", "external-finding-publications");
-  const digest =
-    "6d0cd82bed91273c26d2d9cd6eea9814f7ce3ac33af58a266f6554617d560362";
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(
-      directory,
+  await stageReleasedCheckpoint(f, {
+    filename:
       "c03e748fff72692564d445fc232317c164f16cf16fc5b1969bbee80d98bdb97e.pending.json",
-    ),
-    JSON.stringify({
-      accountId: "synthetic-account",
-      requests: [request],
-      inputProjection: { inputDigest: digest, savedEvidenceDigest: digest },
-    }),
-    { mode: 0o600 },
-  );
+    requests: [request],
+    inputDigest:
+      "6d0cd82bed91273c26d2d9cd6eea9814f7ce3ac33af58a266f6554617d560362",
+  });
 
   const resumed = await prepare(priorReader);
   expect(resumed.preview.resumed).toBe(true);

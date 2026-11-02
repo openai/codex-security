@@ -205,6 +205,10 @@ function wireJson(value: unknown): string {
   return canonicalJson(value, undefined, isBoxedPrimitive);
 }
 
+function jsonDigest(value: unknown, serialize = wireJson): string {
+  return hash("sha256", serialize(value));
+}
+
 function sameSubmission(
   left: SavedSubmission,
   right: SavedSubmission,
@@ -555,7 +559,7 @@ function previousDiagnosticMessage(diagnostic: Error): string | undefined {
     (name && typeof name.value !== "string") ||
     (cause &&
       (!Object.hasOwn(cause, "value") ||
-        !canSnapshotWithoutGetters(cause.value, true)))
+        !canSnapshotWithoutGetters(cause.value)))
   )
     return;
   return message;
@@ -596,7 +600,7 @@ function previousNormalizedFindings(
   observe: (value: object) => void,
 ): ExternalFindings | undefined {
   input = previousDiagnosticInput(input, nativeDiagnostics);
-  if (!canSnapshotWithoutGetters(input, true, observe)) return;
+  if (!canSnapshotWithoutGetters(input, observe)) return;
   // Object spread skips a hidden report, but explicitly reading it could run a getter.
   const reportField = Object.getOwnPropertyDescriptor(input, "report");
   if (reportField && !Object.hasOwn(reportField, "value")) return;
@@ -941,11 +945,8 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
-  function scopeKey(identity: unknown, wire: boolean) {
-    return hash(
-      "sha256",
-      (wire ? wireJson : canonicalJson)([...checkpointIdentity, identity]),
-    );
+  function scopeKey(identity: unknown, serialize = wireJson) {
+    return jsonDigest([...checkpointIdentity, identity], serialize);
   }
   function localeKey(rows: ExternalFindings["findings"]) {
     return hash(
@@ -955,19 +956,19 @@ async function preparePublicationInput(
       ),
     );
   }
-  const freshKey = scopeKey(currentIdentity, true);
   const original = input.original;
+  const originalParsed = original?.parsed ?? parsed;
   const originalIdentity = original?.identity ?? currentIdentity;
-  const hasBoxedScalars = original?.hasBoxedScalars ?? false;
-  const originalWire = original?.wire ?? wireJson(currentIdentity);
-  const changedCapture = original && originalWire !== wireJson(currentIdentity);
+  const hasBoxedScalars = original?.hasBoxedScalars === true;
+  const changedCapture =
+    original && original.wire !== wireJson(currentIdentity);
   const originalKey =
     changedCapture || hasBoxedScalars
-      ? scopeKey(originalIdentity, false)
+      ? scopeKey(originalIdentity, canonicalJson)
       : undefined;
   let historicalOnly = false;
   const originalWireKey = changedCapture
-    ? scopeKey(originalIdentity, true)
+    ? scopeKey(originalIdentity)
     : undefined;
   if (changedCapture && originalKey && originalWireKey) {
     // A released SDK could stage either spelling. A modern approval for the
@@ -991,7 +992,7 @@ async function preparePublicationInput(
             pathKey === originalWireKey ||
             original.parsed.report === undefined ||
             record?.inputProjection?.inputDigest ===
-              hash("sha256", canonicalJson(originalIdentity))))
+              jsonDigest(originalIdentity, canonicalJson)))
       ) {
         parsed = legacyParsed = original.parsed;
         currentIdentity = legacyIdentity = original.identity;
@@ -1001,12 +1002,11 @@ async function preparePublicationInput(
     }
   }
   if (input.freshError && !historicalOnly) throw input.freshError;
-  const inputDigest = hash("sha256", wireJson(currentIdentity));
+  const inputDigest = jsonDigest(currentIdentity);
   const legacyInputDigest =
     currentIdentity === legacyIdentity
       ? inputDigest
-      : hash("sha256", wireJson(legacyIdentity));
-  const previousKey = originalKey;
+      : jsonDigest(legacyIdentity);
   function matchesSavedDestination(requests: FindingImportRequest[]): boolean {
     return (
       requests.length > 0 &&
@@ -1018,6 +1018,22 @@ async function preparePublicationInput(
           wireJson(batch.source) === wireJson(source),
       )
     );
+  }
+  async function retireIfReset(
+    content: SavedSubmission,
+    retire: () => Promise<void>,
+  ) {
+    if (
+      content.requests.some(
+        (batch) => batch.repository.reset_marker !== destination.reset_marker,
+      )
+    ) {
+      await retire();
+      throw new CloudImportError(
+        409,
+        "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
+      );
+    }
   }
   function readSaved(
     content: SavedSubmission | null | undefined,
@@ -1068,7 +1084,7 @@ async function preparePublicationInput(
       !legacy &&
       hasBoxedScalars &&
       projection?.identityFormat !== 2 &&
-      !verifiableLegacyMetadata(original?.parsed ?? parsed, true)
+      !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
     return content;
@@ -1084,20 +1100,15 @@ async function preparePublicationInput(
     const projection = content.inputProjection;
     const savedWire = wireJson(submissionFindings(content.requests));
     const wireDigest = hash("sha256", savedWire);
-    if (
-      projection?.inputDigest !==
-      hash("sha256", canonicalJson(originalIdentity))
-    )
+    if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
     if (projection.identityFormat === 2) {
       // A current writer may own the old filename for an ordinary object.
       if (projection.savedEvidenceDigest === wireDigest) return undefined;
       throw unmatchedPreviousNumbers();
     }
-    const selected = (original?.parsed ?? parsed).findings.map(wireFinding);
-    if (
-      projection.savedEvidenceDigest !== hash("sha256", canonicalJson(selected))
-    )
+    const selected = originalParsed.findings.map(wireFinding);
+    if (projection.savedEvidenceDigest !== jsonDigest(selected, canonicalJson))
       throw unmatchedPreviousNumbers();
     if (savedWire !== wireJson(selected)) {
       // A genuinely empty object at this key is a separate ordinary selection.
@@ -1106,7 +1117,7 @@ async function preparePublicationInput(
     }
     if (
       (changedCapture && !historicalOnly) ||
-      !verifiableLegacyMetadata(original?.parsed ?? parsed, false)
+      !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
     content.legacyApproval = true;
@@ -1122,7 +1133,8 @@ async function preparePublicationInput(
       "The older saved import cannot be matched to the selected input. Its checkpoint was preserved without uploading.",
     );
   }
-  const key = historicalOnly ? scopeKey(currentIdentity, true) : freshKey;
+  const key = scopeKey(currentIdentity);
+  const stagingKey = originalKey ?? key;
   const canonicalPath = join(state, `${key}.pending.json`);
   const lookupPath = join(state, `${key}.lookup.json`);
   // A lookup only suggests a regular file to validate. A missing or stale hint
@@ -1140,17 +1152,14 @@ async function preparePublicationInput(
   }
 
   const historicalKey = localeKey(legacyParsed.findings);
-  const legacyIdentityKey = hash(
-    "sha256",
-    wireJson([...checkpointIdentity, legacyIdentity]),
-  );
+  const legacyIdentityKey = scopeKey(legacyIdentity);
   const legacyKeys = new Set([legacyIdentityKey, historicalKey]);
   function underLocks<T>(keys: string[], operation: () => Promise<T>) {
     return withImportLocks(state, keys, dependencies.signal, operation);
   }
   let recovered: SavedSubmission | undefined;
   for (const legacyKey of legacyKeys) {
-    if (legacyKey === key || legacyKey === previousKey) continue;
+    if (legacyKey === key || legacyKey === originalKey) continue;
     const legacyPath = join(state, `${legacyKey}.pending.json`);
     const captured = await readOptionalFile(legacyPath);
     if (captured !== undefined) {
@@ -1176,7 +1185,6 @@ async function preparePublicationInput(
         }
         // A report-free approval at the locale-era filename can be a separate input.
         if (
-          legacyKey === historicalKey &&
           legacyKey !== legacyIdentityKey &&
           prior?.inputProjection &&
           prior.inputProjection.inputDigest !== legacyInputDigest
@@ -1185,28 +1193,21 @@ async function preparePublicationInput(
           const rows = legacyParsed.findings;
           if (
             projection.identityFormat === 2 ||
-            (projection.inputDigest === hash("sha256", wireJson(rows)) &&
+            (projection.inputDigest === jsonDigest(rows) &&
               projection.savedEvidenceDigest ===
-                hash("sha256", wireJson(submissionFindings(prior.requests))))
+                jsonDigest(submissionFindings(prior.requests)))
           )
             return;
           // The released SDK hashed report-free rows as an array and boxed scores as {}.
+          const originalRows = original?.parsed.findings ?? rows;
           if (
             hasBoxedScalars &&
             legacyParsed.report !== undefined &&
-            legacyKey === scopeKey(original?.parsed.findings ?? rows, false) &&
+            legacyKey === scopeKey(originalRows, canonicalJson) &&
             projection.inputDigest ===
-              hash(
-                "sha256",
-                canonicalJson(original?.parsed.findings ?? rows),
-              ) &&
+              jsonDigest(originalRows, canonicalJson) &&
             projection.savedEvidenceDigest ===
-              hash(
-                "sha256",
-                canonicalJson(
-                  (original?.parsed.findings ?? rows).map(wireFinding),
-                ),
-              ) &&
+              jsonDigest(originalRows.map(wireFinding), canonicalJson) &&
             sameFindingSelection(
               submissionFindings(readSaved(prior).requests),
               rows,
@@ -1222,21 +1223,12 @@ async function preparePublicationInput(
           throw new CodexSecurityError(
             "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
           );
-        if (
-          content.requests.some(
-            (submission) =>
-              submission.repository.reset_marker !== destination.reset_marker,
-          )
-        ) {
+        await retireIfReset(content, async () => {
           if (serialized !== undefined) await rm(legacyPath);
-          throw new CloudImportError(
-            409,
-            "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
-          );
-        }
+        });
         const savedEvidenceDigest =
           content.inputProjection?.savedEvidenceDigest ??
-          hash("sha256", wireJson(legacyParsed.findings));
+          jsonDigest(legacyParsed.findings);
         const rebindProjection =
           content.inputProjection !== undefined ||
           savedEvidenceDigest !== inputDigest;
@@ -1273,12 +1265,9 @@ async function preparePublicationInput(
   // Some getter-backed batches cannot reproduce a released filename. Their IDs
   // can stop a conflicting upload, but never authorize replay of a saved request.
   const potentialIds =
-    input.potentialIds === null
-      ? null
-      : (input.potentialIds ??
-        (changedCapture
-          ? original?.parsed.findings.map((row) => row.source_finding_id)
-          : undefined));
+    input.potentialIds === undefined && changedCapture
+      ? original.parsed.findings.map((row) => row.source_finding_id)
+      : input.potentialIds;
   const unprovenPrefixes = new Set(input.unprovenIdPrefixes);
   const uncertainIds = new Set(input.uncertainFindingIds);
   const uncertainMembership =
@@ -1330,10 +1319,10 @@ async function preparePublicationInput(
       if (!matchesSavedDestination(record.requests)) return false;
       const rows = submissionFindings(record.requests);
       const savedWire = wireJson(rows);
-      if (
+      const evidenceMatches =
         projection &&
-        projection.savedEvidenceDigest === hash("sha256", savedWire)
-      ) {
+        projection.savedEvidenceDigest === hash("sha256", savedWire);
+      if (evidenceMatches) {
         // Matching old digests reconstruct its scoped filename. A report from
         // this caller is useful only when the saved digest independently binds it.
         const reportFree =
@@ -1345,13 +1334,12 @@ async function preparePublicationInput(
             : undefined;
         if (
           identity &&
-          (reportFree ||
-            projection.inputDigest === hash("sha256", wireJson(identity)))
+          (reportFree || projection.inputDigest === jsonDigest(identity))
         ) {
           if (
             record.wireKey
-              ? record.wireKey !== scopeKey(identity, true)
-              : fileKey !== scopeKey(identity, false) &&
+              ? record.wireKey !== scopeKey(identity)
+              : fileKey !== scopeKey(identity, canonicalJson) &&
                 fileKey !== localeKey(rows)
           )
             return false;
@@ -1367,7 +1355,7 @@ async function preparePublicationInput(
           !record.wireKey &&
           reportFree &&
           original &&
-          originalWire !== savedWire
+          original.wire !== savedWire
         )
           return false;
       }
@@ -1375,21 +1363,20 @@ async function preparePublicationInput(
       if (
         projection &&
         original &&
-        !record.wireKey &&
-        fileKey !== (originalKey ?? key) &&
+        fileKey !== stagingKey &&
         fileKey !== originalWireKey &&
         projection.inputDigest ===
-          (originalInputDigest ??= hash(
-            "sha256",
-            canonicalJson(original.identity),
+          (originalInputDigest ??= jsonDigest(
+            original.identity,
+            canonicalJson,
           )) &&
         fileKey !== localeKey(original.parsed.findings) &&
         projection.savedEvidenceDigest ===
-          hash(
-            "sha256",
-            canonicalJson(original.parsed.findings.map(wireFinding)),
+          jsonDigest(
+            original.parsed.findings.map(wireFinding),
+            canonicalJson,
           ) &&
-        wireJson(rows) === wireJson(original.parsed.findings.map(wireFinding))
+        savedWire === wireJson(original.parsed.findings.map(wireFinding))
       )
         return false;
       if (stableIds) {
@@ -1406,21 +1393,19 @@ async function preparePublicationInput(
           (input.unprovenOccurrenceCount ?? 0)
         )
           return false;
-        if (
-          !rows.length ||
-          stableSaved.length !== stableIds.length ||
-          !stableSaved.every((row, i) => {
+        return (
+          rows.length > 0 &&
+          stableSaved.length === stableIds.length &&
+          stableSaved.every((row, i) => {
             const known = knownRows.get(row.source_finding_id);
             return (
               row.source_finding_id === stableIds[i] &&
               (!known || wireJson(row) === wireJson(known))
             );
           })
-        )
-          return false;
-        return true;
+        );
       }
-      const candidates = original?.parsed.findings ?? parsed.findings;
+      const candidates = originalParsed.findings;
       const ids =
         potentialIds === undefined
           ? parsed.findings.map((row) => row.source_finding_id)
@@ -1443,11 +1428,7 @@ async function preparePublicationInput(
         parsed.report !== undefined
       )
         return false;
-      if (
-        potentialIds === undefined &&
-        (hasBoxedScalars ||
-          projection.savedEvidenceDigest === hash("sha256", wireJson(rows)))
-      )
+      if (potentialIds === undefined && (hasBoxedScalars || evidenceMatches))
         return false;
       return (
         !sameFindingSelection(rows, candidates) ||
@@ -1480,12 +1461,11 @@ async function preparePublicationInput(
     });
     if (!directory) return undefined;
     const known = new Set(
-      [key, previousKey, knownFileKey].filter((value) => value !== undefined),
+      [key, originalKey, knownFileKey].filter((value) => value !== undefined),
     );
     let unidentified = false;
     let unprovenOriginal = false;
     let incomplete = false;
-    let differentOldWire = false;
     let stagingPathOccupied = false;
     async function readCandidate(
       fileKey: string,
@@ -1502,7 +1482,7 @@ async function preparePublicationInput(
         if (!known.has(fileKey)) incomplete = true;
         return selected;
       }
-      if (fileKey === (previousKey ?? key)) stagingPathOccupied = true;
+      if (fileKey === stagingKey) stagingPathOccupied = true;
       let record: SavedSubmission | null;
       try {
         record = JSON.parse(serialized) as SavedSubmission | null;
@@ -1511,23 +1491,26 @@ async function preparePublicationInput(
         incomplete = true;
         return selected;
       }
-      if (record?.wireKey !== undefined && record.wireKey !== key) {
+      // A migrated checkpoint records the wire identity it belongs to even
+      // when a separate input hashes to its historical filename.
+      const tag = record?.wireKey;
+      const tagged = tag !== undefined;
+      const ownerKey = tagged ? tag : fileKey;
+      const historical = !tagged && fileKey === originalKey && fileKey !== key;
+      if (ownerKey !== key && !historical) {
         if (
-          (cannotCaptureOriginal || possibleBufferExport) &&
+          record &&
+          (!tagged || cannotCaptureOriginal || possibleBufferExport) &&
           potentialOriginal(record, fileKey)
         )
           unprovenOriginal = true;
-        return selected;
-      }
-      const historical =
-        fileKey !== key &&
-        record?.wireKey === undefined &&
-        fileKey === previousKey;
-      if (fileKey !== key && record?.wireKey !== key && !historical) {
-        if (record && potentialOriginal(record, fileKey))
-          unprovenOriginal = true;
         // Some early locale filenames carry no deployment identity. Never guess their target.
-        if (record && !record.inputProjection && !legacyKeys.has(fileKey)) {
+        if (
+          !tagged &&
+          record &&
+          !record.inputProjection &&
+          !legacyKeys.has(fileKey)
+        ) {
           try {
             // A different locale cannot authorize replay, even when the
             // original native capture proves these rows were selected.
@@ -1549,7 +1532,7 @@ async function preparePublicationInput(
         : validateSaved(record);
       if (content === "different-wire") {
         // Another spelling may already have a verified checkpoint for this wire value.
-        differentOldWire = true;
+        unprovenOriginal = true;
         return selected;
       }
       if (!content) return selected;
@@ -1561,17 +1544,11 @@ async function preparePublicationInput(
         // The two unlocked reads may have straddled completion of the first request.
         return await underLocks([key, selected.fileKey, fileKey], async () => {
           const first = await readCandidate(selected.fileKey);
-          if (first && (await readCandidate(fileKey))) throw conflict;
-          if (first && sameSubmission(first.content, selected.content))
-            return first;
-          if (
-            await readCompletedPublication(
-              selected.content.requests,
-              selected.fileKey,
-            )
-          )
-            return selected;
-          throw changedWhilePreparing();
+          if (first) {
+            if (await readCandidate(fileKey)) throw conflict;
+            if (sameSubmission(first.content, selected.content)) return first;
+          }
+          return completedCheckpoint(selected);
         });
       }
       return { fileKey, content, historical };
@@ -1615,10 +1592,7 @@ async function preparePublicationInput(
       if (!known.has(fileKey))
         selected = await readCandidate(fileKey, selected);
     }
-    if (
-      (!selected && differentOldWire) ||
-      (unprovenOriginal && (!selected || cannotCaptureOriginal))
-    )
+    if (unprovenOriginal && (!selected || cannotCaptureOriginal))
       throw unmatchedPreviousNumbers();
     if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
     if (!selected && unidentified)
@@ -1657,8 +1631,15 @@ async function preparePublicationInput(
         };
     }
   }
-  function changedWhilePreparing() {
-    return new CodexSecurityError(
+  async function completedCheckpoint(observed: Checkpoint) {
+    if (
+      await readCompletedPublication(
+        observed.content.requests,
+        observed.fileKey,
+      )
+    )
+      return observed;
+    throw new CodexSecurityError(
       "The saved publication changed while preparing this input. Review it again.",
     );
   }
@@ -1668,7 +1649,7 @@ async function preparePublicationInput(
     );
   }
   let selected = await selectedCheckpoint(recovered ? key : undefined, true);
-  const fileKey = selected?.fileKey ?? (recovered ? key : (previousKey ?? key));
+  const fileKey = selected?.fileKey ?? (recovered ? key : stagingKey);
   const pendingPath = join(state, `${fileKey}.pending.json`);
   async function rememberFile() {
     if (fileKey !== key && (await lookupFileKey()) !== fileKey)
@@ -1680,13 +1661,7 @@ async function preparePublicationInput(
       await rm(lookupPath, { force: true }).catch(() => undefined);
   }
 
-  const lockKeys = [
-    ...new Set([
-      key,
-      fileKey,
-      ...(previousKey === undefined ? [] : [previousKey]),
-    ]),
-  ];
+  const lockKeys = [key, fileKey, stagingKey];
   if (selected?.historical) {
     const observed = selected;
     selected = await underLocks(lockKeys, async () => {
@@ -1695,16 +1670,8 @@ async function preparePublicationInput(
         !current ||
         current.fileKey !== fileKey ||
         !sameSubmission(current.content, observed.content)
-      ) {
-        if (
-          await readCompletedPublication(
-            observed.content.requests,
-            observed.fileKey,
-          )
-        )
-          return observed;
-        throw changedWhilePreparing();
-      }
+      )
+        return completedCheckpoint(observed);
       if (current.historical) {
         current.content.wireKey = key;
         await writeAtomicJson(pendingPath, current.content);
@@ -1717,25 +1684,16 @@ async function preparePublicationInput(
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
   if (!parsed.findings.length) noFindings();
   if (saved) {
-    const content = saved;
-    for (const submission of content.requests) {
-      if (submission.repository.reset_marker !== destination.reset_marker) {
-        // The old request is never sent after reset. A subsequent explicit
-        // invocation prepares a fresh submission and asks for approval again.
-        await underLocks(lockKeys, async () => {
-          const current = await readOptionalFile(pendingPath);
-          if (
-            current !== undefined &&
-            sameSubmission(JSON.parse(current) as SavedSubmission, content)
-          )
-            await removePending();
-        });
-        throw new CloudImportError(
-          409,
-          "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
-        );
-      }
-    }
+    await retireIfReset(saved, () =>
+      underLocks(lockKeys, async () => {
+        const current = await readOptionalFile(pendingPath);
+        if (
+          current !== undefined &&
+          sameSubmission(JSON.parse(current) as SavedSubmission, saved)
+        )
+          await removePending();
+      }),
+    );
   }
   if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
     throw new CodexSecurityError(
@@ -1940,10 +1898,7 @@ async function preparePublicationInput(
     inputProjection: saved?.inputProjection ?? {
       identityFormat: saved ? undefined : 2,
       inputDigest,
-      savedEvidenceDigest: hash(
-        "sha256",
-        wireJson(submissionFindings(requests)),
-      ),
+      savedEvidenceDigest: jsonDigest(submissionFindings(requests)),
     },
   };
   if (inspectorProjectMap) submission.inspectorProjectMapRequired = true;

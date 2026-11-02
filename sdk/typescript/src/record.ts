@@ -3,7 +3,6 @@ import { isBoxedPrimitive, isDate, isProxy } from "node:util/types";
 /** Native capture reads enumerable own accessors and may run proxy traps. */
 export function canSnapshotWithoutGetters(
   input: unknown,
-  allowSerializerPrototype = false,
   observe?: (value: object) => boolean | void,
 ): boolean {
   const seen = new Set<object>();
@@ -23,7 +22,6 @@ export function canSnapshotWithoutGetters(
       prototype !== null
     ) {
       if (
-        !allowSerializerPrototype ||
         !prototype ||
         typeof prototype !== "object" ||
         isProxy(prototype) ||
@@ -42,6 +40,19 @@ export function canSnapshotWithoutGetters(
     }
   }
   return true;
+}
+
+/** Capture historical data only when cloning cannot run a caller's getter. */
+export function cloneWithoutGetters<T>(
+  value: T,
+  observe?: (value: object) => boolean | void,
+): T | undefined {
+  if (!canSnapshotWithoutGetters(value, observe)) return;
+  try {
+    return structuredClone(value);
+  } catch {
+    return;
+  }
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

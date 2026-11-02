@@ -12,14 +12,18 @@ import {
   validateExternalEvidenceJson,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
 import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import { asRecord, canSnapshotWithoutGetters } from "./record.js";
+import {
+  asRecord,
+  canSnapshotWithoutGetters,
+  cloneWithoutGetters,
+} from "./record.js";
 import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
 
 import {
@@ -62,6 +66,18 @@ function severity(value: unknown): string {
     : "unknown";
 }
 
+function codeScanningPrefix(
+  { parsed, host }: ReturnType<typeof sourceUrl>,
+  repository: string,
+  number: number,
+): string | undefined {
+  const name = repository.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  const alert = `code-scanning/${number}`;
+  if (path === `/${name}/${alert}` || path === `/${name}/security/${alert}`)
+    return `${host}/${name}/${alert}/`;
+}
+
 function codeScanningFinding(record: Record<string, unknown>): {
   source_finding_id: string;
   evidence: unknown;
@@ -82,14 +98,9 @@ function codeScanningFinding(record: Record<string, unknown>): {
   const url = text(record["url"]);
   if (!url || url !== alert["html_url"])
     throw new Error("GitHub alert URL must match the original alert.");
-  const { parsed: parsedUrl, host, origin } = sourceUrl(url);
-  if (
-    !["security/code-scanning", "code-scanning"].some(
-      (route) =>
-        parsedUrl.pathname.toLowerCase() ===
-        `/${repository}/${route}/${number}`.toLowerCase(),
-    )
-  )
+  const link = sourceUrl(url);
+  const prefix = codeScanningPrefix(link, repository, number);
+  if (!prefix)
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
@@ -118,9 +129,8 @@ function codeScanningFinding(record: Record<string, unknown>): {
     ),
   ];
   const path = text(location?.["path"]);
-  const sourceId = `${host}/${repository.toLowerCase()}/code-scanning/${number}/${hash("sha256", ref)}`;
   return {
-    source_finding_id: sourceId,
+    source_finding_id: prefix + hash("sha256", ref),
     evidence: {
       title:
         text(rule?.["name"]) ??
@@ -139,7 +149,7 @@ function codeScanningFinding(record: Record<string, unknown>): {
       details: {
         kind: "sast",
         repository: {
-          url: `${origin}/${repository}`,
+          url: `${link.origin}/${repository}`,
           name: repository,
         },
         // Dismissal covers every branch; detection state belongs to the selected ref.
@@ -286,18 +296,6 @@ function mapRecord(input: unknown) {
   );
 }
 
-function nativeGitHubRecord(
-  value: unknown,
-  observe?: (value: object) => boolean | void,
-): Record<string, unknown> | undefined {
-  if (!canSnapshotWithoutGetters(value, true, observe)) return;
-  try {
-    return asRecord(structuredClone(value));
-  } catch {
-    return;
-  }
-}
-
 function ownData(value: unknown, key: string): unknown {
   if (value && typeof value === "object" && !isProxy(value))
     return Object.getOwnPropertyDescriptor(value, key)?.value;
@@ -349,18 +347,69 @@ function codeOccurrencePrefix(value: unknown): string | undefined {
   )
     return;
   try {
-    const { parsed, host } = sourceUrl(url);
-    if (
-      ["security/code-scanning", "code-scanning"].some(
-        (route) =>
-          parsed.pathname.toLowerCase() ===
-          `/${repository.toLowerCase()}/${route}/${number}`,
-      )
-    )
-      return `${host}/${repository.toLowerCase()}/code-scanning/${number}/`;
+    return codeScanningPrefix(sourceUrl(url), repository, number);
   } catch {
     /* No validated occurrence anchor. */
   }
+}
+
+// The released reader measured the caller's source_data JSON before native capture.
+function captureGitHubRecord(input: unknown, target: ExternalImportTarget) {
+  // Only plain records, arrays and standard Buffers have a reconstructable wire size.
+  let plainBuffers: Buffer[] | undefined = [];
+  let hiddenFields = false;
+  let largeLocalRow = false;
+  const record = cloneWithoutGetters(input, (value) => {
+    const prototype = Object.getPrototypeOf(value);
+    if (
+      target === "local" &&
+      ((Array.isArray(value) && value.length > 256 * 1024) ||
+        (prototype === Buffer.prototype &&
+          Buffer.isBuffer(value) &&
+          !Object.hasOwn(value, "byteLength") &&
+          value.byteLength > 256 * 1024))
+    ) {
+      largeLocalRow = true;
+      return false;
+    }
+    // Native capture drops non-enumerable fields the released vendor mapper could read.
+    if (
+      !Array.isArray(value) &&
+      !ArrayBuffer.isView(value) &&
+      !isBoxedPrimitive(value) &&
+      !isDate(value) &&
+      Object.getOwnPropertyNames(value).some(
+        (key) =>
+          key !== "toJSON" &&
+          !Object.prototype.propertyIsEnumerable.call(value, key),
+      )
+    )
+      hiddenFields = true;
+
+    if (!plainBuffers) return;
+    if (Buffer.isBuffer(value)) {
+      if (
+        prototype === Buffer.prototype &&
+        !Object.hasOwn(value, "toJSON") &&
+        !Object.hasOwn(value, "length") &&
+        !("_arr" in value)
+      )
+        plainBuffers.push(value);
+      else plainBuffers = undefined;
+    } else if (
+      (prototype !== Object.prototype &&
+        prototype !== null &&
+        prototype !== Array.prototype) ||
+      maySerialize(value)
+    )
+      plainBuffers = undefined;
+  });
+  return {
+    record: asRecord(record),
+    hiddenFields,
+    plainBuffers,
+    largeLocalRow,
+  };
 }
 
 function normalizeRecords(
@@ -373,15 +422,10 @@ function normalizeRecords(
     findings: [],
     excluded: [],
   };
-  const previous = snapshot
-    ? ({
-        read: records.length,
-        findings: [],
-        excluded: [],
-      } as ExternalFindings)
+  const previous: ExternalFindings | undefined = snapshot
+    ? { read: records.length, findings: [], excluded: [] }
     : undefined;
-  const checks: { input: unknown; before: unknown; uncertain: () => void }[] =
-    [];
+  const checks: (() => void)[] = [];
   const uncertainIds = new Set<string>();
   const unidentifiedRows = new Set<number>();
   let independentlyObserved = Infinity;
@@ -389,59 +433,14 @@ function normalizeRecords(
   let largeLocalSelection = false;
   const potentialIds: string[] = [];
   const prefixes = new Set<string>();
-  let uncertain = false;
   const identities = new Set<string>();
   for (const [index, input] of records.entries()) {
     const afterRootSerializer = ranRootSerializer;
     const keySensitive = previous !== undefined && maySerialize(input);
     ranRootSerializer ||= keySensitive;
     let exported = input;
-    // The released reader measured the caller's source_data JSON before native capture.
-    // Its byte count can be reconstructed for plain JSON containing ordinary Buffers.
-    let plainBufferWire = true;
-    let buffers: Buffer[] | undefined;
-    let hiddenFields = false;
-    let largeLocalRow = false;
-    const before = previous
-      ? nativeGitHubRecord(input, (value) => {
-          const prototype = Object.getPrototypeOf(value);
-          if (
-            target === "local" &&
-            ((Array.isArray(value) && value.length > 256 * 1024) ||
-              (prototype === Buffer.prototype &&
-                Buffer.isBuffer(value) &&
-                !Object.hasOwn(value, "byteLength") &&
-                value.byteLength > 256 * 1024))
-          ) {
-            largeLocalRow = true;
-            return false;
-          }
-          // Native capture drops non-enumerable fields the released vendor mapper could read.
-          if (
-            !Array.isArray(value) &&
-            !ArrayBuffer.isView(value) &&
-            !isBoxedPrimitive(value) &&
-            !isDate(value) &&
-            Object.getOwnPropertyNames(value).some(
-              (key) =>
-                key !== "toJSON" &&
-                !Object.prototype.propertyIsEnumerable.call(value, key),
-            )
-          )
-            hiddenFields = true;
-          if (!plainBufferWire) return;
-          if (Buffer.isBuffer(value)) (buffers ??= []).push(value);
-          plainBufferWire = Buffer.isBuffer(value)
-            ? prototype === Buffer.prototype &&
-              !Object.hasOwn(value, "toJSON") &&
-              !Object.hasOwn(value, "length") &&
-              !("_arr" in value)
-            : (prototype === Object.prototype ||
-                prototype === null ||
-                prototype === Array.prototype) &&
-              !maySerialize(value);
-        })
-      : undefined;
+    const capture = previous ? captureGitHubRecord(input, target) : undefined;
+    const before = capture?.record;
     const priorPrefix = previous ? codeOccurrencePrefix(input) : undefined;
     let priorId = previous ? priorAdvisoryId(input) : undefined;
     let prefix = priorPrefix;
@@ -449,7 +448,7 @@ function normalizeRecords(
     let rowUncertain = false;
     const priorRowCount = previous?.findings.length ?? 0;
     function possible() {
-      uncertain = rowUncertain = true;
+      rowUncertain = true;
       // A caller getter can mutate a later row before its native evidence is seen.
       independentlyObserved = Math.min(independentlyObserved, priorRowCount);
       for (const id of rowIds) uncertainIds.add(id);
@@ -463,6 +462,18 @@ function normalizeRecords(
       possible();
       unidentifiedRows.add(index);
     }
+    function retainPrevious(
+      selection: ExternalFindings,
+      id: string,
+      evidence: ExternalFinding["evidence"],
+    ) {
+      selection.findings.push({ source_finding_id: id, evidence });
+      potentialIds.push(id);
+      checks.push(() => {
+        if (!isDeepStrictEqual(before, asRecord(cloneWithoutGetters(input))))
+          possible();
+      });
+    }
     const exclusion = (record: unknown, reason: string) => ({
       position: index + 1,
       source_finding_id: text(asRecord(record)?.["url"]),
@@ -470,91 +481,76 @@ function normalizeRecords(
     });
     let possibleFreshId = false;
     try {
-      if (snapshot) {
+      if (previous && capture) {
         const source = exportedGitHubRecord(
           input,
           index,
           target,
-          target === "local" && !largeLocalRow,
+          target === "local" && !capture.largeLocalRow,
         );
         exported = source.record;
-        if (previous) {
-          prefix ??= codeOccurrencePrefix(exported);
-          // A serializer or Buffer can expand a native record that fit the approved request.
+        prefix ??= codeOccurrencePrefix(exported);
+        // A serializer or Buffer can expand a native record that fit the approved request.
+        const oversizedLocalRow =
+          target === "local" &&
+          (capture.largeLocalRow ||
+            (source.bytes > 256 * 1024 &&
+              (!before || capture.plainBuffers?.length === 0)));
+        if (oversizedLocalRow || !before) {
           if (
-            target === "local" &&
-            (largeLocalRow ||
-              (source.bytes > 256 * 1024 &&
-                (!before || (plainBufferWire && !buffers))))
-          ) {
-            largeLocalSelection = true;
-            possible();
-            possibleFreshId = true;
-          } else if (
-            !before &&
+            !oversizedLocalRow &&
             source.previousInvalid &&
             !source.skippedRawValue &&
-            canSnapshotWithoutGetters(input, true)
+            canSnapshotWithoutGetters(input)
           ) {
             previous.excluded.push(
               exclusion(exported, errorMessage(source.previousInvalid)),
             );
-          } else if (!before) {
-            // With no independent native observation, only an occurrence can
-            // identify a possible older approval. It cannot authorize a retry.
-            const rawSizeExcludes =
-              source.adjustment === Infinity ||
-              source.bytes + source.adjustment > 256 * 1024;
-            if (
-              target === "local" ||
-              !rawSizeExcludes ||
-              !canSnapshotWithoutGetters(input, true) ||
-              keySensitive
-            ) {
-              possible();
-              possibleFreshId = true;
-            } else
-              previous.excluded.push(
-                exclusion(
-                  exported,
-                  "Evidence exceeds the Cloud limit of 256 KiB.",
-                ),
-              );
+          } else if (
+            target !== "local" &&
+            source.bytes + source.adjustment > 256 * 1024 &&
+            canSnapshotWithoutGetters(input) &&
+            !keySensitive
+          ) {
+            previous.excluded.push(
+              exclusion(
+                exported,
+                "Evidence exceeds the Cloud limit of 256 KiB.",
+              ),
+            );
           } else {
-            if (hiddenFields || source.skippedRawValue) possible();
-            try {
-              const row = mapRecord(before);
-              const knownOldId = row.source_finding_id;
-              priorId = knownOldId;
-              if (!afterRootSerializer) unidentifiedRows.delete(index);
-              rowIds.add(knownOldId);
-              if (rowUncertain) uncertainIds.add(knownOldId);
-              const evidence = validateExternalEvidenceFields(
-                row.evidence,
-                target,
-              );
-              if (source.previousInvalid) throw source.previousInvalid;
-              if (keySensitive) possible();
-              const reason =
-                keySensitive || target === "local"
-                  ? undefined
-                  : previousGitHubExclusion(
-                      evidence,
-                      source.bytes,
-                      source.adjustment,
-                    );
-              if (reason) previous.excluded.push(exclusion(before, reason));
-              else {
-                checks.push({ input, before, uncertain: possible });
-                previous.findings.push({
-                  source_finding_id: knownOldId,
-                  evidence,
-                });
-                potentialIds.push(knownOldId);
-              }
-            } catch (error) {
-              previous.excluded.push(exclusion(before, errorMessage(error)));
-            }
+            largeLocalSelection ||= oversizedLocalRow;
+            // An occurrence without independent native evidence can only stop a retry.
+            possible();
+            possibleFreshId = true;
+          }
+        } else {
+          if (capture.hiddenFields || source.skippedRawValue) possible();
+          try {
+            const row = mapRecord(before);
+            const knownOldId = row.source_finding_id;
+            priorId = knownOldId;
+            if (!afterRootSerializer) unidentifiedRows.delete(index);
+            rowIds.add(knownOldId);
+            if (rowUncertain) uncertainIds.add(knownOldId);
+            const evidence = validateExternalEvidenceFields(
+              row.evidence,
+              target,
+            );
+            if (source.previousInvalid) throw source.previousInvalid;
+            if (keySensitive) possible();
+            const reason =
+              keySensitive || target === "local"
+                ? undefined
+                : previousGitHubExclusion(
+                    evidence,
+                    source.bytes,
+                    source.adjustment,
+                  );
+            if (reason) previous.excluded.push(exclusion(before, reason));
+            else retainPrevious(previous, knownOldId, evidence);
+          } catch (error) {
+            previous.excluded.push(exclusion(before, errorMessage(error)));
           }
         }
         if (source.invalid) throw source.invalid;
@@ -586,13 +582,11 @@ function normalizeRecords(
         if (
           error instanceof CloudEvidenceDepthError &&
           before &&
-          plainBufferWire &&
           // Extra Buffer fields were inspected by the old row validator, but
           // structuredClone does not retain them as part of the typed array.
-          (buffers?.every(
+          capture?.plainBuffers?.every(
             (buffer) => Object.keys(buffer).length === buffer.length,
-          ) ??
-            true)
+          )
         ) {
           // Exported JSON can be deeper than an approved native snapshot.
           // Retain only the independently observed, valid prior selection.
@@ -614,12 +608,7 @@ function normalizeRecords(
               target,
               Buffer.byteLength(oldSource) - Buffer.byteLength(savedSource),
             );
-            previous.findings.push({
-              source_finding_id: row.source_finding_id,
-              evidence,
-            });
-            potentialIds.push(row.source_finding_id);
-            checks.push({ input, before, uncertain: possible });
+            retainPrevious(previous, row.source_finding_id, evidence);
           } catch (priorError) {
             previous.excluded.push(exclusion(before, errorMessage(priorError)));
           }
@@ -642,10 +631,8 @@ function normalizeRecords(
     }
   }
   if (previous) {
-    for (const check of checks) {
-      if (!isDeepStrictEqual(check.before, nativeGitHubRecord(check.input)))
-        check.uncertain();
-    }
+    for (const check of checks) check();
+    const uncertain = independentlyObserved !== Infinity;
     if (uncertain || !isDeepStrictEqual(previous.findings, result.findings)) {
       const prior: LegacyReaderSelection = { sourceFindingIds: potentialIds };
       if (uncertain) {
