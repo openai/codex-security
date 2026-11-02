@@ -484,6 +484,27 @@ export async function readVendorFindings(
   return normalizeFindings(await readFindingInput(path), target);
 }
 
+function inventorySources(input: FindingInput, current: VendorFindings) {
+  return current.findings.flatMap(({ evidence }) => {
+    const repository = evidence.details?.repository;
+    const inventory = input.repositories.get(repository?.id ?? "");
+    // Forward provenance only for selected findings that match the inventory.
+    // Use the emitted spelling so typed evidence and reader hints share it.
+    return repository &&
+      inventory?.platform === "GITHUB" &&
+      inventoryRepositoryUrlKey(repository.url, inventory.platform) ===
+        inventoryRepositoryUrlKey(inventory.url, inventory.platform)
+      ? [{ url: repository.url, platform: "github" as const }]
+      : [];
+  });
+}
+
+export async function readLocalWizFindings(path: string) {
+  const input = await readFindingInput(path);
+  const current = normalizeFindings(input, "local");
+  return { current, sourceRepositories: inventorySources(input, current) };
+}
+
 /** @internal Preserve older inventory projections only for saved publication replay. */
 export async function readVendorFindingsForPublication(
   path: string,
@@ -540,18 +561,7 @@ export async function readVendorFindingsForPublication(
     legacy,
     currentIdentity,
     legacyIdentity: legacy === current ? currentIdentity : identity(legacy),
-    sourceRepositories: current.findings.flatMap(({ evidence }) => {
-      const repository = evidence.details?.repository;
-      const inventory = input.repositories.get(repository?.id ?? "");
-      // Forward provenance only for selected findings that match the inventory.
-      // Use the emitted spelling so typed evidence and reader hints share it.
-      return repository &&
-        inventory?.platform === "GITHUB" &&
-        inventoryRepositoryUrlKey(repository.url, inventory.platform) ===
-          inventoryRepositoryUrlKey(inventory.url, inventory.platform)
-        ? [{ url: repository.url, platform: "github" as const }]
-        : [];
-    }),
+    sourceRepositories: inventorySources(input, current),
   };
 }
 
