@@ -387,6 +387,7 @@
             "inspector",
             "blackduck",
             "veracode",
+            "sonar",
             "trivy"
           ],
           "title": "Provider",

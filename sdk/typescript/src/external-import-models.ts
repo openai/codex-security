@@ -14,6 +14,7 @@ export type Provider =
   | "inspector"
   | "blackduck"
   | "veracode"
+  | "sonar"
   | "trivy";
 export type SourceKey = string;
 export type ClientId = string;

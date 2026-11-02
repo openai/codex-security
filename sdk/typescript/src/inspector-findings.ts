@@ -671,13 +671,11 @@ export function normalizeInspectorFindings(
     claims: repositoryClaims(finding),
   }));
   checkReportScope(rows, target, projectMap);
-  const result = normalizeRecords(
-    rows,
-    ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
-    ({ finding }) => identity(record(finding, "Inspector finding")).arn,
-    target,
-  );
-  if (result.excluded.length && result.findings.length) {
+  function checkRetainedScope(
+    result: ExternalFindings,
+    removedIds?: Set<string>,
+  ) {
+    if (!result.excluded.length || !result.findings.length) return;
     // Only surviving rows can supply shared provider and host evidence on replay.
     const skipped = new Set(result.excluded.map((row) => row.position));
     const retained = rows.filter((row) => !skipped.has(row.position));
@@ -690,12 +688,20 @@ export function normalizeInspectorFindings(
         reason: errorMessage(error),
       });
     });
-    result.findings = result.findings.filter(
-      (_, i) => !skipped.has(retained[i]!.position),
-    );
+    result.findings = result.findings.filter((finding, i) => {
+      if (!skipped.has(retained[i]!.position)) return true;
+      removedIds?.add(finding.source_finding_id);
+      return false;
+    });
     result.excluded.sort((a, b) => a.position - b.position);
   }
-  return result;
+  return normalizeRecords(
+    rows,
+    ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
+    ({ finding }) => identity(record(finding, "Inspector finding")).arn,
+    target,
+    { filter: checkRetainedScope },
+  );
 }
 
 export async function readInspectorFindings(

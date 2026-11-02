@@ -12,13 +12,14 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { isBoxedPrimitive, isNativeError, isProxy } from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
   codexSecurityStateDirectory,
@@ -31,9 +32,15 @@ import {
   semgrepSarifRepositories,
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
-import { canonicalJson, isRecord } from "./record.js";
+import {
+  canSnapshotWithoutGetters,
+  canonicalJson,
+  isRecord,
+} from "./record.js";
+import { notify } from "./value.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
 import { wizFindingRepository } from "./wiz-findings.js";
+import { previousReaderSelection } from "./reader-selection.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   normalizeSemgrepFindings,
@@ -77,7 +84,7 @@ import {
   trivyRepositoryUrl,
   validateTrivyRepositoryUrl,
 } from "./trivy-findings.js";
-import { canonicalNumber, hostedRepositoryUrl } from "./hosted-scanner-http.js";
+import { hostedRepositoryUrl } from "./hosted-scanner-http.js";
 import { endorRepositoryUrls } from "./endor-findings.js";
 import {
   blackDuckReportRepositories,
@@ -85,19 +92,26 @@ import {
 } from "./blackduck-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
+import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
   checkRetainedTrivyProvider,
   checkTrivyReportProvider,
-  snapshotImportOptions,
   snapshotSourceRepositories,
+  type ExternalSourceRepository,
+  snapshotImportOptions,
+  cloneImportPreview,
+  nativeErrorStackGetter,
+  snapshotNormalizedFindings,
   type ExternalFindings,
   type ExternalPublicationInput,
-  type ExternalSourceRepository,
 } from "./external-findings.js";
 import {
+  canonicalNumber,
   cloudRepositoryUrlKey,
+  CloudEvidenceDepthError,
   validateImportRequest,
   validateExternalEvidence,
+  validatePreviousCloudEvidence,
   validateExternalReport,
   validateImportReceipt,
   validateRepositories,
@@ -186,15 +200,22 @@ interface SavedSubmission {
   requests: FindingImportRequest[];
   receipts?: FindingImportReceipt[];
   inputProjection?: {
-    inputDigest: string;
-    savedEvidenceDigest: string;
     retainedHostedSelection?: true;
     semgrepPartialScopeDigest?: string;
+    identityFormat?: 2;
+    inputDigest: string;
+    savedEvidenceDigest: string;
   };
-  inspectorProjectMapRequired?: true;
+  // A verified older approval stays at its original deployment-bound filename.
+  wireKey?: string;
+  // Only a verified released approval may preserve a native value different from fresh JSON.
+  legacyApproval?: true;
+  // The older canonical file was checked under its lock for a second approval.
+  canonicalChecked?: true;
   /** Catalog URL when this source selection was approved, before any repository rename. */
   approvedRepositoryUrl?: string;
   approvedRepositoryPlatform?: "other";
+  inspectorProjectMapRequired?: true;
 }
 
 export interface ExternalPublicationPreview extends ExternalFindings {
@@ -231,6 +252,16 @@ async function readInBatches<T, U>(
   return output;
 }
 
+// JSON.stringify serializes boxed primitives after the replacer. Let it
+// produce their actual wire values, including false and strings.
+function wireJson(value: unknown): string {
+  return canonicalJson(value, undefined, isBoxedPrimitive);
+}
+
+function jsonDigest(value: unknown, serialize = wireJson): string {
+  return hash("sha256", serialize(value));
+}
+
 function sameSubmission(
   left: SavedSubmission,
   right: SavedSubmission,
@@ -239,18 +270,63 @@ function sameSubmission(
     left.accountId === right.accountId &&
     left.trivyRepositoryUrl === right.trivyRepositoryUrl &&
     left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
-    canonicalJson(left.requests) === canonicalJson(right.requests)
+    wireJson(left.requests) === wireJson(right.requests)
   );
+}
+
+function wireFinding({
+  source_finding_id,
+  evidence,
+}: ExternalFindings["findings"][number]) {
+  return { source_finding_id, evidence };
 }
 
 function submissionFindings(
   requests: readonly FindingImportRequest[],
 ): ExternalFindings["findings"] {
-  return requests.flatMap((batch) =>
-    batch.items.map(({ source_finding_id, evidence }) => ({
-      source_finding_id,
-      evidence,
-    })),
+  return requests.flatMap((batch) => batch.items.map(wireFinding));
+}
+
+function sameLegacyJson(
+  saved: unknown,
+  current: unknown,
+  equivalent: (saved: unknown, current: unknown) => boolean,
+): boolean {
+  if (saved === current || equivalent(saved, current)) return true;
+  if (Array.isArray(saved) && Array.isArray(current))
+    return (
+      saved.length === current.length &&
+      saved.every((child, i) => sameLegacyJson(child, current[i], equivalent))
+    );
+  if (!isRecord(saved) || !isRecord(current)) return false;
+  return (
+    Object.keys(current).every((key) => Object.hasOwn(saved, key)) &&
+    Object.keys(saved).every((key) =>
+      sameLegacyJson(saved[key], current[key], equivalent),
+    )
+  );
+}
+
+// A copied reader result can retain the JSON from Buffer.toJSON but lose
+// the native Buffer that the previous reader cloned into a Uint8Array.
+function previousBufferJson(saved: unknown, current: unknown): boolean {
+  if (
+    !isRecord(current) ||
+    current["type"] !== "Buffer" ||
+    !Array.isArray(current["data"])
+  )
+    return false;
+  return (
+    isRecord(saved) &&
+    Object.keys(current).length === 2 &&
+    Object.keys(saved).length === current["data"].length &&
+    current["data"].every(
+      (byte, index) =>
+        Number.isInteger(byte) &&
+        byte >= 0 &&
+        byte <= 255 &&
+        saved[index] === byte,
+    )
   );
 }
 
@@ -278,12 +354,24 @@ function reportForJson(report: ExternalFindings["report"]) {
   const errors = report?.["errors"];
   if (!Array.isArray(errors)) return report;
   const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { message: entry.message } : entry,
+    entry instanceof Error ? { ...entry, message: entry.message } : entry,
   );
   return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
-async function writeAtomicJson(path: string, value: unknown): Promise<void> {
+export function externalPublicationStateDirectory(
+  environment: NodeJS.ProcessEnv,
+): string {
+  return join(
+    codexSecurityStateDirectory(environment),
+    "external-finding-publications",
+  );
+}
+
+export async function writeAtomicJson(
+  path: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, "wx", 0o600);
@@ -320,8 +408,8 @@ function validatePublicationReceipt(
   const batchItems = new Map(batch.items.map((item) => [item.client_id, item]));
   if (
     receipt.id !== batch.request_id ||
-    canonicalJson(receipt.repository) !== canonicalJson(batch.repository) ||
-    canonicalJson(receipt.source) !== canonicalJson(batch.source) ||
+    wireJson(receipt.repository) !== wireJson(batch.repository) ||
+    wireJson(receipt.source) !== wireJson(batch.source) ||
     receipt.item_count !== batch.items.length ||
     receipt.results.length !== batch.items.length ||
     new Set(receipt.results.map((item) => item.client_id)).size !==
@@ -356,16 +444,16 @@ function validatePublicationReceipt(
         "Cloud returned an incomplete saved finding.",
       );
   }
-  if (canonicalJson(receipt.counts) !== canonicalJson(actual))
+  if (wireJson(receipt.counts) !== wireJson(actual))
     throw new CodexSecurityError(
       "Cloud returned inconsistent publication counts.",
     );
   return receipt;
 }
 
-async function withImportLock<T>(
+async function withImportLocks<T>(
   state: string,
-  key: string,
+  keys: string[],
   signal: AbortSignal | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
@@ -373,44 +461,57 @@ async function withImportLock<T>(
     await createWindowsOutputDirectory(state, true);
   else await mkdir(state, { recursive: true, mode: 0o700 });
   await validatePreparedOutputDir(state, undefined, true);
-  const path = join(state, `${key}.lock.sqlite`);
-  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (metadata && !metadata.isFile())
-    throw new CodexSecurityError("The publication lock is not a regular file.");
   const require = createRequire(import.meta.url);
   const Database = (
     process.versions["bun"]
       ? require("bun:sqlite").Database
       : require("node:sqlite").DatabaseSync
   ) as new (path: string) => { exec(sql: string): void; close(): void };
-  const guard = new Database(path);
+  const guards: InstanceType<typeof Database>[] = [];
   try {
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-    guard.exec("PRAGMA busy_timeout = 0");
+    for (const key of [...new Set(keys)].sort()) {
+      const path = join(state, `${key}.lock.sqlite`);
+      const metadata = await lstat(path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      if (metadata && !metadata.isFile())
+        throw new CodexSecurityError(
+          "The publication lock is not a regular file.",
+        );
+      const guard = new Database(path);
+      guards.push(guard);
+      if (process.platform !== "win32") chmodSync(path, 0o600);
+      guard.exec("PRAGMA busy_timeout = 0");
+    }
     for (;;) {
       signal?.throwIfAborted();
+      let acquired = 0;
       try {
-        // Keep this inode across invocations. SQLite releases the transaction
-        // on process exit, so a paused publisher cannot lose its lock to a lease.
-        guard.exec("BEGIN EXCLUSIVE");
+        // SQLite releases these transactions on process exit.
+        for (const guard of guards) {
+          guard.exec("BEGIN EXCLUSIVE");
+          acquired++;
+        }
         break;
       } catch (error) {
         const sqliteError = error as { code?: string; errcode?: number };
         if (sqliteError.errcode !== 5 && sqliteError.code !== "SQLITE_BUSY")
           throw error;
+        // Older SDKs can acquire historical keys in a different order.
+        for (const guard of guards.slice(0, acquired)) guard.exec("ROLLBACK");
         await delay(50, undefined, { signal });
       }
     }
     return await operation();
   } finally {
-    guard.close();
+    for (const guard of guards) guard.close();
   }
 }
 
-type ResolvedPublicationInput = ExternalPublicationInput & {
+type ResolvedPublicationInput = PublicationSelection & {
   recheckFileRepository?: (
     approvedUrl: string,
     platform?: "other",
@@ -735,16 +836,236 @@ function hostedRepositoryMatcher(
   return { github: platform === "github", matches };
 }
 
+interface PublicationSelection extends ExternalPublicationInput {
+  original?: {
+    parsed: ExternalFindings;
+    identity: unknown;
+    wire: string;
+    hasBoxedScalars: boolean;
+  };
+
+  potentialIds?: (string | undefined)[] | null;
+  uncertainFindingIds?: string[];
+  unprovenOccurrenceCount?: number;
+  knownFindings?: ExternalFindings["findings"];
+  unprovenIdPrefixes?: string[];
+  freshError?: Error;
+}
+
+function ownData(value: unknown, key: string) {
+  return isRecord(value) && !isProxy(value)
+    ? (Object.getOwnPropertyDescriptor(value, key)?.value as unknown)
+    : undefined;
+}
+
+// When native capture would invoke caller code, only the original data
+// properties can identify the earlier selection. Unknown IDs cannot rule it out.
+function previousFindingIds(
+  input: ExternalFindings,
+): (string | undefined)[] | null {
+  const rows = ownData(input, "findings");
+  if (!Array.isArray(rows) || isProxy(rows)) return null;
+  return Array.from({ length: rows.length }, (_, index) => {
+    const row: unknown = Object.getOwnPropertyDescriptor(rows, index)?.value;
+    const id = ownData(row, "source_finding_id");
+    return typeof id === "string" ? id : undefined;
+  });
+}
+
+function withDataProperty<T extends object>(
+  record: T,
+  key: string,
+  value: unknown,
+): T {
+  const fields = Object.getOwnPropertyDescriptors(record);
+  return Object.create(Object.getPrototypeOf(record) as object | null, {
+    ...fields,
+    [key]: { ...fields[key], value },
+  }) as T;
+}
+
+// Native cloning discarded enumerable diagnostic fields. Recover its message
+// without reading the caller's stack getter or changing their report.
+const nativeDiagnosticPrototypes = new Set<unknown>([
+  Error.prototype,
+  EvalError.prototype,
+  RangeError.prototype,
+  ReferenceError.prototype,
+  SyntaxError.prototype,
+  TypeError.prototype,
+  URIError.prototype,
+]);
+
+function previousDiagnosticMessage(diagnostic: Error): string | undefined {
+  const stack = Object.getOwnPropertyDescriptor(diagnostic, "stack");
+  const message = ownData(diagnostic, "message");
+  const cause = Object.getOwnPropertyDescriptor(diagnostic, "cause");
+  const name = Object.getOwnPropertyDescriptor(diagnostic, "name");
+  if (
+    !nativeDiagnosticPrototypes.has(Object.getPrototypeOf(diagnostic)) ||
+    typeof message !== "string" ||
+    (stack?.get && stack.get !== nativeErrorStackGetter) ||
+    (name && typeof name.value !== "string") ||
+    (cause &&
+      (!Object.hasOwn(cause, "value") ||
+        !canSnapshotWithoutGetters(cause.value)))
+  )
+    return;
+  return message;
+}
+
+function previousDiagnosticInput(
+  input: ExternalFindings,
+  nativeDiagnostics: Map<number, Error>,
+): ExternalFindings {
+  const report = ownData(input, "report");
+  const errors = ownData(report, "errors");
+  if (!isRecord(report) || !Array.isArray(errors) || isProxy(errors))
+    return input;
+  let entries: PropertyDescriptorMap | undefined;
+  for (let index = 0; index < errors.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(errors, index);
+    const diagnostic: unknown = descriptor?.value;
+    if (!descriptor || !isNativeError(diagnostic)) continue;
+    const message = previousDiagnosticMessage(diagnostic);
+    if (message === undefined) return input;
+    nativeDiagnostics.set(index, diagnostic);
+    (entries ??= Object.getOwnPropertyDescriptors(errors as object))[index] = {
+      ...descriptor,
+      value: { message },
+    };
+  }
+  if (!entries) return input;
+  const capturedErrors = Object.defineProperties([], entries) as unknown[];
+  const capturedReport = withDataProperty(report, "errors", capturedErrors);
+  return withDataProperty(input, "report", capturedReport);
+}
+
+// Capture before JSON hooks can change their source. If native capture would
+// invoke caller code too, the original bytes cannot be observed independently.
+function previousNormalizedFindings(
+  input: ExternalFindings,
+  nativeDiagnostics: Map<number, Error>,
+  observe: (value: object) => void,
+): ExternalFindings | undefined {
+  input = previousDiagnosticInput(input, nativeDiagnostics);
+  if (!canSnapshotWithoutGetters(input, observe)) return;
+  // Object spread skips a hidden report, but explicitly reading it could run a getter.
+  const reportField = Object.getOwnPropertyDescriptor(input, "report");
+  if (reportField && !Object.hasOwn(reportField, "value")) return;
+  const { report, ...parsed } = input;
+  const snapshot: ExternalFindings = structuredClone(parsed);
+  if (report !== undefined) snapshot.report = structuredClone(report);
+  return snapshot;
+}
+
+function publicationIdentity(parsed: ExternalFindings) {
+  return parsed.report === undefined
+    ? parsed.findings
+    : { findings: parsed.findings, report: reportForJson(parsed.report) };
+}
+
+function validatePublicationFindings(
+  parsed: ExternalFindings,
+  validateEvidence: typeof validateExternalEvidence,
+) {
+  validateExternalReport(parsed.report);
+  const ids = new Set<string>();
+  for (const finding of parsed.findings) {
+    const id = finding.source_finding_id;
+    if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
+      throw new CodexSecurityError(
+        "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
+      );
+    if (ids.has(id))
+      throw new CodexSecurityError(
+        `Duplicate source finding id ${JSON.stringify(id)}.`,
+      );
+    ids.add(id);
+    finding.evidence = validateEvidence(finding.evidence);
+  }
+}
+
+function historicalPublication(
+  native: ExternalFindings | undefined,
+): PublicationSelection["original"] {
+  if (!native) return;
+  try {
+    // Older SDKs detached all raw records before Cloud validation added defaults.
+    for (const finding of native.findings)
+      if (finding.evidence.source_data !== undefined)
+        finding.evidence.source_data = structuredClone(
+          finding.evidence.source_data,
+        );
+    validatePublicationFindings(native, validatePreviousCloudEvidence);
+    const identity = publicationIdentity(native);
+    let hasBoxedScalars = false;
+    const wire = canonicalJson(identity, undefined, (value) => {
+      if (!isBoxedPrimitive(value)) return false;
+      hasBoxedScalars = true;
+      return true;
+    });
+    return { parsed: native, identity, wire, hasBoxedScalars };
+  } catch {
+    // The caller may export valid JSON even if the native candidate cannot be
+    // validated or hashed, for example when an unused row property holds a BigInt.
+    return;
+  }
+}
+
 function normalizedPublicationInput(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   provider: NormalizedExternalPublicationOptions["provider"],
-): ExternalPublicationInput {
-  // Validation adds Cloud defaults; leave the caller's objects unchanged.
-  const { report, ...parsed } = input;
-  // Read native declarations from SDK class getters as well as plain JSON.
-  for (const key of ["sourceFormat", "semgrepPlatformScope", "snykRestContext"])
-    if (!Object.hasOwn(parsed, key) && key in input)
-      Object.assign(parsed, { [key]: Reflect.get(input, key) });
+): PublicationSelection {
+  const nativeDiagnostics = new Map<number, Error>();
+  let native: ExternalFindings | undefined;
+  let plainJson = true;
+  try {
+    native = previousNormalizedFindings(input, nativeDiagnostics, (value) => {
+      if (!plainJson) return;
+      const prototype = Object.getPrototypeOf(value);
+      plainJson =
+        (prototype === null ||
+          prototype === Object.prototype ||
+          prototype === Array.prototype) &&
+        !("toJSON" in value);
+    });
+  } catch {
+    /* A valid JSON export can contain an uncloneable value. */
+  }
+  let priorIds = native ? undefined : previousFindingIds(input);
+  let current: ExternalFindings;
+  let freshError: Error | undefined;
+  try {
+    current = snapshotNormalizedFindings(input, undefined, "cloud");
+  } catch (error) {
+    if (
+      (!isNativeError(error) && !(error instanceof Error)) ||
+      !native?.findings.length
+    )
+      throw error;
+    freshError = error;
+    current = { read: native.read, findings: [], excluded: [] };
+  }
+  // Repository and format declarations can be non-enumerable SDK getters.
+  for (const key of [
+    "sourceFormat",
+    "semgrepPlatformScope",
+    "snykRestContext",
+    ...(provider === "semgrep" || provider === "snyk"
+      ? ["sourceRepositoryUrl", "sourceRepositoryPlatform"]
+      : []),
+  ]) {
+    if (
+      !(key in current) &&
+      !Object.prototype.propertyIsEnumerable.call(input, key) &&
+      key in input
+    )
+      Object.assign(current, {
+        [key]: structuredClone(Reflect.get(input, key)),
+      });
+  }
+  const parsed: ExternalFindings & Partial<SnykIssuesFindings> = current;
   if (parsed.snykRestContext !== undefined) {
     if (provider !== "snyk")
       throw new CodexSecurityError(
@@ -755,16 +1076,6 @@ function normalizedPublicationInput(
         "Expected a versioned Snyk REST report context.",
       );
   }
-  if (provider === "semgrep" || provider === "snyk") {
-    // Normalized SDK inputs may expose the source binding through class getters.
-    for (const key of [
-      "sourceRepositoryUrl",
-      "sourceRepositoryPlatform",
-    ] as const) {
-      if (!Object.hasOwn(parsed, key) && key in input)
-        Object.assign(parsed, { [key]: input[key] });
-    }
-  }
   const markedSemgrep =
     "sourceFormat" in parsed && isSemgrepPlatformFormat(parsed.sourceFormat);
   if (markedSemgrep && provider !== "semgrep")
@@ -773,31 +1084,60 @@ function normalizedPublicationInput(
     );
   if (markedSemgrep || "semgrepPlatformScope" in parsed)
     semgrepPlatformReportScope(parsed, provider);
-  const current: ExternalFindings = structuredClone(parsed);
-  if (report !== undefined) {
-    current.report = structuredClone(report);
-    validateExternalReport(current.report);
+  if (native && nativeDiagnostics.size) {
+    const historical = native.report!["errors"] as Error[];
+    const exported = current.report?.["errors"];
+    for (const [index, source] of nativeDiagnostics) {
+      const message = historical[index]!.message;
+      let diagnostic: unknown = Array.isArray(exported) && exported[index];
+      // A failed export may never reach the report. Its hooks have already run,
+      // so check the original descriptors again before native cloning reads a stack.
+      if (freshError && previousDiagnosticMessage(source) === message)
+        diagnostic = source;
+      if (
+        isNativeError(diagnostic) &&
+        Object.getPrototypeOf(diagnostic) === Object.getPrototypeOf(source)
+      ) {
+        try {
+          const copy = structuredClone(diagnostic);
+          if (copy.message === message) {
+            historical[index] = copy;
+            continue;
+          }
+        } catch {
+          // A failed native clone cannot establish a historical report.
+        }
+      }
+      if (freshError) throw freshError;
+      priorIds = previousFindingIds(native);
+      native = undefined;
+      break;
+    }
   }
-  // structuredClone preserves aliases. Detach every raw record before adding
-  // typed defaults, including aliases shared with another finding's evidence.
-  for (const finding of current.findings)
-    if (finding.evidence.source_data !== undefined)
-      finding.evidence.source_data = structuredClone(
-        finding.evidence.source_data,
-      );
-  const identities = new Set<string>();
-  for (const finding of current.findings) {
-    const id = finding.source_finding_id;
-    if (!id.trim() || id.includes("\0") || Buffer.byteLength(id) > 512)
-      throw new CodexSecurityError(
-        "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
-      );
-    if (identities.has(id))
-      throw new CodexSecurityError(
-        `Duplicate source finding id ${JSON.stringify(id)}.`,
-      );
-    identities.add(id);
-    finding.evidence = validateExternalEvidence(finding.evidence);
+  // A Cloud depth error can interrupt a local reader's JSON export. Its plain,
+  // independently captured output can still verify the original reader selection.
+  const readerOutput = freshError
+    ? freshError instanceof CloudEvidenceDepthError &&
+      plainJson &&
+      !nativeDiagnostics.size &&
+      native
+    : current;
+  const reader = readerOutput
+    ? previousReaderSelection(input, readerOutput, native ?? null)
+    : undefined;
+  if (reader) native = reader.snapshot;
+  const original = historicalPublication(native);
+  try {
+    validatePublicationFindings(current, validateExternalEvidence);
+  } catch (error) {
+    if (!(error instanceof Error) || !original?.parsed.findings.length)
+      throw error;
+    freshError = error;
+  }
+  if (freshError) {
+    if (!original) throw freshError;
+    // Only the old selection can be reviewed when fresh validation failed.
+    current = { read: original.parsed.read, findings: [], excluded: [] };
   }
   // A Trivy header provides repository provenance for its findings. Either entrypoint
   // can resume the same immutable request when the independently checked rows agree.
@@ -812,13 +1152,58 @@ function normalizedPublicationInput(
     legacy: current,
     currentIdentity: identity,
     legacyIdentity: identity,
+    original,
+    freshError,
+    unprovenIdPrefixes: reader?.unprovenIdPrefixes,
+    uncertainFindingIds: reader?.uncertainFindingIds,
+    unprovenOccurrenceCount: reader?.unprovenOccurrenceCount,
+    knownFindings: reader?.knownFindings,
+    potentialIds:
+      reader?.sourceFindingIds ??
+      (original
+        ? undefined
+        : (native?.findings.map((row) => row.source_finding_id) ?? priorIds)),
   };
 }
 
-function publicationIdentity(input: ExternalFindings) {
-  return input.report === undefined
-    ? input.findings
-    : { findings: input.findings, report: reportForJson(input.report) };
+// The old hash represented Number objects as {}. Unpublished row properties
+// and report metadata cannot be recovered from the immutable saved request.
+function verifiableLegacyMetadata(
+  { report, findings }: ExternalFindings,
+  wireIdentity: boolean,
+): boolean {
+  let verifiable = true;
+  // Only values in these records can be old scalar projections. Their record
+  // containers are required by the normalized selection, including an empty report.
+  const { errors, ...metadata } = report ?? {};
+  JSON.stringify(
+    [
+      Object.values(metadata),
+      // The original hash used the serialized form of report.errors arrays.
+      Array.isArray(errors) ? undefined : errors,
+      findings.map(({ evidence: _, ...fields }) => Object.values(fields)),
+    ],
+    (_key, value: unknown) => {
+      if (isRecord(value) && !(wireIdentity && isBoxedPrimitive(value))) {
+        // {} and string-index records can both be the old form of a scalar.
+        let index = 0;
+        if (
+          Object.keys(value).every((key) => {
+            const item = value[key];
+            return (
+              item === undefined ||
+              (key === String(index++) &&
+                typeof item === "string" &&
+                item.length === 1)
+            );
+          })
+        )
+          verifiable = false;
+      }
+      return value;
+    },
+  );
+  return verifiable;
 }
 
 // Prefer the current native evidence for new publications. The original SDK input
@@ -864,6 +1249,8 @@ function* hostedPublicationProjections(
     yield {
       ...input,
       current: retained,
+      // The raw input above owns its historical native checkpoint.
+      original: undefined,
       currentIdentity: publicationIdentity(retained),
     };
     return;
@@ -928,6 +1315,7 @@ function* hostedPublicationProjections(
       yield {
         ...input,
         current: upgraded,
+        original: undefined,
         currentIdentity: publicationIdentity(upgraded),
       };
     } catch {
@@ -938,38 +1326,16 @@ function* hostedPublicationProjections(
   yield input;
 }
 
-function requireFindings(
-  input: ResolvedPublicationInput,
-  provider: NormalizedExternalPublicationOptions["provider"],
-): ResolvedPublicationInput {
-  const parsed = input.current;
-  checkTrivyReportProvider(provider, parsed.report);
-  for (const finding of parsed.findings)
-    checkRetainedTrivyProvider(provider, finding);
-  if (parsed.findings.length === 0) {
-    const diagnostics = reportForJson(parsed.report)?.["errors"];
-    throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
-    );
-  }
-  return input;
-}
-
 async function preparePublicationInput(
-  input: PreparePublicationInput,
+  supplied: PreparePublicationInput,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
   readerSources: readonly ExternalSourceRepository[],
   declaredUrl?: string,
 ): Promise<PreparedExternalPublication> {
   const { inspectorProjectMap } = options;
-  const progress = (event: ExternalPublicationProgress): void => {
-    try {
-      dependencies.onProgress?.(event);
-    } catch {
-      // Optional progress must not interrupt preparation or publication.
-    }
-  };
+  const progress = (event: ExternalPublicationProgress): void =>
+    notify(() => dependencies.onProgress?.(event));
   if (
     !options.sourceKey.trim() ||
     options.sourceKey.includes("\0") ||
@@ -981,14 +1347,39 @@ async function preparePublicationInput(
   }
   progress({ phase: "reading", completed: 0 });
   const trivyReportUrls =
-    options.provider === "trivy" && typeof input !== "function"
-      ? trivyBatchSourceUrls(input.current, input.current.findings.length > 0)
+    options.provider === "trivy" && typeof supplied !== "function"
+      ? trivyBatchSourceUrls(
+          supplied.current,
+          supplied.current.findings.length > 0,
+        )
       : undefined;
-  if (typeof input !== "function") requireFindings(input, options.provider);
   if (trivyReportUrls) validateTrivyRepositoryUrl(options.repository);
   const catalogKey = trivyReportUrls
     ? (url: string) => hostedRepositoryUrlKey(url, true)
     : cloudRepositoryUrlKey;
+  function noFindings(parsed: ExternalFindings): never {
+    const diagnostics = reportForJson(parsed.report)?.["errors"];
+    throw new CodexSecurityError(
+      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
+    );
+  }
+  function checkSelection(input: PublicationSelection) {
+    const parsed = input.current;
+    checkTrivyReportProvider(options.provider, parsed.report);
+    for (const finding of parsed.findings)
+      checkRetainedTrivyProvider(options.provider, finding);
+    if (
+      !parsed.findings.length &&
+      !input.original?.parsed.findings.length &&
+      input.potentialIds !== null &&
+      !input.potentialIds?.length &&
+      !input.uncertainFindingIds?.length &&
+      !input.unprovenOccurrenceCount &&
+      !input.unprovenIdPrefixes?.length
+    )
+      noFindings(parsed);
+  }
+  if (typeof supplied !== "function") checkSelection(supplied);
   progress({ phase: "discovering", completed: 0 });
   const environment = dependencies.environment ?? process.env;
   requireExternalImports(environment);
@@ -1073,17 +1464,15 @@ async function preparePublicationInput(
     return destination;
   }
   const destination = await discoverDestination();
-  const resolved =
-    typeof input === "function"
-      ? requireFindings(await input(destination), options.provider)
-      : input;
+  const deferred = typeof supplied === "function";
+  const resolved = deferred ? await supplied(destination) : supplied;
+  if (deferred) checkSelection(resolved);
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
     resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const state = join(
-    codexSecurityStateDirectory(environment),
-    "external-finding-publications",
-  );
+  const importPrefix = source.provider === "sonar" ? "/v2" : "";
+  const sourceReportsPath = importPrefix + sourcePath(destination);
+  const state = externalPublicationStateDirectory(environment);
   const checkpointIdentity = [
     // Keep existing production checkpoints readable; other deployments must
     // never share a saved request or receipt with the production default.
@@ -1093,17 +1482,24 @@ async function preparePublicationInput(
     destination.repo_connector_id,
     source,
   ];
+  function scopeKey(identity: unknown, serialize = wireJson) {
+    return jsonDigest([...checkpointIdentity, identity], serialize);
+  }
+  function localeKey(rows: ExternalFindings["findings"]) {
+    return hash(
+      "sha256",
+      canonicalJson([...checkpointIdentity, rows], (left, right) =>
+        left.localeCompare(right),
+      ),
+    );
+  }
   const hosted = options.provider === "snyk" || options.provider === "semgrep";
   // Different selections can share native occurrences. Serialize their checkpoint
   // creation under the authenticated source and release before calling Cloud.
   const sourceLock =
     "source-" + hash("sha256", canonicalJson(checkpointIdentity));
   const withSourceAdmission = (operation: () => Promise<void>) =>
-    hosted
-      ? withImportLock(state, sourceLock, dependencies.signal, operation)
-      : operation();
-  const keyFor = (identity: unknown) =>
-    hash("sha256", canonicalJson([...checkpointIdentity, identity]));
+    hosted ? underLocks([sourceLock], operation) : operation();
   let projection = resolved;
   let capturedPending: string | undefined;
   const projectionKeys = new Set<string>();
@@ -1114,7 +1510,7 @@ async function preparePublicationInput(
       destination,
       readerSources,
     )) {
-      const candidateKey = keyFor(candidate.currentIdentity);
+      const candidateKey = scopeKey(candidate.currentIdentity);
       if (projectionKeys.has(candidateKey)) continue;
       // New imports use the first reconstructed projection; an exact pending key
       // takes precedence, including an earlier SDK's unmodified original input.
@@ -1127,19 +1523,81 @@ async function preparePublicationInput(
       if (capturedPending !== undefined) break;
     }
   }
-  const {
+  const input = projection;
+  let {
     current: parsed,
     legacy: legacyParsed,
     currentIdentity,
     legacyIdentity,
     recheckFileRepository,
-  } = projection;
+  } = input;
   const scopedSemgrepReport =
     options.provider === "semgrep" &&
     "sourceFormat" in parsed &&
     isSemgrepPlatformFormat(parsed.sourceFormat);
-  const inputDigest = hash("sha256", canonicalJson(currentIdentity));
-  const legacyInputDigest = hash("sha256", canonicalJson(legacyIdentity));
+  const original = input.original;
+  const originalParsed = original?.parsed ?? parsed;
+  const originalIdentity = original?.identity ?? currentIdentity;
+  const hasBoxedScalars = original?.hasBoxedScalars === true;
+  const changedCapture =
+    original && original.wire !== wireJson(currentIdentity);
+  const originalKey =
+    changedCapture || hasBoxedScalars
+      ? scopeKey(originalIdentity, canonicalJson)
+      : undefined;
+  let historicalOnly = false;
+  const originalWireKey = changedCapture
+    ? scopeKey(originalIdentity)
+    : undefined;
+  if (changedCapture && originalKey && originalWireKey) {
+    // A released SDK could stage either spelling. A modern approval for the
+    // fresh JSON can occupy the very same historical filename.
+    for (const pathKey of new Set([
+      originalKey,
+      originalWireKey,
+      localeKey(original.parsed.findings),
+    ])) {
+      const bytes = await readOptionalFile(
+        join(state, `${pathKey}.pending.json`),
+      );
+      if (bytes === undefined) continue;
+      const record = JSON.parse(bytes) as SavedSubmission | null;
+      if (
+        (record?.legacyApproval &&
+          (record.wireKey ?? pathKey) === originalWireKey) ||
+        (record?.wireKey === undefined &&
+          record?.inputProjection?.identityFormat !== 2 &&
+          (pathKey === originalKey ||
+            pathKey === originalWireKey ||
+            original.parsed.report === undefined ||
+            record?.inputProjection?.inputDigest ===
+              jsonDigest(originalIdentity, canonicalJson)))
+      ) {
+        parsed = legacyParsed = original.parsed;
+        currentIdentity = legacyIdentity = original.identity;
+        historicalOnly = true;
+        break;
+      }
+    }
+  }
+  if (input.freshError && !historicalOnly) throw input.freshError;
+  const inputDigest = jsonDigest(currentIdentity);
+  const legacyInputDigest =
+    currentIdentity === legacyIdentity
+      ? inputDigest
+      : jsonDigest(legacyIdentity);
+  function matchesSavedDestination(requests: FindingImportRequest[]): boolean {
+    return (
+      requests.length > 0 &&
+      requests.every(
+        (batch) =>
+          batch.repository.id === destination.id &&
+          batch.repository.repo_connector_id ===
+            destination.repo_connector_id &&
+          wireJson(batch.source) === wireJson(source),
+      )
+    );
+  }
   const originalHostedRetry =
     "This source has a pending hosted Cloud request. Resume it with the SDK build that created it and the original input before publishing another selection.";
   const unknownHostedRetry =
@@ -1195,9 +1653,11 @@ async function preparePublicationInput(
     }
     // Caller metadata on a normalized finding is part of the filename but not the
     // request body. An exact retry still supplies that original identity.
-    if (filenameKey === keyFor(legacyIdentity))
+    if (filenameKey === scopeKey(legacyIdentity))
       identities.unshift(legacyIdentity);
-    const identity = identities.find((value) => filenameKey === keyFor(value));
+    const identity = identities.find(
+      (value) => filenameKey === scopeKey(value),
+    );
     const digest = (value: unknown) => hash("sha256", canonicalJson(value));
     const semgrep = options.provider === "semgrep";
     const isHosted = (row: (typeof findings)[number]) =>
@@ -1291,8 +1751,8 @@ async function preparePublicationInput(
     if (!couldOverlap) return false;
     if (!identity) {
       // If the saved selections reconstruct an old input digest but not its scoped
-      // filename, the pending request belongs to another deployment. The #2085
-      // writer included its original repository comparison flags in the digest.
+      // filename, the pending request belongs to another deployment. The older
+      // publisher included its repository comparison flags in the digest.
       const repositories = new Set([destination.url]);
       for (const { evidence } of findings) {
         const data = evidence.source_data;
@@ -1328,12 +1788,7 @@ async function preparePublicationInput(
       ({ repository }) => repository.reset_marker !== destination.reset_marker,
     );
   }
-  const resetMessage =
-    "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.";
-  async function retireReset(
-    content: SavedSubmission,
-    filenameKey: string,
-  ): Promise<never> {
+  async function confirmReset() {
     // A newer pending request may have been written while the catalog response
     // was in flight. Confirm the reset after observing this immutable request.
     const confirmed = await discoverDestination();
@@ -1345,16 +1800,6 @@ async function preparePublicationInput(
       throw new CodexSecurityError(
         "The repository changed while preparing this publication. Review the destination again.",
       );
-    const path = join(state, filenameKey + ".pending.json");
-    await withImportLock(state, filenameKey, dependencies.signal, async () => {
-      const current = await readOptionalFile(path);
-      if (
-        current !== undefined &&
-        sameSubmission(JSON.parse(current) as SavedSubmission, content)
-      )
-        await rm(path);
-    });
-    throw new CloudImportError(409, resetMessage);
   }
   function suppliedSemgrepScopeDigest() {
     const scope = semgrepPlatformReportScope(report, options.provider);
@@ -1372,52 +1817,86 @@ async function preparePublicationInput(
       ),
     );
   }
-  function validateSaved(
-    serialized: string,
-    legacy = false,
-    filenameKey = key,
-  ): SavedSubmission {
-    const content = JSON.parse(serialized) as SavedSubmission;
+  async function retireIfReset(
+    content: SavedSubmission,
+    retire: () => Promise<void>,
+  ) {
     if (
+      content.requests.some(
+        (batch) => batch.repository.reset_marker !== destination.reset_marker,
+      )
+    ) {
+      if (hosted) await confirmReset();
+      await retire();
+      throw new CloudImportError(
+        409,
+        "The repository was reset after this submission. The saved request was retired without uploading. Review the destination and run the command again to approve a fresh publication.",
+      );
+    }
+  }
+  function readSaved(
+    content: SavedSubmission | null | undefined,
+  ): SavedSubmission {
+    if (
+      !content ||
       content.accountId !== credentials.account_id ||
       !Array.isArray(content.requests) ||
       content.requests.length === 0
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    const savedFindings = submissionFindings(content.requests);
-    for (const finding of savedFindings)
+    for (const finding of submissionFindings(content.requests))
       checkRetainedTrivyProvider(options.provider, finding);
-    const savedEvidence = canonicalJson(savedFindings);
+    if (!matchesSavedDestination(content.requests))
+      throw new Error("Saved import destination does not match.");
+    return content;
+  }
+
+  function validateSaved(
+    record: SavedSubmission | null | undefined,
+    legacy = false,
+    filenameKey = key,
+  ): SavedSubmission {
+    const content = readSaved(record);
+    const saved = submissionFindings(content.requests);
+    const wire = wireJson(saved);
     const expected = legacy ? legacyParsed.findings : parsed.findings;
-    const matches =
-      content.inputProjection !== undefined
-        ? sameFindingSelection(savedFindings, expected) &&
-          content.inputProjection?.inputDigest ===
-            (legacy ? legacyInputDigest : inputDigest) &&
-          content.inputProjection?.savedEvidenceDigest ===
-            hash("sha256", savedEvidence)
-        : savedEvidence === canonicalJson(expected);
-    if (!matches) {
+    const projection = content.inputProjection;
+    if (
+      projection &&
+      (!sameFindingSelection(saved, expected) ||
+        projection.inputDigest !== (legacy ? legacyInputDigest : inputDigest) ||
+        projection.savedEvidenceDigest !== hash("sha256", wire))
+    ) {
       const status = originalHostedPending(content, filenameKey);
       if (status === "unidentified")
         throw new CodexSecurityError(unknownHostedRetry);
-      if (!status)
-        throw new Error(
-          "Saved import evidence does not match the selected input.",
-        );
-      if (!wasReset(content)) throw new CodexSecurityError(originalHostedRetry);
-      // Return only to the existing reset-retirement path, before preparation or upload.
+      if (status) {
+        if (wasReset(content)) return content;
+        throw new CodexSecurityError(originalHostedRetry);
+      }
+      throw new Error(
+        "Saved import evidence does not match the selected input.",
+      );
     }
-    for (const submission of content.requests) {
-      if (
-        submission.repository.id !== destination.id ||
-        submission.repository.repo_connector_id !==
-          destination.repo_connector_id ||
-        canonicalJson(submission.source) !== canonicalJson(source)
-      )
-        throw new Error("Saved import destination does not match.");
-    }
+    // Older file readers can have a different, explicitly bound projection.
+    // A corrected numeric checkpoint must carry the selected evidence verbatim.
+    const exactWire =
+      historicalOnly || hasBoxedScalars || content.wireKey !== undefined;
+    if (
+      (!projection || exactWire) &&
+      wire !== wireJson(exactWire ? expected.map(wireFinding) : expected)
+    )
+      throw new Error(
+        "Saved import evidence does not match the selected input.",
+      );
+    if (
+      !legacy &&
+      hasBoxedScalars &&
+      projection?.identityFormat !== 2 &&
+      !verifiableLegacyMetadata(originalParsed, true)
+    )
+      throw unmatchedPreviousNumbers();
     if (source.provider === "trivy" && !content.trivyRepositoryUrl)
       throw new CodexSecurityError(
         "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
@@ -1433,156 +1912,646 @@ async function preparePublicationInput(
       );
     return content;
   }
-  const key = keyFor(currentIdentity);
-  const pendingPath = join(state, `${key}.pending.json`);
-  const historicalKey = hash(
-    "sha256",
-    canonicalJson(
-      [...checkpointIdentity, legacyParsed.findings],
-      (left, right) => left.localeCompare(right),
-    ),
+
+  // The original filename and digests identify the previous selection, but
+  // contained {} for every boxed number. Only its actual saved request can
+  // prove which numbers were approved.
+  function readPreviousNumbers(
+    record: SavedSubmission | null,
+  ): SavedSubmission | "different-wire" | undefined {
+    const content = readSaved(record);
+    const projection = content.inputProjection;
+    const savedWire = wireJson(submissionFindings(content.requests));
+    const wireDigest = hash("sha256", savedWire);
+    if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
+      throw unmatchedPreviousNumbers();
+    if (projection.identityFormat === 2) {
+      // A current writer may own the old filename for an ordinary object.
+      if (projection.savedEvidenceDigest === wireDigest) return undefined;
+      throw unmatchedPreviousNumbers();
+    }
+    const selected = originalParsed.findings.map(wireFinding);
+    if (projection.savedEvidenceDigest !== jsonDigest(selected, canonicalJson))
+      throw unmatchedPreviousNumbers();
+    if (savedWire !== wireJson(selected)) {
+      // A genuinely empty object at this key is a separate ordinary selection.
+      if (wireDigest === projection.savedEvidenceDigest) return undefined;
+      return "different-wire";
+    }
+    if (
+      (changedCapture && !historicalOnly) ||
+      !verifiableLegacyMetadata(originalParsed, false)
+    )
+      throw unmatchedPreviousNumbers();
+    content.legacyApproval = true;
+    content.inputProjection = {
+      ...content.inputProjection,
+      identityFormat: 2,
+      inputDigest,
+      savedEvidenceDigest: wireDigest,
+    };
+    return content;
+  }
+  function unmatchedPreviousNumbers() {
+    return new CodexSecurityError(
+      "The older saved import cannot be matched to the selected input. Its checkpoint was preserved without uploading.",
+    );
+  }
+  const key = scopeKey(currentIdentity);
+  const stagingKey = originalKey ?? key;
+  const canonicalPath = join(state, `${key}.pending.json`);
+  const lookupPath = join(state, `${key}.lookup.json`);
+  // A lookup only suggests a regular file to validate. A missing or stale hint
+  // leaves the same on-disk discovery available as before.
+  async function readOptionalRegularFile(path: string) {
+    try {
+      if ((await lstat(path)).isFile()) return await readFile(path, "utf8");
+    } catch {
+      // Optional discovery must not veto an independently verified checkpoint.
+    }
+  }
+  async function lookupFileKey() {
+    const serialized = await readOptionalRegularFile(lookupPath);
+    return serialized?.trim().match(/^"([a-f0-9]{64})"$/u)?.[1];
+  }
+
+  const historicalKey = localeKey(legacyParsed.findings);
+  const legacyIdentityKey = scopeKey(legacyIdentity);
+  const legacyKeys = new Set([legacyIdentityKey, historicalKey]);
+  function underLocks<T>(keys: string[], operation: () => Promise<T>) {
+    return withImportLocks(state, keys, dependencies.signal, operation);
+  }
+  let recovered: SavedSubmission | undefined;
+  for (const legacyKey of legacyKeys) {
+    if (legacyKey === key || legacyKey === originalKey) continue;
+    const legacyPath = join(state, `${legacyKey}.pending.json`);
+    const captured = await readOptionalFile(legacyPath);
+    if (captured !== undefined) {
+      // Preserve requests staged by the earlier locale-based filename format.
+      // Hold both publication locks while moving the original checkpoint.
+      await underLocks([key, legacyKey], async () => {
+        const current = await readOptionalFile(canonicalPath);
+        const serialized = await readOptionalFile(legacyPath);
+        let prior: SavedSubmission | undefined | null;
+        if (serialized !== undefined) {
+          try {
+            prior = JSON.parse(serialized) as SavedSubmission | null;
+          } catch (error) {
+            if (current === undefined || !(error instanceof SyntaxError))
+              throw error;
+          }
+        }
+        if (prior?.wireKey !== undefined) return;
+        if (current !== undefined) {
+          recovered = validateSaved(JSON.parse(current));
+          if (prior && sameSubmission(prior, recovered)) await rm(legacyPath);
+          return;
+        }
+        // A report-free approval at the locale-era filename can be a separate input.
+        if (
+          legacyKey !== legacyIdentityKey &&
+          prior?.inputProjection &&
+          prior.inputProjection.inputDigest !== legacyInputDigest
+        ) {
+          const projection = prior.inputProjection;
+          const rows = legacyParsed.findings;
+          if (
+            projection.identityFormat === 2 ||
+            (projection.inputDigest === jsonDigest(rows) &&
+              projection.savedEvidenceDigest ===
+                jsonDigest(submissionFindings(prior.requests)))
+          )
+            return;
+          // The released SDK hashed report-free rows as an array and boxed scores as {}.
+          const originalRows = original?.parsed.findings ?? rows;
+          if (
+            hasBoxedScalars &&
+            legacyParsed.report !== undefined &&
+            legacyKey === scopeKey(originalRows, canonicalJson) &&
+            projection.inputDigest ===
+              jsonDigest(originalRows, canonicalJson) &&
+            projection.savedEvidenceDigest ===
+              jsonDigest(originalRows.map(wireFinding), canonicalJson) &&
+            sameFindingSelection(
+              submissionFindings(readSaved(prior).requests),
+              rows,
+            )
+          )
+            return;
+        }
+        const content = validateSaved(
+          serialized === undefined ? JSON.parse(captured) : prior,
+          true,
+          legacyKey,
+        );
+        if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
+          throw new CodexSecurityError(
+            "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
+          );
+        await retireIfReset(content, async () => {
+          if (serialized !== undefined) await rm(legacyPath);
+        });
+        const savedEvidenceDigest =
+          content.inputProjection?.savedEvidenceDigest ??
+          jsonDigest(legacyParsed.findings);
+        const rebindProjection =
+          content.inputProjection !== undefined ||
+          savedEvidenceDigest !== inputDigest;
+        if (rebindProjection) {
+          if (content.inputProjection?.identityFormat !== 2)
+            content.legacyApproval = true;
+          content.inputProjection = {
+            ...content.inputProjection,
+            identityFormat: 2,
+            inputDigest,
+            savedEvidenceDigest,
+          };
+        }
+        recovered = content;
+        if (serialized === undefined) return;
+        await withSourceAdmission(async () => {
+          if (!rebindProjection) {
+            await rename(legacyPath, canonicalPath);
+          } else {
+            // Bind the new input projection to the original immutable evidence,
+            // so later inventory reordering still resumes these exact requests.
+            await writeAtomicJson(canonicalPath, content);
+            await rm(legacyPath);
+          }
+        });
+      });
+    }
+  }
+
+  interface Checkpoint {
+    fileKey: string;
+    content: SavedSubmission;
+    historical: boolean;
+    checkedCanonical?: true;
+  }
+  // Some getter-backed batches cannot reproduce a released filename. Their IDs
+  // can stop a conflicting upload, but never authorize replay of a saved request.
+  const potentialIds =
+    input.potentialIds === undefined && changedCapture
+      ? original.parsed.findings.map((row) => row.source_finding_id)
+      : input.potentialIds;
+  const unprovenPrefixes = new Set(input.unprovenIdPrefixes);
+  const uncertainIds = new Set(input.uncertainFindingIds);
+  const uncertainMembership =
+    input.unprovenOccurrenceCount ||
+    uncertainIds.size > 0 ||
+    unprovenPrefixes.size > 0;
+  function uncertainId(id: string) {
+    return (
+      uncertainIds.has(id) ||
+      unprovenPrefixes.has(id.replace(/\/[a-f0-9]{64}$/u, "/"))
+    );
+  }
+  const stableIds = uncertainMembership
+    ? (
+        potentialIds ?? parsed.findings.map((row) => row.source_finding_id)
+      ).filter((id) => id === undefined || !uncertainId(id))
+    : undefined;
+  const knownMembership = input.unprovenOccurrenceCount
+    ? new Set(stableIds)
+    : undefined;
+  const knownRows = new Map(
+    input.knownFindings?.map((row) => [
+      row.source_finding_id,
+      wireFinding(row),
+    ]),
   );
-  const legacyKeys = new Set([
-    hash("sha256", canonicalJson([...checkpointIdentity, legacyIdentity])),
-    historicalKey,
-  ]);
-  async function rejectUnidentifiedLegacyCheckpoint(
-    preparing: boolean,
-  ): Promise<void> {
+  let originalInputDigest: string | undefined;
+  const cannotCaptureOriginal =
+    !input.original &&
+    (potentialIds === null || !!(potentialIds?.length || uncertainMembership));
+  const possibleBufferExport =
+    options.provider === "github" && original && !changedCapture;
+  function potentialOriginal(record: SavedSubmission, fileKey: string) {
+    const projection = record.inputProjection;
+    if (record.accountId !== credentials.account_id) return false;
+    if (!projection) {
+      // Locale-era requests had no projection. Their scoped occurrence IDs
+      // can stop an opaque retry but cannot authorize replay.
+      if (!cannotCaptureOriginal || record.wireKey !== undefined) return false;
+    } else if (
+      !/^[a-f0-9]{64}$/u.test(projection.inputDigest) ||
+      !/^[a-f0-9]{64}$/u.test(projection.savedEvidenceDigest) ||
+      (projection.identityFormat === 2 && !record.legacyApproval)
+    )
+      return false;
+    try {
+      // Older evidence may fail today's limits. Scope and selection can still
+      // identify an outstanding approval and prevent a duplicate submission.
+      if (!matchesSavedDestination(record.requests)) return false;
+      const rows = submissionFindings(record.requests);
+      const savedWire = wireJson(rows);
+      const evidenceMatches =
+        projection &&
+        projection.savedEvidenceDigest === hash("sha256", savedWire);
+      if (evidenceMatches) {
+        // Matching old digests reconstruct its scoped filename. A report from
+        // this caller is useful only when the saved digest independently binds it.
+        const reportFree =
+          projection.inputDigest === projection.savedEvidenceDigest;
+        const identity = reportFree
+          ? rows
+          : parsed.report !== undefined
+            ? { findings: rows, report: reportForJson(parsed.report) }
+            : undefined;
+        if (
+          identity &&
+          (reportFree || projection.inputDigest === jsonDigest(identity))
+        ) {
+          if (
+            record.wireKey
+              ? record.wireKey !== scopeKey(identity)
+              : fileKey !== scopeKey(identity, canonicalJson) &&
+                fileKey !== localeKey(rows)
+          )
+            return false;
+          if (
+            possibleBufferExport &&
+            projection.inputDigest !== inputDigest &&
+            sameLegacyJson(identity, currentIdentity, previousBufferJson)
+          ) {
+            return true;
+          }
+        }
+        if (
+          !record.wireKey &&
+          reportFree &&
+          original &&
+          original.wire !== savedWire
+        )
+          return false;
+      }
+      if (record.wireKey && !cannotCaptureOriginal) return false;
+      if (
+        projection &&
+        original &&
+        fileKey !== stagingKey &&
+        fileKey !== originalWireKey &&
+        projection.inputDigest ===
+          (originalInputDigest ??= jsonDigest(
+            original.identity,
+            canonicalJson,
+          )) &&
+        fileKey !== localeKey(original.parsed.findings) &&
+        projection.savedEvidenceDigest ===
+          jsonDigest(
+            original.parsed.findings.map(wireFinding),
+            canonicalJson,
+          ) &&
+        savedWire === wireJson(original.parsed.findings.map(wireFinding))
+      )
+        return false;
+      if (stableIds) {
+        // An opaque occurrence may have had a different old ID. Compare all
+        // definite members and count the remaining IDs without claiming them.
+        const certain = rows.filter(
+          (row) => !uncertainId(row.source_finding_id),
+        );
+        const stableSaved = knownMembership
+          ? certain.filter((row) => knownMembership.has(row.source_finding_id))
+          : certain;
+        if (
+          certain.length - stableSaved.length >
+          (input.unprovenOccurrenceCount ?? 0)
+        )
+          return false;
+        return (
+          rows.length > 0 &&
+          stableSaved.length === stableIds.length &&
+          stableSaved.every((row, i) => {
+            const known = knownRows.get(row.source_finding_id);
+            return (
+              row.source_finding_id === stableIds[i] &&
+              (!known || wireJson(row) === wireJson(known))
+            );
+          })
+        );
+      }
+      const candidates = originalParsed.findings;
+      const ids =
+        potentialIds === undefined
+          ? parsed.findings.map((row) => row.source_finding_id)
+          : potentialIds;
+      if (
+        ids &&
+        (!ids.length ||
+          rows.length !== ids.length ||
+          !rows.every(
+            (row, i) =>
+              ids[i] === undefined || row.source_finding_id === ids[i],
+          ))
+      )
+        return false;
+      // An opaque serializer can add a report or replace every visible field.
+      // Only scoped, independently known occurrences can rule out its old request.
+      if (cannotCaptureOriginal || !projection) return true;
+      if (
+        projection.inputDigest === projection.savedEvidenceDigest &&
+        parsed.report !== undefined
+      )
+        return false;
+      if (potentialIds === undefined && (hasBoxedScalars || evidenceMatches))
+        return false;
+      return (
+        !sameFindingSelection(rows, candidates) ||
+        rows.every((row, i) => {
+          const { source_data: savedData, ...savedFields } = row.evidence;
+          const { source_data: selectedData, ...selectedFields } =
+            candidates[i]!.evidence;
+          if (wireJson(savedFields) !== wireJson(selectedFields)) return false;
+          // Once the original SDK discarded boxed positions, a plain JSON export
+          // alone cannot attribute a new numeric spelling to that saved request.
+          return sameLegacyJson(
+            savedData,
+            selectedData,
+            (value) => typeof value === "number",
+          );
+        })
+      );
+    } catch {
+      return false;
+    }
+  }
+  async function selectedCheckpoint(knownFileKey?: string, preparing = false) {
+    const directory = await validatePreparedOutputDir(
+      state,
+      undefined,
+      true,
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!directory) return undefined;
+    const known = new Set(
+      [key, originalKey, knownFileKey].filter((value) => value !== undefined),
+    );
+    let unidentified = false;
+    let unprovenOriginal = false;
+    let incomplete = false;
+    let stagingPathOccupied = false;
+    async function readCandidate(
+      fileKey: string,
+      selected?: Checkpoint,
+      contents?: string,
+    ): Promise<Checkpoint | undefined> {
+      const path = join(state, `${fileKey}.pending.json`);
+      const serialized =
+        contents ??
+        (selected?.fileKey === key && !known.has(fileKey)
+          ? await readOptionalRegularFile(path)
+          : await readOptionalFile(path)) ??
+        (preparing && fileKey === key ? capturedPending : undefined);
+      if (serialized === undefined) {
+        if (!known.has(fileKey)) incomplete = true;
+        return selected;
+      }
+      if (fileKey === stagingKey) stagingPathOccupied = true;
+      let record: SavedSubmission | null;
+      try {
+        record = JSON.parse(serialized) as SavedSubmission | null;
+      } catch (error) {
+        if (known.has(fileKey)) throw error;
+        incomplete = true;
+        return selected;
+      }
+      // A migrated checkpoint records the wire identity it belongs to even
+      // when a separate input hashes to its historical filename.
+      const tag = record?.wireKey;
+      const tagged = tag !== undefined;
+      const ownerKey = tagged ? tag : fileKey;
+      const historical = !tagged && fileKey === originalKey && fileKey !== key;
+      if (ownerKey !== key && !historical) {
+        if (hosted && record?.inputProjection) {
+          let status;
+          try {
+            status = originalHostedPending(record, ownerKey);
+          } catch {
+            // An unrelated or unreadable checkpoint cannot identify this source.
+          }
+          if (status === "unidentified")
+            throw new CodexSecurityError(unknownHostedRetry);
+          if (status) {
+            if (wasReset(record)) {
+              if (!preparing)
+                throw new CodexSecurityError(
+                  "The pending request and this preview have different repository reset markers. Review the destination again.",
+                );
+              await retireIfReset(record, () =>
+                underLocks([fileKey], async () => {
+                  const bytes = await readOptionalFile(path);
+                  if (
+                    bytes !== undefined &&
+                    sameSubmission(JSON.parse(bytes), record)
+                  )
+                    await rm(path);
+                }),
+              );
+            }
+            throw new CodexSecurityError(originalHostedRetry);
+          }
+        }
+        if (
+          record &&
+          (!tagged || cannotCaptureOriginal || possibleBufferExport) &&
+          potentialOriginal(record, fileKey)
+        )
+          unprovenOriginal = true;
+        // Some early locale filenames carry no deployment identity. Never guess their target.
+        if (
+          !tagged &&
+          record &&
+          !record.inputProjection &&
+          !legacyKeys.has(fileKey)
+        ) {
+          try {
+            // A different locale cannot authorize replay, even when the
+            // original native capture proves these rows were selected.
+            if (
+              !original ||
+              wireJson(submissionFindings(readSaved(record).requests)) !==
+                wireJson(original.parsed.findings.map(wireFinding))
+            )
+              validateSaved(record, true);
+            unidentified = true;
+          } catch {
+            /* Unrelated input. */
+          }
+        }
+        return selected;
+      }
+      const content = historical
+        ? readPreviousNumbers(record)
+        : validateSaved(record);
+      if (content === "different-wire") {
+        // Another spelling may already have a verified checkpoint for this wire value.
+        unprovenOriginal = true;
+        return selected;
+      }
+      if (!content) return selected;
+      if (selected) {
+        const conflict = new CodexSecurityError(
+          "Two saved imports match this input. Their original requests and receipts were preserved without uploading.",
+        );
+        if (!preparing) throw conflict;
+        // The two unlocked reads may have straddled completion of the first request.
+        return await underLocks([key, selected.fileKey, fileKey], async () => {
+          const first = await readCandidate(selected.fileKey);
+          if (first) {
+            if (await readCandidate(fileKey)) throw conflict;
+            if (sameSubmission(first.content, selected.content)) return first;
+          }
+          return completedCheckpoint(selected);
+        });
+      }
+      return { fileKey, content, historical };
+    }
+    let selected: Checkpoint | undefined;
+    for (const fileKey of known)
+      selected = await readCandidate(fileKey, selected);
+    // A known file that disappeared can be checked against its completed receipt.
+    if (!selected && knownFileKey !== undefined && !hosted) return undefined;
+    const hint = await lookupFileKey();
+    if (hint && !known.has(hint)) {
+      const contents = await readOptionalRegularFile(
+        join(state, `${hint}.pending.json`),
+      );
+      if (contents !== undefined) {
+        selected = await readCandidate(hint, selected, contents);
+        known.add(hint);
+      }
+    }
+    // A released publisher could stage the canonical request while another SDK
+    // tagged its old filename but had not yet written the optional lookup.
+    if (
+      selected &&
+      !cannotCaptureOriginal &&
+      !selected.historical &&
+      (selected.fileKey !== key ||
+        selected.content.canonicalChecked ||
+        selected.content.inputProjection?.identityFormat === 2)
+    )
+      return selected;
     const entries = await readdir(state, { withFileTypes: true }).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
       },
     );
-    if (entries.length) await validatePreparedOutputDir(state, undefined, true);
     for (const entry of entries) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name))
         continue;
-      const candidateKey = entry.name.slice(0, -".pending.json".length);
-      if (candidateKey === key || legacyKeys.has(candidateKey)) continue;
-      const serialized = await readOptionalFile(join(state, entry.name));
-      if (serialized === undefined) continue;
-      let hostedV1: SavedSubmission | undefined;
-      let unknownHosted = false;
-      try {
-        const content = JSON.parse(serialized) as SavedSubmission | null;
-        if (!content) continue;
-        if (content.inputProjection !== undefined) {
-          const identified = originalHostedPending(content, candidateKey);
-          if (!identified) continue;
-          if (identified === "verified") hostedV1 = content;
-          else unknownHosted = true;
-        } else validateSaved(serialized, true);
-      } catch {
-        continue;
-      }
-      if (unknownHosted) throw new CodexSecurityError(unknownHostedRetry);
-      if (hostedV1) {
-        if (wasReset(hostedV1)) {
-          // A prepared caller may predate this checkpoint's reset. Only a fresh
-          // catalog lookup can establish which request is stale.
-          if (preparing) await retireReset(hostedV1, candidateKey);
-          throw new CodexSecurityError(
-            "The pending request and this preview have different repository reset markers. Review the destination again.",
-          );
-        }
-        throw new CodexSecurityError(originalHostedRetry);
-      }
-      // These older bodies contain no deployment identity. Do not guess a
-      // destination or replace their immutable request with a fresh publication.
+      const fileKey = entry.name.slice(0, -".pending.json".length);
+      if (!known.has(fileKey))
+        selected = await readCandidate(fileKey, selected);
+    }
+    if (unprovenOriginal && (!selected || cannotCaptureOriginal))
+      throw unmatchedPreviousNumbers();
+    if (!selected && stagingPathOccupied) throw occupiedCheckpoint();
+    if (!selected && unidentified)
       throw new CodexSecurityError(
         "An older pending import matches this input, but its checkpoint identity could not be established. Resume it using the original deployment and locale before publishing this selection. The saved request was preserved without uploading.",
       );
-    }
+    if (selected?.fileKey === key && !preparing && !incomplete)
+      selected.checkedCanonical = true;
+    return selected;
   }
-  let recovered: SavedSubmission | undefined;
-  for (const legacyKey of legacyKeys) {
-    if (legacyKey === key) continue;
-    const legacyPath = join(state, `${legacyKey}.pending.json`);
-    const captured = await readOptionalFile(legacyPath);
-    if (captured !== undefined) {
-      let reset: SavedSubmission | undefined;
-      // Preserve requests staged by the earlier locale-based filename format.
-      // Hold both publication locks while moving the original checkpoint.
-      await withImportLock(state, key, dependencies.signal, async () =>
-        withImportLock(state, legacyKey, dependencies.signal, async () => {
-          const current = await readOptionalFile(pendingPath);
-          const serialized = await readOptionalFile(legacyPath);
-          if (current !== undefined) {
-            recovered = validateSaved(current);
-            if (serialized !== undefined) {
-              // A crash may leave both copies after installing the canonical file.
-              // Retire only an identical immutable submission, never another request.
-              let duplicate: SavedSubmission | null = null;
-              try {
-                duplicate = JSON.parse(serialized) as SavedSubmission | null;
-              } catch (error) {
-                if (!(error instanceof SyntaxError)) throw error;
-              }
-              if (
-                duplicate !== null &&
-                typeof duplicate === "object" &&
-                sameSubmission(duplicate, recovered)
-              )
-                await rm(legacyPath);
-            }
-            return;
-          }
-          // A competing resumer may have completed and removed both paths while
-          // this caller waited. Retain its observed immutable request and receipts.
-          const content = validateSaved(
-            serialized ?? captured,
-            true,
-            legacyKey,
-          );
-          if (!sameFindingSelection(legacyParsed.findings, parsed.findings))
-            throw new CodexSecurityError(
-              "The saved import selects different findings from this input. Resume the original selection before publishing this selection.",
-            );
-          if (wasReset(content)) {
-            reset = content;
-            return;
-          }
-          const savedEvidenceDigest =
-            content.inputProjection?.savedEvidenceDigest ??
-            hash("sha256", canonicalJson(legacyParsed.findings));
-          const rebindProjection =
-            content.inputProjection !== undefined ||
-            savedEvidenceDigest !== inputDigest;
-          if (rebindProjection) {
-            const approvedScope =
-              content.inputProjection?.semgrepPartialScopeDigest;
-            content.inputProjection = {
-              inputDigest,
-              savedEvidenceDigest,
-              ...(approvedScope !== undefined && {
-                semgrepPartialScopeDigest: approvedScope,
-              }),
-            };
-          }
-          recovered = content;
-          if (serialized === undefined) return;
-          await withSourceAdmission(async () => {
-            if (!rebindProjection) {
-              await rename(legacyPath, pendingPath);
-            } else {
-              // Bind the new input projection to the original immutable evidence,
-              // so later inventory reordering still resumes these exact requests.
-              await writeAtomicJson(pendingPath, content);
-              await rm(legacyPath);
-            }
-          });
-        }),
+  async function readCompletedPublication(
+    requests: FindingImportRequest[],
+    observedKey: string,
+  ) {
+    for (const resultKey of new Set([key, observedKey])) {
+      const serialized = await readOptionalFile(
+        join(state, `${resultKey}.result.json`),
       );
-      if (reset) await retireReset(reset, legacyKey);
+      if (serialized === undefined) continue;
+      const completed = JSON.parse(
+        serialized,
+      ) as ExternalPublicationResult | null;
+      if (
+        (completed?.status === "complete" || completed?.status === "partial") &&
+        Array.isArray(completed.receipts) &&
+        completed.receipts.length === requests.length &&
+        completed.receipts.every(
+          (receipt, i) => receipt?.id === requests[i]!.request_id,
+        )
+      )
+        return {
+          receipts: completed.receipts.map((receipt, i) =>
+            validatePublicationReceipt(receipt, requests[i]!),
+          ),
+          verified: completed.verified,
+        };
     }
   }
-  const serialized = (await readOptionalFile(pendingPath)) ?? capturedPending;
-  const saved =
-    serialized === undefined ? recovered : validateSaved(serialized);
-  if (!saved) await rejectUnidentifiedLegacyCheckpoint(true);
-  if (saved && wasReset(saved)) await retireReset(saved, key);
+  async function completedCheckpoint(observed: Checkpoint) {
+    if (
+      await readCompletedPublication(
+        observed.content.requests,
+        observed.fileKey,
+      )
+    )
+      return observed;
+    throw new CodexSecurityError(
+      "The saved publication changed while preparing this input. Review it again.",
+    );
+  }
+  function occupiedCheckpoint() {
+    return new CodexSecurityError(
+      "Finish the other pending import at this checkpoint first, then review this input again.",
+    );
+  }
+  let selected = await selectedCheckpoint(recovered ? key : undefined, true);
+  const fileKey = selected?.fileKey ?? (recovered ? key : stagingKey);
+  const pendingPath = join(state, `${fileKey}.pending.json`);
+  async function rememberFile() {
+    if (fileKey !== key && (await lookupFileKey()) !== fileKey)
+      await writeAtomicJson(lookupPath, fileKey).catch(() => undefined);
+  }
+  async function removePending() {
+    await rm(pendingPath, { force: true });
+    if (fileKey !== key && (await lookupFileKey()) === fileKey)
+      await rm(lookupPath, { force: true }).catch(() => undefined);
+  }
+
+  const lockKeys = [key, fileKey, stagingKey];
+  if (selected?.historical) {
+    const observed = selected;
+    selected = await underLocks(lockKeys, async () => {
+      const current = await selectedCheckpoint(fileKey);
+      if (
+        !current ||
+        current.fileKey !== fileKey ||
+        !sameSubmission(current.content, observed.content)
+      )
+        return completedCheckpoint(observed);
+      if (current.historical) {
+        current.content.wireKey = key;
+        await writeAtomicJson(pendingPath, current.content);
+        await rememberFile();
+      }
+      return current;
+    });
+  }
+  const saved = selected?.content ?? recovered;
+  if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
+  if (!parsed.findings.length) noFindings(parsed);
+  if (saved) {
+    await retireIfReset(saved, () =>
+      underLocks(lockKeys, async () => {
+        const current = await readOptionalFile(pendingPath);
+        if (
+          current !== undefined &&
+          sameSubmission(JSON.parse(current) as SavedSubmission, saved)
+        )
+          await removePending();
+      }),
+    );
+  }
   if (saved?.inspectorProjectMapRequired && !inspectorProjectMap)
     throw new CodexSecurityError(
       "Supply the verified Inspector project binding again to resume.",
@@ -1600,7 +2569,7 @@ async function preparePublicationInput(
     saved &&
     !saved.approvedRepositoryUrl &&
     options.provider === "semgrep" &&
-    typeof input !== "function" &&
+    !deferred &&
     declaredUrl !== undefined &&
     saved.requests.every(({ items }) =>
       items.every(
@@ -1701,47 +2670,18 @@ async function preparePublicationInput(
       );
     }
   }
-  for (const url of trivyReportUrls ?? []) requireTrivyRemote(url);
-
-  if (saved) {
-    checkRepositories(parsed.findings);
-    // A resumed request sends its saved projection; validate both before recording approval.
-    checkRepositories(submissionFindings(saved.requests));
+  if (trivyReportUrls) {
+    for (const url of trivyReportUrls) requireTrivyRemote(url);
+    if (parsed !== resolved.current)
+      for (const url of trivyBatchSourceUrls(parsed, true))
+        requireTrivyRemote(url);
   }
 
-  // An older, genuinely unbound checkpoint first acquires a URL on a matching preview.
-  // Retain it at the original path so its bare caller can still recover the same request.
-  if (saved && !saved.approvedRepositoryUrl && hostedSource) {
-    await withImportLock(state, key, dependencies.signal, async () => {
-      const serialized = await readOptionalFile(pendingPath);
-      if (serialized === undefined) return;
-      const current = validateSaved(serialized);
-      if (!sameSubmission(current, saved))
-        throw new CodexSecurityError(
-          "Another publication prepared this input. Review the saved request again.",
-        );
-      if (current.approvedRepositoryUrl) {
-        requireApprovedSource(
-          current.approvedRepositoryUrl,
-          current.approvedRepositoryPlatform,
-        );
-      } else {
-        // Adding the catalog URL cannot erase an older SDK's same-selection hold.
-        if (
-          current.inputProjection &&
-          originalHostedPending(current, key) === "verified"
-        )
-          current.inputProjection.retainedHostedSelection = true;
-        current.approvedRepositoryUrl = approvedUrl;
-        await writeAtomicJson(pendingPath, current);
-      }
-      saved.inputProjection = current.inputProjection;
-      saved.approvedRepositoryUrl = current.approvedRepositoryUrl;
-      saved.approvedRepositoryPlatform = current.approvedRepositoryPlatform;
-    });
-  }
-
-  function checkRepositories(findings: ExternalFindings["findings"]) {
+  function checkRepositories(
+    findings: ExternalFindings["findings"],
+    report?: ExternalFindings["report"],
+  ) {
+    checkTrivyReportProvider(options.provider, report);
     // A catalog casing or spelling change keeps the original source comparison target.
     const approved = hosted ? saved?.approvedRepositoryUrl : undefined;
     const sameCatalog =
@@ -1778,6 +2718,15 @@ async function preparePublicationInput(
     // Recheck any projected source against the destination discovered for this retry.
     const replay =
       saved && options.provider !== "blackduck" && !trivyReportUrls;
+    if (!saved || options.provider === "sonar" || trivyReportUrls) {
+      for (const url of sonarRepositoryUrls(
+        options.provider,
+        findings,
+        report,
+        "cloud",
+      ))
+        requireDestination("Sonar source", url);
+    }
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
@@ -1804,6 +2753,7 @@ async function preparePublicationInput(
     }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      checkRetainedTrivyProvider(options.provider, finding);
       if (trivyReportUrls) {
         const remote = trivyRepositoryUrl(
           retainedTrivyReport(finding),
@@ -1818,7 +2768,8 @@ async function preparePublicationInput(
         replay &&
         !projected &&
         options.provider !== "inspector" &&
-        options.provider !== "veracode"
+        options.provider !== "veracode" &&
+        options.provider !== "sonar"
       )
         continue;
       const urls = [
@@ -1858,9 +2809,51 @@ async function preparePublicationInput(
           "Snyk REST evidence requires the snyk provider.",
         );
     }
-    checkRepositories(parsed.findings);
+  }
+  checkRepositories(parsed.findings, parsed.report);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) {
+    // A common Sonar ref can supply missing row refs. Only use the report
+    // associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories(submissionFindings(saved.requests), report);
   }
 
+  // An older, genuinely unbound checkpoint first acquires a URL on a matching preview.
+  // Retain it at the original path so its bare caller can still recover the same request.
+  if (saved && !saved.approvedRepositoryUrl && hostedSource) {
+    await underLocks(lockKeys, async () => {
+      const serialized = await readOptionalFile(pendingPath);
+      if (serialized === undefined) return;
+      const current = validateSaved(JSON.parse(serialized));
+      if (!sameSubmission(current, saved))
+        throw new CodexSecurityError(
+          "Another publication prepared this input. Review the saved request again.",
+        );
+      if (current.approvedRepositoryUrl) {
+        requireApprovedSource(
+          current.approvedRepositoryUrl,
+          current.approvedRepositoryPlatform,
+        );
+      } else {
+        // Adding the catalog URL cannot erase an older SDK's same-selection hold.
+        if (
+          current.inputProjection &&
+          originalHostedPending(current, current.wireKey ?? fileKey) ===
+            "verified"
+        )
+          current.inputProjection.retainedHostedSelection = true;
+        current.approvedRepositoryUrl = approvedUrl;
+        await writeAtomicJson(pendingPath, current);
+      }
+      saved.inputProjection = current.inputProjection;
+      saved.approvedRepositoryUrl = current.approvedRepositoryUrl;
+      saved.approvedRepositoryPlatform = current.approvedRepositoryPlatform;
+    });
+  }
   let requests = saved?.requests;
   if (!requests) {
     let preparedCount = 0;
@@ -1879,7 +2872,7 @@ async function preparePublicationInput(
           limit: "2",
         });
         const summaries = validateSourceReports(
-          await request(`${sourcePath(destination)}?${query}`),
+          await request(`${sourceReportsPath}?${query}`),
         );
         if (summaries.has_more || summaries.data.length > 1)
           throw new CodexSecurityError(
@@ -1967,16 +2960,16 @@ async function preparePublicationInput(
     ...(trivyReportUrls && { trivyRepositoryUrl: trivyTarget }),
     requests,
     receipts: saved?.receipts,
+    legacyApproval: saved?.legacyApproval,
+    wireKey: saved?.wireKey ?? (fileKey === key ? undefined : key),
     inputProjection: saved?.inputProjection ?? {
+      identityFormat: saved ? undefined : 2,
       ...(scopedSemgrepReport && { retainedHostedSelection: true }),
       ...(bindSemgrepScope && {
         semgrepPartialScopeDigest: suppliedSemgrepScopeDigest(),
       }),
       inputDigest,
-      savedEvidenceDigest: hash(
-        "sha256",
-        canonicalJson(submissionFindings(requests)),
-      ),
+      savedEvidenceDigest: jsonDigest(submissionFindings(requests)),
     },
   };
   if (
@@ -2003,7 +2996,7 @@ async function preparePublicationInput(
     requests,
   };
   return {
-    preview: structuredClone(preview),
+    preview: cloneImportPreview(preview),
     async publish() {
       progress({ phase: "waiting", completed: 0 });
       const result = (
@@ -2036,7 +3029,7 @@ async function preparePublicationInput(
           read: parsed.read,
           ...(parsed.report === undefined
             ? {}
-            : { report: structuredClone(parsed.report) }),
+            : snapshotNormalizedFindings({ report: parsed.report })),
           ready: parsed.findings.length,
           excluded: parsed.excluded,
           receipts: acknowledged,
@@ -2048,15 +3041,44 @@ async function preparePublicationInput(
           verified,
         };
       };
+      function interruptedPreview(
+        message: string,
+        cause?: unknown,
+        savedSubmission?: string,
+      ) {
+        // The expected file is gone or another publisher owns the lock. Use only
+        // the acknowledgements this caller saw when it prepared the request.
+        const known = submission.receipts ?? [];
+        if (known.length > submission.requests.length)
+          throw new CodexSecurityError(
+            "Saved publication has more receipts than requests.",
+          );
+        const acknowledged = known.map((receipt, index) =>
+          validatePublicationReceipt(receipt, submission.requests[index]!),
+        );
+        return new ExternalPublicationError(
+          message,
+          {
+            ...result(acknowledged, 0),
+            status: "interrupted",
+            error: message,
+            ...(savedSubmission === undefined ? {} : { savedSubmission }),
+          },
+          cause,
+        );
+      }
       let acquired = false;
-      return await withImportLock(state, key, dependencies.signal, async () => {
+      return await underLocks(lockKeys, async () => {
         acquired = true;
         // Re-read under the lock to keep checkpoints from another publisher.
-        const pending = await readOptionalFile(pendingPath);
-        const current =
-          pending === undefined
-            ? submission
-            : (JSON.parse(pending) as SavedSubmission);
+        const selected = await selectedCheckpoint(
+          saved ? fileKey : undefined,
+        ).catch((error: unknown) => {
+          if (!submission.receipts?.length) throw error;
+          throw interruptedPreview(errorMessage(error), error);
+        });
+        const pending = selected?.content;
+        const current = pending ?? submission;
         const adoptProjectMap =
           submission.inspectorProjectMapRequired &&
           current.inspectorProjectMapRequired === undefined;
@@ -2066,10 +3088,25 @@ async function preparePublicationInput(
             current.approvedRepositoryUrl,
             current.approvedRepositoryPlatform,
           );
-        if (!sameSubmission(current, submission))
-          throw new CodexSecurityError(
-            "Another publication prepared this input. Run the command again to review and resume that saved request.",
-          );
+        if (
+          !selected ||
+          selected.fileKey !== fileKey ||
+          selected.historical ||
+          !sameSubmission(current, submission)
+        ) {
+          const message = selected
+            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
+            : "The saved publication changed after preview. Review its result before publishing again.";
+          if (saved) {
+            const completed = await readCompletedPublication(requests, fileKey);
+            if (completed)
+              return result(completed.receipts, completed.verified);
+            throw interruptedPreview(message);
+          }
+          if (selected) throw new CodexSecurityError(message);
+          if ((await readOptionalFile(pendingPath)) !== undefined)
+            throw occupiedCheckpoint();
+        }
         // A preview can pin the catalog URL. Tighten its SCM comparison only
         // once the caller confirms publication, including when resuming a request.
         const adoptStrictRepository =
@@ -2085,30 +3122,41 @@ async function preparePublicationInput(
         let verified = 0;
         let persisted = pending !== undefined;
         try {
+          if (selected?.checkedCanonical) current.canonicalChecked = true;
           if (pending === undefined) {
             await withSourceAdmission(async () => {
-              for (const otherKey of new Set([
-                ...projectionKeys,
-                ...legacyKeys,
-              ])) {
-                if (
-                  otherKey !== key &&
-                  (await readOptionalFile(
-                    join(state, otherKey + ".pending.json"),
-                  )) !== undefined
-                )
+              if (hosted) {
+                for (const otherKey of new Set([
+                  ...projectionKeys,
+                  ...legacyKeys,
+                ])) {
+                  if (
+                    otherKey !== key &&
+                    otherKey !== fileKey &&
+                    (await readOptionalFile(
+                      join(state, otherKey + ".pending.json"),
+                    )) !== undefined
+                  )
+                    throw new CodexSecurityError(
+                      "Another publication prepared this input. Run the command again to review and resume that saved request.",
+                    );
+                }
+                if (await selectedCheckpoint())
                   throw new CodexSecurityError(
                     "Another publication prepared this input. Run the command again to review and resume that saved request.",
                   );
               }
-              await rejectUnidentifiedLegacyCheckpoint(false);
               await writeAtomicJson(pendingPath, current);
             });
             persisted = true;
           } else if (adoptProjectMap || adoptStrictRepository) {
             await writeAtomicJson(pendingPath, current);
             persisted = true;
+          } else if (selected?.checkedCanonical) {
+            // The existing approval and receipts are usable if caching the scan fails.
+            await writeAtomicJson(pendingPath, current).catch(() => undefined);
           }
+          await rememberFile();
           progress({
             phase: "uploading",
             completed: 0,
@@ -2118,7 +3166,7 @@ async function preparePublicationInput(
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
               receipts[batchIndex] ??
-                (await request("/finding_imports", batch)),
+                (await request(`${importPrefix}/finding_imports`, batch)),
               batch,
             );
             acknowledged.push(receipt);
@@ -2133,7 +3181,8 @@ async function preparePublicationInput(
               // Acknowledged batches must not consume another POST quota on retry.
               // Readback can still resume after this checkpoint without replaying writes.
               await writeAtomicJson(pendingPath, {
-                ...current,
+                ...submission,
+                canonicalChecked: current.canonicalChecked,
                 receipts,
               });
             }
@@ -2161,7 +3210,7 @@ async function preparePublicationInput(
           await readInBatches(readbacks, async ({ item, expected, batch }) => {
             const report = validateSourceReport(
               await request(
-                `${sourcePath(destination)}/${encodeURIComponent(item.source_report_id!)}`,
+                `${sourceReportsPath}/${encodeURIComponent(item.source_report_id!)}`,
               ),
             );
             if (
@@ -2170,13 +3219,12 @@ async function preparePublicationInput(
               report.version < item.version! ||
               (report.version === item.version &&
                 (report.observation_id !== item.observation_id ||
-                  canonicalJson(report.evidence) !==
-                    canonicalJson(expected.evidence))) ||
+                  wireJson(report.evidence) !== wireJson(expected.evidence))) ||
               report.source_finding_id !== expected.source_finding_id ||
               report.repo_id !== destination.id ||
               report.repo_connector_id !== destination.repo_connector_id ||
               report.environment_id !== batch.repository.environment_id ||
-              canonicalJson(report.source) !== canonicalJson(source)
+              wireJson(report.source) !== wireJson(source)
             )
               throw new CodexSecurityError(
                 "Cloud readback did not match the saved finding identity.",
@@ -2192,11 +3240,11 @@ async function preparePublicationInput(
             ...completed,
             report: reportForJson(completed.report),
           });
-          await rm(pendingPath, { force: true });
+          await removePending();
           return completed;
         } catch (error) {
           if (error instanceof CloudImportError && error.status === 409) {
-            await rm(pendingPath, { force: true });
+            await removePending();
             persisted = false;
           }
           const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : persisted ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
@@ -2213,28 +3261,13 @@ async function preparePublicationInput(
         }
       }).catch((error: unknown) => {
         if (acquired || !dependencies.signal?.aborted) throw error;
-        // The active publisher owns the checkpoint. Report only acknowledgements
-        // already observed during preparation, without rewriting its files.
-        const known = submission.receipts ?? [];
-        if (known.length > requests.length)
-          throw new CodexSecurityError(
-            "Saved publication has more receipts than requests.",
-          );
-        const acknowledged = known.map((receipt, index) =>
-          validatePublicationReceipt(receipt, requests[index]!),
-        );
         const message = saved
           ? `Publication canceled while waiting. Repeat the same command to resume the saved request. Saved submission: ${pendingPath}`
           : "Publication canceled while waiting. No resumable request was saved by this invocation.";
-        throw new ExternalPublicationError(
+        throw interruptedPreview(
           message,
-          {
-            ...result(acknowledged, 0),
-            status: "interrupted",
-            error: message,
-            ...(saved ? { savedSubmission: pendingPath } : {}),
-          },
           error,
+          saved ? pendingPath : undefined,
         );
       });
     },
