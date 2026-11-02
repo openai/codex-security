@@ -68,15 +68,21 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
-def test_projection_normalizes_tilde_fences_and_parenthesized_lists() -> None:
-    markdown = report_with_finding(
-        summary="~~~\ncode fence\n~~~",
-        remediation="1) Validate the record length.",
+def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = "~~~\ncode fence\n~~~"
+    instruction = (
+        "1) Retry 3–5 times, then 5 to 10. See https://example.test/~docs?version=~1. "
+        "Use chmod 0~777 or chmod 0~600 key.pem."
     )
+    finding["remediation"] = instruction
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "\n~~~" not in markdown
     assert "Text: ~~~ code fence ~~~" in markdown
-    assert "Text: 1) Validate the record length." in markdown
+    assert f"Text: {instruction}" in markdown
 
 
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
