@@ -336,7 +336,14 @@ function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
-    const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
+    // A bracket ending an IPv6 authority belongs to the URL, even in prose.
+    const candidate = match[0];
+    const ipv6Authority =
+      candidate.match(/^https?:\/\/(?:[^\\/?#]*@)?\[[\da-fA-F:.]+\]/)?.[0] ??
+      "";
+    const url =
+      ipv6Authority +
+      candidate.slice(ipv6Authority.length).replace(/[.,;:!?)\]}]+$/, "");
     try {
       const parsed = new URL(url);
       const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
@@ -372,7 +379,7 @@ function userCodeFromOutput(value: string): string | null {
 
 function plainTerminalText(value: string): string {
   return value
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 }

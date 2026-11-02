@@ -249,6 +249,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,
@@ -326,11 +327,34 @@ export type {
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
 export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export { readSonarFindings, type SonarCapture } from "./sonar-findings.js";
+export {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "./sonar-collector.js";
+export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
+export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
+export { normalizeSelectedSemgrepPlatformFindings } from "./semgrep-platform-findings.js";
 export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,

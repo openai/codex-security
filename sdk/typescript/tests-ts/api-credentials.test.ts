@@ -10,7 +10,11 @@ import { parse as parseToml } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
-import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
+import {
+  copyCompletedScan,
+  copyCredentialTestPlugin,
+  PLUGIN_ROOT,
+} from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
@@ -113,7 +117,12 @@ describe("CodexSecurity orchestration", () => {
       const originalOverrides = structuredClone(overrides);
       let captured: (CodexOptions & { nativeProfile?: string }) | undefined;
       const client = new TestClient(
-        { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+        {
+          pluginPath: profile
+            ? PLUGIN_ROOT
+            : await copyCredentialTestPlugin(root),
+          codexOverrides: overrides,
+        },
         {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
@@ -589,7 +598,7 @@ describe("CodexSecurity orchestration", () => {
     const runs: Array<{ home: string; apiKey?: string }> = [];
     const client = new TestClient(
       {
-        pluginPath: PLUGIN_ROOT,
+        pluginPath: await copyCredentialTestPlugin(root),
         codexOverrides: {
           model_provider: "synthetic.account",
           model_providers: {

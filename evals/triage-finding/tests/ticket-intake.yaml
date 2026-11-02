@@ -9,13 +9,13 @@
     finding_input: "Linear issue SEC-293. Connector observation: the Linear connector is unavailable because it is not connected."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
     expected_ticket_failure: unavailable
-    eval_instructions: |-
+    eval_instructions: &failedReadInstructions |-
       This is an automated eval. Treat the connector observation as the result
       of the requested read. Respond exactly as the skill requires after this
       intake failure. Do not inspect code or fabricate the issue contents.
-  options:
+  options: &intakeOnly
     disableDefaultAsserts: true
-  assert:
+  assert: &ticketIntake
     - type: javascript
       value: file://./assertions/ticket-intake.mts
 
@@ -30,15 +30,9 @@
     finding_input: "Linear issue SEC-293. Connector observation: access was denied because the authenticated user lacks permission."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-293."
     expected_ticket_failure: permission
-    eval_instructions: |-
-      This is an automated eval. Treat the connector observation as the result
-      of the requested read. Respond exactly as the skill requires after this
-      intake failure. Do not inspect code or fabricate the issue contents.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+    eval_instructions: *failedReadInstructions
+  options: *intakeOnly
+  assert: *ticketIntake
 
 - description: "Missing Linear issue stops with identifier guidance"
   metadata:
@@ -51,15 +45,9 @@
     finding_input: "Linear issue SEC-999999. Connector observation: the issue was not found or is inaccessible."
     invocation_preamble: "Use $codex-security:triage-finding to import Linear issue SEC-999999."
     expected_ticket_failure: not_found
-    eval_instructions: |-
-      This is an automated eval. Treat the connector observation as the result
-      of the requested read. Respond exactly as the skill requires after this
-      intake failure. Do not inspect code or fabricate the issue contents.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+    eval_instructions: *failedReadInstructions
+  options: *intakeOnly
+  assert: *ticketIntake
 
 - description: "Repeated transient Linear failure stops after one retry"
   metadata:
@@ -77,11 +65,8 @@
       of the requested read and its one retry. Respond exactly as the skill
       requires after retry exhaustion. Do not inspect code or fabricate the
       issue contents.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+  options: *intakeOnly
+  assert: *ticketIntake
 
 - description: "Linear parent asks before importing direct sub-issues"
   metadata:
@@ -98,11 +83,8 @@
       This is an automated eval. Treat the parent fetch and child listing as
       completed connector observations. Follow the skill before importing any
       child issue. Do not inspect code or fabricate child issue contents.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+  options: *intakeOnly
+  assert: *ticketIntake
 
 - description: "Linear child-only selection asks before expanding to grandchildren"
   metadata:
@@ -119,11 +101,8 @@
       This is an automated eval. Treat the connector observations as complete.
       Follow the skill before importing the next depth. Do not inspect code or
       fabricate the nested issue contents.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+  options: *intakeOnly
+  assert: *ticketIntake
 
 - description: "Linear all-descendants selection proceeds across depths"
   metadata:
@@ -174,8 +153,5 @@
       This is an automated eval. The parent may or may not be an independent
       finding. Follow the skill before normalizing the parent. Do not inspect
       code or emit triage JSON.
-  options:
-    disableDefaultAsserts: true
-  assert:
-    - type: javascript
-      value: file://./assertions/ticket-intake.mts
+  options: *intakeOnly
+  assert: *ticketIntake
