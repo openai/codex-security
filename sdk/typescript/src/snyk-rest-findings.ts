@@ -878,7 +878,7 @@ function linkedSnykResources(
 }
 
 function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
-  const retained = finding.evidence.source_data;
+  const retained = finding.evidence?.source_data;
   const marked =
     snykRestId.test(finding.source_finding_id) ||
     isSnykRestFormat(retained?.["format"]);
@@ -992,11 +992,11 @@ function bindSnykFinding(
 /** Recognize a retained hosted report before verifying its selected issues. */
 export function isSnykRestReport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
+  matchesFinding = isSnykRestFinding,
 ): boolean {
-  return (
-    input.snykRestContext !== undefined ||
-    input.findings.some(isSnykRestFinding)
-  );
+  if (input.snykRestContext !== undefined) return true;
+  const rows = input.findings;
+  return Array.isArray(rows) && rows.some(matchesFinding);
 }
 
 function readIssues(document: Resource, selected: Scope) {

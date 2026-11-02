@@ -1041,6 +1041,18 @@ test("direct SDK imports respect the native source even with a caller-selected I
       fetch,
     }),
   ).rejects.toThrow("local import");
+  const exported = {
+    source_finding_id: "example",
+    evidence: { title: "Example", severity: "low" as const },
+    toJSON: () => normalized.findings[0],
+  };
+  await expect(
+    prepareNormalizedExternalPublication(
+      { read: 1, excluded: [], findings: [exported] },
+      options,
+      { ...deps, fetch },
+    ),
+  ).rejects.toThrow("local import");
   expect(fetch).not.toHaveBeenCalled();
 
   const row = normalized.findings[0]!;

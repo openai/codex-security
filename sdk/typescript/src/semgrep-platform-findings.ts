@@ -80,6 +80,8 @@ export function semgrepPlatformReportScope(
   input: ExternalFindings,
   provider?: string,
   references: readonly ExternalSourceRepository[] = [],
+  isPlatform = (row: ExternalFinding) =>
+    isSemgrepPlatformEvidence(row, provider),
 ) {
   const format = "sourceFormat" in input ? input.sourceFormat : undefined;
   if (
@@ -95,8 +97,7 @@ export function semgrepPlatformReportScope(
     provider === "semgrep" &&
     "sourceRepositoryUrl" in input &&
     input.sourceRepositoryUrl !== undefined &&
-    (input.findings.length === 0 ||
-      input.findings.some((row) => isSemgrepPlatformEvidence(row, provider)))
+    (input.findings.length === 0 || input.findings.some(isPlatform))
   ) {
     // The object-row SDK retained only the binding on the envelope, including empty reports.
     return {
@@ -134,8 +135,9 @@ export function semgrepPlatformReportScope(
 export function semgrepPlatformReportRepository(
   input: ExternalFindings,
   provider?: string,
+  isPlatform?: (row: ExternalFinding) => boolean,
 ) {
-  return semgrepPlatformReportScope(input, provider)?.url;
+  return semgrepPlatformReportScope(input, provider, [], isPlatform)?.url;
 }
 
 export interface SemgrepPlatformScope {
@@ -914,7 +916,7 @@ export function isSemgrepPlatformEvidence(
   finding: ExternalFinding,
   provider?: string,
 ): boolean {
-  const data = finding.evidence.source_data;
+  const data = finding.evidence?.source_data;
   if (generatedId.test(finding.source_finding_id)) return true;
   if (!data) return false;
   if (

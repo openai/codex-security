@@ -12,7 +12,12 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { isBoxedPrimitive, isNativeError, isProxy } from "node:util/types";
+import {
+  isBoxedPrimitive,
+  isNativeError,
+  isProxy,
+  isStringObject,
+} from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
 import {
   cloudBaseUrl,
@@ -23,7 +28,7 @@ import {
   isSemgrepPlatformEvidence,
   semgrepPlatformReportRepository,
 } from "./semgrep-platform-findings.js";
-import { isSnykRestReport } from "./snyk-rest-findings.js";
+import { isSnykRestFinding, isSnykRestReport } from "./snyk-rest-findings.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -60,6 +65,7 @@ import {
   cloneImportPreview,
   nativeErrorStackGetter,
   snapshotNormalizedFindings,
+  type ExternalFinding,
   type ExternalFindings,
   type ExternalPublicationInput,
 } from "./external-findings.js";
@@ -462,20 +468,52 @@ async function withImportLocks<T>(
   }
 }
 
+// A caller's serializer may deliberately omit an ID accessor. Inspect stored
+// IDs here and check the actual exported rows after normalization.
+function storedFindingId(finding: ExternalFinding): string {
+  const seen = new Set<object>();
+  for (
+    let owner: object | null = finding;
+    owner && !seen.has(owner);
+    owner = Object.getPrototypeOf(owner) as object | null
+  ) {
+    const property = Object.getOwnPropertyDescriptor(
+      owner,
+      "source_finding_id",
+    );
+    if (property) {
+      const id: unknown = property.value;
+      return typeof id === "string" || isStringObject(id)
+        ? String.prototype.valueOf.call(id)
+        : "";
+    }
+    seen.add(owner);
+  }
+  return "";
+}
+
 function rejectLocalScannerReports(
   input: ExternalFindings,
   provider: string,
 ): void {
+  if (!input || (typeof input !== "object" && typeof input !== "function"))
+    return;
+  const stored = (row: ExternalFinding) => ({
+    source_finding_id: storedFindingId(row),
+    evidence: row.evidence,
+  });
+  const isPlatform = (row: ExternalFinding) =>
+    row && isSemgrepPlatformEvidence(stored(row), provider);
+  const hasPlatformRows = (rows: ExternalFinding[]) =>
+    Array.isArray(rows) && rows.some(isPlatform);
   if (
-    semgrepPlatformReportRepository(input, provider) ||
-    input.findings.some((finding) =>
-      isSemgrepPlatformEvidence(finding, provider),
-    )
+    semgrepPlatformReportRepository(input, provider, isPlatform) ||
+    hasPlatformRows(input.findings)
   )
     throw new CodexSecurityError(
       "Semgrep Platform findings require a local import.",
     );
-  if (isSnykRestReport(input))
+  if (isSnykRestReport(input, (row) => row && isSnykRestFinding(stored(row))))
     throw new CodexSecurityError("Snyk REST findings require a local import.");
 }
 
@@ -489,7 +527,8 @@ export async function prepareExternalPublication(
   const parsed = await readExternalFindings(path, settings);
   rejectLocalScannerReports(parsed.findings, settings.provider);
   return preparePublicationInput(
-    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    parsed.publication ??
+      normalizedPublicationInput(parsed.findings, settings.provider),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
   );
@@ -505,7 +544,7 @@ export async function prepareNormalizedExternalPublication(
   const settings = snapshotImportOptions(options);
   rejectLocalScannerReports(input, settings.provider);
   return preparePublicationInput(
-    normalizedPublicationInput(input),
+    normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
   );
@@ -690,6 +729,7 @@ function historicalPublication(
 
 function normalizedPublicationInput(
   input: ExternalFindings,
+  provider: string,
 ): PublicationSelection {
   const nativeDiagnostics = new Map<number, Error>();
   let native: ExternalFindings | undefined;
@@ -764,6 +804,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
+  if (original) rejectLocalScannerReports(original.parsed, provider);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -776,6 +817,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
+  rejectLocalScannerReports(current, provider);
   const identity = publicationIdentity(current);
   return {
     current,
@@ -1111,6 +1153,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     return content;
   }
 
@@ -1122,7 +1165,8 @@ async function preparePublicationInput(
   ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
-    const savedWire = wireJson(submissionFindings(content.requests));
+    const saved = submissionFindings(content.requests);
+    const savedWire = wireJson(saved);
     const wireDigest = hash("sha256", savedWire);
     if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
@@ -1144,6 +1188,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     content.legacyApproval = true;
     content.inputProjection = {
       identityFormat: 2,

@@ -55,17 +55,27 @@ test("normalized Snyk REST Open Source rows cannot publish to Cloud", async () =
   const fetch = mock(async () => {
     throw new Error("Unexpected Cloud request");
   });
-  await expect(
-    prepareNormalizedExternalPublication(
-      normalized,
-      {
-        provider: "snyk",
-        repository: "https://github.com/example/another",
-        sourceKey: "example",
-      },
-      { environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" }, fetch },
-    ),
-  ).rejects.toThrow("local import");
+  const serialized = {
+    source_finding_id: "example",
+    evidence: { title: "Example", severity: "low" as const },
+    toJSON: () => normalized.findings[0],
+  };
+  for (const input of [
+    normalized,
+    { read: 1, excluded: [], findings: [serialized] },
+  ]) {
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        {
+          provider: "snyk",
+          repository: "https://github.com/example/another",
+          sourceKey: "example",
+        },
+        { environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" }, fetch },
+      ),
+    ).rejects.toThrow("local import");
+  }
   expect(fetch).not.toHaveBeenCalled();
   expect(() => normalizeSnykIssues(report, "cloud")).toThrow("local import");
 });
