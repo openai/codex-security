@@ -1215,6 +1215,11 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
+If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
+a string task ID, the command reports its line number and leaves the ledger untouched.
+Restore a complete ledger backup that includes every committed attempt, or start
+a separate campaign in a new `--output-dir`.
+
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
 stops only that repository for this invocation. Failed recovery checkouts remain;

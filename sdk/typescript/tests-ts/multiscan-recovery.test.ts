@@ -509,6 +509,54 @@ describe("multiscan", () => {
     ]);
   });
 
+  test.each([
+    ["malformed middle record", "{", true],
+    ["malformed final record", "{", false],
+    ["non-object", "null", false],
+    ["missing ID", "{}", false],
+    ["non-string ID", '{"id":42}', false],
+  ] as const)(
+    "CLI identifies the %s and preserves committed history",
+    async (_name, bad, middle) => {
+      const { paths } = await repositoryFixture("receipt");
+      const args = [
+        "bulk-scan",
+        paths.input,
+        "--output-dir",
+        paths.output,
+        "--json",
+      ];
+      const deps = dependencies();
+      const run = mock(completeRun);
+      const configured: Parameters<typeof main>[3] = {
+        ...deps,
+        createSecurity: (config) => ({ ...deps.createSecurity(config), run }),
+      };
+      expect(await createCliTest(main).runCli(args, configured)).toBe(0);
+      const ledger = join(paths.output, "results.jsonl");
+      const valid = await readFile(ledger, "utf8");
+      const damaged = Buffer.concat([
+        Buffer.from(`${valid}\n${bad}\n`),
+        ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),
+      ]);
+      await writeFile(ledger, damaged);
+      for (const flags of [[], ["--recover"]]) {
+        const cli = createCliTest(main);
+        expect(await cli.runCli([...args, ...flags], configured)).toBe(2);
+        expect(cli.stderr.text()).toContain(`${ledger}:3:`);
+        expect(cli.stderr.text()).toContain("Restore a complete");
+        expect(cli.stderr.text()).toContain("new --output-dir");
+        expect(await readFile(ledger)).toEqual(damaged);
+        expect(
+          (await readdir(paths.output)).filter((name) =>
+            name.startsWith("results.jsonl.interrupted-"),
+          ),
+        ).toEqual([]);
+      }
+      expect(run).toHaveBeenCalledTimes(1);
+    },
+  );
+
   const interruptedUtf8Cases: [string, number, boolean][] = [
     ["é", 1, false],
     ["中", 1, false],

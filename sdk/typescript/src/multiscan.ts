@@ -1057,20 +1057,21 @@ async function readReceipts(
     throw error;
   }
   const end = contents.lastIndexOf(10) + 1;
-  if (contents.at(-1) !== 10) {
-    const partial = contents.subarray(end);
-    if (preserveInterrupted) {
-      await writeFile(`${path}.interrupted-${randomUUID()}`, partial, {
-        flag: "wx",
-        mode: 0o600,
-      });
-    }
-    await truncate(path, end);
-  }
   const lines = contents.subarray(0, end).toString("utf8").split("\n");
   const receipts = new Map<string, MultiscanHistory>();
-  for (const line of lines.filter(Boolean)) {
-    const saved = JSON.parse(line);
+  for (const [index, line] of lines.entries()) {
+    if (!line) continue;
+    let saved;
+    try {
+      saved = JSON.parse(line);
+      if (typeof saved?.id !== "string")
+        throw new Error("Expected a receipt with a string id");
+    } catch (cause) {
+      throw new Error(
+        `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
+        { cause },
+      );
+    }
     if (saved.status === "completed_with_incomplete_coverage")
       saved.status = "completed";
     const receipt = saved as MultiscanReceipt;
@@ -1081,6 +1082,16 @@ async function readReceipts(
       // Extraction failures never start or modify a scan; keep its last receipt.
       scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
     });
+  }
+  if (contents.at(-1) !== 10) {
+    const partial = contents.subarray(end);
+    if (preserveInterrupted) {
+      await writeFile(`${path}.interrupted-${randomUUID()}`, partial, {
+        flag: "wx",
+        mode: 0o600,
+      });
+    }
+    await truncate(path, end);
   }
   return receipts;
 }
