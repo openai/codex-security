@@ -81,6 +81,12 @@
 - distinguish library defaults from caller obligations ([#2245](https://github.com/openai/codex-security/pull/2245))
 - preserve boxed numeric evidence across retries ([#2224](https://github.com/openai/codex-security/pull/2224))
 - restore concrete discovery guidance for Standard and Deep scans ([#2246](https://github.com/openai/codex-security/pull/2246))
+- reuse repository membership checks across scans ([#2249](https://github.com/openai/codex-security/pull/2249))
+- preserve permission errors from plugin installation ([#2247](https://github.com/openai/codex-security/pull/2247))
+- share terminal grapheme handling ([#2232](https://github.com/openai/codex-security/pull/2232))
+- prepare Veracode selection filters once per report ([#2248](https://github.com/openai/codex-security/pull/2248))
+- index saved sessions by parent when reading scan logs ([#2237](https://github.com/openai/codex-security/pull/2237))
+- share SARIF evidence projection for Semgrep and Endor ([#2233](https://github.com/openai/codex-security/pull/2233))
 
 <!-- release-section: highlights:end -->
 
