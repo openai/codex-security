@@ -401,6 +401,7 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
     queries.clear()
     cached = pending()
     assert (cached["batches"], cached["skippedPairs"]) == ([], 3)
+    assert cached["findingsByScanId"] == {}
     assert not any("FROM scan_comparison_matches" in sql for sql in queries)
 
     for scan in ("foreign-a", "foreign-b"):

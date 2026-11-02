@@ -1069,36 +1069,28 @@ describe("CLI workbench", () => {
 
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
+    const confirmed = (
+      beforeOccurrenceIds: string[],
+      afterOccurrenceIds: string[],
+    ) => ({
+      beforeOccurrenceIds,
+      afterOccurrenceIds,
+      confidence: "high" as const,
+      reason: "Same root cause.",
+    });
 
     const calls: Array<readonly string[]> = [];
     const inputs: Array<string | undefined> = [];
     const matcherCalls = mock<typeof matchScanFindings>(async (input) => {
       return input.after[0]?.occurrenceId === "b"
         ? {
-            matches: [
-              {
-                beforeOccurrenceIds: ["a"],
-                afterOccurrenceIds: ["b"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
-            ],
+            matches: [confirmed(["a"], ["b"])],
             uncertain: [],
           }
         : {
             matches: [
-              {
-                beforeOccurrenceIds: ["a", "b"],
-                afterOccurrenceIds: ["c"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
-              {
-                beforeOccurrenceIds: ["a-shared"],
-                afterOccurrenceIds: ["c-shared"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
+              confirmed(["a", "b"], ["c"]),
+              confirmed(["a-shared"], ["c-shared"]),
             ],
             uncertain: [
               {

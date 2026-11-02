@@ -136,19 +136,29 @@ describe("semantic scan comparison", () => {
       afterFindings: [after],
       beforeScans: [{ scanId: "previous", findings: [before] }],
     };
-    const match = (batches: (typeof legacyBatch)[]) =>
+    const match = (plan: JsonObject) =>
       matchCompletedScan({
         scanId: "current",
         repository: "/repository",
         previousFindings: [before],
         falsePositives: [],
         findings: [after],
-        workbench: async () => ({ batches }),
+        workbench: async ([command]) => {
+          expect(command).toBe("list-unmatched-scan-pairs");
+          return plan;
+        },
+        matchFindings: () => fail("Invalid plans must not start matching."),
       });
-    await expect(match([])).resolves.toBeUndefined();
-    await expect(match([legacyBatch])).rejects.toThrow(
+    await expect(match({ batches: [] })).resolves.toBeUndefined();
+    await expect(match({ batches: [legacyBatch] })).rejects.toThrow(
       "Update the custom plugin or use the bundled plugin.",
     );
+    await expect(
+      match({
+        findingsByScanId: { previous: [before] },
+        batches: [{ afterScanId: "current", beforeScanIds: ["previous"] }],
+      }),
+    ).rejects.toThrow("Matching plan is missing findings for scan current.");
   });
 
   test.each([
