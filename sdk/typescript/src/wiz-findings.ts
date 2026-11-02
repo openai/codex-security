@@ -14,11 +14,6 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 
-export type {
-  ExternalFinding as VendorFinding,
-  ExternalFindings as VendorFindings,
-} from "./external-findings.js";
-
 function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
   const id = text(value);
   if (

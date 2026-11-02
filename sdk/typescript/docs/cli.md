@@ -1206,9 +1206,8 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Recovery requires a matching campaign manifest. It skips completed results
-(including saved results with legacy coverage notes) when no newer attempt
-exists on disk, and skips
-repositories never started. For each latest failed or interrupted attempt:
+(including saved results with legacy coverage notes) and repositories never started. For each latest
+failed or interrupted attempt:
 
 - A sealed scan is recorded in `results.jsonl` without scanning again.
 - An eligible running Deep Scan resumes its original session, keeping its ID,
@@ -1216,17 +1215,10 @@ repositories never started. For each latest failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-Malformed committed records in `results.jsonl` stop ordinary resume with a line
-number and recovery guidance. With `--recover`, the original ledger is saved as
-`results.corrupt-<uuid>.jsonl` before usable records replace the active ledger.
-Completed rows stay skipped unless a newer attempt exists on disk; that attempt
-uses the same recovery process above. Original scan artifacts remain available.
-If damaged records leave attempted work without a retained receipt or saved
-attempt to recover, repair stops with an error and leaves the active ledger
-unchanged. Records that cannot identify both their task and attempt require
-manual repair even when older receipts or scan artifacts remain: those do not
-establish which later work was lost. Use the preserved backup to repair the ledger manually
-before retrying recovery; missing history is not classified as never started.
+If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
+a string task ID, the command reports its line number and leaves the ledger untouched.
+Restore a complete ledger backup that includes every committed attempt, or start
+a separate campaign in a new `--output-dir`.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
