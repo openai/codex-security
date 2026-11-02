@@ -28,8 +28,8 @@ export async function prepareLocalExternalImport(
   dependencies.signal?.throwIfAborted();
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  const readerSources = snapshotSourceRepositories(
-    dependencies.sourceRepositories,
+  const readerSources = distinctSourceRepositories(
+    snapshotSourceRepositories(dependencies.sourceRepositories),
   );
   const parsed = await abortable(
     () => readExternalFindings(path, settings, "local", readerSources),

@@ -688,11 +688,12 @@ export async function prepareNormalizedLocalImport(
 export function distinctSourceRepositories(
   sources: readonly ExternalSourceRepository[],
 ) {
-  const seen = new Set<string>();
+  const seen = new Map<ExternalSourceRepository["platform"], Set<string>>();
   return sources.filter(({ url, platform }) => {
-    const key = JSON.stringify({ url, platform });
-    if (seen.has(key)) return false;
-    seen.add(key);
+    const urls = seen.get(platform) ?? new Set<string>();
+    if (urls.has(url)) return false;
+    urls.add(url);
+    seen.set(platform, urls);
     return true;
   });
 }
@@ -702,11 +703,12 @@ export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   options: NormalizedLocalImportOptions & { sourceRepositoryUrl?: string },
   dependencies: LocalExternalImportDependencies,
-  readerInput = snapshotSourceRepositories(dependencies.sourceRepositories),
+  readerSources = distinctSourceRepositories(
+    snapshotSourceRepositories(dependencies.sourceRepositories),
+  ),
   parsedInput: readonly ExternalSourceRepository[] = [],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const readerSources = distinctSourceRepositories(readerInput);
   const parsedSources = distinctSourceRepositories(parsedInput);
   const current = structuredClone(input);
   // structuredClone omits inherited or non-enumerable SDK reader properties.
