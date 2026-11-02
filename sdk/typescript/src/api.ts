@@ -1314,6 +1314,7 @@ export class CodexSecurity {
     let repository = "";
     let tracker: ScanCostTracker | null = null;
     const reportTrackingError = (error: unknown): void => {
+      tracker?.recordTrackingError(error);
       notifyObserver(
         options,
         "onWarning",
@@ -2342,22 +2343,13 @@ export class CodexSecurity {
         }
         notifyObserver(options, "onWorkerStatus")(status);
       };
-      const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown, secondary = false): void => {
         if (options.maxCostUsd !== undefined) {
           costAbortController.abort(error);
           return;
         }
-        if (
-          isRecord(error) &&
-          (error["code"] === "EACCES" || error["code"] === "EPERM") &&
-          error["syscall"] === "open" &&
-          typeof error["path"] === "string"
-        ) {
-          const path = error["path"];
-          if (!secondary && reportedInaccessibleSessionLogs.has(path)) return;
-          reportedInaccessibleSessionLogs.add(path);
-        }
+        if (!secondary && costTracker?.recordTrackingError(error) === false)
+          return;
         notifyObserver(
           options,
           "onWarning",

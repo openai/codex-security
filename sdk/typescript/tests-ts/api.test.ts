@@ -3801,6 +3801,17 @@ if __name__ == "__main__":
       Promise.withResolvers<void>(),
     );
     const originalOpen = fsPromises.open;
+    const originalList = fsPromises.readdir;
+    const listing = spyOn(fsPromises, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(originalList, fsPromises, args);
+        if (String(args[0]) === sessions)
+          entries.sort((a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+          );
+        return entries;
+      },
+    );
     const opening = spyOn(fsPromises, "open").mockImplementation(
       async (...args: Parameters<typeof fsPromises.open>) => {
         const path = String(args[0]);
@@ -3873,6 +3884,132 @@ if __name__ == "__main__":
       for (const gate of gates) gate.resolve();
       await client.close();
       opening.mockRestore();
+      listing.mockRestore();
+    }
+  });
+
+  test("reports a recovered secondary permission failure when it becomes the sole failure", async () => {
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions);
+    const primary = join(sessions, "a-primary.jsonl"),
+      secondary = join(sessions, "b-secondary.jsonl");
+    for (const [path, id, parent] of [
+      [primary, "thread-1", undefined],
+      [secondary, "worker-thread", "thread-1"],
+    ] as const)
+      await writeFile(
+        path,
+        [
+          {
+            type: "session_meta",
+            payload: { id, ...(parent ? { parent_thread_id: parent } : {}) },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 10,
+                  output_tokens: 0,
+                  cached_input_tokens: 0,
+                  cache_write_input_tokens: 0,
+                },
+              },
+            },
+          },
+        ]
+          .map((value) => JSON.stringify(value))
+          .join("\n") + "\n",
+      );
+    const failed = new Set([primary, secondary]);
+    let code = "EACCES",
+      attempts = 0;
+    const initial = Promise.withResolvers<void>(),
+      recovered = Promise.withResolvers<void>(),
+      sole = Promise.withResolvers<void>(),
+      changed = Promise.withResolvers<void>();
+    const originalOpen = fsPromises.open,
+      originalList = fsPromises.readdir;
+    const listing = spyOn(fsPromises, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(originalList, fsPromises, args);
+        if (String(args[0]) === sessions)
+          entries.sort((a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+          );
+        return entries;
+      },
+    );
+    const opening = spyOn(fsPromises, "open").mockImplementation(
+      async (...args: Parameters<typeof fsPromises.open>) => {
+        const path = String(args[0]);
+        if (failed.has(path)) {
+          if (path === primary && ++attempts === 3) initial.resolve();
+          throw Object.assign(
+            new Error(
+              `Synthetic ${path === primary ? "EACCES" : code} ${basename(path)}`,
+            ),
+            { code: path === primary ? "EACCES" : code, syscall: "open", path },
+          );
+        }
+        return originalOpen(...args);
+      },
+    );
+    const warnings: string[] = [];
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: () => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed() {
+            await copyCompletedScan(root);
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "thread-1" };
+              await initial.promise;
+              failed.clear();
+              await recovered.promise;
+              failed.add(secondary);
+              await appendFile(secondary, "{}\n");
+              await sole.promise;
+              code = "EPERM";
+              await changed.promise;
+              failed.clear();
+              for await (const event of completedEvents())
+                if (event.type !== "thread.started") yield event;
+            }
+            return { events: events() };
+          },
+        }),
+      }),
+    });
+    const keepAlive = setTimeout(() => {}, 10_000);
+    try {
+      await expect(
+        client.run(repository, {
+          onActivity: () => {},
+          onUsage: (usage) => {
+            if (usage.input_tokens === 20) recovered.resolve();
+          },
+          onWarning: (warning) => {
+            if (!warning.includes("b-secondary.jsonl")) return;
+            warnings.push(warning);
+            if (warnings.length === 2) sole.resolve();
+            if (warnings.length === 3) changed.resolve();
+          },
+        }),
+      ).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(warnings).toHaveLength(3);
+      expect(warnings[1]).toContain("EACCES");
+      expect(warnings[2]).toContain("EPERM");
+    } finally {
+      failed.clear();
+      for (const gate of [initial, recovered, sole, changed]) gate.resolve();
+      clearTimeout(keepAlive);
+      await client.close();
+      opening.mockRestore();
+      listing.mockRestore();
     }
   });
 

@@ -1355,15 +1355,17 @@ describe("live scan cost tracking", () => {
         expect(tracker.refresh()).rejects.toMatchObject({ path: paths[0] });
       try {
         for (let index = 0; index < 3; index++) await refresh();
-        expect(attempts).toBe(18);
+        expect(attempts).toBe(code === "EACCES" ? 8 : 18);
         expect(diagnostics).toHaveLength(5);
         failed.delete(paths[1]!);
-        await refresh();
+        for (let index = 0; index < paths.length; index++) await refresh();
         failed.add(paths[1]!);
         await appendFile(paths[1]!, "{}\n");
         await refresh();
         expect(diagnostics).toHaveLength(6);
         failed.clear();
+        for (let index = 0; index < paths.length; index++)
+          await tracker.refresh().catch(() => {});
         await tracker.refresh();
         for (const path of paths) {
           failed.add(path);
@@ -1372,7 +1374,7 @@ describe("live scan cost tracking", () => {
         for (let index = 0; index < 3; index++) await refresh();
         expect(diagnostics).toHaveLength(11);
         messages.set(paths[2]!, "Synthetic changed I/O diagnostic");
-        await refresh();
+        for (let index = 0; index < paths.length; index++) await refresh();
         expect(diagnostics).toHaveLength(12);
         expect(diagnostics.every(({ secondary }) => secondary === true)).toBe(
           true,
@@ -1384,6 +1386,158 @@ describe("live scan cost tracking", () => {
       }
     },
   );
+
+  test("shares a permission failure episode across replay, growth, and recovery", async () => {
+    const home = await codexHome(),
+      usage = { input_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(home, "worker-thread", usage, {
+      parent: "scan-thread",
+    });
+    const diagnostics: unknown[] = [],
+      events: ScanSessionEvent[] = [];
+    const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onError: (error) => diagnostics.push(error),
+    };
+    const tracker = new ScanCostTracker(options);
+    tracker.start("scan-thread");
+    options.onActivity = () => {};
+    await tracker.refresh();
+    const blocker = join(home, "sessions", "a-blocker.jsonl");
+    await writeFile(blocker, "{}\n");
+    const primary = Object.assign(new Error("Synthetic primary read failure"), {
+      code: "EIO",
+      syscall: "open",
+      path: blocker,
+    });
+    let denied = true,
+      deniedOpens = 0;
+    const opened = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) === blocker) throw primary;
+        if (String(args[0]) === worker && denied) {
+          deniedOpens++;
+          throw Object.assign(new Error("Synthetic worker denial"), {
+            code: "EACCES",
+            syscall: "open",
+            path: worker,
+          });
+        }
+        return opened(...args);
+      },
+    );
+    options.onSessionEvent = (event) => events.push(event);
+    try {
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      await appendFile(worker, "{}\n");
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      expect(deniedOpens).toBe(3);
+      expect(diagnostics).toHaveLength(1);
+      denied = false;
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      expect(
+        events.filter(
+          (event) =>
+            event.threadId === "worker-thread" &&
+            event.event["type"] === "session_meta",
+        ),
+      ).toHaveLength(1);
+      denied = true;
+      await appendFile(worker, "{}\n");
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      expect(diagnostics).toHaveLength(2);
+    } finally {
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  });
+
+  test("rotates one unchanged denied-open probe while observing healthy workers", async () => {
+    const home = await codexHome(),
+      usage = { input_tokens: 10, output_tokens: 0 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(home, "worker-thread", usage, {
+      parent: "scan-thread",
+    });
+    const directory = join(home, "sessions", "denied");
+    await filesystem.mkdir(directory);
+    const histories = new Set(
+      Array.from({ length: 1000 }, (_, index) =>
+        join(directory, `${index}.jsonl`),
+      ),
+    );
+    for (const path of histories) await writeFile(path, "{}\n");
+    const activity: ScanActivity[] = [];
+    const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: home,
+    };
+    const tracker = new ScanCostTracker(options);
+    tracker.start("scan-thread");
+    options.onActivity = (event) => activity.push(event);
+    const opened = filesystem.open;
+    let denied = true,
+      attempts = 0;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        const path = String(args[0]);
+        if (denied && histories.has(path)) {
+          attempts++;
+          throw Object.assign(new Error("Synthetic denied history"), {
+            code: "EACCES",
+            syscall: "open",
+            path,
+          });
+        }
+        return opened(...args);
+      },
+    );
+    try {
+      await expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
+      expect(attempts).toBe(1000);
+      await appendSessionItem(worker, {
+        id: "healthy-output",
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "Healthy output during denied history retries.",
+          },
+        ],
+      });
+      for (let index = 0; index < 3; index++)
+        await expect(tracker.refresh()).rejects.toMatchObject({
+          code: "EACCES",
+        });
+      expect(attempts).toBe(1003);
+      expect(
+        activity.filter(
+          (event) =>
+            event.description ===
+            "Healthy output during denied history retries.",
+        ),
+      ).toHaveLength(1);
+      denied = false;
+      await tracker.refresh().catch(() => {});
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(20);
+      expect(
+        activity.filter(
+          (event) =>
+            event.description ===
+            "Healthy output during denied history retries.",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  });
 
   test.each(["EMFILE", "ENFILE"])(
     "preserves the first directory %s diagnostic before a replay failure",

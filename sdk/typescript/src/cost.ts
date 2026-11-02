@@ -123,6 +123,7 @@ function createSessionUsage(observeUsage: boolean) {
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
     unreadable: false,
+    deniedOpen: null as { error: unknown } | null,
     threadId: null as string | null,
     parentThreadId: null as string | null,
     workingDirectory: null as string | null,
@@ -155,8 +156,10 @@ export class ScanCostTracker {
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
   readonly #reportedFailures = new Map<string, unknown>();
+  readonly #deniedOpens = new Set<string>();
   #threadId: string | null = null;
   #observingWorkers = true;
+  #stopping = false;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
@@ -180,6 +183,21 @@ export class ScanCostTracker {
     if (threadId !== null) {
       this.#receipts.set(threadId, normalized);
     }
+  }
+
+  /** Record primary permission warnings using the same episode as secondary ones. */
+  public recordTrackingError(error: unknown): boolean {
+    if (
+      !isDeniedOpen(error) ||
+      !isRecord(error) ||
+      typeof error["path"] !== "string"
+    )
+      return true;
+    const path = error["path"],
+      key = trackingFailureKey(error);
+    const previous = this.#reportedFailures.get(path);
+    this.#reportedFailures.set(path, key);
+    return previous !== key;
   }
 
   public start(threadId: string): void {
@@ -234,6 +252,7 @@ export class ScanCostTracker {
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
+    this.#stopping = true;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
     try {
       await this.refresh();
@@ -272,6 +291,13 @@ export class ScanCostTracker {
     let blocked: [SessionUsage, unknown] | undefined;
     let traversalFailure: { error: unknown } | undefined;
     let fatalFileFailure: { error: unknown } | undefined;
+    const retry = this.#deniedOpens.values().next().value;
+    if (retry !== undefined) {
+      this.#deniedOpens.delete(retry);
+      this.#deniedOpens.add(retry);
+    }
+    // Match fail-fast polling's one denied-open probe while still reading healthy logs.
+    let retryDenied = this.#stopping || !observeHealthySessions;
     try {
       for await (const path of sessionFiles(
         join(this.#options.codexHome, "sessions"),
@@ -282,8 +308,15 @@ export class ScanCostTracker {
           this.#sessions.set(path, session);
         }
         try {
-          await readSessionUsage(path, session, repository);
-          this.#reportedFailures.delete(JSON.stringify(["read", path]));
+          const denied = session.deniedOpen !== null;
+          const result = await readSessionUsage(
+            path,
+            session,
+            repository,
+            retryDenied || path === retry,
+          );
+          if (result !== "unchanged") this.#reportedFailures.delete(path);
+          if (denied && result === "read") retryDenied = true;
         } catch (error) {
           if (session.threadId === null) {
             if (!observeHealthySessions || !isBlockedLogRead(error)) {
@@ -294,6 +327,9 @@ export class ScanCostTracker {
           }
           unreadable.set(session, error);
           failures.push({ session, error, path });
+        } finally {
+          if (session.deniedOpen !== null) this.#deniedOpens.add(path);
+          else this.#deniedOpens.delete(path);
         }
       }
       this.#reportedFailures.delete("traversal");
@@ -372,14 +408,11 @@ export class ScanCostTracker {
       ];
       for (const failure of remaining) {
         const key = trackingFailureKey(failure.error, failure.path);
-        const identity =
-          failure.path === undefined
-            ? "traversal"
-            : JSON.stringify([failure.phase ?? "read", failure.path]);
-        const previous = this.#reportedFailures.get(identity);
-        this.#reportedFailures.set(identity, key);
         if (seen.has(key)) continue;
         seen.add(key);
+        const identity = failure.path ?? "traversal";
+        const previous = this.#reportedFailures.get(identity);
+        this.#reportedFailures.set(identity, key);
         if (previous !== key)
           notify(() => this.#options.onError?.(failure.error, true));
       }
@@ -411,10 +444,21 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage(observeUsage);
         session.events = [];
+        session.deniedOpen = tracked.deniedOpen;
         try {
-          await readSessionUsage(path, session, repository);
-          this.#reportedFailures.delete(JSON.stringify(["replay", path]));
+          const denied = session.deniedOpen !== null;
+          const result = await readSessionUsage(
+            path,
+            session,
+            repository,
+            retryDenied || path === retry,
+          );
+          if (result !== "unchanged") this.#reportedFailures.delete(path);
+          if (denied && result === "read") retryDenied = true;
+          this.#deniedOpens.delete(path);
         } catch (error) {
+          tracked.deniedOpen = session.deniedOpen;
+          if (tracked.deniedOpen !== null) this.#deniedOpens.add(path);
           if (!observeHealthySessions) throw error;
           blocked ??= [tracked, error];
           relevant.push({ session: tracked, error, path, phase: "replay" });
@@ -623,14 +667,24 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
-): Promise<void> {
-  if (session.unreadable) return;
+  retryDenied = true,
+): Promise<"read" | "unchanged" | "missing"> {
+  if (session.unreadable) return "unchanged";
+  if (session.deniedOpen !== null && !retryDenied)
+    throw session.deniedOpen.error;
   let file;
+  let opening = false;
   try {
-    if ((await stat(path)).size === session.offset) return;
+    if ((await stat(path)).size === session.offset) return "unchanged";
+    opening = true;
     file = await open(path, "r");
+    session.deniedOpen = null;
   } catch (error) {
-    if (isMissingFile(error)) return;
+    if (isMissingFile(error)) {
+      session.deniedOpen = null;
+      return "missing";
+    }
+    if (opening && isDeniedOpen(error)) session.deniedOpen = { error };
     throw error;
   }
   try {
@@ -642,7 +696,7 @@ async function readSessionUsage(
         buffer.length,
         session.offset,
       );
-      if (bytesRead === 0) return;
+      if (bytesRead === 0) return "read";
       session.offset += bytesRead;
       try {
         const lines = session.decoder
@@ -1048,6 +1102,14 @@ function isDescriptorExhaustion(error: unknown): boolean {
   return (
     isRecord(error) &&
     (error["code"] === "EMFILE" || error["code"] === "ENFILE")
+  );
+}
+
+function isDeniedOpen(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    error["syscall"] === "open"
   );
 }
 
