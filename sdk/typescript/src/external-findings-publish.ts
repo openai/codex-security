@@ -1479,13 +1479,12 @@ async function preparePublicationInput(
         let persisted = pending !== undefined;
         try {
           if (selected?.checkedCanonical) current.canonicalChecked = true;
-          if (
-            pending === undefined ||
-            adoptProjectMap ||
-            selected?.checkedCanonical
-          ) {
+          if (pending === undefined || adoptProjectMap) {
             await writeAtomicJson(pendingPath, current);
             persisted = true;
+          } else if (selected?.checkedCanonical) {
+            // The existing approval and receipts are usable if caching the scan fails.
+            await writeAtomicJson(pendingPath, current).catch(() => undefined);
           }
           await rememberFile();
           progress({

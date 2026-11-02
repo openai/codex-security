@@ -4563,6 +4563,56 @@ test.each(["released", "current"])(
   },
 );
 
+test("a released receipt can finish readback when caching the checkpoint scan fails", async () => {
+  const { f, prepare, path, saved, request } =
+    await oldScoreApproval("unreported");
+  f.state.brokenReadback = true;
+  await expect((await prepare(2.5)).publish()).rejects.toThrow(
+    "Readback unavailable",
+  );
+  const receipts = [f.receipts.get(request.request_id)!];
+  const released = { ...JSON.parse(saved), receipts };
+  await writeFile(path, JSON.stringify(released));
+
+  const rename = fs.rename;
+  const writes = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (String(to) === path) {
+      const { canonicalChecked, ...pending } = JSON.parse(
+        await readFile(from, "utf8"),
+      );
+      if (canonicalChecked && Bun.deepEquals(pending, released))
+        throw Object.assign(new Error("No space for checkpoint metadata"), {
+          code: "ENOSPC",
+        });
+    }
+    return rename(from, to);
+  });
+  try {
+    const retry = await prepare(2.5);
+    expect(retry.preview.resumed).toBe(true);
+    const interrupted = await retry.publish().catch((error: unknown) => error);
+    if (!(interrupted instanceof ExternalPublicationError)) throw interrupted;
+    expect(interrupted.result).toMatchObject({
+      status: "interrupted",
+      counts: { updated: 1 },
+      receipts,
+      unacknowledged: 0,
+      savedSubmission: path,
+    });
+    expect(await readFile(path, "utf8")).toBe(JSON.stringify(released));
+    f.state.brokenReadback = false;
+    const completed = await (await prepare(2.5)).publish();
+    expect(completed).toMatchObject({
+      status: "complete",
+      verified: 1,
+      receipts,
+    });
+    expect(f.posts).toEqual([JSON.stringify(request)]);
+  } finally {
+    writes.mockRestore();
+  }
+});
+
 test("checking a released canonical approval preserves ambiguous boxed report metadata", async () => {
   const { f, prepare } = await oldScoreApproval("report");
   f.state.throttle = true;
