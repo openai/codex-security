@@ -93,6 +93,7 @@
 - clarify the post-scan findings review prompt ([#2255](https://github.com/openai/codex-security/pull/2255))
 - remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
 - opt in to the remote rubric for standalone reclassification ([#2257](https://github.com/openai/codex-security/pull/2257))
+- accept a host-supplied severity rubric for Standard scans ([#2253](https://github.com/openai/codex-security/pull/2253))
 
 <!-- release-section: highlights:end -->
 
