@@ -996,6 +996,42 @@ describe("scan activity", () => {
 describe("concrete repository path prefixes", () => {
   test.each([
     [
+      "POSIX backslash directory",
+      "/\\Foo/Repo",
+      "/\\Foo/Repo/Src/Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "distinct POSIX backslash directory",
+      "/\\Foo/Repo",
+      "/\\foo/Repo/Src/Login.ts",
+      [],
+    ],
+    [
+      "mixed separators are not a UNC host",
+      "//Foo/Repo",
+      "/\\foo/Repo/Src/Login.ts",
+      [],
+    ],
+    [
+      "extended Windows drive",
+      "\\\\?\\C:\\Repo",
+      "\\\\?\\c:\\Repo\\Src\\Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "extended Windows UNC host",
+      "\\\\?\\UNC\\Server\\Share\\Repo",
+      "\\\\?\\UNC\\server\\Share\\Repo\\Src\\Login.ts",
+      ["Src/Login.ts"],
+    ],
+    [
+      "extended UNC collection remains exact",
+      "//?/UNC/Server/Docs/Repo",
+      "//?/UNC/server/docs/Repo/Src/Login.ts",
+      [],
+    ],
+    [
       "matching drive casing",
       "C:\\code\\project",
       "C:\\code\\project\\Src\\Login.ts",
