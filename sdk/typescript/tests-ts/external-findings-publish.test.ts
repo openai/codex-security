@@ -9,6 +9,7 @@ import {
 } from "./support/opengrep-import-fixtures.js";
 import {
   normalizeSnykFindingsExport,
+  normalizeSnykJson,
   normalizeSnykSarif,
   snykRepositoryUrls,
 } from "../src/snyk-findings.js";
@@ -4368,6 +4369,32 @@ for (const [provider, report, normalize, dryRunTitle] of [
     },
   );
 }
+
+test("native Snyk remote tests bind file and normalized imports to the reported GitHub repository", async () => {
+  const input = snykJson();
+  input.path = "https://github.com/other/project#release/v1";
+  const f = await fixture(input);
+  const selected = { ...options, provider: "snyk" as const };
+  await expect(
+    prepareExternalPublication(f.file, selected, f.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalizeSnykJson(input),
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
+
+  input.path = "https://github.com/example/project.git#release/v1";
+  await writeFile(f.file, JSON.stringify(input));
+  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  expect((await prepared.publish()).verified).toBe(1);
+  expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
+    project: { path: input.path },
+  });
+});
 
 test("Snyk source repository binding is rechecked for a fresh import after completion", async () => {
   const input: any = snykSarif();
