@@ -66,6 +66,16 @@ must describe the actual source; it does not authorize additional repository
 access. Unknown extension fields are preserved. This does not require creating
 scan manifests or other saved-scan artifacts.
 
+For an imported observation, set `"kind": "imported"` on its entry alongside
+`id` and `finding`. Supply the actual source in `finding.provenance.source`
+and retain original source references and evidence as extensions. Imported
+findings may omit `ruleId`, `identity`, `taxonomy`, and `remediation`. If
+there is no known repository line, supply an empty `locations` array and
+preserve any file-level evidence in the original source data. All other
+Finding requirements apply. Entries without a kind use the full Finding
+schema. A SAME review must return a merged finding that satisfies the schema
+of the assigned canonical original.
+
 Observation IDs are host-owned, nonempty strings, unique within `observations`.
 Supply the pending observations and their retrieved neighbors together as original
 observations. Each `candidateRelationships` entry selects one anchor to process;

@@ -16,7 +16,6 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
-  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -25,6 +24,7 @@ import {
   sarifResultContext,
   stableId,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 export interface SemgrepImportOptions {
@@ -256,17 +256,7 @@ export function normalizeSemgrepSarif(
           "Semgrep result must reference exactly one rule in its run.",
         );
       const rule = selectedRule?.rule;
-      const ruleIndex = selectedRule?.index;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Semgrep ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Semgrep rule reference");
-        if (!matchesSarifRuleReference(ref, ruleId, selectedRule))
-          throw new Error("Inconsistent or external Semgrep rule reference.");
-      }
+      validateSarifRuleReference(result, ruleId, selectedRule, "Semgrep");
       const { physical, artifact } = primarySarifLocation(result);
       const rawPath = sarifArtifactUri(artifact, context.runContext);
       const region = record(physical["region"], "Semgrep region");

@@ -387,6 +387,26 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("uses the singular for one finding or reviewed file", () => {
+    const scan = {
+      scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      targetPath: "/demo/service",
+      mode: "standard",
+      progress: { status: "complete", coverage: { filesTotal: 1 } },
+      findingCount: 1,
+      startedAt: "2026-07-24T12:00:00Z",
+    };
+    const list = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", { columns: 60 }),
+    );
+    expect(list).toMatch(/1 scan {2}· {2}latest: 1 finding$/mu);
+    expect(list).toContain("1 finding  ·  ✓ COMPLETE");
+    const show = stripVTControlCharacters(
+      renderScanHistory({ ...scan, findings: [] }, "show"),
+    );
+    expect(show).toMatch(/REVIEW {2}1 file$/mu);
+  });
+
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
