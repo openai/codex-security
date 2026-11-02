@@ -51,6 +51,15 @@ export function normalizeEndorFindings(
       );
     }
     // Endor can omit the empty repeated objects field, leaving only pagination.
+    const objects = list["objects"];
+    const total = response["total_size"];
+    if (
+      Array.isArray(objects) &&
+      !objects.length &&
+      (typeof total === "number" || typeof total === "string") &&
+      Number(total) > 0
+    )
+      throw new Error("Expected Endor list.objects in the finding export.");
     if (
       list["objects"] == null &&
       (Object.keys(list).some(

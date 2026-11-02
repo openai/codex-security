@@ -6518,6 +6518,45 @@ for (const [provider, report, normalize, dryRunTitle] of [
     "Endor CLI dry-run recognizes SARIF without writing imports",
   ],
 ] as const) {
+  test(`${provider} SARIF warnings preserve interrupted requests and appear in the terminal preview`, async () => {
+    const source = report();
+    const notification = {
+      level: "warning",
+      message: { text: "Example manifest was skipped" },
+    };
+    const input = {
+      ...source,
+      runs: source.runs.map((run) => ({
+        ...run,
+        invocations: [
+          {
+            executionSuccessful: true,
+            toolExecutionNotifications: [notification],
+          },
+        ],
+      })),
+    };
+    const f = await fixture(input);
+    const settings = { ...options, provider };
+    const command = [...f.command, "--dry-run"];
+    command[command.indexOf("--provider") + 1] = provider;
+    command[command.indexOf("--format") + 1] = "toon";
+    const cli = createCliTest(main);
+    expect(await cli.runCli(command, f.cliDeps)).toBe(0);
+    expect(cli.stderr.text()).toContain("Example manifest was skipped");
+    const old = structuredClone(normalize(input));
+    delete old.report;
+    const original = await prepareNormalizedExternalPublication(
+      old,
+      settings,
+      f.deps,
+    );
+    f.state.loseResponse = true;
+    await expect(original.publish()).rejects.toThrow();
+    const retry = await prepareExternalPublication(f.file, settings, f.deps);
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+  });
   test(dryRunTitle, async () => {
     const f = await fixture(report());
     const command = [...f.command, "--dry-run"];

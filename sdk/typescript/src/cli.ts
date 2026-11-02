@@ -3719,6 +3719,11 @@ export async function main(
             );
           };
           const showScannerReport = (preview: ExternalFindings) => {
+            if (
+              preview.findings.length &&
+              !(humanSummary && options.to === "local" && options.dryRun)
+            )
+              writeDiagnostic(coverageWarnings(preview));
             if (options.provider !== "opengrep") return;
             writeDiagnostic("Reader: OpenGrep (stored provider: semgrep)\n");
             const diagnostics = preview.report?.["errors"];

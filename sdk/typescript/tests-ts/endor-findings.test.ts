@@ -58,6 +58,7 @@ test("an Endor response with no objects and unrecognized list data is not an emp
   for (const list of [
     { items: [endorFinding()] },
     { response: { total_size: 13 } },
+    { objects: [], response: { total_size: 13 } },
   ]) {
     expect(() => normalizeEndorFindings({ list })).toThrow(
       "Endor list.objects",

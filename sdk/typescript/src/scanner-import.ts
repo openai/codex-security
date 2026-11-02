@@ -544,8 +544,11 @@ export function trackReaderSelection(result: ExternalFindings) {
       changes.push({ index, position, id, previous });
   }
 
-  function finish(filter?: SelectionFilter): ExternalFindings {
-    if (!changes.length && !uncertainIds.size) {
+  function finish(
+    filter?: SelectionFilter,
+    notifications?: unknown[],
+  ): ExternalFindings {
+    if (!changes.length && !uncertainIds.size && !notifications?.length) {
       filter?.(result);
       return result;
     }
@@ -577,6 +580,13 @@ export function trackReaderSelection(result: ExternalFindings) {
     // A removed sibling could have depended on an unproven row for its scope.
     filter?.(previous, uncertainIds.size ? uncertainIds : undefined);
     filter?.(result);
+    const reportFreeIdentity = Boolean(notifications?.length && !result.report);
+    // Older SARIF readers retained invocations in the rows, without a summary.
+    if (notifications?.length)
+      result.report = {
+        ...result.report,
+        notifications: structuredClone(notifications),
+      };
     const sourceFindingIds = [
       ...new Set([
         ...previous.findings.map((row) => row.source_finding_id),
@@ -586,6 +596,7 @@ export function trackReaderSelection(result: ExternalFindings) {
     if (uncertainIds.size) {
       rememberPreviousSelection(result, {
         sourceFindingIds,
+        reportFreeIdentity,
         uncertainFindingIds: [...uncertainIds],
         knownFindings: structuredClone(
           previous.findings.filter(
@@ -596,6 +607,7 @@ export function trackReaderSelection(result: ExternalFindings) {
     } else {
       rememberPreviousSelection(result, {
         sourceFindingIds,
+        reportFreeIdentity,
         snapshot: structuredClone(previous),
       });
     }
@@ -662,12 +674,5 @@ export function normalizeRecords<T>(
     selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  const normalized = selection.finish(options.filter);
-  if (options.notifications?.length) {
-    normalized.report = {
-      ...normalized.report,
-      notifications: structuredClone(options.notifications),
-    };
-  }
-  return normalized;
+  return selection.finish(options.filter, options.notifications);
 }

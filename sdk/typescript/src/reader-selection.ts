@@ -5,6 +5,8 @@ import type { ExternalFindings } from "./external-findings.js";
 import { canonicalJson, cloneWithoutGetters } from "./record.js";
 
 export interface LegacyReaderSelection {
+  /** The reader added a SARIF display summary to a previously report-free selection. */
+  reportFreeIdentity?: boolean;
   sourceFindingIds: string[];
   snapshot?: ExternalFindings;
   unprovenIdPrefixes?: string[];

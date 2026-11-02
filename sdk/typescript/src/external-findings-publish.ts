@@ -747,7 +747,9 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  const identity = publicationIdentity(current);
+  const identity = reader?.reportFreeIdentity
+    ? current.findings
+    : publicationIdentity(current);
   return {
     current,
     legacy: current,
