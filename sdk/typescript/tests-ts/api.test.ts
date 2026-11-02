@@ -34,6 +34,7 @@ import {
   AuthenticationRequiredError,
   CodexSecurity,
   DiffTarget,
+  IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -3611,6 +3612,160 @@ if __name__ == "__main__":
     await client.close();
   });
 
+  test.each([
+    ["caller abort", true],
+    ["nested interruption", true],
+    ["client close", true],
+    ["caller abort then close", true],
+    ["ordinary failure", false],
+    ["independent abort", false],
+    ["older plugin", false],
+  ] as const)(
+    "registers the terminal state after %s",
+    async (scenario, canceled) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const runtime = preparedRuntime(codexHome);
+      if (scenario === "older plugin") {
+        const pluginRoot = await copyCredentialTestPlugin(root);
+        const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        delete manifest.codexSecurity.registeredScanCancellation;
+        await writeFile(manifestPath, JSON.stringify(manifest));
+        runtime.plugin = {
+          ...runtime.plugin,
+          pluginRoot,
+          installedRoot: pluginRoot,
+        };
+      }
+
+      const controller = new AbortController();
+      const closes =
+        scenario === "client close" || scenario === "caller abort then close";
+      const stopped = mock(
+        (_args: readonly string[], _signal?: AbortSignal) => {},
+      );
+      let closing: Promise<void> | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => runtime,
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "fail-scan") stopped(args, options.signal);
+          if (args[0] === "get-scan-feedback") {
+            if (closes) {
+              if (scenario === "caller abort then close")
+                controller.abort("caller stopped");
+              closing = client.close();
+            } else if (scenario === "ordinary failure") {
+              return Promise.reject(
+                new Error("underlying scan failure"),
+              ).finally(() => controller.abort("caller stopped"));
+            } else {
+              controller.abort("caller stopped");
+              if (scenario === "independent abort") {
+                const error = new Error("subprocess aborted", {
+                  cause: new Error("independent stop"),
+                });
+                error.name = "AbortError";
+                throw error;
+              }
+              if (scenario === "nested interruption") {
+                const abort = new Error("validation subprocess aborted", {
+                  cause: controller.signal.reason,
+                });
+                abort.name = "AbortError";
+                let cause: unknown = new IncompleteScanError(
+                  "validation interrupted",
+                  { cause: abort },
+                );
+                for (let i = 0; i < 10; i++)
+                  cause = new ScanInterruptedError(
+                    "nested interruption",
+                    scanDir,
+                    { cause },
+                  );
+                throw cause;
+              }
+              throw new DOMException("workbench command aborted", "AbortError");
+            }
+          }
+          return mockWorkbench(args, input);
+        },
+      });
+      const scan = client.run(repository, { signal: controller.signal });
+      if (closes) {
+        await expect(scan).rejects.toThrow("CodexSecurity is closed.");
+        await closing;
+      } else {
+        await expect(scan).rejects.toBeInstanceOf(ScanInterruptedError);
+      }
+      expect(stopped.mock.calls).toEqual([
+        [
+          [
+            "fail-scan",
+            "--scan-id",
+            "scan_example_001",
+            scenario === "ordinary failure"
+              ? "--message=underlying scan failure"
+              : expect.stringMatching(/^--message=.+/),
+            ...(canceled ? ["--canceled"] : []),
+          ],
+          undefined,
+        ],
+      ]);
+    },
+  );
+
+  const otherScanBudget = new ScanCostLimitExceededError(
+    0.001,
+    estimateScanCost("gpt-5.6-sol", { input_tokens: 1_000, output_tokens: 0 })!,
+    "other-scan",
+  );
+  const nativeAbort = new DOMException("subprocess interrupted", "AbortError");
+  const decoderError = new Error("Failed to parse item: NOT JSON", {
+    cause: new SyntaxError(),
+  });
+  test.each([
+    ["native abort", nativeAbort, undefined, true],
+    ["decoder failure", decoderError, undefined, false],
+    ["forwarded budget stop", otherScanBudget, otherScanBudget, true],
+    ["decoder failure on external stop", decoderError, otherScanBudget, false],
+    ["late caller abort", nativeAbort, undefined, false],
+  ] as const)(
+    "records the registered scan disposition for a %s",
+    async (scenario, nativeError, reason, canceled) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const late = scenario === "late caller abort";
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (!late) controller.abort(reason);
+        throw nativeError;
+      }
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "get-scan" && !options.signal) controller.abort();
+          if (args[0] === "fail-scan") stopped = args;
+          return mockWorkbench(args, input);
+        },
+      });
+      const scan = client.run(repository, { signal: controller.signal });
+      const error = await scan.catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(ScanInterruptedError);
+      const interrupted = error as ScanInterruptedError;
+      const cause = late ? controller.signal.reason : nativeError;
+      if (reason) expect(interrupted).toBe(reason);
+      else expect(interrupted.cause).toBe(cause);
+      expect(stopped?.slice(1, 3)).toEqual(["--scan-id", "scan_example_001"]);
+      const message = late ? nativeError.message : interrupted.message;
+      if (reason && !canceled)
+        expect(stopped).toContainEqual(expect.stringMatching(/^--message=.+/));
+      else expect(stopped).toContain(`--message=${message}`);
+      expect(stopped?.includes("--canceled")).toBe(canceled);
+    },
+  );
+
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const commands: string[] = [];
@@ -3659,13 +3814,17 @@ if __name__ == "__main__":
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
       const warnings: string[] = [];
+      const controller = new AbortController();
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "register-cli-scan")
+            options.signal?.addEventListener(
+              "abort",
+              () => controller.abort(),
+              { once: true },
+            );
+          if (args[0] === "fail-scan") expect(args).not.toContain("--canceled");
           commands.push(args[0]!);
           return mockWorkbench(args, input);
         },
@@ -3673,6 +3832,7 @@ if __name__ == "__main__":
       });
 
       const scan = client.run(repository, {
+        signal: controller.signal,
         ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
@@ -3680,6 +3840,7 @@ if __name__ == "__main__":
       if (enforceCostLimit) {
         await expect(scan).rejects.toThrow("interrupted");
         expect(commands).toContain("fail-scan");
+        expect(controller.signal.aborted).toBe(true);
       } else {
         await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
         expect(warnings).toContainEqual(

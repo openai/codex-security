@@ -36,10 +36,9 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
-import { runWorkbench } from "../src/runtime.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import {
   createApiTestFixtures,
   removeTemporaryDirectory,
@@ -156,6 +155,15 @@ async function fixture(
       buildId: "fixture-build",
     },
   };
+}
+
+function hostedWorkbench(input: HostedScanInput, args: string[]) {
+  const workbench = workbenchCommand(pythonExecutable()!, () => ({
+    PATH: process.env["PATH"],
+    SYSTEMROOT: process.env["SYSTEMROOT"],
+    CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+  }));
+  return workbench(args);
 }
 
 async function writeDraft(
@@ -991,38 +999,59 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
 });
 
 test.each([
-  ["failed", undefined],
-  ["failed", "remote-session"],
-  ["canceled", "remote-session"],
-  ["acceptance_unknown", "remote-session"],
+  ["failed", undefined, false, "failed"],
+  ["failed", "remote-session", false, "failed"],
+  ["canceled", "remote-session", false, "canceled"],
+  ["acceptance_unknown", "remote-session", false, "acceptance_unknown"],
+  ["failed", "remote-session", true, "canceled"],
+  ["canceled", "remote-session", true, "canceled"],
+  ["acceptance_unknown", "remote-session", true, "acceptance_unknown"],
 ] as const)(
-  "standalone SDK retains %s host identity %p and usage in its terminal receipt",
-  async (status, sessionId) => {
+  "standalone SDK retains %s host receipt with session %p and caller abort %p, returning %s",
+  async (status, sessionId, callerAborts, terminalStatus) => {
     const input = await fixture();
+    const controller = new AbortController();
     const usage = {
       authoritative_snapshot: { input_tokens: 123, output_tokens: 7 },
     };
     let execution: ScanExecutionResult | undefined;
-    const terminal = await runHostedScan(input, {
-      executor: {
-        async run(request) {
-          execution = receipt(request, {
-            status,
-            sessionId,
-            usage,
-            error: {
-              code: -32010,
-              message: "Recorded remote outcome",
-              data: { remoteTurnId: "turn-1" },
-            },
-          });
-          return execution;
+    const run = mock<ScanExecutor["run"]>(async (request, options) => {
+      if (callerAborts) {
+        controller.abort();
+        expect(options.signal.aborted).toBe(true);
+        await Promise.resolve();
+      }
+      execution = receipt(request, {
+        status,
+        sessionId,
+        usage,
+        error: {
+          code: -32010,
+          message: "Recorded remote outcome",
+          data: { remoteTurnId: "turn-1" },
         },
-      },
+      });
+      return execution;
     });
-    expect(terminal.status).toBe(status);
+    const terminal = await runHostedScan(input, {
+      executor: { run },
+      ...(callerAborts ? { signal: controller.signal } : {}),
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(terminal.status).toBe(terminalStatus);
     expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
+    const canceled = status === "canceled";
+    const saved = await hostedWorkbench(input, [
+      "get-scan",
+      "--scan-id",
+      terminal.scanId!,
+    ]);
+    expect(saved["scan"]).toMatchObject({
+      progress: { status: canceled ? "canceled" : "failed" },
+      canceledAt: canceled ? expect.any(String) : null,
+      failureMessage: "Recorded remote outcome",
+    });
   },
 );
 
@@ -1203,7 +1232,7 @@ test("cancellation after registration retains scan identity before executor disp
         event.progress.phase === "preflight" &&
         event.progress.filesTotal > 0
       )
-        controller.abort();
+        controller.abort(new Error("Invalid JSON."));
     },
     executor,
   });
@@ -1211,51 +1240,60 @@ test("cancellation after registration retains scan identity before executor disp
   expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
-  const history = await runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-      },
-    },
-    ["list-scans", "--repository", input.repository],
-  );
+  const history = await hostedWorkbench(input, [
+    "list-scans",
+    "--repository",
+    input.repository,
+  ]);
   expect(history["scans"]).toMatchObject([
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
     },
   ]);
 });
 
-test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
-  const input = await fixture();
-  const controller = new AbortController();
-  const result = await runHostedScan(input, {
-    signal: controller.signal,
-    executor: {
-      async run(request, options) {
-        controller.abort();
-        expect(options.signal.aborted).toBe(true);
-        await Promise.resolve();
-        return receipt(request, {
-          status: "canceled",
-          sessionId: "canceled-session",
-          usage: { input_tokens: 42 },
-        });
+test("invalid host input records a registered scan as failed when pre-dispatch cleanup completes", async () => {
+  const params = await fixture();
+  const input = new PassThrough();
+  const run = spyOn(hostedScan, "runHostedScan");
+  try {
+    const output = capture();
+    const finished = runHostedScanProtocol(input, {
+      write(chunk) {
+        output.stream.write(chunk);
+        const frame = JSON.parse(chunk.toString());
+        const progress = frame.params?.event?.progress;
+        if (progress?.phase === "preflight" && progress.filesTotal > 0)
+          input.write("invalid JSON\n");
+        return true;
       },
-    },
-  });
-  expect(result.status).toBe("canceled");
-  expect(result.execution).toMatchObject({
-    status: "canceled",
-    sessionId: "canceled-session",
-    usage: { input_tokens: 42 },
-  });
+    });
+    send(input, { id: "run", method: "run", params });
+    expect(await finished).toBe(2);
+    const messages = parseJsonLines(output.text());
+    expect(messages.at(-1)?.error).toMatchObject({
+      code: -32700,
+      message: "Invalid JSON.",
+    });
+    expect(messages.some((frame) => frame.method === "execution.run")).toBe(
+      false,
+    );
+    // The protocol can report the input error before the scan finishes its cleanup.
+    await run.mock.results[0]!.value;
+    const history = await hostedWorkbench(params, [
+      "list-scans",
+      "--repository",
+      params.repository,
+    ]);
+    expect(history["scans"]).toMatchObject([
+      { scanDir: params.outputDirectory, progress: { status: "failed" } },
+    ]);
+  } finally {
+    run.mockRestore();
+    input.destroy();
+  }
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {

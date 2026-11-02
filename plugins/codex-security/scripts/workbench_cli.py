@@ -315,6 +315,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")
+    fail_scan.add_argument("--canceled", action="store_true")
     fail_scan.add_argument("--cost-json")
 
     preserve_scan = add_command("preserve-scan-results", "--scan-id")

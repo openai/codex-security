@@ -12,6 +12,7 @@ from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
     empty_target_paths,
+    fail_scan,
     get_scan,
     mark_handoff_delivered,
     run_workbench,
@@ -224,16 +225,12 @@ def test_workbench_handoff_claim_only_allows_stale_takeover(tmp_path: Path) -> N
     )
     assert stale["results"]["handoffClaimToken"] == replacement
     assert stale["results"]["continuationThreadId"] is None
-    for claim_token in (None, owner):
-        rejected_update = update_progress(
-            state_dir,
-            scan_id,
-            "--phase",
-            "discovery",
-            *(() if claim_token is None else ("--claim-token", claim_token)),
-            check=False,
-        )
-        assert "owned by another continuation" in str(rejected_update["stderr"])
+    for claim in ((), ("--claim-token", owner)):
+        for rejected in (
+            update_progress(state_dir, scan_id, "--phase", "discovery", *claim, check=False),
+            fail_scan(state_dir, scan_id, "Caller canceled.", "--canceled", *claim, check=False),
+        ):
+            assert "owned by another continuation" in str(rejected["stderr"])
     attached = attach_continuation(state_dir, scan_id, replacement, "replacement-continuation")
     assert attached["results"]["continuationThreadId"] == "replacement-continuation"
     delivered = mark_handoff_delivered(state_dir, scan_id, replacement)

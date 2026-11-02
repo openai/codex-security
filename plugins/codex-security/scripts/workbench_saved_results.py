@@ -1246,6 +1246,7 @@ def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    canceled = getattr(args, "canceled", False)
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     cost_json = db.parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
@@ -1267,14 +1268,24 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             """
             UPDATE scans
             SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?
+                cost_json = ?, canceled_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (message, timestamp, timestamp, cost_json, scan["id"]),
+            (
+                message,
+                timestamp,
+                timestamp,
+                scan["cost_json"] if canceled and cost_json is None else cost_json,
+                timestamp if canceled else None,
+                scan["id"],
+            ),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
-        db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
+        if canceled:
+            db.deep_scan.cancel_from_parent_scan(connection, scan["id"], timestamp)
+        else:
+            db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
         progress_updated = connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
             (timestamp, scan["id"]),

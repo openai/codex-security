@@ -21,6 +21,7 @@
   "codexSecurity": {
     "directDeepScanEngine": 1,
     "hostedScopeInventory": 1,
+    "registeredScanCancellation": 1,
     "workerProviderSnapshot": 4
   },
   "interface": {

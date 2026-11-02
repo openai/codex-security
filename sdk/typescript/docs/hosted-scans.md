@@ -279,7 +279,9 @@ blocked output terminate the transport even while a write callback is stuck.
 Input EOF before the terminal response fails the run; EOF while that response is
 flushing waits for the write callback. A selected successful result is not a
 successful delivery. Hosts own deadlines and independently cancel remote work
-and reconcile known execution identities after transport failure.
+and reconcile known execution identities after transport failure. If the CLI
+exits before local cleanup records the failure, the registered scan can still
+appear as running in history.
 
 Preparation failures include typed `error.data.reason` for missing, escaping,
 aliased or syntactically invalid paths and revision mismatch. Other failures
