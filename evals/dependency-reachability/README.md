@@ -1,7 +1,8 @@
 # Dependency reachability eval
 
 The acceptance case runs the public CLI from a fresh copy of a small application.
-The only user input is a CVE identifier.
+The CLI uses the bundled `attack-path-analysis` skill. The only user input is
+a CVE identifier.
 
 ```sh
 codex-security exploitability check CVE-2026-48801 --json

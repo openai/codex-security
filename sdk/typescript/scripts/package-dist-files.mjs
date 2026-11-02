@@ -66,7 +66,6 @@ const distModules = [
   "deep-config",
   "deep-scan-defaults",
   "dependency-advisory",
-  "dependency-evidence",
   "dependency-reachability",
   "project-config",
   "project-config-schema",

@@ -2376,8 +2376,8 @@ The token needs code-scanning read access; access failures reject the import.
 
 ## Check a dependency CVE
 
-Run the check from anywhere in the Git checkout. It uses the worktree root.
-Outside Git it uses the current directory.
+The only required argument is a public CVE ID. Run the check from anywhere in
+the Git checkout. Outside Git it uses the current directory.
 
 ```bash
 codex-security exploitability --help
@@ -2385,19 +2385,14 @@ codex-security exploitability check CVE-2023-4863
 codex-security exploitability check CVE-2023-4863 --json
 ```
 
-The command looks up the public advisory in the GitHub Advisory Database and
-selects source, dependency and deployment excerpts from the checkout. It
-searches for the package names listed by the advisory, so renamed or vendored
-copies can escape detection. Each discovered use reports its component,
-version, verdict, deployment status and source citations.
-Any supported exploitable use makes the overall status `exploitable`. If all
-identified uses are ruled out, the overall status is `ruled_out` only when the
-reviewer received the complete source and reported no material gaps.
-Otherwise the report gives an overall `unknown` alongside the per-use verdicts
-and limitations. A deployment manifest establishes what is configured.
-Confirming what is running requires separate evidence.
+The command looks up the CVE in the GitHub Advisory Database, then runs the
+bundled `attack-path-analysis` skill from the worktree root. The skill inspects
+the checkout read-only to identify where the affected dependency is used.
+Each use includes a version when known, a verdict, and source citations.
+Deployment is reported separately. A manifest can show that a service is
+configured. Confirming that it is running requires separate evidence.
 
-The assessment is read-only and consumes model usage. Use `--model` and
+The assessment consumes model usage. Use `--model` and
 `--effort` to select model settings. A completed report exits with status
 zero for any verdict. Use `--json` and inspect its `status` field in automation.
 

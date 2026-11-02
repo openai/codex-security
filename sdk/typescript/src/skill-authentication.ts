@@ -22,7 +22,7 @@ export function resolveSkillAuthentication(
     auth: ScanAuthMode;
     modelProvider?: string;
     codexOverrides?: JsonObject;
-    command: "validate" | "patch" | "verify-fix";
+    command: string;
   },
   processEnvironment: NodeJS.ProcessEnv,
   ambientConfig: JsonObject,
