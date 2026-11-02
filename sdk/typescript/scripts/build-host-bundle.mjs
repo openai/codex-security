@@ -47,8 +47,10 @@ try {
     "-C",
     join(bundle, "cli"),
   ]);
-  for (const name of ["pnpm-lock.yaml", "pnpm-workspace.yaml"])
-    await cp(join(packageRoot, name), join(bundle, "cli", name));
+  for (const name of ["pnpm-lock.yaml", "pnpm-workspace.yaml", "patches"])
+    await cp(join(packageRoot, name), join(bundle, "cli", name), {
+      recursive: true,
+    });
   run(
     "pnpm",
     [

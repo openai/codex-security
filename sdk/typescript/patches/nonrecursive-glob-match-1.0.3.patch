@@ -1,0 +1,50 @@
+diff --git a/dist/esm/parse-class.js b/dist/esm/parse-class.js
+--- a/dist/esm/parse-class.js
++++ b/dist/esm/parse-class.js
+@@ -18,8 +18,8 @@
+     '[:xdigit:]': ['A-Fa-f0-9'],
+ };
+ // only need to escape a few things inside of brace expressions
+-// escapes: [ \ ] -
+-const braceEscape = (s) => s.replace(/[[\]\\-]/g, '\\$&');
++// escapes: [ \ ] ^ -
++const braceEscape = (s) => s.replace(/[[\]\\^-]/g, '\\$&');
+ const noMatch = /$./;
+ // Takes a glob string at a posix brace expression. Returns a RegExp
+ // that tests one character, and the number of glob chars consumed.
+@@ -125,7 +125,7 @@
+-    // if we got no ranges and no negates, then we have a range that
+-    // cannot possibly match anything, and that poisons the whole glob
++    // A class with no remaining members matches nothing. Its negation
++    // matches any one character, and the rest of the glob still applies.
+     if (!ranges.length && !negs.length) {
+-        return [noMatch, glob.length - pos];
++        return [negate ? /^./su : noMatch, endPos - pos];
+     }
+     const sranges = '[' + (negate ? '^' : '') + ranges.join('') + ']';
+     const snegs = '[' + (negate ? '' : '^') + negs.join('') + ']';
+diff --git a/dist/commonjs/parse-class.js b/dist/commonjs/parse-class.js
+--- a/dist/commonjs/parse-class.js
++++ b/dist/commonjs/parse-class.js
+@@ -21,8 +21,8 @@
+     '[:xdigit:]': ['A-Fa-f0-9'],
+ };
+ // only need to escape a few things inside of brace expressions
+-// escapes: [ \ ] -
+-const braceEscape = (s) => s.replace(/[[\]\\-]/g, '\\$&');
++// escapes: [ \ ] ^ -
++const braceEscape = (s) => s.replace(/[[\]\\^-]/g, '\\$&');
+ const noMatch = /$./;
+ // Takes a glob string at a posix brace expression. Returns a RegExp
+ // that tests one character, and the number of glob chars consumed.
+@@ -128,7 +128,7 @@
+-    // if we got no ranges and no negates, then we have a range that
+-    // cannot possibly match anything, and that poisons the whole glob
++    // A class with no remaining members matches nothing. Its negation
++    // matches any one character, and the rest of the glob still applies.
+     if (!ranges.length && !negs.length) {
+-        return [noMatch, glob.length - pos];
++        return [negate ? /^./su : noMatch, endPos - pos];
+     }
+     const sranges = '[' + (negate ? '^' : '') + ranges.join('') + ']';
+     const snegs = '[' + (negate ? '' : '^') + negs.join('') + ']';

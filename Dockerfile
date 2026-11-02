@@ -10,6 +10,7 @@ WORKDIR /build/sdk/typescript
 
 COPY package.json /build/package.json
 COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./
+COPY sdk/typescript/patches/ ./patches/
 COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/pnpm-lock.yaml plugins/codex-security/mcp-app/pnpm-workspace.yaml /build/plugins/codex-security/mcp-app/
 
 RUN npm install --global --no-audit --no-fund corepack@0.36.0 \
