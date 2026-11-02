@@ -1,5 +1,5 @@
 import { requestMetadata } from "./support/request-metadata.js";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -7,6 +7,7 @@ import { stripVTControlCharacters } from "node:util";
 import { writeArtifactOutput } from "../src/artifact-export.js";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { remediationPrompt, verificationBatches } from "../src/remediation.js";
+import * as runtime from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -396,6 +397,39 @@ describe("read-only finding verification", () => {
       scanId: "scan-1",
       results: [{ id: "occ_1", status: "fixed", evidence }],
     });
+  });
+
+  test("reports missing verification instructions on stderr for a small saved finding", async () => {
+    const pluginRoot = await temporaryDirectory();
+    using plugin = spyOn(runtime, "bundledPluginRoot").mockResolvedValue(
+      pluginRoot,
+    );
+    const result = fakeResult(["high"]);
+    result.findings.findings[0]!.occurrenceId = "occ_0";
+    const onCodex = mock(() => 0);
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["verify-fix", "--scan", "scan", "--json"],
+        dependencies({
+          result,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan",
+              targetPath: "/saved/repository",
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex,
+        }),
+      ),
+    ).toBe(2);
+    const failure = JSON.parse(stdout.text());
+    expect(failure.code).toBe("VERIFICATION_FAILED");
+    expect(failure.message).toContain("SKILL.md");
+    expect(stderr.text()).toBe(`codex-security: ${failure.message}\n`);
+    expect(plugin).toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
   });
 
   test.each(["worker", "planner"])(
@@ -1101,7 +1135,7 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
     "writes a structured selection failure before stderr drains (token count: %s)",
     async (tokenCount) => {
       const stdout = capture();
-      const writeStarted = Promise.withResolvers<() => void>();
+      const writeStarted = Promise.withResolvers<(error?: Error) => void>();
       let diagnostic = "";
       const stderr = new Writable({
         write(chunk, _encoding, callback) {
@@ -1130,7 +1164,21 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
       await new Promise<void>((resolve) => setImmediate(resolve));
       const beforeDrain = stdout.text();
       const finishedBeforeDrain = finished;
-      finishWrite();
+      if (!tokenCount) {
+        const queued = stderr.writableLength;
+        const repeated = await main(
+          ["verify-fix", "--scan", "latest", "--json"],
+          capture().stream,
+          stderr,
+          dependencies({ onWorkbench: () => ({ scans: [] }) }),
+        );
+        expect(repeated).toBe(2);
+        expect(stderr.listenerCount("error")).toBe(0);
+        expect(stderr.writableLength).toBe(queued);
+      }
+      finishWrite(
+        tokenCount ? undefined : new Error("Synthetic stderr failure."),
+      );
       expect(await operation).toBe(2);
       expect(finishedBeforeDrain).toBe(!tokenCount);
       expect(diagnostic).toContain("No saved scan was found");

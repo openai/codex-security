@@ -71,13 +71,13 @@ async function runHarness(
   options: {
     timeoutMs?: number;
     terminationGraceMs?: number;
-    onSpawn?: (pid: number) => void;
+    onSpawn?: (pid: number, stdout: Promise<string>) => Promise<void>;
   } = {},
 ): Promise<readonly [string, string, number]> {
   const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
-  options.onSpawn?.(child.pid);
+  const stdout = new Response(child.stdout).text();
   const completed = Promise.all([
-    new Response(child.stdout).text(),
+    stdout,
     new Response(child.stderr).text(),
     child.exited,
   ] as const);
@@ -85,6 +85,7 @@ async function runHarness(
   void completed.catch(() => undefined);
   const timeout = options.timeoutMs ?? 22_000;
   try {
+    await options.onSpawn?.(child.pid, stdout);
     return await bounded(
       completed,
       timeout,
@@ -115,13 +116,17 @@ test.skipIf(process.platform === "win32")(
         [
           python!,
           "-c",
-          "import signal,time; signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(60)",
+          "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); " +
+            "os.write(1, b'ready'); os.close(1); time.sleep(60)",
         ],
         {
           timeoutMs: 100,
           terminationGraceMs: 100,
-          onSpawn: (childPid) => {
+          onSpawn: async (childPid, stdout) => {
             pid = childPid;
+            expect(
+              await bounded(stdout, 5_000, "Harness did not become ready."),
+            ).toBe("ready");
           },
         },
       ),

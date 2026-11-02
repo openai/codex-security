@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
 
@@ -39,17 +40,14 @@ export interface RemediationPromptInput {
   verificationMode?: z.infer<typeof VerificationModeSchema>;
 }
 
-function characterCount(text: string): number {
-  return text[Symbol.iterator]().reduce((count) => count + 1, 0);
-}
+export class VerificationFindingTooLargeError extends CodexSecurityError {}
 
 export async function verificationBatches(
   findings: readonly Finding[],
   pluginRoot: string,
   verificationMode?: RemediationPromptInput["verificationMode"],
 ): Promise<Finding[][]> {
-  // Codex turn/start limits the decoded text to 2^20 Unicode scalar values.
-  const limit = 1 << 20;
+  const limit = MAX_CODEX_INPUT_CHARACTERS;
   const emptyPrompt = await remediationPrompt({
     operation: "verify",
     pluginRoot,
@@ -65,7 +63,7 @@ export async function verificationBatches(
       characterCount(JSON.stringify(finding)) +
       characterCount(JSON.stringify(finding.occurrenceId));
     if (overhead + size > limit) {
-      throw new CodexSecurityError(
+      throw new VerificationFindingTooLargeError(
         `Finding ${finding.occurrenceId} cannot fit in one complete Codex verification request. The request requires ${overhead + size} characters, but Codex accepts at most ${limit}. To verify another finding from this scan, run codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID. For this finding, run a narrower scan that records smaller evidence, then retry.`,
       );
     }

@@ -146,6 +146,7 @@ import {
   parseFindingVerifications,
   remediationPrompt,
   verificationBatches,
+  VerificationFindingTooLargeError,
   VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
@@ -1974,6 +1975,33 @@ async function skillDaybreakConfigOverrides(
     overrides.push("--config", `${key}=${inlineToml(value)}`);
   }
   return overrides;
+}
+
+function writeOptionalVerificationDiagnostic(
+  stream: Writable,
+  message: string,
+): void {
+  try {
+    if (!(stream instanceof NodeWritable)) {
+      stream.write(message);
+    } else if (
+      stream.writable &&
+      !stream.writableLength &&
+      !stream.writableNeedDrain
+    ) {
+      stream.write(message, (error) => {
+        // Node calls the write callback before emitting its error. A stalled
+        // write needs no listener, and other consumers still receive the event.
+        if (
+          error &&
+          !stream.closed &&
+          stream.errored === error &&
+          !stream.listenerCount("error")
+        )
+          stream.once("error", () => {});
+      });
+    }
+  } catch {}
 }
 
 function guardDisconnectedVerificationTerminal(stream: Writable): void {
@@ -6195,9 +6223,6 @@ export async function main(
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
-            // A finding rejected by the planner follows the same diagnostic
-            // path as a failed batch, before any worker starts.
-            batchedVerification = selected !== undefined;
             const batches = selected
               ? await verificationBatches(
                   selected.findings,
@@ -6315,6 +6340,8 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
+          if (error instanceof VerificationFindingTooLargeError)
+            batchedVerification = true;
           const message = errorMessage(error);
           if (workerDiagnostic === undefined || batchedVerification)
             await reportDiagnostic(
@@ -7461,12 +7488,16 @@ export async function main(
     if (deferredVerificationDiagnostic !== undefined) {
       // Token output can omit the diagnostic. Otherwise a buffered stderr
       // write is optional once the complete structured failure is on stdout.
-      const written = writeCliOutput(
-        errorOutput,
-        deferredVerificationDiagnostic,
-      ).catch(() => {});
-      if (frameworkFlags.tokenOutput || !(errorOutput instanceof NodeWritable))
-        await written;
+      if (frameworkFlags.tokenOutput) {
+        await writeCliOutput(errorOutput, deferredVerificationDiagnostic).catch(
+          () => {},
+        );
+      } else {
+        writeOptionalVerificationDiagnostic(
+          errorOutput,
+          deferredVerificationDiagnostic,
+        );
+      }
       writeUpdateNotice();
     }
   }
