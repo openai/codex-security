@@ -653,7 +653,7 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     { id: "coverage", defaultConfiguration: { level: "error" } },
   ];
   const notification = {
-    descriptor: { id: "coverage" },
+    descriptor: { index: 0, toolComponent: {} },
     message: { text: "File skipped" },
   };
   const invocation = {
@@ -669,6 +669,24 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     findings: [],
     report: { notifications: [notification] },
   });
+  run.tool.driver.globalMessageStrings = {
+    skipped: { text: "File {0} was skipped" },
+  };
+  run.invocations[0].toolExecutionNotifications[0].message = {
+    id: "skipped",
+    arguments: ["example.js"],
+  };
+  expect(normalizeEndorSarif(report).report?.["notifications"]).toMatchObject([
+    {
+      level: "warning",
+      message: { id: "skipped" },
+      messageTemplate: { text: "File {0} was skipped" },
+    },
+  ]);
+  run.invocations = [
+    { executionSuccessful: false, exitCodeDescription: "Scanner timed out" },
+  ];
+  expect(() => normalizeEndorSarif(report)).toThrow("Scanner timed out");
   expect(() => normalizeEndorSarif({ ...report, runs: [] })).toThrow(
     "no scanner runs",
   );

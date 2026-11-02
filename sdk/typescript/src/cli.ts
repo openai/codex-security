@@ -129,6 +129,7 @@ import {
 } from "./external-findings-read.js";
 import {
   hasNoExternalRecords,
+  hasScannerDiagnostics,
   isEmptyExternalReport,
   type ExternalFindings,
 } from "./external-findings.js";
@@ -3663,6 +3664,17 @@ export async function main(
             !machineFormat && read === 0 && report
               ? { report: terminalReportValue(report) }
               : {};
+          const coverageWarnings = (selection: ExternalFindings): string => {
+            const notifications = selection.report?.["notifications"];
+            return Array.isArray(notifications) && notifications.length
+              ? notifications
+                  .map(
+                    (entry) =>
+                      `Scanner notification: ${diagnosticValue(JSON.stringify(entry))}\n`,
+                  )
+                  .join("")
+              : "";
+          };
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);
             for (const item of sample)
@@ -3783,14 +3795,13 @@ export async function main(
                 );
               };
               if (!structured) showPreview();
+              if (!preview.findings.length && hasScannerDiagnostics(preview))
+                throw new NoPublishableFindingsError(preview);
               if (options.dryRun) {
-                if (
-                  hasNoExternalRecords(preview) &&
-                  !isEmptyExternalReport(preview)
-                )
-                  throw new NoPublishableFindingsError(preview);
                 if (humanSummary)
-                  renderedOutput = "Dry run complete. No findings stored.\n";
+                  renderedOutput =
+                    "Dry run complete. No findings stored.\n" +
+                    coverageWarnings(preview);
                 return {
                   ...preview,
                   ...emptyReportDisplay(preview),
@@ -3801,7 +3812,8 @@ export async function main(
                 const result = await prepared.import();
                 if (humanSummary)
                   renderedOutput =
-                    "The report contains no findings. Nothing was stored.\n";
+                    "The report contains no findings. Nothing was stored.\n" +
+                    coverageWarnings(preview);
                 return { ...result, ...emptyReportDisplay(result) };
               }
               if (!(await confirmImport(preview, showPreview))) {
@@ -3888,7 +3900,8 @@ export async function main(
               !controller.signal.aborted
             ) {
               const message =
-                "The report contains no findings. Nothing was uploaded; the Cloud destination was not checked.\n";
+                "The report contains no findings. Nothing was uploaded; the Cloud destination was not checked.\n" +
+                coverageWarnings(selection);
               if (humanSummary) renderedOutput = message;
               else if (!structured) writeDiagnostic(message);
               return {

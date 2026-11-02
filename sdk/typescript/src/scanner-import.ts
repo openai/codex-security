@@ -31,65 +31,60 @@ export function sarifRuns(document: Record<string, unknown>): unknown[] {
   return runs;
 }
 
-// SARIF notifications may inherit a descriptor default or an invocation override.
-function inheritedNotificationLevel(
-  reference: unknown,
-  tool: unknown,
-  invocation: Record<string, unknown>,
-): unknown {
-  if (!isRecord(reference) || !isRecord(tool)) return;
-  function resolveDescriptor(ref: Record<string, unknown>) {
-    let component = (tool as Record<string, unknown>)["driver"];
-    const target = ref["toolComponent"];
-    if (isRecord(target)) {
-      const extensions = optionalArray(
-        (tool as Record<string, unknown>)["extensions"],
-        "SARIF tool extensions",
-      );
-      component =
-        typeof target["index"] === "number" && target["index"] >= 0
-          ? extensions[target["index"]]
-          : [component, ...extensions].find(
-              (value) =>
-                isRecord(value) &&
-                ((typeof target["guid"] === "string" &&
-                  value["guid"] === target["guid"]) ||
-                  (typeof target["name"] === "string" &&
-                    value["name"] === target["name"])),
-            );
+// SARIF references select the driver by default, then use a component's
+// descriptor index or GUID. Older exports can also reference a descriptor by ID.
+function notificationDescriptors(value: unknown) {
+  const tool = isRecord(value) ? value : {};
+  const extensions = optionalArray(tool["extensions"], "SARIF tool extensions");
+  const components = new Map<string, Record<string, unknown>>();
+  const descriptors = new Map<
+    Record<string, unknown>,
+    {
+      entries: unknown[];
+      byGuid: Map<unknown, Record<string, unknown>>;
+      byId: Map<unknown, Record<string, unknown>>;
     }
-    if (!isRecord(component)) return;
-    const descriptors = optionalArray(
+  >();
+  const driver = tool["driver"];
+  for (const component of [driver, ...extensions]) {
+    if (!isRecord(component)) continue;
+    if (typeof component["guid"] === "string")
+      components.set(component["guid"], component);
+    const entries = optionalArray(
       component["notifications"],
       "SARIF notification descriptors",
     );
-    return typeof ref["index"] === "number" && ref["index"] >= 0
-      ? descriptors[ref["index"]]
-      : descriptors.find(
-          (item) =>
-            isRecord(item) &&
-            ((typeof ref["guid"] === "string" &&
-              item["guid"] === ref["guid"]) ||
-              (typeof ref["id"] === "string" && item["id"] === ref["id"])),
-        );
+    const byGuid = new Map<unknown, Record<string, unknown>>();
+    const byId = new Map<unknown, Record<string, unknown>>();
+    for (const entry of entries) {
+      if (!isRecord(entry)) continue;
+      if (typeof entry["guid"] === "string") byGuid.set(entry["guid"], entry);
+      if (typeof entry["id"] === "string") byId.set(entry["id"], entry);
+    }
+    descriptors.set(component, { entries, byGuid, byId });
   }
-  const descriptor = resolveDescriptor(reference);
-  if (!isRecord(descriptor)) return;
-  for (const override of optionalArray(
-    invocation["notificationConfigurationOverrides"],
-    "SARIF notification overrides",
-  )) {
-    if (
-      isRecord(override) &&
-      isRecord(override["descriptor"]) &&
-      resolveDescriptor(override["descriptor"]) === descriptor &&
-      isRecord(override["configuration"]) &&
-      override["configuration"]["level"] !== undefined
-    )
-      return override["configuration"]["level"];
-  }
-  const defaults = descriptor["defaultConfiguration"];
-  return isRecord(defaults) ? defaults["level"] : undefined;
+  return (ref: unknown) => {
+    const target = isRecord(ref) ? ref["toolComponent"] : undefined;
+    let component = driver;
+    if (isRecord(target)) {
+      if (typeof target["index"] === "number" && target["index"] >= 0)
+        component = extensions[target["index"]];
+      else if (typeof target["guid"] === "string")
+        component = components.get(target["guid"]);
+    }
+    if (!isRecord(component) || !isRecord(ref)) return { component };
+    const lookup = descriptors.get(component);
+    const descriptor =
+      typeof ref["index"] === "number" && ref["index"] >= 0
+        ? lookup?.entries[ref["index"]]
+        : typeof ref["guid"] === "string"
+          ? lookup?.byGuid.get(ref["guid"])
+          : lookup?.byId.get(ref["id"]);
+    return {
+      component,
+      descriptor: isRecord(descriptor) ? descriptor : undefined,
+    };
+  };
 }
 
 export function successfulSarifInvocations(
@@ -99,7 +94,7 @@ export function successfulSarifInvocations(
 ): Record<string, unknown>[] {
   function validateInvocation(
     value: unknown,
-    tool: unknown,
+    resolve: ReturnType<typeof notificationDescriptors>,
   ): Record<string, unknown> {
     const invocation = record(value, `${producer} invocation`);
     const successful = invocation["executionSuccessful"];
@@ -107,41 +102,85 @@ export function successfulSarifInvocations(
       throw new Error(
         `${producer} SARIF executionSuccessful must be a boolean.`,
       );
+    const levels = new Map<Record<string, unknown>, unknown>();
+    for (const override of optionalArray(
+      invocation["notificationConfigurationOverrides"],
+      "SARIF notification overrides",
+    )) {
+      if (!isRecord(override) || !isRecord(override["configuration"])) continue;
+      const descriptor = resolve(override["descriptor"]).descriptor;
+      if (descriptor && override["configuration"]["level"] !== undefined)
+        levels.set(descriptor, override["configuration"]["level"]);
+    }
+    const messages: unknown[] = [];
     for (const property of [
       "toolExecutionNotifications",
       "toolConfigurationNotifications",
     ]) {
-      const notifications = optionalArray(
+      for (const entry of optionalArray(
         invocation[property],
         `${producer} ${property}`,
-      );
-      for (const entry of notifications) {
+      )) {
         const notification = record(entry, `${producer} notification`);
+        const { descriptor, component } = resolve(notification["descriptor"]);
+        const defaults = descriptor?.["defaultConfiguration"];
         const level =
           notification["level"] ??
-          inheritedNotificationLevel(
-            notification["descriptor"],
-            tool,
-            invocation,
-          );
+          (descriptor && levels.get(descriptor)) ??
+          (isRecord(defaults) ? defaults["level"] : undefined) ??
+          "warning";
+        const msg = notification["message"];
+        const key =
+          isRecord(msg) && typeof msg["id"] === "string"
+            ? msg["id"]
+            : undefined;
+        const local = descriptor?.["messageStrings"];
+        const global = isRecord(component)
+          ? component["globalMessageStrings"]
+          : undefined;
+        const template =
+          key === undefined
+            ? undefined
+            : ((isRecord(local) ? local[key] : undefined) ??
+              (isRecord(global) ? global[key] : undefined));
+        const diagnostic = {
+          ...notification,
+          level,
+          ...(template === undefined ? {} : { messageTemplate: template }),
+        };
         if (level === "error")
           throw new Error(
-            `${producer} SARIF contains scan error notifications: ${JSON.stringify(notification)}`,
+            `${producer} SARIF contains scan error notifications: ${JSON.stringify(diagnostic)}`,
           );
-        retained?.push(notification);
+        if (successful) retained?.push(diagnostic);
+        else messages.push(diagnostic);
       }
     }
-    if (!successful)
-      throw new Error(`${producer} SARIF contains an unsuccessful invocation.`);
+    if (!successful) {
+      const diagnostics = [
+        ...messages,
+        invocation["processStartFailureMessage"],
+        invocation["exitCodeDescription"],
+        invocation["exitCode"],
+        invocation["exitSignalName"],
+      ].filter((detail) => detail !== undefined);
+      throw new Error(
+        `${producer} SARIF contains an unsuccessful invocation.${diagnostics.length ? " " + JSON.stringify(diagnostics) : ""}`,
+      );
+    }
     return invocation;
   }
   if (run["conversion"] !== undefined) {
     const conversion = record(run["conversion"], `${producer} conversion`);
     if (conversion["invocation"] !== undefined)
-      validateInvocation(conversion["invocation"], conversion["tool"]);
+      validateInvocation(
+        conversion["invocation"],
+        notificationDescriptors(conversion["tool"]),
+      );
   }
+  const resolve = notificationDescriptors(run["tool"]);
   return optionalArray(run["invocations"], `${producer} invocations`).map(
-    (invocation) => validateInvocation(invocation, run["tool"]),
+    (invocation) => validateInvocation(invocation, resolve),
   );
 }
 

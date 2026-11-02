@@ -144,11 +144,7 @@ export async function readExternalFindings(
         ).map((url) => ({ url })),
       );
     }
-    if (
-      target === "local" &&
-      hasNoExternalRecords(findings) &&
-      isRecord(input)
-    ) {
+    if (hasNoExternalRecords(findings) && isRecord(input)) {
       if (
         options.provider === "snyk" &&
         input["format"] === "snyk-findings-export/v1"

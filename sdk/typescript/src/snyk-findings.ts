@@ -437,6 +437,8 @@ export function normalizeSnykJson(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const projects = Array.isArray(input) ? input : [input];
+  if (!projects.length)
+    throw new Error("The Snyk report contains no scanned projects.");
   const entries = projects.flatMap((value) => {
     const project = record(value, "Snyk Open Source project");
     if (project["error"])

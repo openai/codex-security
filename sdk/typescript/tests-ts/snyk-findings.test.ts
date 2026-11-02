@@ -630,6 +630,7 @@ test("native project errors stop import, including partial all-projects output",
     { infrastructureAsCodeIssues: [], ok: true },
     { version: "2.1.0", runs: [] },
     { data: [] },
+    [],
   ]) {
     expect(() => normalizeSnykJson(input)).toThrow();
   }

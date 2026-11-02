@@ -941,9 +941,9 @@ export async function prepareLocalImport(
         ready: current.findings.length,
         excluded: structuredClone(current.excluded),
       };
+      if (!current.findings.length && hasScannerDiagnostics(current))
+        throw new NoPublishableFindingsError(cloneImportPreview(current));
       if (hasNoExternalRecords(current)) {
-        if (hasScannerDiagnostics(current))
-          throw new NoPublishableFindingsError(cloneImportPreview(current));
         return {
           ...summary,
           findings: [],

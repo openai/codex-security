@@ -1,3 +1,5 @@
+import { snykPluginExport } from "./support/snyk-import-fixtures.js";
+import { endorSarif } from "./support/endor-import-fixtures.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -558,4 +560,50 @@ test("finding import requires an explicit destination and advertises local repos
     ),
   ).not.toBe(0);
   expect(missing.stderr.text()).toContain("to");
+});
+
+test("empty SARIF terminal previews retain coverage warnings for either destination", async () => {
+  const f = await fixture();
+  const input: any = endorSarif();
+  input.runs[0].results = [];
+  input.runs[0].invocations = [
+    {
+      executionSuccessful: true,
+      toolExecutionNotifications: [
+        { level: "warning", message: { text: "A manifest was skipped" } },
+      ],
+    },
+  ];
+  await writeFile(f.file, JSON.stringify(input));
+  for (const destination of ["local", "cloud"]) {
+    const command = f.command.slice(0, f.command.indexOf("--format"));
+    command[command.indexOf("--to") + 1] = destination;
+    command[command.indexOf("--provider") + 1] = "endor";
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...command, "--dry-run"], f.deps)).toBe(0);
+    expect(cli.stdout.text() + cli.stderr.text()).toContain(
+      "A manifest was skipped",
+    );
+  }
+});
+
+test("local previews and imports fail with the SCA error when every occurrence is excluded", async () => {
+  const f = await fixture();
+  const input = snykPluginExport();
+  input.findings[0]!.originatingScanner = "snyk-code";
+  Object.assign(input.collection.scans[0]!, {
+    outcome: "failed",
+    error: "SCA timed out",
+  });
+  await writeFile(f.file, JSON.stringify(input));
+  const command = [...f.command];
+  command[command.indexOf("--provider") + 1] = "snyk";
+  for (const flags of [["--dry-run"], ["--yes"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...command, ...flags], f.deps)).toBe(2);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      error: expect.stringContaining("SCA timed out"),
+      excluded: [{ position: 1 }],
+    });
+  }
 });
