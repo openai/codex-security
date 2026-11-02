@@ -1244,6 +1244,7 @@ describe("live scan cost tracking", () => {
       });
       const secondary: unknown[] = [],
         reads: Array<{ mockRestore(): void }> = [];
+      let secondaryAttempts = 0;
       const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
         codexHome: home,
         model: "gpt-5.6-sol",
@@ -1268,6 +1269,7 @@ describe("live scan cost tracking", () => {
         async (...args: Parameters<typeof filesystem.open>) => {
           if (String(args[0]) === first) throw primary;
           if (others.includes(String(args[0]))) {
+            secondaryAttempts++;
             const failure = Object.assign(
               new Error("Synthetic I/O read failure"),
               {
@@ -1286,6 +1288,7 @@ describe("live scan cost tracking", () => {
       );
       try {
         await expect(tracker.refresh()).rejects.toBe(primary);
+        expect(secondaryAttempts).toBe(others.length);
         expect(secondary).toHaveLength(1);
         expect(secondary[0]).toMatchObject({ code: "EIO" });
       } finally {
