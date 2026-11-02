@@ -21,6 +21,24 @@ pytestmark = [
 ]
 
 
+def test_scan_directory_closes_descriptor_when_metadata_read_fails(tmp_path: Path) -> None:
+    failure = OSError(errno.EIO, "could not read directory metadata")
+    with (
+        mock.patch.object(os, "fstat", side_effect=failure) as fstat,
+        pytest.raises(OSError) as raised,
+    ):
+        FINALIZER._open_verified_scan_directory(tmp_path)
+    assert raised.value is failure
+    descriptor = fstat.call_args.args[0]
+    try:
+        os.fstat(descriptor)
+    except OSError as closed:
+        assert closed.errno == errno.EBADF
+    else:
+        os.close(descriptor)
+        pytest.fail("metadata read failure left the directory open")
+
+
 def test_write_retries_after_umask_denies_owner_write(tmp_path: Path) -> None:
     relative_path = "remediation/request/generated.patch"
     patch = b"--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-old\n+new\n"

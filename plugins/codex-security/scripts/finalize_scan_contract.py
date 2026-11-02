@@ -530,13 +530,12 @@ def _open_verified_scan_directory(
         raise _scan_local_directory_error(
             "scan directory: expected an existing non-symlink directory", exc
         ) from exc
-    opened = os.fstat(descriptor)
-    opened_identity = (opened.st_dev, opened.st_ino)
-    if opened_identity != observed_identity or (
-        expected_root_identity is not None and opened_identity != expected_root_identity
-    ):
+    try:
+        if not os.path.samestat(expected, os.fstat(descriptor)):
+            raise ContractError("scan directory: changed while it was being opened")
+    except BaseException:
         os.close(descriptor)
-        raise ContractError("scan directory: changed while it was being opened")
+        raise
     return descriptor
 
 
