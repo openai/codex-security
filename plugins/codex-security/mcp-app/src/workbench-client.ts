@@ -26,7 +26,6 @@ export async function scanRoot(): Promise<string> {
 
 interface WorkbenchOptions {
   isolatedPython?: boolean;
-  signal?: AbortSignal;
 }
 
 export async function runWorkbench(
@@ -34,7 +33,6 @@ export async function runWorkbench(
   input?: string | Buffer,
   options: WorkbenchOptions = {},
 ): Promise<JsonObject> {
-  options.signal?.throwIfAborted();
   let pythonCommand: string | undefined;
   try {
     pythonCommand = await resolvePythonCommand();
@@ -104,7 +102,6 @@ async function executeWorkbench(
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,
-      signal: options.signal,
     },
   );
   execution.child.stdin!.on("error", () => {

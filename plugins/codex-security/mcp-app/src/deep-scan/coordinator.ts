@@ -86,9 +86,10 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
-  prepareReviewItems?: (
+  checkFreshTarget?: (
+    run: DeepScanRunState,
     signal: AbortSignal,
-  ) => Promise<{ reviewItemsTotal: number }>;
+  ) => Promise<void>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -367,28 +368,11 @@ export class DeepScanCoordinator {
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
-      if (
-        this.options.prepareReviewItems &&
-        !hasAcceptedWorkerResults(this.state)
-      ) {
-        let inventory: { reviewItemsTotal: number } | undefined;
-        try {
-          inventory = await this.options.prepareReviewItems(
-            this.discoveryAbortController.signal,
-          );
-        } catch (error) {
-          if (
-            !this.discoveryDeadlineReached ||
-            this.abortController.signal.aborted
-          )
-            throw error;
-        }
-        if (this.canceled || this.externallyFailed) return;
-        if (inventory?.reviewItemsTotal === 0) {
-          throw new Error(
-            "Deep Scan target contains no reviewable source files; no security audit was performed.",
-          );
-        }
+      if (this.options.checkFreshTarget && isFreshRun(this.state)) {
+        await this.options.checkFreshTarget(
+          this.state,
+          this.abortController.signal,
+        );
       }
       if (this.canceled || this.externallyFailed) return;
 
@@ -1282,11 +1266,11 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
   return { ...state, config: { ...state.config } };
 }
 
-function hasAcceptedWorkerResults(state: DeepScanRunState): boolean {
-  return (state.persistedWorkers ?? []).some(
-    (worker) =>
-      worker.status === "succeeded" &&
-      (worker.kind === "discovery" || worker.kind === "dedup"),
+function isFreshRun(state: DeepScanRunState): boolean {
+  return (
+    state.dispatchedCount === 0 &&
+    (state.persistedWorkers?.length ?? 0) === 0 &&
+    (state.persistedDedupInputs?.length ?? 0) === 0
   );
 }
 

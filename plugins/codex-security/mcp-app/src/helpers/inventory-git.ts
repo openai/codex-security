@@ -16,7 +16,6 @@ import {
   isAbsolute,
   resolve,
   sep,
-  win32,
 } from "node:path";
 import { createRequire } from "node:module";
 import { constants } from "node:os";
@@ -370,9 +369,7 @@ export async function runTool(
   cwd?: string,
   input?: Buffer,
   inputFd: 0 | 3 = 0,
-  signal?: AbortSignal,
 ): Promise<ToolResult> {
-  signal?.throwIfAborted();
   const execution = spawnTool(
     command,
     args,
@@ -383,7 +380,6 @@ export async function runTool(
         "pipe",
         "pipe",
       ],
-      detached: !windows && signal !== undefined,
     },
     inheritedToolPaths(["RIPGREP_CONFIG_PATH", "CODEX_SECURITY_GIT"]),
     inputFd,
@@ -391,34 +387,21 @@ export async function runTool(
   const pipe = execution.child.stdio[inputFd] as Writable | null;
   pipe?.on("error", () => {});
   pipe?.end(input);
-  return collect(execution, signal);
+  return collect(execution);
 }
 
-async function collect(
-  { child, failureMarker }: ReturnType<typeof spawnTool>,
-  signal?: AbortSignal,
-): Promise<ToolResult> {
+async function collect({
+  child,
+  failureMarker,
+}: ReturnType<typeof spawnTool>): Promise<ToolResult> {
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
   child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
-  let spawnError: unknown;
-  let termination: Promise<void> | undefined;
-  const abort = () => {
-    termination ??= terminateToolProcess(child);
-  };
-  signal?.addEventListener("abort", abort, { once: true });
-  if (signal?.aborted) abort();
-  await new Promise<void>((resolve) => {
-    child.once("error", (error) => {
-      spawnError = error;
-    });
+  await new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
     child.once("close", () => resolve());
   });
-  signal?.removeEventListener("abort", abort);
-  await termination;
-  signal?.throwIfAborted();
-  if (spawnError) throw spawnError;
   const diagnostic = Buffer.concat(stderr);
   const start = failureMarker ? diagnostic.indexOf(failureMarker) : -1;
   if (start >= 0)
@@ -437,55 +420,6 @@ async function collect(
     stdout: Buffer.concat(stdout),
     stderr: diagnostic.toString("utf8"),
   };
-}
-
-async function terminateToolProcess(
-  child: ReturnType<typeof spawnTool>["child"],
-): Promise<void> {
-  if (child.pid === undefined) {
-    killToolProcess(child);
-    return;
-  }
-  if (!windows) {
-    killToolProcess(child);
-    return;
-  }
-  await new Promise<void>((resolvePromise) => {
-    const command = win32.join(
-      environmentValue("SystemRoot") ?? "C:\\Windows",
-      "System32",
-      "taskkill.exe",
-    );
-    const taskkill = spawn(command, ["/PID", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    taskkill.once("error", () => {
-      killToolProcess(child);
-      resolvePromise();
-    });
-    taskkill.once("close", (status) => {
-      if (status !== 0) killToolProcess(child);
-      resolvePromise();
-    });
-  });
-}
-
-function killToolProcess(child: ReturnType<typeof spawnTool>["child"]): void {
-  if (child.pid === undefined) return;
-  if (!windows) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {
-      // Fall back when the child has already left its process group.
-    }
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // The child may have exited between cancellation and termination.
-  }
 }
 
 export async function git(repo: string, args: string[]) {
@@ -574,18 +508,20 @@ export async function directoryPaths(
       character.charCodeAt(0) > 127 &&
       character.toLowerCase() !== character.toUpperCase(),
   );
-  const listingResult = await git(repository, [
-    ...(depth && !unicodeCase ? ["--no-literal-pathspecs"] : []),
-    "ls-files",
-    "--cached",
-    "--others",
-    "--exclude-standard",
-    "-z",
-    "--",
-    depth && !unicodeCase ? `:(icase,literal)${prefix}` : ".",
-  ]);
-  const listing = paths(requireSuccess(listingResult));
-  if (listingResult.stderr.trim()) throw new Error(listingResult.stderr.trim());
+  const listing = paths(
+    requireSuccess(
+      await git(repository, [
+        ...(depth && !unicodeCase ? ["--no-literal-pathspecs"] : []),
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        depth && !unicodeCase ? `:(icase,literal)${prefix}` : ".",
+      ]),
+    ),
+  );
   const found = new Set<string>(),
     matching = new Map<string, boolean>();
   for (const name of listing) {

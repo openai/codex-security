@@ -30,10 +30,6 @@ import { startRpcServer } from "./support/rpc-server.ts";
 const execFileAsync = promisify(execFile);
 
 const pluginRoot = path.resolve(mcpAppRoot, "..");
-const bundledPluginRoot = path.resolve(
-  mcpAppRoot,
-  "../../../sdk/typescript/_bundled_plugin",
-);
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -51,12 +47,6 @@ async function testDeepScanStdioLifecycle() {
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex [home]");
-  const activePluginRoot = path.join(fixtureRoot, "active-plugin");
-  const activeWorkbenchPath = path.join(
-    activePluginRoot,
-    "scripts",
-    "workbench_db.py",
-  );
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const projectConfigPath = path.join(fixtureRoot, "selected.yaml");
@@ -85,18 +75,6 @@ async function testDeepScanStdioLifecycle() {
     fixtureRoot,
     "workbench-launches.jsonl",
   );
-  const blockedGetScanControlPath = path.join(
-    fixtureRoot,
-    "block-next-get-scan",
-  );
-  const blockedGetScanStartedPath = path.join(
-    fixtureRoot,
-    "blocked-get-scan-started.jsonl",
-  );
-  const blockedGetScanSignalPath = path.join(
-    fixtureRoot,
-    "blocked-get-scan-signals.jsonl",
-  );
   const serverBundlePath = path.join(
     installedPluginRoot,
     "mcp",
@@ -111,29 +89,14 @@ async function testDeepScanStdioLifecycle() {
     "scripts",
     "references",
     "schemas",
-    "shared",
     ".codex-plugin",
   ]) {
-    for (const destination of [installedPluginRoot, activePluginRoot]) {
-      await cp(
-        path.join(pluginRoot, directory),
-        path.join(destination, directory),
-        {
-          recursive: true,
-        },
-      );
-    }
+    await cp(
+      path.join(pluginRoot, directory),
+      path.join(installedPluginRoot, directory),
+      { recursive: true },
+    );
   }
-  await cp(
-    path.join(bundledPluginRoot, "mcp"),
-    path.join(activePluginRoot, "mcp"),
-    { recursive: true },
-  );
-  await cp(
-    path.join(bundledPluginRoot, "mcp", "native"),
-    path.join(installedPluginRoot, "mcp", "native"),
-    { recursive: true },
-  );
   const parentSandbox = readOnlyParentSandboxState(pluginRoot);
   parentSandboxState = {
     ...parentSandbox,
@@ -205,7 +168,7 @@ model_reasoning_summary = "none"
     CODEX_CLI_PATH: fakeCodexPath,
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
-    CODEX_SECURITY_PLUGIN_ROOT: activePluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
@@ -215,9 +178,6 @@ model_reasoning_summary = "none"
     FAKE_WORKBENCH_CANCEL_LOG: cancelLogPath,
     FAKE_WORKBENCH_COMPLETION_FAILURE_CONTROL: completionFailureControlPath,
     FAKE_WORKBENCH_LAUNCH_LOG: workbenchLaunchLogPath,
-    FAKE_WORKBENCH_BLOCK_GET_SCAN: blockedGetScanControlPath,
-    FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED: blockedGetScanStartedPath,
-    FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL: blockedGetScanSignalPath,
     FAKE_CODEX_EXIT_LOG: exitLogPath,
     FAKE_CODEX_RESTART_CONTROL: restartControlPath,
     FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL: signalCheckpointControlPath,
@@ -350,7 +310,7 @@ model_reasoning_summary = "none"
       path.join(installedPluginRoot, "scripts", "workbench_db.py"),
       'raise RuntimeError("Installed plugin helpers replaced during another scan")\n',
     );
-    assert.equal(workerContext.pluginRoot, activePluginRoot);
+    assert.equal(workerContext.pluginRoot, pluginRoot);
     assert.equal(startedWorker.readCoreScanReference, true);
     assert.equal(workerContext.targetPath, await realpath(targetPath));
     assert.deepEqual(workerContext.includePaths, ["."]);
@@ -391,7 +351,7 @@ model_reasoning_summary = "none"
     assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
-      activePluginRoot,
+      pluginRoot,
       pythonWrapperPath,
     );
 
@@ -638,7 +598,7 @@ model_reasoning_summary = "none"
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
     )?.artifactDir;
     assert.equal(typeof failedArtifactRoot, "string");
-    assert.equal(failedWorkerContext.pluginRoot, activePluginRoot);
+    assert.equal(failedWorkerContext.pluginRoot, pluginRoot);
     assert.equal(failedWorker.readCoreScanReference, true);
     assert.equal(
       failedWorkerContext.targetPath,
@@ -1094,9 +1054,9 @@ model_reasoning_summary = "none"
         assert.ok(launches.length > 0);
         for (const launch of launches) {
           assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
-          assert.equal(launch.args.at(-1), activeWorkbenchPath);
+          assert.equal(launch.args.at(-1), workbenchPath);
           assert.equal(launch.args.length, 4);
-          assert.equal(launch.cwd, await realpath(activePluginRoot));
+          assert.equal(launch.cwd, pluginRoot);
         }
       }
       const executions = (await readLogLines(startLogPath)).slice(
@@ -1108,12 +1068,12 @@ model_reasoning_summary = "none"
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
-          assert.equal(context.pluginRoot, activePluginRoot);
+          assert.equal(context.pluginRoot, pluginRoot);
           assert.deepEqual(context.includePaths, ["."]);
         }
         assertWorkerArtifactEnvironment(
           execution.argv,
-          activePluginRoot,
+          pluginRoot,
           pythonWrapperPath,
         );
         assertFlagPair(
@@ -1391,51 +1351,6 @@ async function testCliDeepScanEngine({
     );
     return execution;
   };
-  const blocked = await register("cli-engine-blocked-get-scan");
-  await writeFile(
-    environment.FAKE_WORKBENCH_BLOCK_GET_SCAN!,
-    "block initial lookup\n",
-  );
-  const blockedExecution = launch(blocked.scanId);
-  const blockedOutcome = blockedExecution.then(
-    () => undefined,
-    (error) => error,
-  );
-  try {
-    await waitForJsonLines(
-      environment.FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED!,
-      1,
-    );
-    blockedExecution.child.kill("SIGTERM");
-    const error = await Promise.race([
-      blockedOutcome,
-      delay(5_000).then(() => {
-        throw new Error(
-          "packaged CLI did not interrupt the blocked initial get-scan lookup",
-        );
-      }),
-    ]);
-    assert.ok(error);
-    assert.deepEqual(
-      await readLogLines(environment.FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL!),
-      [{ signal: "SIGTERM" }],
-    );
-  } finally {
-    await rm(environment.FAKE_WORKBENCH_BLOCK_GET_SCAN!, { force: true });
-    if (
-      blockedExecution.child.exitCode === null &&
-      blockedExecution.child.signalCode === null
-    )
-      blockedExecution.child.kill("SIGKILL");
-    await blockedOutcome;
-    await runWorkbench(environment, [
-      "cancel-scan",
-      "--scan-id",
-      blocked.scanId,
-      "--thread-id",
-      threadId,
-    ]);
-  }
   const completed = await register("cli-engine-completed", true);
   const startIndex = (await readLogLines(environment.FAKE_CODEX_START_LOG!))
     .length;
@@ -1449,19 +1364,9 @@ async function testCliDeepScanEngine({
   assert.ok(helperLaunches.length > 0);
   for (const launch of helperLaunches) {
     assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
-    assert.equal(
-      launch.args.at(-1),
-      path.join(
-        environment.CODEX_SECURITY_PLUGIN_ROOT!,
-        "scripts",
-        "workbench_db.py",
-      ),
-    );
+    assert.equal(launch.args.at(-1), workbenchPath);
     assert.equal(launch.args.length, 7);
-    assert.equal(
-      launch.cwd,
-      await realpath(environment.CODEX_SECURITY_PLUGIN_ROOT!),
-    );
+    assert.equal(launch.cwd, pluginRoot);
   }
   assert.deepEqual(JSON.parse(result.stdout), {
     scanId: completed.scanId,
@@ -1768,11 +1673,6 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
-    if (deepScan.status === "failed") {
-      throw new Error(
-        `Deep Scan failed before starting a worker: ${deepScan.error}`,
-      );
-    }
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",
@@ -1884,16 +1784,6 @@ const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
 const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
 appendFileSync(process.env.FAKE_WORKBENCH_LAUNCH_LOG, JSON.stringify({ args, workbenchArgs, cwd: process.cwd() }) + '\\n');
-const blockedGetScan = process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN;
-if (workbenchArgs[0] === 'get-scan' && blockedGetScan && existsSync(blockedGetScan)) {
-  process.once('SIGTERM', () => {
-    appendFileSync(process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN_SIGNAL, JSON.stringify({ signal: 'SIGTERM' }) + '\\n');
-    process.exit(0);
-  });
-  appendFileSync(process.env.FAKE_WORKBENCH_BLOCK_GET_SCAN_STARTED, JSON.stringify({ pid: process.pid }) + '\\n');
-  setInterval(() => {}, 1_000);
-  await new Promise(() => {});
-}
 const control = process.env.FAKE_WORKBENCH_CANCEL_FAILURE_CONTROL;
 if (workbenchArgs[0] === 'cancel-scan') {
   appendFileSync(process.env.FAKE_WORKBENCH_CANCEL_LOG, JSON.stringify(workbenchArgs) + '\\n');

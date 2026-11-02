@@ -1,5 +1,6 @@
+import { readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
-import { preflightCodexSecurityReviewItems } from "../artifact-inventory.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
 import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
@@ -13,18 +14,12 @@ import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanLogger, DeepScanRunState } from "./types.js";
 import type { CoordinatorOptions } from "./coordinator.js";
 
-type AbortableWorkbench = (
-  arguments_: string[],
-  input?: string | Buffer,
-  options?: { signal?: AbortSignal },
-) => Promise<Record<string, unknown>>;
-
 /** Shared execution behind the SDK engine and the plugin's MCP adapter. */
 export function startDeepScanEngine(options: {
   run: DeepScanRunState;
   store: WorkbenchDeepScanStore;
   registry: DeepScanCoordinatorRegistry;
-  runWorkbench: AbortableWorkbench;
+  runWorkbench: Parameters<typeof createScanArtifactContext>[1];
   pluginRoot: string;
   pythonCommand: string;
   parentSandbox: DeepWorkerParentSandbox;
@@ -38,6 +33,7 @@ export function startDeepScanEngine(options: {
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
+  const freshStart = options.store.isFreshStart(run);
   return startOrJoinDeepScanCoordinator({
     run,
     registry: options.registry,
@@ -64,20 +60,7 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
-      prepareReviewItems: async (signal) => {
-        const context = await createScanArtifactContext(
-          run.scanId,
-          (arguments_, input) => runWorkbench(arguments_, input, { signal }),
-          {
-            requireRunning: true,
-            requireClaim: true,
-            handoffClaimToken,
-            pluginRoot,
-            pythonCommand: options.pythonCommand,
-          },
-        );
-        return preflightCodexSecurityReviewItems(context, signal);
-      },
+      checkFreshTarget: freshStart ? checkFreshTarget : undefined,
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
@@ -112,4 +95,31 @@ export function startDeepScanEngine(options: {
       },
     },
   });
+}
+
+async function checkFreshTarget(
+  run: DeepScanRunState,
+  signal: AbortSignal,
+): Promise<void> {
+  const exactFiles = new Set(run.filePaths ?? []);
+  let readError: unknown;
+
+  for (const selectedPath of run.includePaths ?? [run.scope]) {
+    signal.throwIfAborted();
+    if (exactFiles.has(selectedPath)) return;
+
+    const target = join(run.targetPath, selectedPath);
+    try {
+      if (!(await stat(target)).isDirectory()) return;
+      if ((await readdir(target)).length > 0) return;
+    } catch (error) {
+      readError ??= error;
+    }
+    signal.throwIfAborted();
+  }
+
+  if (readError) throw readError;
+  throw new Error(
+    "Deep Scan target is empty; no security audit was performed.",
+  );
 }

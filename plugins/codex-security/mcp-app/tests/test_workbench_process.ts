@@ -14,9 +14,10 @@ interface WorkbenchModule {
     python: string,
     args: string[],
     input?: string | Buffer,
-    options?: { isolatedPython?: boolean; signal?: AbortSignal },
+    options?: { isolatedPython?: boolean },
   ): Promise<Record<string, unknown>>;
 }
+
 const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),

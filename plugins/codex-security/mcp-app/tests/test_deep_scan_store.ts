@@ -51,6 +51,7 @@ async function testBeginProtocolAndParsing() {
     scanRoot: "/fixture/scans",
   });
   assert.equal(result.scanId, scanId);
+  assert.equal(store.isFreshStart(result), true);
   assert.deepEqual(result.config, {
     workers: 6,
     subagents: 3,
@@ -88,13 +89,15 @@ async function testBeginProtocolAndParsing() {
     joinedArgs = args;
     return stateResult(scanId, { startDisposition: "joined" });
   };
-  const joined = await new WorkbenchDeepScanStore(joinedRunner).begin({
+  const joinedStore = new WorkbenchDeepScanStore(joinedRunner);
+  const joined = await joinedStore.begin({
     scanId,
     handoffClaimToken: claimToken,
     threadId: "thread-fixture",
     scanRoot: "/fixture/scans",
   });
   assert.equal(joined.scanId, scanId);
+  assert.equal(joinedStore.isFreshStart(joined), false);
   assert.equal(flagValue(joinedArgs, "--claim-token"), claimToken);
   const scoped = parseDeepScan(
     stateResult(scanId, {

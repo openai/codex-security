@@ -62,14 +62,6 @@ try {
     "/fixture",
   ]);
   assert.equal(invocations.at(-1)!.options.timeout, 30_000);
-  const controller = new AbortController();
-  await executeWorkbench(
-    "fixture-python",
-    ["get-scan", "--scan-id", "fixture"],
-    undefined,
-    { signal: controller.signal },
-  );
-  assert.equal(invocations.at(-1)!.options.signal, controller.signal);
   failure = Object.assign(
     new Error("Command failed: fixture-python\nfixture diagnostic"),
     {

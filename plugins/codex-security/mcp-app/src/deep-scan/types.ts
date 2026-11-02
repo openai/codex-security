@@ -62,7 +62,7 @@ export interface DedupCommit {
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs"
+  "begin" | "coordinatorLeaseArgs" | "isFreshStart"
 >;
 
 /** Host-bound worker artifact state; never populate this from model input. */

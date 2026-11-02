@@ -1,618 +1,264 @@
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
-import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
   FakeStore,
-  createCoordinator,
+  assertNoPublishedCandidates,
   fixtureRun,
   runCoordinator,
-  standardScanDraft,
   temporaryDirectories,
-  type TestWorker,
 } from "./deep_scan_coordinator_fixture.ts";
 import { importSource } from "./import-module.ts";
-import { writeJson } from "./support/json.ts";
 
 const execFile = promisify(nodeExecFile);
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-        import.meta.url,
-      ).href,
-    ),
-  },
-});
-const artifactInventory = await importSource("src/artifact-inventory.ts", {
-  define: {
-    "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-        import.meta.url,
-      ).href,
+      new URL("../src/deep-scan/engine.ts", import.meta.url).href,
     ),
   },
 });
 
 after(() => temporaryDirectories.cleanup());
 
-test("a fresh empty target fails before discovery or reduction", async () => {
+test("an empty directory beneath a Git repository starts no workers", async () => {
   const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  let completed = false;
+  const repository = path.dirname(fixture.run.targetPath);
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  await writeFile(path.join(repository, "parent-source.ts"), "export {};\n");
+  await runGit(repository, "init", "-q");
+  await runGit(repository, "add", "parent-source.ts");
+  await runGit(repository, "commit", "-qm", "parent source");
+  assert.match(
+    await runGit(repository, "rev-parse", "--verify", "HEAD"),
+    /^[0-9a-f]+$/u,
+  );
 
-  const terminal = await runCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => ({ reviewItemsTotal: 0 }),
-    onComplete: async () => {
-      completed = true;
-    },
-  });
+  const { coordinator, executor, store } = await startFixture(fixture);
+  const terminal = await coordinator.wait(undefined, 10_000);
 
   assert.equal(terminal?.status, "failed");
   assert.match(
     terminal?.error ?? "",
-    /no reviewable source files.*no security audit was performed/iu,
+    /target is empty.*no security audit was performed/iu,
   );
   assert.equal(executor.discoveryCalls, 0);
   assert.equal(executor.dedupCalls, 0);
   assert.deepEqual(store.workerUpdates, []);
   assert.deepEqual(store.finishCalls, []);
-  assert.equal(store.failureMessages.length, 1);
-  assert.equal(completed, false);
+  await assertNoPublishedCandidates(fixture.run.scanDir);
 });
 
-test("a nonempty target retains normal discovery and reduction", async () => {
+test("a nonempty directory retains ordinary discovery", async () => {
   const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-
-  const terminal = await runCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => ({ reviewItemsTotal: 1 }),
-  });
-
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(executor.discoveryCalls, 1);
-  assert.equal(executor.dedupCalls, 1);
-});
-
-test("an inventory failure is not treated as an empty target", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-
-  const terminal = await runCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => {
-      throw new Error("synthetic inventory failure");
-    },
-  });
-
-  assert.equal(terminal?.status, "failed");
-  assert.equal(terminal?.error, "synthetic inventory failure");
-  assert.doesNotMatch(terminal?.error ?? "", /empty target/iu);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  assert.deepEqual(store.workerUpdates, []);
-});
-
-test("resume preserves accepted work without replacing the source inventory", async () => {
-  const fixture = await fixtureRun();
-  const resultPath = path.join(
-    fixture.run.scanDir,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-    "discovery-0001",
-    "output",
-    "result.json",
-  );
-  await mkdir(path.dirname(resultPath), { recursive: true });
-  await writeJson(
-    resultPath,
-    standardScanDraft(fixture.run.scanId, undefined, "discovery-0001"),
-  );
-  const worker: TestWorker = {
-    id: "accepted-discovery",
-    kind: "discovery",
-    status: "succeeded",
-    mergeState: "buffered",
-    promptPath: path.join(
-      fixture.run.scanDir,
-      "artifacts",
-      "deep_discovery",
-      "workers",
-      "discovery-0001",
-      "prompt.md",
-    ),
-    artifactDir: path.dirname(resultPath),
-    attempt: 1,
-    resultManifestPath: resultPath,
-    completionSequence: 1,
-  };
-  fixture.run.persistedWorkers = [worker];
-  fixture.run.dispatchedCount = 1;
-  const store = new FakeStore(fixture.run);
-  store.workers.set(worker.id, worker);
-  store.completionSequence = 1;
-  const executor = new FakeExecutor();
-  let preflightCalls = 0;
-
-  const terminal = await runCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => {
-      preflightCalls += 1;
-      return { reviewItemsTotal: 0 };
-    },
-  });
-
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(preflightCalls, 0);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 1);
-  assert.equal(store.dedupClaims[0]?.workerIds.includes(worker.id), true);
-});
-
-test("cancellation reaches a pending inventory preflight", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  let receivedSignal: AbortSignal | undefined;
-  const entered = Promise.withResolvers<void>();
-  const coordinator = createCoordinator(fixture, store, executor, {
-    prepareReviewItems: async (signal?: AbortSignal) => {
-      receivedSignal = signal;
-      assert.ok(signal instanceof AbortSignal);
-      entered.resolve();
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true }),
-      );
-      return { reviewItemsTotal: 0 };
-    },
-  });
-  coordinator.start();
-  await entered.promise;
-  coordinator.cancel("cancel pending inventory");
-  const terminal = await coordinator.wait(undefined, 5_000);
-
-  assert.ok(receivedSignal?.aborted);
-  assert.equal(terminal?.status, "canceled");
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  assert.deepEqual(store.failureMessages, []);
-});
-
-test("cancellation interrupts the pending preflight scan lookup", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  const registry = new DeepScanCoordinatorRegistry();
-  const start = registry.start.bind(registry);
-  registry.start = (options: CoordinatorOptions) =>
-    start({ ...options, executor });
-  const lookupStarted = Promise.withResolvers<void>();
-  const pluginRoot = path.resolve(
-    import.meta.dirname,
-    "../../../../sdk/typescript/_bundled_plugin",
-  );
-  const { coordinator } = await startDeepScanEngine({
-    run: store.run,
-    store,
-    registry,
-    runWorkbench: async (
-      args: string[],
-      _input?: string | Buffer,
-      options?: { signal?: AbortSignal },
-    ) => {
-      if (args[0] === "preserve-scan-results") return {};
-      assert.equal(args[0], "get-scan");
-      const signal = options?.signal;
-      assert.ok(signal instanceof AbortSignal);
-      lookupStarted.resolve();
-      await new Promise<void>((_resolve, reject) => {
-        const abort = () => reject(new Error(String(signal.reason)));
-        if (signal.aborted) abort();
-        else signal.addEventListener("abort", abort, { once: true });
-      });
-      throw new Error("unreachable scan lookup");
-    },
-    pluginRoot,
-    pythonCommand: "fixture-python",
-    parentSandbox: { filesystemDenies: [] },
-    threadId: "fixture-owner",
-  });
-
-  await lookupStarted.promise;
-  coordinator.cancel("cancel pending get-scan");
-  const terminal = await coordinator.wait(undefined, 5_000);
-
-  assert.equal(terminal?.status, "canceled");
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  assert.deepEqual(store.failureMessages, []);
-});
-
-test("a discovery deadline during inventory preflight remains capped", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  const completedDrafts: ScanDraftInput[] = [];
-  let receivedSignal: AbortSignal | undefined;
-
-  const terminal = await runCoordinator(fixture, store, executor, {
-    discoveryTimeoutMs: 1,
-    prepareReviewItems: async (signal: AbortSignal) => {
-      receivedSignal = signal;
-      await new Promise<void>((resolve) => {
-        const abort = () => resolve();
-        if (signal.aborted) abort();
-        else signal.addEventListener("abort", abort, { once: true });
-      });
-      throw new Error("inventory preflight reached its discovery deadline");
-    },
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
-
-  assert.ok(receivedSignal?.aborted);
-  assert.equal(terminal?.status, "succeeded");
-  assert.equal(terminal?.terminalReason, "capped");
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  assert.deepEqual(store.failureMessages, []);
-  assert.deepEqual(completedDrafts[0].reviewState.deferred, [
-    {
-      reason:
-        "The configured discovery time limit elapsed before any source review completed.",
-    },
-  ]);
-});
-
-test("cancellation before inventory preflight does not launch it", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  let preflightCalls = 0;
-  const coordinator = createCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => {
-      preflightCalls += 1;
-      return { reviewItemsTotal: 1 };
-    },
-  });
-  coordinator.cancel("cancel before inventory");
-  coordinator.start();
-  const terminal = await coordinator.wait(undefined, 5_000);
-
-  assert.equal(terminal?.status, "canceled");
-  assert.equal(preflightCalls, 0);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-});
-
-test("cancellation after inventory preflight wins over an empty result", async () => {
-  const fixture = await fixtureRun();
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  let coordinator: ReturnType<typeof createCoordinator>;
-  coordinator = createCoordinator(fixture, store, executor, {
-    prepareReviewItems: async () => {
-      coordinator.cancel("cancel after inventory");
-      return { reviewItemsTotal: 0 };
-    },
-  });
-  coordinator.start();
-  const terminal = await coordinator.wait(undefined, 5_000);
-
-  assert.equal(terminal?.status, "canceled");
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  assert.deepEqual(store.failureMessages, []);
-});
-
-test("an empty child of a nonempty Git repository fails through the shared engine", async () => {
-  const fixture = await fixtureRun();
-  const repository = path.dirname(fixture.run.targetPath);
   await mkdir(fixture.run.targetPath, { recursive: true });
-  await writeFile(path.join(repository, "parent-source.ts"), "export {}\n");
-  await runGit(repository, "init", "-q");
-  await runGit(repository, "add", "parent-source.ts");
-  await runGit(repository, "commit", "-qm", "parent source");
-  const revision = await runGit(
-    fixture.run.targetPath,
-    "rev-parse",
-    "--verify",
-    "HEAD",
+  await writeFile(
+    path.join(fixture.run.targetPath, "source.ts"),
+    "export {};\n",
   );
-  assert.match(revision, /^[0-9a-f]+$/u);
 
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  const registry = new DeepScanCoordinatorRegistry();
-  const start = registry.start.bind(registry);
-  registry.start = (options: CoordinatorOptions) =>
-    start({ ...options, executor });
-  const pluginRoot = path.resolve(
-    import.meta.dirname,
-    "../../../../sdk/typescript/_bundled_plugin",
+  const { coordinator, executor } = await startFixture(
+    fixture,
+    new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
   );
-  const { coordinator } = await startDeepScanEngine({
-    run: store.run,
-    store,
-    registry,
-    runWorkbench: async (args: string[]) => {
-      if (args[0] === "preserve-scan-results") return {};
-      assert.equal(args[0], "get-scan");
-      return {
-        scan: {
-          scanId: fixture.run.scanId,
-          scanDir: fixture.run.scanDir,
-          targetPath: fixture.run.targetPath,
-          scope: ".",
-          mode: "deep",
-          status: "running",
-          contract: {},
-          targetRevision: revision,
-        },
-      };
-    },
-    pluginRoot,
-    pythonCommand: "fixture-python",
-    parentSandbox: { filesystemDenies: [] },
-    threadId: "fixture-owner",
-  });
-  const terminal = await coordinator.wait(undefined, 10_000);
+  await executor.discoveryStarted.promise;
+  assert.equal(executor.discoveryCalls, 1);
 
-  assert.equal(terminal?.status, "failed");
-  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  await assert.rejects(
-    readFile(
-      path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "02_discovery",
-        "in_scope_files.txt",
-      ),
-      "utf8",
-    ),
-    /ENOENT/iu,
-  );
+  coordinator.cancel("fixture complete");
+  assert.equal((await coordinator.wait(undefined, 10_000))?.status, "canceled");
 });
 
-for (const included of [false, true])
-  test(`an inherited .ignore ${included ? "retains an included sibling" : "can make a selected child empty"}`, async () => {
-    const fixture = await fixtureRun();
-    const repository = path.dirname(fixture.run.targetPath);
-    await mkdir(path.join(fixture.run.targetPath, "excluded"), {
-      recursive: true,
-    });
-    await writeFile(path.join(repository, ".ignore"), "excluded/\n");
-    await writeFile(
-      path.join(fixture.run.targetPath, "excluded", "example.py"),
-      "# ignored source\n",
-    );
-    if (included)
-      await writeFile(
-        path.join(fixture.run.targetPath, "included.py"),
-        "# included source\n",
-      );
-    await runGit(repository, "init", "-q");
-    await runGit(repository, "add", ".ignore");
-    await runGit(repository, "commit", "-qm", "ignore rules");
-
-    const store = new FakeStore(fixture.run);
-    const executor = new FakeExecutor();
-    const pluginRoot = path.resolve(
-      import.meta.dirname,
-      "../../../../sdk/typescript/_bundled_plugin",
-    );
-    const terminal = await runCoordinator(fixture, store, executor, {
-      prepareReviewItems: (signal) =>
-        artifactInventory.preflightCodexSecurityReviewItems(
-          {
-            root: fixture.run.scanDir,
-            repoRoot: fixture.run.targetPath,
-            layout: "scan",
-            scope: ".",
-            pluginRoot,
-          },
-          signal,
-        ),
-    });
-
-    if (included) {
-      assert.equal(terminal?.status, "succeeded", terminal?.error);
-      assert.equal(executor.discoveryCalls, 1);
-      assert.equal(executor.dedupCalls, 1);
-    } else {
-      assert.equal(terminal?.status, "failed");
-      assert.match(terminal?.error ?? "", /no security audit was performed/iu);
-      assert.equal(executor.discoveryCalls, 0);
-      assert.equal(executor.dedupCalls, 0);
-      assert.deepEqual(store.finishCalls, []);
-    }
-  });
-
-test("a saved file scope replaced by a directory stays empty", async () => {
+test("a physically nonempty target is not reinterpreted through ignore rules", async () => {
   const fixture = await fixtureRun();
-  await mkdir(path.join(fixture.run.targetPath, "selected"), {
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  await writeFile(path.join(fixture.run.targetPath, ".gitignore"), "*.py\n");
+  await writeFile(path.join(fixture.run.targetPath, "generated.py"), "pass\n");
+
+  const { coordinator, executor } = await startFixture(
+    fixture,
+    new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
+  );
+  await executor.discoveryStarted.promise;
+  assert.equal(executor.discoveryCalls, 1);
+  coordinator.cancel("fixture complete");
+  await coordinator.wait(undefined, 10_000);
+});
+
+test("multiple selected paths are empty only when every path is empty", async () => {
+  const emptyFixture = await fixtureRun();
+  emptyFixture.run.includePaths = ["left", "right"];
+  await mkdir(path.join(emptyFixture.run.targetPath, "left"), {
     recursive: true,
   });
-  await writeFile(
-    path.join(fixture.run.targetPath, "selected", "descendant.py"),
-    "# not part of the saved file scope\n",
-  );
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  const pluginRoot = path.resolve(
-    import.meta.dirname,
-    "../../../../sdk/typescript/_bundled_plugin",
-  );
+  await mkdir(path.join(emptyFixture.run.targetPath, "right"));
 
-  const terminal = await runCoordinator(fixture, store, executor, {
-    prepareReviewItems: (signal) =>
-      artifactInventory.preflightCodexSecurityReviewItems(
-        {
-          root: fixture.run.scanDir,
-          repoRoot: fixture.run.targetPath,
-          layout: "scan",
-          scope: "selected",
-          pluginRoot,
-          targetContract: {
-            scope: {
-              requiredIncludePaths: ["selected"],
-              requiredExcludePaths: [],
-              filePaths: ["selected"],
-            },
-          },
-        },
-        signal,
-      ),
+  const empty = await startFixture(emptyFixture);
+  const emptyTerminal = await empty.coordinator.wait(undefined, 10_000);
+  assert.equal(emptyTerminal?.status, "failed");
+  assert.match(emptyTerminal?.error ?? "", /target is empty/iu);
+  assert.equal(empty.executor.discoveryCalls, 0);
+
+  const nonemptyFixture = await fixtureRun();
+  nonemptyFixture.run.includePaths = ["left", "right"];
+  await mkdir(path.join(nonemptyFixture.run.targetPath, "left"), {
+    recursive: true,
   });
-
-  assert.equal(terminal?.status, "failed");
-  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
+  await mkdir(path.join(nonemptyFixture.run.targetPath, "right"));
+  await writeFile(
+    path.join(nonemptyFixture.run.targetPath, "right", "ok.py"),
+    "pass\n",
+  );
+  const nonempty = await startFixture(
+    nonemptyFixture,
+    new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
+  );
+  await nonempty.executor.discoveryStarted.promise;
+  assert.equal(nonempty.executor.discoveryCalls, 1);
+  nonempty.coordinator.cancel("fixture complete");
+  await nonempty.coordinator.wait(undefined, 10_000);
 });
 
-test("empty requested paths do not widen to the repository root", async () => {
-  const fixture = await fixtureRun();
-  await mkdir(path.join(fixture.run.targetPath, "left"), { recursive: true });
-  await mkdir(path.join(fixture.run.targetPath, "right"), { recursive: true });
-  await writeFile(
-    path.join(fixture.run.targetPath, "outside-selection.py"),
-    "# outside the requested scope\n",
-  );
-  await runGit(fixture.run.targetPath, "init", "-q");
-  await runGit(fixture.run.targetPath, "add", "outside-selection.py");
-  await runGit(fixture.run.targetPath, "commit", "-qm", "root source");
-  const revision = await runGit(
-    fixture.run.targetPath,
-    "rev-parse",
-    "--verify",
-    "HEAD",
-  );
-  fixture.run.includePaths = ["left", "right"];
+for (const replacement of ["file", "directory"] as const) {
+  test(`an exact-file selection remains eligible when it is a ${replacement}`, async () => {
+    const fixture = await fixtureRun();
+    fixture.run.includePaths = ["selected.py"];
+    fixture.run.filePaths = ["selected.py"];
+    await mkdir(fixture.run.targetPath, { recursive: true });
+    const selected = path.join(fixture.run.targetPath, "selected.py");
+    if (replacement === "file") await writeFile(selected, "");
+    else await mkdir(selected);
 
+    const { coordinator, executor } = await startFixture(
+      fixture,
+      new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
+    );
+    await executor.discoveryStarted.promise;
+    assert.equal(executor.discoveryCalls, 1);
+    coordinator.cancel("fixture complete");
+    await coordinator.wait(undefined, 10_000);
+  });
+}
+
+test(
+  "an unreadable selected directory retains its filesystem diagnostic",
+  { skip: process.platform === "win32" },
+  async () => {
+    const fixture = await fixtureRun();
+    await mkdir(fixture.run.targetPath, { recursive: true });
+    await chmod(fixture.run.targetPath, 0);
+    try {
+      const { coordinator, executor } = await startFixture(fixture);
+      const terminal = await coordinator.wait(undefined, 10_000);
+      assert.equal(terminal?.status, "failed");
+      assert.match(terminal?.error ?? "", /EACCES|permission denied/iu);
+      assert.doesNotMatch(terminal?.error ?? "", /target is empty/iu);
+      assert.equal(executor.discoveryCalls, 0);
+      assert.equal(executor.dedupCalls, 0);
+    } finally {
+      await chmod(fixture.run.targetPath, 0o700);
+    }
+  },
+);
+
+test(
+  "an unreadable selected directory does not hide another usable selection",
+  { skip: process.platform === "win32" },
+  async () => {
+    const fixture = await fixtureRun();
+    fixture.run.includePaths = ["left", "right"];
+    const left = path.join(fixture.run.targetPath, "left");
+    await mkdir(left, { recursive: true });
+    await mkdir(path.join(fixture.run.targetPath, "right"));
+    await writeFile(
+      path.join(fixture.run.targetPath, "right", "ok.py"),
+      "pass\n",
+    );
+    await chmod(left, 0);
+    try {
+      const { coordinator, executor } = await startFixture(
+        fixture,
+        new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
+      );
+      await executor.discoveryStarted.promise;
+      assert.equal(executor.discoveryCalls, 1);
+      coordinator.cancel("fixture complete");
+      await coordinator.wait(undefined, 10_000);
+    } finally {
+      await chmod(left, 0o700);
+    }
+  },
+);
+
+test("prior dispatch history bypasses the fresh-target check", async () => {
+  const fixture = await fixtureRun({ maxDiscoveryRuns: 1 });
+  fixture.run.dispatchedCount = 1;
   const store = new FakeStore(fixture.run);
   const executor = new FakeExecutor();
+  let checks = 0;
+
+  const terminal = await runCoordinator(fixture, store, executor, {
+    checkFreshTarget: async () => {
+      checks += 1;
+      throw new Error("fresh-target check should not run");
+    },
+  });
+
+  assert.equal(checks, 0);
+  assert.equal(terminal?.status, "failed");
+  assert.match(
+    terminal?.error ?? "",
+    /ended without a successfully reduced Standard scan/iu,
+  );
+  assert.doesNotMatch(terminal?.error ?? "", /target is empty/iu);
+});
+
+test("a joined run with no dispatch history preserves the resume path", async () => {
+  const fixture = await fixtureRun();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const { coordinator, executor } = await startFixture(
+    fixture,
+    new FakeExecutor({ blockDiscoveryAfterCalls: 0 }),
+    false,
+  );
+
+  await executor.discoveryStarted.promise;
+  assert.equal(executor.discoveryCalls, 1);
+  coordinator.cancel("fixture complete");
+  await coordinator.wait(undefined, 10_000);
+});
+
+async function startFixture(
+  fixture: Awaited<ReturnType<typeof fixtureRun>>,
+  executor = new FakeExecutor(),
+  freshStart = true,
+) {
+  const store = new FakeStore(fixture.run);
+  store.freshStart = freshStart;
   const registry = new DeepScanCoordinatorRegistry();
   const start = registry.start.bind(registry);
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
-  const pluginRoot = path.resolve(
-    import.meta.dirname,
-    "../../../../sdk/typescript/_bundled_plugin",
-  );
-  const { coordinator } = await startDeepScanEngine({
+  const started = await startDeepScanEngine({
     run: store.run,
     store,
     registry,
     runWorkbench: async (args: string[]) => {
-      if (args[0] === "preserve-scan-results") return {};
-      assert.equal(args[0], "get-scan");
-      return {
-        scan: {
-          scanId: fixture.run.scanId,
-          scanDir: fixture.run.scanDir,
-          targetPath: fixture.run.targetPath,
-          scope: ".",
-          mode: "deep",
-          status: "running",
-          contract: {
-            scope: {
-              requiredIncludePaths: ["left", "right"],
-              requiredExcludePaths: [],
-            },
-          },
-          targetRevision: revision,
-        },
-      };
+      assert.equal(args[0], "preserve-scan-results");
+      return {};
     },
-    pluginRoot,
+    pluginRoot: fixture.pluginRoot,
     pythonCommand: "fixture-python",
     parentSandbox: { filesystemDenies: [] },
     threadId: "fixture-owner",
   });
-  const terminal = await coordinator.wait(undefined, 10_000);
-
-  assert.equal(terminal?.status, "failed");
-  assert.match(terminal?.error ?? "", /no security audit was performed/iu);
-  assert.equal(executor.discoveryCalls, 0);
-  assert.equal(executor.dedupCalls, 0);
-  await assert.rejects(
-    readFile(
-      path.join(
-        fixture.run.scanDir,
-        "artifacts",
-        "02_discovery",
-        "in_scope_files.txt",
-      ),
-      "utf8",
-    ),
-    /ENOENT/iu,
-  );
-});
-
-for (const selected of ["left", "right"]) {
-  test(`a source in requested path ${selected} retains normal scanning`, async () => {
-    const fixture = await fixtureRun();
-    await mkdir(path.join(fixture.run.targetPath, "left"), {
-      recursive: true,
-    });
-    await mkdir(path.join(fixture.run.targetPath, "right"), {
-      recursive: true,
-    });
-    await writeFile(
-      path.join(fixture.run.targetPath, selected, "selected.py"),
-      "# selected source\n",
-    );
-    await writeFile(
-      path.join(fixture.run.targetPath, "outside-selection.py"),
-      "# outside the requested scope\n",
-    );
-    await runGit(fixture.run.targetPath, "init", "-q");
-    await runGit(fixture.run.targetPath, "add", ".");
-    await runGit(fixture.run.targetPath, "commit", "-qm", "source tree");
-    fixture.run.includePaths = ["left", "right"];
-
-    const store = new FakeStore(fixture.run);
-    const executor = new FakeExecutor();
-    const pluginRoot = path.resolve(
-      import.meta.dirname,
-      "../../../../sdk/typescript/_bundled_plugin",
-    );
-    const context = {
-      root: fixture.run.scanDir,
-      repoRoot: fixture.run.targetPath,
-      layout: "scan" as const,
-      scope: ".",
-      pluginRoot,
-      targetContract: {
-        scope: {
-          requiredIncludePaths: ["left", "right"],
-          requiredExcludePaths: [],
-        },
-      },
-    };
-    const terminal = await runCoordinator(fixture, store, executor, {
-      prepareReviewItems: (signal) =>
-        artifactInventory.preflightCodexSecurityReviewItems(context, signal),
-    });
-
-    assert.equal(terminal?.status, "succeeded", terminal?.error);
-    assert.equal(executor.discoveryCalls, 1);
-    assert.equal(executor.dedupCalls, 1);
-  });
+  return { ...started, executor, store };
 }
 
 async function runGit(repository: string, ...arguments_: string[]) {

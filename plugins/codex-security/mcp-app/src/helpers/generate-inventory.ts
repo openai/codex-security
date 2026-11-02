@@ -6,7 +6,7 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, parse, posix, relative, sep } from "node:path";
+import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
@@ -26,11 +26,9 @@ import {
   exists,
   fsPath,
   inside,
-  linkedParent,
   lstat,
   regular,
   rejectStreams,
-  sameFile,
   stat,
   sourceMetadata,
   walk,
@@ -120,256 +118,37 @@ function scopePath(
   return resolved;
 }
 
-class RipgrepUnavailableError extends Error {}
-
-interface ScopeFiles {
-  paths: string[];
-  failure?: Error;
-}
-
-function toolFailure(
-  name: "Git" | "ripgrep",
-  result: {
-    status: number | null;
-    signal: NodeJS.Signals | null;
-    stderr: string;
-  },
-): Error {
-  const detail = result.stderr.trim();
-  return new Error(
-    detail ||
-      (result.signal
-        ? `${name} terminated by ${result.signal}`
-        : `${name} exited with status ${result.status}`),
-  );
-}
-
-async function scopeRipgrep(
-  repo: string,
-  requested: string | string[],
-  nonVcs = false,
-  maxDepth?: number,
-) {
-  return runRipgrep(
-    [
-      "--files",
-      "--null",
-      "--hidden",
-      "--path-separator",
-      "/",
-      ...(nonVcs ? ["--no-ignore-vcs"] : []),
-      ...(maxDepth === undefined ? [] : ["--max-depth", String(maxDepth)]),
-      "--glob",
-      "!**/{.git,.svn}",
-      "--glob",
-      "!**/{.git,.svn}/**",
-      "--",
-      ...(Array.isArray(requested) ? requested : [requested]),
-    ],
-    repo,
-  );
-}
-
-function rawRipgrepPaths(data: Buffer): Set<string> {
-  const paths = new Set<string>();
-  for (let start = 0; start < data.length;) {
-    let end = data.indexOf(0, start);
-    if (end < 0) end = data.length;
-    let path = data.subarray(start, end);
-    if (path[0] === 0x2e && path[1] === 0x2f) path = path.subarray(2);
-    if (path.length) paths.add(path.toString("hex"));
-    start = end + 1;
-  }
-  return paths;
-}
-
-function hasApplicableNonVcsRules(repo: string, path: string): boolean {
-  if (environmentValue("RIPGREP_CONFIG_PATH")) return true;
-  const parent = dirname(append(repo, path));
-  return [...ancestors(parent)].some(
-    (ancestor) =>
-      statFile(append(ancestor, ".ignore")) ||
-      statFile(append(ancestor, ".rgignore")),
-  );
-}
-
-async function ripgrepScopeFiles(
-  repo: string,
-  requested: string,
-  scope: string,
-): Promise<ScopeFiles> {
+async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
+  if (regular(scope)) return [scope];
+  const indexed = await directoryPaths(scope);
+  if (indexed !== undefined) return indexed;
   let result;
   try {
-    result = await scopeRipgrep(repo, requested);
-  } catch (error) {
-    throw new RipgrepUnavailableError(
-      `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
-  }
-  if (result.signal) throw toolFailure("ripgrep", result);
-  let failure =
-    result.status === 0 || result.status === 1
-      ? undefined
-      : toolFailure("ripgrep", result);
-  const paths = decodePosixBytes(result.stdout).split("\0").filter(Boolean);
-  const trackedRoot = directory(scope) ? scope : dirname(scope);
-  if (
-    [...ancestors(trackedRoot)].some((path) => exists(append(path, ".git")))
-  ) {
-    const owner = await git(trackedRoot, ["rev-parse", "--show-toplevel"]);
-    if (owner.signal) throw toolFailure("Git", owner);
-    const ownerRoot =
-      owner.status === 0
-        ? canonical(
-            decodeGitPath(owner.stdout).replace(
-              windows ? /\r?\n$/u : /\n$/u,
-              "",
-            ),
-          )
-        : undefined;
-    const ownerScope = ownerRoot ? inside(ownerRoot, scope) : undefined;
-    const tracked = ownerRoot
-      ? await git(ownerRoot, [
-          "ls-files",
-          "--cached",
-          "--ignored",
-          "--exclude-standard",
-          "-z",
-          "--",
-          ".",
-        ])
-      : undefined;
-    if (tracked?.signal) throw toolFailure("Git", tracked);
-    if (tracked?.status === 0 && ownerRoot) {
-      const prefix =
-        requested === "." || requested.startsWith("./") ? "./" : "";
-      const candidates: string[] = [];
-      const scopeDepth = ownerScope === "." ? 0 : ownerScope!.split("/").length;
-      const scopeIsDirectory = directory(scope);
-      const matchingPrefixes = new Map<string, boolean>();
-      for (const path of decodeGitPath(tracked.stdout).split("\0")) {
-        if (!path) continue;
-        try {
-          const parts = path.split("/");
-          if (scopeIsDirectory) {
-            if (parts.length <= scopeDepth) continue;
-            if (scopeDepth) {
-              const indexedPrefix = append(
-                ownerRoot,
-                parts.slice(0, scopeDepth).join(sep),
-              );
-              if (!matchingPrefixes.has(indexedPrefix))
-                matchingPrefixes.set(
-                  indexedPrefix,
-                  sameFile(indexedPrefix, scope),
-                );
-              if (!matchingPrefixes.get(indexedPrefix)) continue;
-            }
-          }
-          const absolute = append(ownerRoot, path);
-          if (!scopeIsDirectory && !sameFile(absolute, scope)) continue;
-          if (!regular(absolute)) continue;
-          candidates.push(inside(repo, absolute));
-        } catch (error) {
-          failure ??= error instanceof Error ? error : new Error(String(error));
-        }
-      }
-      if (candidates.length) {
-        const filtered = new Set(
-          candidates.filter((path) => hasApplicableNonVcsRules(repo, path)),
-        );
-        paths.push(
-          ...candidates
-            .filter((path) => !filtered.has(path))
-            .map((path) => prefix + path),
-        );
-        if (filtered.size) {
-          const allowed = await scopeRipgrep(
-            repo,
-            [...new Set([...filtered].map((path) => posix.dirname(path)))],
-            true,
-            1,
-          );
-          if (allowed.signal) throw toolFailure("ripgrep", allowed);
-          if (allowed.status !== 0 && allowed.status !== 1)
-            failure ??= toolFailure("ripgrep", allowed);
-          const allowedPaths = rawRipgrepPaths(allowed.stdout);
-          paths.push(
-            ...[...filtered]
-              .filter((path) =>
-                allowedPaths.has(encodeGitPath(path).toString("hex")),
-              )
-              .map((path) => prefix + path),
-          );
-        }
-      }
-    } else if (tracked && tracked.status !== 127)
-      failure ??= toolFailure("Git", tracked);
-    else if (
-      owner.status !== 0 &&
-      owner.status !== 127 &&
-      !/not a git repository/iu.test(owner.stderr)
-    )
-      failure ??= toolFailure("Git", owner);
-  }
-  return {
-    paths,
-    failure,
-  };
-}
-
-function hasRipgrepOnlyRules(scope: string): boolean {
-  if (environmentValue("RIPGREP_CONFIG_PATH")) return true;
-  const names = new Set([".ignore", ".rgignore"]);
-  for (const path of ancestors(scope)) {
-    if ([...names].some((name) => statFile(append(path, name)))) return true;
-  }
-  for (const path of walk(scope, true, true)) {
-    if (names.has(path.slice(path.lastIndexOf(sep) + 1)) && statFile(path))
-      return true;
-  }
-  return false;
-}
-
-function statFile(path: string): boolean {
-  try {
-    return stat(path).isFile();
-  } catch (error) {
-    if (isMissingPathError(error)) return false;
-    throw error;
-  }
-}
-
-async function scopeCandidates(
-  repo: string,
-  scope: string,
-): Promise<ScopeFiles> {
-  if (regular(scope)) return { paths: [scope] };
-  try {
-    const result = await ripgrepScopeFiles(
+    result = await runRipgrep(
+      [
+        "--files",
+        "--hidden",
+        "--no-require-git",
+        "--null",
+        "--glob",
+        "!**/{.git,.svn}",
+        "--glob",
+        "!**/{.git,.svn}/**",
+        "--",
+        relative(repo, scope) || ".",
+      ],
       repo,
-      relative(repo, scope) || ".",
-      scope,
     );
-    return {
-      paths: result.paths.map((path) =>
-        append(repo, path.startsWith("./") ? path.slice(2) : path),
-      ),
-      failure: result.failure,
-    };
-  } catch (error) {
-    if (!(error instanceof RipgrepUnavailableError)) throw error;
-    const indexed = await directoryPaths(scope);
-    if (indexed !== undefined) {
-      if (hasRipgrepOnlyRules(scope))
-        throw new Error(
-          "Could not safely enumerate ignored scoped files without Git or ripgrep.",
-          { cause: error },
-        );
-      return { paths: indexed };
-    }
+  } catch {
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
+    const isIgnoreFile = (path: string) => {
+      try {
+        return stat(path).isFile();
+      } catch (error) {
+        if (isMissingPathError(error)) return false;
+        throw error;
+      }
+    };
     let ignored =
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
       [...ancestors(scope)].some((path) => {
@@ -378,14 +157,14 @@ async function scopeCandidates(
         } catch {
           return false;
         }
-        return ignoreNames.some((name) => statFile(append(path, name)));
+        return ignoreNames.some((name) => isIgnoreFile(append(path, name)));
       });
     const files: string[] = [];
     if (!ignored)
       for (const path of walk(scope, false, true)) {
         if (
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
-          statFile(path)
+          isIgnoreFile(path)
         ) {
           ignored = true;
           break;
@@ -396,57 +175,34 @@ async function scopeCandidates(
       throw new Error(
         "Could not safely enumerate ignored scoped files without Git or ripgrep.",
       );
-    return { paths: files };
+    return files;
   }
+  if (result.status !== 0 && result.status !== 1)
+    throw new Error(
+      `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
+    );
+  return decodePosixBytes(result.stdout)
+    .split("\0")
+    .filter(Boolean)
+    .map((path) => append(repo, path));
 }
 
-interface RequestedScopes {
-  paths: string[];
-  filePaths: Set<string>;
-  firstMatchOnly: boolean;
-  preserveKinds: boolean;
-}
-
-function loadScopes(path: string): RequestedScopes {
+function loadScopes(path: string): string[] {
   let scopes: unknown;
   try {
     scopes = JSON.parse(decodeUtf8(readFile(path)));
   } catch {
     throw new Error(`Unable to read scopes file: ${path}`);
   }
-  const paths = Array.isArray(scopes)
-    ? scopes
-    : scopes && typeof scopes === "object"
-      ? (scopes as Record<string, unknown>).paths
-      : undefined;
-  const preserveKinds = Boolean(
-    scopes &&
-    !Array.isArray(scopes) &&
-    typeof scopes === "object" &&
-    Object.hasOwn(scopes, "filePaths"),
-  );
-  const filePaths = preserveKinds
-    ? (scopes as Record<string, unknown>).filePaths
-    : [];
   if (
-    !Array.isArray(paths) ||
-    !paths.length ||
-    paths.some((scope: unknown) => typeof scope !== "string" || !scope) ||
-    !Array.isArray(filePaths) ||
-    filePaths.some(
-      (scope: unknown) =>
-        typeof scope !== "string" || !scope || !paths.includes(scope),
-    )
+    !Array.isArray(scopes) ||
+    !scopes.length ||
+    scopes.some((scope: unknown) => typeof scope !== "string" || !scope)
   )
     throw new Error(
       `Scopes file must contain a non-empty JSON string array: ${path}`,
     );
-  return {
-    paths: paths as string[],
-    filePaths: new Set(filePaths as string[]),
-    firstMatchOnly: !Array.isArray(scopes),
-    preserveKinds,
-  };
+  return scopes as string[];
 }
 
 function inventoryOutput(value: string): string {
@@ -520,28 +276,65 @@ export async function generateInventory(
     const requested = isAbsolute(expandHome(scope, home))
       ? inside(repo, absolute)
       : scope;
-    const listed = await ripgrepScopeFiles(repo, requested, absolute);
-    let listingFailure = listed.failure;
-    for (const path of listed.paths) {
-      const candidate = append(
-        repo,
-        path.startsWith("./") ? path.slice(2) : path,
+    const result = await runRipgrep(
+      [
+        "--files",
+        "--null",
+        "--hidden",
+        "--path-separator",
+        "/",
+        "--glob",
+        "!**/{.git,.svn}",
+        "--glob",
+        "!**/{.git,.svn}/**",
+        "--",
+        requested,
+      ],
+      repo,
+    ).catch((error: unknown) => {
+      throw new Error(
+        `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
       );
-      try {
-        if (directory(absolute) && linkedParent(absolute, candidate)) continue;
-      } catch (error) {
-        listingFailure ??=
-          error instanceof Error ? error : new Error(String(error));
-        continue;
+    });
+    if (result.status !== 0 && result.status !== 1)
+      throw new Error(
+        `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+      );
+    let bytes = result.stdout;
+    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
+      const tracked = await git(repo, [
+        "ls-files",
+        "--cached",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        requested,
+      ]).catch((error: unknown) => {
+        if (error instanceof Error && "code" in error)
+          return { status: 127, stdout: Buffer.alloc(0) };
+        throw error;
+      });
+      if (tracked.status === 0) {
+        const prefix =
+          requested === "." || requested.startsWith("./") ? "./" : "";
+        const paths = decodeGitPath(tracked.stdout)
+          .split("\0")
+          .filter((path) => path && regular(append(repo, path)));
+        bytes = Buffer.concat([
+          bytes,
+          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+        ]);
       }
+    }
+    for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
       if (/[\r\n]/u.test(path))
         throw new Error(
           "Repository contains a path that cannot fit in the file inventory",
         );
-      inventoryRows.push(encodeGitPath(path + "\n"));
+      inventoryRows.push(encodePosixPath(path + "\n"));
     }
-    if (inventoryRows.length === 0 && listingFailure) throw listingFailure;
   } else if (diff) {
     if (
       inventory &&
@@ -612,41 +405,22 @@ export async function generateInventory(
     }
   } else {
     const scopes = loadScopes(expandHome(options.scopesFile!, home));
-    let listingFailure: unknown;
-    selectedScopes: for (const value of scopes.paths) {
-      try {
-        const selected = scopePath(repo, value, home, true, true);
-        if (
-          scopes.firstMatchOnly &&
-          scopes.preserveKinds &&
-          scopes.filePaths.has(value) !== regular(selected)
-        )
+    const resolved = scopes.map((value) =>
+      scopePath(repo, value, home, true, true),
+    );
+    for (const selected of resolved) {
+      for (const path of await scopeCandidates(repo, selected)) {
+        let name: string;
+        try {
+          if (!regular(path)) continue;
+          name = inside(repo, canonical(path));
+        } catch {
           continue;
-        const candidates = await scopeCandidates(repo, selected);
-        const previousSize = rankRows.size;
-        for (const path of candidates.paths) {
-          let name: string;
-          try {
-            if (directory(selected) && linkedParent(selected, path)) continue;
-            if (!regular(path)) continue;
-            name = inside(repo, canonical(path));
-          } catch (error) {
-            listingFailure ??= error;
-            continue;
-          }
-          if (name.split("/").some((part) => sourceMetadata.has(part)))
-            continue;
-          rankRows.set(name, { path: name });
-          if (scopes.firstMatchOnly) break selectedScopes;
         }
-        if (rankRows.size === previousSize && candidates.failure)
-          listingFailure ??= candidates.failure;
-      } catch (error) {
-        if (!scopes.firstMatchOnly) throw error;
-        listingFailure ??= error;
+        if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
+        rankRows.set(name, { path: name });
       }
     }
-    if (rankRows.size === 0 && listingFailure) throw listingFailure;
   }
   if (inventory) {
     const unique = [
