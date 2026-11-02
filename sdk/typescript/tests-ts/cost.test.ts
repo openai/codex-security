@@ -1203,13 +1203,17 @@ describe("live scan cost tracking", () => {
   );
 
   test.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
+    [false, false, "EMFILE"],
+    [false, true, "EMFILE"],
+    [true, false, "EMFILE"],
+    [true, true, "EMFILE"],
+    [false, false, "EIO"],
+    [false, true, "EIO"],
+    [true, false, "EIO"],
+    [true, true, "EIO"],
   ] as const)(
-    "preserves accounting failure order after directory traversal fails (budget=%p, earlier log failure=%p)",
-    async (budget, earlierFailure) => {
+    "preserves accounting failure order after directory traversal fails (budget=%p, earlier log failure=%p, code=%s)",
+    async (budget, earlierFailure, code) => {
       const home = await codexHome();
       await writeSession(home, "scan-thread", { input_tokens: 10 });
       const healthy = await writeSession(
@@ -1239,7 +1243,7 @@ describe("live scan cost tracking", () => {
         code: "EACCES",
       });
       const later = Object.assign(new Error("Synthetic directory failure"), {
-        code: "EMFILE",
+        code,
       });
       const opened = filesystem.open;
       const listed = filesystem.readdir;
@@ -1278,7 +1282,7 @@ describe("live scan cost tracking", () => {
         await expect(tracker.refresh()).rejects.toBe(
           earlierFailure ? first : later,
         );
-        if (earlierFailure && !budget) {
+        if (earlierFailure && !budget && code !== "EMFILE") {
           expect(
             activities.filter(
               (activity) => activity.description === "Healthy worker output.",
@@ -1303,6 +1307,12 @@ describe("live scan cost tracking", () => {
         listing.mockRestore();
         await tracker.stop();
       }
+      expect(
+        activities.filter(
+          (activity) => activity.description === "Healthy worker output.",
+        ),
+      ).toHaveLength(1);
+      expect(progress).toHaveLength(1);
     },
   );
 
@@ -1514,6 +1524,128 @@ describe("live scan cost tracking", () => {
       opening.mockRestore();
     }
   });
+
+  test.each([
+    ["log", false],
+    ["log", true],
+    ["directory", false],
+    ["replay", false],
+  ] as const)(
+    "drains buffered observations after descriptor exhaustion in %s (budget=%s)",
+    async (phase, budget) => {
+      const home = await codexHome(),
+        usage = { input_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const healthy = await writeSession(home, "a-healthy", usage, {
+        parent: "scan-thread",
+      });
+      const blocked = await writeSession(home, "b-blocked", usage, {
+        parent: phase === "log" ? "other-scan" : "scan-thread",
+      });
+      const secondary: unknown[] = [],
+        activities: ScanActivity[] = [],
+        events: ScanSessionEvent[] = [],
+        progress: ScanProgress[] = [];
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        repository: home,
+        onError: (error) => secondary.push(error),
+      };
+      const tracker = new ScanCostTracker(options);
+      // Enable observers after startup so this fixture uses explicit refreshes only.
+      tracker.start("scan-thread");
+      Object.assign(options, {
+        onActivity: (value: ScanActivity) => activities.push(value),
+        onSessionEvent: (value: ScanSessionEvent) => events.push(value),
+        onProgress: (value: ScanProgress) => progress.push(value),
+      });
+      await tracker.refresh();
+      activities.length = events.length = progress.length = 0;
+      if (budget) options.maxCostUsd = 1;
+      const output = {
+        id: "buffered-output",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Buffered worker output." }],
+      };
+      await appendSessionItem(healthy, output);
+      await appendSessionItem(healthy, progressMessage(1));
+      await appendFile(blocked, "{}\n");
+      const replay = await writeSession(home, "c-replay", usage, {
+        parent: "scan-thread",
+      });
+      const later = await writeSession(home, "d-later", usage, {
+        parent: "scan-thread",
+      });
+      const directory = parse(healthy).dir,
+        unavailable = join(directory, "zz-next");
+      if (phase === "directory") await filesystem.mkdir(unavailable);
+      const denied = Object.assign(new Error("Synthetic worker denial"), {
+        code: "EACCES",
+      });
+      const exhausted = Object.assign(
+        new Error("Synthetic descriptor exhaustion"),
+        { code: "EMFILE" },
+      );
+      const opened = filesystem.open,
+        listed = filesystem.readdir,
+        opens = new Map<string, number>();
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          const path = String(args[0]),
+            count = (opens.get(path) ?? 0) + 1;
+          opens.set(path, count);
+          if (path === blocked) throw phase === "log" ? exhausted : denied;
+          if ((path === replay || path === later) && count > 1) throw exhausted;
+          return opened(...args);
+        },
+      );
+      const listing = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (phase === "directory" && String(args[0]) === unavailable)
+            throw exhausted;
+          const entries = await Reflect.apply(listed, filesystem, args);
+          if (String(args[0]) === directory)
+            entries.sort((a: { name: string }, b: { name: string }) =>
+              a.name.localeCompare(b.name),
+            );
+          return entries;
+        },
+      );
+      try {
+        await expect(tracker.refresh()).rejects.toBe(
+          phase === "log" ? exhausted : denied,
+        );
+        expect(
+          activities.filter(
+            (value) => value.description === "Buffered worker output.",
+          ),
+        ).toHaveLength(budget ? 0 : 1);
+        expect(
+          events.filter(
+            (value) =>
+              JSON.stringify(value.event["payload"]) === JSON.stringify(output),
+          ),
+        ).toHaveLength(budget ? 0 : 1);
+        expect(progress).toHaveLength(budget ? 0 : 1);
+        expect(secondary).toEqual(phase === "log" ? [] : [exhausted]);
+        expect(opens.get(replay) ?? 0).toBe(
+          phase === "log" ? 0 : phase === "replay" ? 2 : 1,
+        );
+        expect(opens.get(later) ?? 0).toBe(phase === "log" ? 0 : 1);
+      } finally {
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      }
+      expect(
+        activities.filter(
+          (value) => value.description === "Buffered worker output.",
+        ),
+      ).toHaveLength(1);
+    },
+  );
 
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",

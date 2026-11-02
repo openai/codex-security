@@ -256,6 +256,7 @@ export class ScanCostTracker {
         : this.#options.repository;
     const unreadable = new Map<SessionUsage, unknown>();
     let traversalFailure: { error: unknown } | undefined;
+    let exhausted: { error: unknown } | undefined;
     try {
       for await (const path of sessionFiles(
         join(this.#options.codexHome, "sessions"),
@@ -268,8 +269,12 @@ export class ScanCostTracker {
         try {
           await readSessionUsage(path, session, repository);
         } catch (error) {
-          // Descriptor exhaustion affects the whole process, so later opens cannot help.
-          if (isRecord(error) && error["code"] === "EMFILE") throw error;
+          if (isRecord(error) && error["code"] === "EMFILE") {
+            if (this.#options.maxCostUsd !== undefined) throw error;
+            exhausted = { error };
+            unreadable.set(session, error);
+            break;
+          }
           if (
             this.#options.maxCostUsd !== undefined &&
             session.threadId === null
@@ -279,7 +284,11 @@ export class ScanCostTracker {
         }
       }
     } catch (error) {
-      if (this.#options.maxCostUsd !== undefined || unreadable.size === 0)
+      if (isRecord(error) && error["code"] === "EMFILE") exhausted = { error };
+      if (
+        this.#options.maxCostUsd !== undefined ||
+        (unreadable.size === 0 && !exhausted)
+      )
         throw error;
       traversalFailure = { error };
     }
@@ -333,9 +342,15 @@ export class ScanCostTracker {
       }
     }
 
-    if (failure === undefined && traversalFailure) throw traversalFailure.error;
+    if (failure === undefined && traversalFailure && !exhausted)
+      throw traversalFailure.error;
     if (failure && this.#options.maxCostUsd !== undefined) throw failure.error;
-    if (traversalFailure) failures.push(traversalFailure.error);
+    if (exhausted && !failures.includes(exhausted.error)) {
+      failure ??= exhausted;
+      failures.push(exhausted.error);
+    }
+    if (traversalFailure && !failures.includes(traversalFailure.error))
+      failures.push(traversalFailure.error);
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
@@ -344,6 +359,7 @@ export class ScanCostTracker {
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined &&
+        exhausted === undefined &&
         !unreadable.has(session)
       ) {
         // Replay only newly associated sessions, including their early events.
@@ -354,11 +370,9 @@ export class ScanCostTracker {
           session = replayed;
           this.#sessions.set(path, session);
         } catch (error) {
-          if (
-            this.#options.maxCostUsd !== undefined ||
-            (isRecord(error) && error["code"] === "EMFILE")
-          )
-            throw error;
+          if (this.#options.maxCostUsd !== undefined) throw error;
+          if (isRecord(error) && error["code"] === "EMFILE")
+            exhausted = { error };
           failure ??= { error };
           failures.push(error);
         }
