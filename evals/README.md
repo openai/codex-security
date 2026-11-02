@@ -3,9 +3,9 @@
 Model-based evaluations live here so they can evolve with the plugin without
 being embedded in its source tree or shipped npm runtime.
 
-- [Dependency reachability](dependency-reachability/README.md) checks whether a
-  caller can reach third-party CVEs in MailParser services, Pillow wheels and
-  downstream builds, and Backstage’s Scaffolder task workflow.
+- [Dependency reachability](dependency-reachability/README.md) invokes the public CLI
+  with a CVE alone and checks the reported uses in a mixed-version deployment.
+  It also retains the historical caller-scoped skill cases.
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
 - [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC

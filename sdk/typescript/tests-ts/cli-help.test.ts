@@ -76,6 +76,7 @@ describe("CLI help", () => {
       );
     expect(sectionFor("scan")).toBeGreaterThanOrEqual(0);
     expect(sectionFor("patch")).toBe(sectionFor("scan"));
+    expect(sectionFor("exploitability")).toBe(sectionFor("scan"));
     expect(sectionFor("scans")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("findings")).toBe(sectionFor("scans"));
     expect(sectionFor("login")).toBeGreaterThan(sectionFor("scan"));
@@ -172,6 +173,15 @@ describe("CLI help", () => {
       expect(schema).toEqual(expect.any(Object));
     },
   );
+
+  test("discovers the exploitability check and its required CVE from group help", async () => {
+    expect(await help(["exploitability", "--help"])).toMatch(/^  check\s/mu);
+    const schema = JSON.parse(
+      await help(["exploitability", "check", "--schema", "--json"]),
+    );
+    expect(schema.args.required).toEqual(["cve"]);
+    expect(schema.output.required).toContain("uses");
+  });
 
   test("documents optional validation context and structured output", async () => {
     const text = await help(["validate", "--help"]);

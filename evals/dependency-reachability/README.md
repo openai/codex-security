@@ -1,8 +1,49 @@
 # Dependency reachability eval
 
-Can the production `attack-path-analysis` skill determine whether a caller can
-trigger a dependency advisory? Use these 23 cases to compare accuracy, analysis
-time, and token use against a candidate implementation.
+The acceptance case runs the public CLI from a fresh copy of a small application.
+The only user input is a CVE identifier.
+
+```sh
+codex-security exploitability check CVE-2026-48801 --json
+```
+
+Two services share an HTTP handler but install different versions of
+`linkify-it`. The command has to discover both uses and distinguish the
+affected service from the fixed one. Compose records which service builds
+use which lockfiles. Whether either service is currently running is unknown.
+[Public advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
+
+## Run the command eval
+
+Use Node.js 22.22+ and Git. From the repository root, install and build the CLI.
+
+```sh
+pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build
+```
+
+Run the live acceptance case with the same model credentials as the CLI.
+It fetches the public advisory and consumes model usage. No upstream clones
+or running services are needed.
+
+```sh
+node --experimental-strip-types evals/dependency-reachability/run.mts
+```
+
+The runner invokes the shipped CLI entrypoint with closed stdin in a temporary
+checkout. Its JSON output is graded outside that checkout. A pass requires the
+overall verdict, a separate verdict and version for each service, configured
+deployment status, and citations grounding the results. The report in
+`reports/command-*/report.json` records the actual invocation, source revision,
+fixture digest, command wall time, response, individual grades, and token usage
+when available. Command errors and grading failures both exit nonzero.
+
+## Historical skill baseline
+
+The original 23 cases measure the production `attack-path-analysis` skill
+when the caller and entry point are given. They remain available as
+component-level tests. Their historical scores and costs have a different
+input and denominator from the direct command eval.
 
 Each case gives the caller's entry point and permissions, the advisory, and a
 snapshot of the application. Where processing spans services, the analysis has
@@ -24,13 +65,11 @@ The package sources and fixes are pinned public revisions. The application code
 and deployment records added to those checkouts are synthetic.
 [Nodemailer fix](https://github.com/nodemailer/nodemailer/compare/v7.0.10...v7.0.11) · [Alpine backport](https://github.com/alpinelinux/aports/commit/29a91ff19585ca3eebd4bf53d275f600a093a73d) · [Backstage advisory](https://github.com/backstage/backstage/security/advisories/GHSA-wg6p-jmpc-xjmr)
 
-## Run locally
+### Run the scoped cases
 
-Use Node.js 22.22+ and Git. From the repository root, install the dependencies
-and build the SDK.
+Install the shared eval dependencies and type-check the harness.
 
 ```sh
-pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir evals/triage-finding install --frozen-lockfile
 pnpm --dir sdk/typescript run build:evals
@@ -44,7 +83,7 @@ repos="$(mktemp -d)"
 mkdir -p "$repos/nodemailer"
 git clone --no-checkout https://github.com/nodemailer/mailparser.git "$repos/nodemailer/mailparser"
 git clone --no-checkout https://github.com/nodemailer/nodemailer.git "$repos/nodemailer/nodemailer"
-node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos" --case address-backport
+node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport
 ```
 
 To run all cases, add the remaining repositories and omit the case selector.
@@ -55,7 +94,7 @@ git clone --no-checkout https://github.com/python-pillow/Pillow.git "$repos/pyth
 git clone --no-checkout https://github.com/python-pillow/pillow-wheels.git "$repos/python-pillow/pillow-wheels"
 git clone --branch v1.14.1 --single-branch --no-checkout https://github.com/backstage/backstage.git "$repos/backstage/backstage"
 git clone --no-checkout https://github.com/alpinelinux/aports.git "$repos/alpinelinux/aports"
-node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos"
+node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos"
 ```
 
 Use `--suite mailparser`, `--suite pillow`, or `--suite backstage` to select
@@ -65,14 +104,14 @@ the pinned Codex SDK and CLI, and xhigh reasoning. Omit `--model` to use the
 default. Model runs consume usage on the caller's Codex account or API key.
 [Shared eval runtime](../secret-discovery/README.md#run)
 
-## Compare a candidate
+### Compare scoped candidates
 
 Append a trusted local command after `--`. It runs in a copy of the snapshot
 with the caller's OS permissions, reads the question and output instructions
 from stdin, and writes one JSON answer to stdout. Diagnostics can go to stderr.
 
 ```sh
-node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos" --case address-backport -- /absolute/path/to/adapter
+node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport -- /absolute/path/to/adapter
 ```
 
 A full pass requires the expected verdict (`exploitable`, `ruled_out`, or

@@ -14,6 +14,8 @@ Use its security workflows in Codex, or automate them with the
 - Scan repositories, selected paths, or Git changes. Deep scans run parallel
   discovery workers on repositories and selected paths.
 - Validate candidate findings, generate patches, and verify existing fixes.
+- Check a dependency CVE against the current checkout with
+  [`cs exploitability check`](sdk/typescript/docs/cli.md#check-a-dependency-cve).
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.

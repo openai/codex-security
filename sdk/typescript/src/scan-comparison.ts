@@ -10,6 +10,7 @@ import {
   type ModelReasoningEffort,
   type ThreadOptions,
   type TurnOptions,
+  type Usage,
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { parse, stringify } from "smol-toml";
@@ -132,7 +133,7 @@ interface ReadOnlyCodex {
     run(
       input: string,
       options: TurnOptions,
-    ): Promise<{ finalResponse: string }>;
+    ): Promise<{ finalResponse: string; usage?: Usage | null }>;
   };
 }
 
@@ -698,6 +699,7 @@ export async function runReadOnlyCodex(
     surface: CodexSecuritySurface;
     command: string;
     threadSource: ReadOnlyCodexThreadSource;
+    onUsage?: (usage: Usage) => void;
   },
 ): Promise<string> {
   const { thread, cleanup } = await startReadOnlyCodexThread(
@@ -710,6 +712,8 @@ export async function runReadOnlyCodex(
       cyberAccessProgram: options.cyberAccessProgram,
       signal: options.signal,
     });
+    const usage = turn.usage;
+    if (usage) notify(() => runtimeOptions.onUsage?.(usage));
     return turn.finalResponse;
   } finally {
     await cleanup?.();

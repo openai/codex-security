@@ -38,7 +38,8 @@ without running security analysis.
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
   [classify severity](#classify-finding-severity), or
   [suggest owners](#suggest-finding-owners).
-- [Validate and patch findings](#validate-and-patch-findings) or
+- [Check a dependency CVE](#check-a-dependency-cve),
+  [validate and patch findings](#validate-and-patch-findings), or
   [verify an existing fix](#verify-fixes).
 - [Publish to Cloud](#publish-findings-to-cloud) or
   [Linear](#publish-completed-scans-to-linear), or [export results](#exports-and-ci).
@@ -2372,6 +2373,33 @@ Without `gh`, pass a `githubToken` issued for the selected `githubHost`.
 If you omit the token, the SDK asks the GitHub CLI for credentials, including
 its supported token environment variables. `githubHost` defaults to `GH_HOST` or `github.com`.
 The token needs code-scanning read access; access failures reject the import.
+
+## Check a dependency CVE
+
+Run the check from anywhere in the Git checkout. It uses the worktree root.
+Outside Git it uses the current directory.
+
+```bash
+codex-security exploitability --help
+codex-security exploitability check CVE-2023-4863
+codex-security exploitability check CVE-2023-4863 --json
+```
+
+The command looks up the public advisory in the GitHub Advisory Database and
+selects source, dependency and deployment excerpts from the checkout. It
+searches for the package names listed by the advisory, so renamed or vendored
+copies can escape detection. Each discovered use reports its component,
+version, verdict, deployment status and source citations.
+Any supported exploitable use makes the overall status `exploitable`. If all
+identified uses are ruled out, the overall status is `ruled_out` only when the
+reviewer received the complete source and reported no material gaps.
+Otherwise the report gives an overall `unknown` alongside the per-use verdicts
+and limitations. A deployment manifest establishes what is configured.
+Confirming what is running requires separate evidence.
+
+The assessment is read-only and consumes model usage. Use `--model` and
+`--effort` to select model settings. A completed report exits with status
+zero for any verdict. Use `--json` and inspect its `status` field in automation.
 
 ## Validate and patch findings
 

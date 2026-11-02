@@ -267,9 +267,11 @@ function directoryCounts(files: readonly string[]): Map<string, number> {
   return counts;
 }
 
-async function inventoryFiles(
+export async function inventoryFiles(
   repository: string,
   signal?: AbortSignal,
+  include?: (path: string, directory: boolean) => boolean,
+  onNonRegular?: () => void,
 ): Promise<string[]> {
   signal?.throwIfAborted();
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -300,6 +302,7 @@ async function inventoryFiles(
     for (const path of stdout.toString("latin1").split("\0").filter(Boolean)) {
       signal?.throwIfAborted();
       const bytes = Buffer.from(path, "latin1");
+      if (include && !include(utf8.decode(bytes), false)) continue;
       const metadata = await lstat(
         Buffer.from(
           join(Buffer.from(repository).toString("latin1"), path),
@@ -307,6 +310,7 @@ async function inventoryFiles(
         ),
       ).catch(nullIfMissingFile);
       if (metadata?.isFile()) files.push(join(repository, utf8.decode(bytes)));
+      else onNonRegular?.();
     }
     return files.length === 0
       ? []
@@ -329,7 +333,10 @@ async function inventoryFiles(
           encoding: "buffer",
         });
     for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isFile()) continue;
+      if (!entry.isDirectory() && !entry.isFile()) {
+        onNonRegular?.();
+        continue;
+      }
       const name =
         typeof entry.name === "string"
           ? process.platform === "win32"
@@ -338,6 +345,7 @@ async function inventoryFiles(
           : utf8.decode(entry.name);
       if (name === ".git") continue;
       const path = directory ? `${directory}/${name}` : name;
+      if (include && !include(path, entry.isDirectory())) continue;
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile()) files.push(path);
     }

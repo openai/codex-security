@@ -71,6 +71,38 @@ function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
 }
 
+test("a read-only turn reports SDK token usage without depending on the observer", async () => {
+  const usage = {
+    input_tokens: 12,
+    cached_input_tokens: 3,
+    cache_write_input_tokens: 0,
+    output_tokens: 4,
+    reasoning_output_tokens: 1,
+  };
+  const observer = mock(() => {
+    throw new Error("observer failed");
+  });
+  const answer = await runReadOnlyCodex(
+    "Review the supplied evidence.",
+    {},
+    {
+      codex: {
+        startThread: () => ({
+          run: async () => ({ finalResponse: "{}", usage }),
+        }),
+      },
+    },
+    {
+      surface: "cli",
+      command: "exploitability check",
+      threadSource: "security_scan",
+      onUsage: observer,
+    },
+  );
+  expect(answer).toBe("{}");
+  expect(observer).toHaveBeenCalledWith(usage);
+});
+
 function fakeCodex(response: unknown) {
   const calls: {
     prompt?: string;

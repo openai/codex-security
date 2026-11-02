@@ -104,6 +104,10 @@ import {
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanProgress } from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
+import {
+  assessDependencyReachability,
+  dependencyReachabilityReportSchema,
+} from "./dependency-reachability.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -1275,6 +1279,7 @@ interface CliDependencies {
   deduplicateScan?: typeof deduplicateScanInternal;
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
+  assessDependencyReachability?: typeof assessDependencyReachability;
   suggestOwners?: typeof suggestOwnersInternal;
   recordsInput?: Readable;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
@@ -2434,6 +2439,43 @@ export async function main(
       },
     });
   }
+  const exploitability = Cli.create("exploitability", {
+    description: "Assess dependency advisories against the current checkout.",
+  }).command("check", {
+    description: "Check whether a dependency CVE affects this checkout.",
+    destructive: false,
+    mcp: false,
+    args: z.object({
+      cve: z.string().describe("Public CVE identifier."),
+    }),
+    options: modelOptions(
+      "Model for dependency assessment.",
+      "Reasoning effort for dependency assessment.",
+    ),
+    output: dependencyReachabilityReportSchema,
+    async run({ args, options }) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        return await (
+          dependencies.assessDependencyReachability ??
+          assessDependencyReachability
+        )(args.cve, {
+          workingDirectory: dependencies.currentDirectory(),
+          environment: dependencies.environment,
+          model: options.model,
+          reasoningEffort: options.effort,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        exitCode = interruptedExitCode(controller.signal) ?? 2;
+        errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        throw error;
+      } finally {
+        removeSignals();
+      }
+    },
+  });
   const scanHistory = Cli.create("scans", {
     description: "Review saved scans (default: list).",
   })
@@ -5967,6 +6009,7 @@ export async function main(
         }
       },
     })
+    .command(exploitability)
     .command("validate", {
       hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       description:
@@ -6996,6 +7039,7 @@ export async function main(
     const scanImport = isScanImportCommand(argv);
     const nestedCommand =
       scanImport ||
+      command === "exploitability" ||
       command === "scans" ||
       command === "findings" ||
       command === "publish" ||
