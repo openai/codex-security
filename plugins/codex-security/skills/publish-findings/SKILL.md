@@ -45,20 +45,20 @@ Use `--provider veracode` with all Findings API pages for one application’s ST
 
 ## Endor Labs findings
 
-For Endor Labs imports, prefer native Finding JSON from authenticated `endorctl`, scoped to one project and context. Omit `--field-mask` and fetch all pages with `--list-all`:
+Use authenticated `endorctl` for one verified project and context. Omit `--field-mask` to keep complete native Finding objects. Replace `/path/to/private/reports` with a private directory outside the checkout.
 
 ```sh
-endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
-  --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
-  --list-all --output-type json > endor-findings.json
-codex-security publish findings endor-findings.json --to local \
-  --provider endor --repository /path/to/project \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+out=$(mktemp -d "/path/to/private/reports/endor.XXXXXX") &&
+  endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
+    --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
+    --list-all --output-type json > "$out/findings.tmp" &&
+  mv "$out/findings.tmp" "$out/endor-findings.json" &&
+  printf '%s\n' "$out/endor-findings.json"
 ```
 
-Choose a project that corresponds to the selected local checkout or Cloud repository. To publish the same export to Cloud, use `--to cloud --repository "CLOUD_REPOSITORY_ID"`. For a different branch or scan context, change the Endor filter and keep a distinct, stable source key. The [official Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) can help with setup and investigation; its summaries, counts and field-masked results do not replace complete Finding objects. The [CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api) supplies the export. The importer reads that saved file; it does not maintain an Endor API connection or write changes back to Endor.
+Preview the completed file with `--provider endor` and a stable source key such as `YOUR_NAMESPACE/PROJECT_UUID/main`. Match the project to the destination repository. For another branch or scan context, change the filter and use a distinct source key. The [official Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) can help with setup and investigation; its summaries, counts and field-masked results do not replace complete Finding objects. The [CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api) supplies the export. The importer reads that saved file; it does not maintain an Endor API connection or write changes back to Endor.
 
-Native JSON retains severity, scanned commit, package and advisory data, and primary SAST/AI SAST locations. Existing self-contained endorctl SARIF is a lossy compatibility format that retains finding UUIDs and links; unavailable severity or revisions stay unknown. Both formats use the Endor UUID within the selected repository and source key as identity. Importing SARIF after native JSON updates the same record by replacing its evidence snapshot, not merging it: native detail absent from SARIF is removed from that snapshot. Use native JSON consistently for ongoing imports. Keep the original evidence and inspect exclusions. Imported records remain unassessed source evidence. For local imports, use the preview and readback procedure above; for Cloud, use the publication procedure below.
+Native JSON retains severity, scanned commit, package and advisory data, and primary SAST/AI SAST locations. Existing self-contained endorctl SARIF is a lossy compatibility format that retains finding UUIDs and links; unavailable severity or revisions stay unknown. Both formats use the Endor UUID within the selected repository and source key as identity. Importing SARIF after native JSON updates the same record by replacing its evidence snapshot, not merging it: native detail absent from SARIF is removed from that snapshot. Use native JSON consistently for ongoing imports. Keep the original evidence and inspect exclusions. Imported records remain unassessed source evidence. Follow the [local](#import-locally) or [Cloud](#publish-to-cloud) workflow for the chosen destination.
 
 ## Wiz findings
 
@@ -121,26 +121,9 @@ For Dependabot, follow the [repository alert export guide](https://github.com/op
 
 **GHSA import stages advisory evidence for investigation; it does not establish an installed dependency or applicability to the destination repository.** Keep advisories separate from code scanning. `codex-security import github-advisories OWNER/REPO --format json` reads published repository disclosures by default. Repeated `--github-advisory GHSA-xxxx-xxxx-xxxx` selects exact IDs; `--github-state draft|triage|closed` explicitly selects an unpublished list and cannot be combined with exact IDs. Add `--github-advisory-source global` for exact public database IDs. This does not enumerate the global database. Private advisory access needs Repository security advisories read permission and access to those records. Stop on a read failure instead of publishing an incomplete selection.
 
-```sh
-codex-security import github example/project --format json > /path/to/alerts.json
-codex-security publish findings /path/to/alerts.json \
-  --to local --repository /path/to/project --provider github \
-  --source-key github.com/example/project/code-scanning --dry-run --format json
-codex-security publish findings /path/to/alerts.json \
-  --to cloud --repository https://github.com/example/project --provider github \
-  --source-key github.com/example/project/code-scanning --dry-run --format json
+Save the selected collector’s output in a private file outside the checkout. After collection succeeds, use `--provider github` and the [local](#import-locally) or [Cloud](#publish-to-cloud) workflow for the requested destination. Keep a separate stable source key for each family, such as `github.com/example/project/code-scanning` or `github.com/example/project/security-advisories`.
 
-codex-security import github-advisories example/project \
-  --github-advisory-source global --github-advisory GHSA-2345-6789-cfgh \
-  --format json > /path/to/advisories.json
-codex-security publish findings /path/to/advisories.json \
-  --to cloud --repository https://github.com/example/project --provider github \
-  --source-key github.com/example/project/security-advisories --dry-run --format json
-```
-
-Choose the local or Cloud preview for the intended destination. GHSA input supports the same choice: use `--to local --repository /path/to/project` with the advisory file and source key. Follow [local imports](#import-locally) for confirmation and readback or [Cloud publication](#publish-to-cloud) for upload review.
-
-Use a separate stable source key for each GitHub finding family. Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. Secret-scanning alerts and writeback to GitHub are outside this workflow.
+Code-scanning identities include the ref; repository alerts and advisories must match the selected Cloud repository or, when available, a configured local Git remote. Global advisories omit source-repository provenance and are bound to the explicit local or Cloud destination for investigation. Preserve original evidence, package ranges and patches; do not infer installed packages or source locations from an advisory. Missing security severity stays `unknown`. Dismissal, resolution and withdrawal are source state, not Codex assessment. Secret-scanning alerts and writeback to GitHub are outside this workflow.
 
 ## Publish to Cloud
 
