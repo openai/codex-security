@@ -74,6 +74,13 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+To supply grading rules, pass `severityRubric` with the Markdown text in
+`markdown`, a positive integer `revision`, and the lowercase `sha256` digest of
+the exact UTF-8 text, including any trailing newline. The SDK verifies the digest
+before dispatch, includes the rubric in the model prompt, and echoes the snapshot
+in `execution.run` and the terminal scan receipt. Omit the field to use the
+existing Standard scan grading rules.
+
 Set `ownerSuggestions: true` to record ownership evidence during the existing
 scan execution. The scan agent may include an optional hint on each finding:
 

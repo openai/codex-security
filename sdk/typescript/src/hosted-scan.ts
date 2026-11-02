@@ -19,6 +19,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CodexSecurity } from "./api.js";
+import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
 import { normalizeRepository, repositoryRevision } from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
@@ -35,6 +36,12 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  severityRubric: severityRubricSnapshotSchema
+    .refine(
+      ({ markdown, sha256 }) => hash("sha256", markdown) === sha256,
+      "Rubric SHA-256 does not match its exact UTF-8 Markdown.",
+    )
+    .optional(),
   ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
@@ -154,6 +161,9 @@ async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
     revision: input.revision,
     scope,
     identity: input.identity,
+    ...(input.severityRubric === undefined
+      ? {}
+      : { severityRubric: input.severityRubric }),
   };
 }
 
