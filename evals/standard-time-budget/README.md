@@ -116,14 +116,20 @@ A canonical scan that misses a bug still completed successfully. The runner
 exits nonzero for execution failures, not low recall.
 
 Automatic recall uses a finite set of accepted CWEs and source locations for
-each case. Credit requires a `root_control` or `sink` location with authentic
-source evidence. The statement routes send the file where they select the tenant.
+each case. A `root_control` or `sink` location needs authentic source evidence.
+When an affected location omits its role or identifies an entrypoint
+(`entrypoint` or `entrypoint/wrapper`), an
+authentic `root_control`, `sink`, or `entrypoint` snippet must cover a gold line
+within that location and the snippet's cited range. An unlabelled location on
+a safe sibling is a comparison when verified `expected_control` evidence covers
+it and no competing citation claims that line.
+The statement routes send the file where they select the tenant.
 For the grant case, the discarded verification result and the next line that
 uses the unchecked tenant identify the vulnerable route. Both routes call the
 same invoice query, so a citation to that query alone needs manual review.
-A different CWE, another equivalent source location, or an omitted role can
-leave a valid finding unmatched. Adjudicate these reports before counting
-discovery misses. Duplicates do not increase recall.
+A different CWE, another equivalent source location, or missing roles in both
+the location and its evidence can leave a valid finding unmatched. Adjudicate
+these reports before counting discovery misses. Duplicates do not increase recall.
 Safe-control overlaps, unmatched findings, and citation errors are separate
 signals; overlaps and unmatched findings require adjudication, not automatic
 false-positive labels. Free-text location roles can flag benign context

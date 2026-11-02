@@ -1,26 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFixture, type Fixture, type SourceCase } from "./fixtures.mts";
-import { gradeResult, type SourceLocation } from "./grade.mts";
+import { gradeResult, type Result, type SourceLocation } from "./grade.mts";
 
 function findingFor(
   fixture: Fixture,
   expected: SourceCase,
   role = "root_control",
 ) {
+  const codeEvidence: NonNullable<Result["findings"][number]["codeEvidence"]> =
+    [
+      {
+        path: expected.path,
+        startLine: expected.line,
+        code: fixture.files[expected.path].split("\n")[expected.line - 1],
+      },
+    ];
   return {
     title: expected.id,
     taxonomy: { cwe: [expected.cwes[0]] },
     locations: [
       { path: expected.path, startLine: expected.line, role },
     ] as SourceLocation[],
-    codeEvidence: [
-      {
-        path: expected.path,
-        startLine: expected.line,
-        code: fixture.files[expected.path].split("\n")[expected.line - 1],
-      },
-    ],
+    codeEvidence,
   };
 }
 
@@ -214,6 +216,163 @@ test("the discarded verification result is a grounded root control for the grant
   ).codeEvidence;
   assert.deepEqual(grade().matchedIds, []);
   assert.equal(grade().evidenceErrors.length, 1);
+});
+
+test("an unlabelled affected location can use the role on authentic evidence at the same gold line", () => {
+  const fixture = createFixture();
+  const finding = findingAt(
+    fixture,
+    "src/grants.py",
+    "    verified_grant(batch)",
+    "CWE-863",
+  );
+  const [location] = finding.locations;
+  const [snippet] = finding.codeEvidence;
+  const grade = () => gradeResult({ findings: [finding] }, fixture);
+  delete location.role;
+  for (const role of ["root_control", "sink", "entrypoint"]) {
+    snippet.role = role;
+    assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
+  }
+  for (const role of ["entrypoint", "entrypoint/wrapper"]) {
+    location.role = role;
+    assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
+  }
+  delete location.role;
+  for (const role of [
+    undefined,
+    "expected_control",
+    "supporting",
+    "propagation",
+  ]) {
+    snippet.role = role;
+    assert.deepEqual(grade().matchedIds, []);
+  }
+
+  // Both lines are gold. A role on one cannot qualify a citation to the other.
+  snippet.role = "sink";
+  location.startLine++;
+  assert.deepEqual(grade().matchedIds, []);
+  location.startLine--;
+  location.role = "supporting";
+  assert.deepEqual(grade().matchedIds, []);
+  delete location.role;
+  snippet.code = "invented code";
+  const fabricated = grade();
+  assert.deepEqual(fabricated.matchedIds, []);
+  assert.equal(fabricated.evidenceErrors.length, 1);
+});
+
+test("a safe sibling cited as a comparison stays clear, while an accusation is flagged", () => {
+  const fixture = createFixture();
+  const path = "src/statements.py";
+  const finding = findingAt(
+    fixture,
+    path,
+    "send_file(statement_path(tenant_id, name)",
+    "CWE-639",
+  );
+  const safe = findingAt(
+    fixture,
+    path,
+    "send_file(statement_path(g.tenant_id, name)",
+    "CWE-639",
+  );
+  delete finding.locations[0].role;
+  finding.codeEvidence[0].role = "entrypoint";
+  finding.locations.push(...safe.locations);
+  finding.codeEvidence.push(...safe.codeEvidence);
+  const compare = (evidenceRole?: string, locationRole?: string) => {
+    safe.locations[0].role = locationRole;
+    safe.codeEvidence[0].role = evidenceRole;
+    return gradeResult({ findings: [finding] }, fixture);
+  };
+  const comparison = compare("expected_control");
+  assert.deepEqual(comparison.matchedIds, ["statement-tenant-selection"]);
+  assert.deepEqual(comparison.safeControlDetails, []);
+  finding.locations.push({
+    path: "src/app.py",
+    startLine: 999,
+    role: "supporting",
+  });
+  const unrelatedError = compare("expected_control");
+  assert.equal(unrelatedError.evidenceErrors.length, 1);
+  assert.deepEqual(unrelatedError.safeControlDetails, []);
+  finding.locations.pop();
+  for (const report of [
+    compare("sink"),
+    compare("supporting"),
+    compare("consumer"),
+    compare(undefined),
+    compare("expected_control", "root_control"),
+  ]) {
+    assert.deepEqual(
+      report.safeControlDetails.map(({ controlIds }) => controlIds),
+      [["statement-session-tenant"]],
+    );
+    assert.equal(report.needsAdjudication, true);
+  }
+  const conflictSnippet = {
+    ...safe.codeEvidence[0],
+    role: "sink",
+    endLine: fixture.files[path].split("\n").length + 1,
+  };
+  finding.codeEvidence.push(conflictSnippet);
+  const conflict = compare("expected_control");
+  assert.equal(conflict.passed, false);
+  assert.equal(conflict.evidenceErrors.length, 1);
+  assert.deepEqual(
+    conflict.safeControlDetails.flatMap(({ controlIds }) => controlIds),
+    ["statement-session-tenant"],
+  );
+  conflictSnippet.endLine = conflictSnippet.startLine;
+  conflictSnippet.startLine--;
+  conflictSnippet.code =
+    fixture.files[path].split("\n")[conflictSnippet.startLine - 1];
+  const partialQuote = compare("expected_control");
+  assert.deepEqual(partialQuote.evidenceErrors, []);
+  assert.deepEqual(
+    partialQuote.safeControlDetails.flatMap(({ controlIds }) => controlIds),
+    ["statement-session-tenant"],
+  );
+});
+
+test("a snippet cannot assign roles to trailing context outside its declared span", () => {
+  const fixture = createFixture();
+  const findingWithContext = (expected: SourceCase, role: string) => {
+    const finding = findingFor(fixture, expected);
+    delete finding.locations[0].role;
+    const [snippet] = finding.codeEvidence;
+    snippet.role = role;
+    snippet.startLine--;
+    snippet.endLine = snippet.startLine;
+    snippet.code = fixture.files[snippet.path]
+      .split("\n")
+      .slice(snippet.startLine - 1, expected.line)
+      .join("\n");
+    return finding;
+  };
+  const [expected] = fixture.positives;
+  const finding = findingWithContext(expected, "root_control");
+  const grade = () => gradeResult({ findings: [finding] }, fixture);
+  assert.deepEqual(grade().matchedIds, []);
+  finding.locations[0].role = "sink";
+  assert.deepEqual(grade().matchedIds, [expected.id]);
+  delete finding.locations[0].role;
+  const [snippet] = finding.codeEvidence;
+  delete snippet.endLine;
+  assert.deepEqual(grade().matchedIds, [expected.id]);
+  snippet.endLine = expected.line;
+  snippet.code = snippet.code.split("\n")[0];
+  assert.deepEqual(grade().matchedIds, []);
+  const [control] = fixture.controls;
+  const comparison = findingWithContext(control, "expected_control");
+  assert.deepEqual(
+    gradeResult({ findings: [comparison] }, fixture).safeControlDetails.flatMap(
+      ({ controlIds }) => controlIds,
+    ),
+    [control.id],
+  );
 });
 
 test("additional fabricated locations invalidate an otherwise grounded finding", () => {
