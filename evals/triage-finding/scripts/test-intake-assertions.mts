@@ -235,6 +235,15 @@ for (const [request, parameter, value, pass] of [
   ["instances", "per_page", undefined, false],
   ["instances", "per_page", 1000, false],
   ["alerts", "state", "closed", false],
+  ["alerts", "page", 1, true],
+  ["alerts", "sort", "updated", true],
+  ["alerts", "direction", "asc", true],
+  ["alerts", "sort", "severity", false],
+  ["alerts", "severity", "critical", false],
+  ["alerts", "after", "cursor", false],
+  ["instances", "page", "1", true],
+  ["instances", "page", 12, false],
+  ["instances", "state", "open", false],
   ["alerts", "per_page", undefined, false],
 ] as const) {
   const answer = JSON.parse(JSON.stringify(codeScanning));

@@ -136,33 +136,43 @@ const checks: Record<
 
   code_scanning: (text, context) => {
     const answer = structuredAnswer(text);
-    const defaultRef = context.vars.expected_default_ref;
-    const alertsRef = answer?.alerts?.parameters?.ref;
     const repositories = [
       "{owner}/{repo}",
       repositoryName(context.vars.target_repo as string),
     ];
     const requestMatches = (
       request:
-        | { path?: unknown; parameters?: { per_page?: unknown } }
+        | { path?: unknown; parameters?: Record<string, unknown> }
         | null
         | undefined,
       suffix: string,
-    ) =>
-      request &&
-      repositories.some(
-        (repository) =>
-          request.path === `/repos/${repository}/code-scanning/alerts${suffix}`,
-      ) &&
-      [100, "100"].some((value) => value === request.parameters?.per_page);
+    ) => {
+      const { ref, per_page, page = 1, ...options } = request?.parameters ?? {};
+      if (
+        (per_page !== 100 && per_page !== "100") ||
+        (page !== 1 && page !== "1") ||
+        !matchesRef(ref, context.vars.expected_default_ref) ||
+        !repositories.some(
+          (repository) =>
+            request?.path ===
+            `/repos/${repository}/code-scanning/alerts${suffix}`,
+        )
+      )
+        return false;
+      if (suffix) return Object.keys(options).length === 0;
+      const { state, sort = "created", direction = "desc", ...rest } = options;
+      return (
+        state === "open" &&
+        (sort === "created" || sort === "updated") &&
+        (direction === "asc" || direction === "desc") &&
+        Object.keys(rest).length === 0
+      );
+    };
     return [
-      ...(!requestMatches(answer?.alerts, "") ||
-      answer?.alerts?.parameters?.state !== "open" ||
-      !matchesRef(alertsRef, defaultRef)
+      ...(!requestMatches(answer?.alerts, "")
         ? ["must describe open default-branch alerts with per_page=100"]
         : []),
-      ...(!requestMatches(answer?.instances, "/{alert_number}/instances") ||
-      !matchesRef(answer?.instances?.parameters?.ref, defaultRef)
+      ...(!requestMatches(answer?.instances, "/{alert_number}/instances")
         ? [
             "must scope per-alert instances to the default ref with per_page=100",
           ]
