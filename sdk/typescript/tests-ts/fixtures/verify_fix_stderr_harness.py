@@ -450,12 +450,7 @@ def cleanup_sigwinch():
 
 def simple_process(scenario: str):
     with running(scenario) as fixture:
-        if scenario in {"missing-id", "wrong-id"}:
-            events = fixture.event_until("worker-started", 2)
-            fixture.send()
-        else:
-            events = []
-        return {"scenario": scenario, **fixture.finish(events)}
+        return {"scenario": scenario, **fixture.finish([])}
 
 
 def simple_pty_process(scenario: str):
@@ -500,8 +495,6 @@ results = [
     cleanup_sigwinch(),
     simple_pty_process("single-saved-progress-interactive"),
     simple_process("single-saved-progress-ci"),
-    simple_process("missing-id"),
-    simple_process("wrong-id"),
     simple_process("repeated-main"),
 ]
 if Path("/dev/full").exists():

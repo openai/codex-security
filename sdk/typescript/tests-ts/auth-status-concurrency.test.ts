@@ -229,11 +229,26 @@ test(verificationAbort, async () => {
       return runtime.acquireCodexSecurityCredentialHomeLock(...args);
     },
   }));
+  const probeSource =
+    "if (process.argv.slice(-2).join(' ') !== 'login status') process.exit(1); " +
+    // Acknowledge the first interrupt with a second real signal while the probe is still running.
+    "process.on('SIGTERM', () => process.kill(process.ppid, 'SIGTERM')); " +
+    "process.stdout.write('ready'); setTimeout(() => process.exit(1), 4_000);";
   const start = childProcess.spawn;
-  using probes = spyOn(childProcess, "spawn").mockImplementation(((
+  const probes: childProcess.ChildProcess[] = [];
+  using spawns = spyOn(childProcess, "spawn").mockImplementation(((
     ...args: Parameters<typeof start>
   ) => {
     const child = start(...args);
+    const argv = args[1];
+    if (
+      !Array.isArray(argv) ||
+      argv[1] !== probeSource ||
+      argv.at(-2) !== "login" ||
+      argv.at(-1) !== "status"
+    )
+      return child;
+    probes.push(child);
     child.stdout!.once("data", () => {
       if (process.platform === "win32") process.emit("SIGINT");
       else process.kill(process.pid, "SIGINT");
@@ -269,18 +284,12 @@ test(verificationAbort, async () => {
           output,
           {
             command: process.execPath,
-            args: [
-              "-e",
-              "if (process.argv.slice(-2).join(' ') !== 'login status') process.exit(1); " +
-                // Acknowledge the first interrupt with a second real signal while the probe is still running.
-                "process.on('SIGTERM', () => process.kill(process.ppid, 'SIGTERM')); " +
-                "process.stdout.write('ready'); setTimeout(() => process.exit(1), 4_000);",
-              "--",
-            ],
+            args: ["-e", probeSource, "--"],
           },
           environment,
         ),
     });
+    const runCodex = mock(deps.runCodex);
     const stdout = capture();
     const stderr = capture();
     const exit = await main(
@@ -289,6 +298,7 @@ test(verificationAbort, async () => {
       stderr.stream,
       {
         ...deps,
+        runCodex,
         addSignalListener: (signal, listener) => process.on(signal, listener),
         removeSignalListener: (signal, listener) =>
           process.off(signal, listener),
@@ -297,9 +307,15 @@ test(verificationAbort, async () => {
     expect(exit, stdout.text() + stderr.text()).toBe(130);
     expect(signals).toEqual([signals[0], signals[0]]);
     expect(signals[0]?.reason).toBe("SIGINT");
-    expect(probes).toHaveBeenCalledTimes(1);
-    const probe = probes.mock.results[0]!.value as ReturnType<typeof start>;
-    if (process.platform !== "win32") expect(probe.signalCode).toBe("SIGKILL");
+    expect(runCodex).toHaveBeenCalledTimes(1);
+    expect(probes).toHaveLength(1);
+    expect(
+      spawns.mock.calls.some(
+        ([, argv]) => Array.isArray(argv) && argv[0] === "app-server",
+      ),
+    ).toBe(false);
+    if (process.platform !== "win32")
+      expect(probes[0]!.signalCode).toBe("SIGKILL");
     const home = await runtime.prepareCodexSecurityCredentialHome(environment);
     const release = await runtime.acquireCodexSecurityCredentialHomeLock(home);
     await release();

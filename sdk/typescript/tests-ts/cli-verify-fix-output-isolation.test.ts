@@ -20,7 +20,7 @@ interface HarnessResult {
 }
 
 const hasFullDevice = existsSync("/dev/full");
-const scenarioCount = hasFullDevice ? 21 : 20;
+const scenarioCount = hasFullDevice ? 19 : 18;
 const scenarioTimeoutSeconds = 22;
 const harnessTimeoutMs = (scenarioCount * scenarioTimeoutSeconds + 5) * 1_000;
 
@@ -308,16 +308,6 @@ test.skipIf(process.platform === "win32")(
         ({ id }: { id: string }) => id,
       ),
     ).toEqual(["occ_0", "occ_1", "occ_2"]);
-
-    for (const scenario of ["missing-id", "wrong-id"]) {
-      const entry = result(results, scenario);
-      expect(entry.exit).toBe(2);
-      expect(JSON.parse(entry.stdout)).toMatchObject({
-        status: "failed",
-        code: "VERIFICATION_FAILED",
-      });
-      expect(JSON.parse(entry.stdout).results).toBeUndefined();
-    }
 
     const interactive = result(results, "single-saved-progress-interactive");
     const noninteractive = result(results, "single-saved-progress-ci");

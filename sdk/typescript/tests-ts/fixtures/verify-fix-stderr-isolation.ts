@@ -258,15 +258,11 @@ setInterval(() => {}, 1_000);
         message: (await observed).message,
       });
     }
-    if (batchWorker === 2 && scenario === "missing-id") {
-      output?.stdout.write(JSON.stringify({ results: [] }));
-      return 0;
-    }
     output?.stdout.write(
       JSON.stringify({
         results: [
           {
-            id: batchWorker === 2 && scenario === "wrong-id" ? "occ_0" : id,
+            id,
             status: "fixed",
             evidence: `Verified ${id} against source.`,
           },

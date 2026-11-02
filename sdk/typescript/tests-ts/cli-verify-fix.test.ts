@@ -487,6 +487,7 @@ describe("read-only finding verification", () => {
     ["complete", 1],
     ["redirected output", 1],
     ["wrong ID", 2],
+    ["missing result", 2],
     ["transport failure", 2],
     ["closed stderr", 2],
     ["SIGINT", 130],
@@ -554,6 +555,10 @@ describe("read-only finding verification", () => {
               },
             },
           });
+          if (seen.length === 2 && scenario === "missing result") {
+            output!.stdout.write(JSON.stringify({ results: [] }));
+            return 0;
+          }
           if (seen.length === 1 && scenario === "transport failure")
             output!.stderr.write("First batch diagnostic.\n");
           if (seen.length === 2 && scenario === "transport failure") return 1;
