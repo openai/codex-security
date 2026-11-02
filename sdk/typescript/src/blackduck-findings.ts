@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
@@ -185,16 +184,6 @@ function projectReference(
   };
 }
 
-const bomComponent = z.object(
-  {
-    vulnerabilityWithRemediation: z.custom<Record<string, unknown>>(
-      isRecord,
-      "Black Duck vulnerabilityWithRemediation must be an object.",
-    ),
-  },
-  "Black Duck BOM component must be an object.",
-);
-
 function scopedRow(
   value: unknown,
   scope: string | undefined,
@@ -222,16 +211,15 @@ function scopedRow(
       );
     scope = reference.scope;
   }
-  const component = bomComponent.safeParse(value);
+  const vulnerability = row["vulnerabilityWithRemediation"];
   return {
     row,
     matched,
     scope,
     // Shape errors are row exclusions; project-scope errors abort the report.
     get vulnerability() {
-      if (!component.success)
-        throw new Error(component.error.issues[0]!.message);
-      return component.data.vulnerabilityWithRemediation;
+      record(value, "Black Duck BOM component");
+      return record(vulnerability, "Black Duck vulnerabilityWithRemediation");
     },
   };
 }

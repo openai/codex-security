@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state
 
@@ -63,8 +62,8 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     workbench_api, workbench_db, publication_scan, stale, complete
 ):
     scan = publication_scan()
-    old_result = add_worker(workbench_db, scan)
-    new_result = add_worker(workbench_db, scan)
+    old_result = scan.add_worker()
+    new_result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 3 WHERE scan_id = ?",
@@ -120,7 +119,7 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     instant = workbench_api["now"]()
     monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = ?, status = 'running' "
@@ -182,7 +181,7 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
     with monkeypatch.context() as patch:
         patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_report)
         with pytest.raises(SystemExit, match="Synthetic report write interruption"):
-            complete(workbench_api, workbench_db, scan)
+            scan.complete()
 
     run = workbench_db.execute(
         "SELECT status, coordinator_generation FROM deep_scan_runs WHERE scan_id = ?",
@@ -212,7 +211,7 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     } == saved
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [finding["title"] for finding in findings] == [scan.findings[0]["title"]]
     assert read_review_state(workbench_db, scan.scan_dir)["deferred"] == scan.coverage["deferred"]
@@ -227,7 +226,7 @@ def test_failed_publication_does_not_acknowledge_staged_input(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
@@ -352,7 +351,7 @@ def test_receipt_io_failure_preserves_successful_publication(
     if backend_kind == "posix" and os.name == "nt":
         pytest.skip("POSIX descriptor-relative directory errors")
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
@@ -501,7 +500,7 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     failure,
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
@@ -628,7 +627,7 @@ def test_receipt_contract_errors_still_reject_publication(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
@@ -672,7 +671,7 @@ def test_accepted_publication_replay_retains_original_warning_and_bytes(
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",

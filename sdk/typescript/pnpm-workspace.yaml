@@ -9,7 +9,7 @@ overrides:
 
 # Stryker rewrites tsconfig files through the compiler API removed in TypeScript 7.
 packageExtensions:
-  "@stryker-mutator/core@10.0.0":
+  "@stryker-mutator/core@10.1.1":
     dependencies:
       typescript: "6.0.3"
 

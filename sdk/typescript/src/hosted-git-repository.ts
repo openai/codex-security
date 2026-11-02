@@ -269,15 +269,17 @@ export function hostedRepositoryMatches(
     source.url,
     github || source.platform === "gitlab",
   );
+  const userinfo = /^https?:\/\/([^/?#]*)@/iu.exec(url)?.[1] ?? "";
   // Git passes raw URL paths to its HTTP transport. Do not turn backslashes,
   // controls or an encoded traversal into a match via web URL serialization.
   if (
     !/^https?:\/\//iu.test(url) ||
     /[\\\x00-\x20\x7f?#]/u.test(url) ||
     // libcurl accepts encoded userinfo but rejects multiple literal authority delimiters.
-    /^https?:\/\/[^/?#]*@[^/?#]*@/iu.test(url) ||
+    userinfo.includes("@") ||
     // Git rejects a decoded line feed in credentials and libcurl rejects a NUL in usernames.
-    /^https?:\/\/(?:[^/?#@]*%0a[^/?#@]*|[^:/?#@]*%00[^/?#@]*)@/iu.test(url) ||
+    /%0a/iu.test(userinfo) ||
+    /^[^:]*%00/u.test(userinfo) ||
     ambiguousGitIpHost(url) ||
     ambiguousHostedHttpPath(url)
   )

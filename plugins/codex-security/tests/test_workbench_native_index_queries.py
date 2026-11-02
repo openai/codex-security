@@ -364,11 +364,12 @@ def test_scan_list_probes_requested_repository_once(
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_output = history.git_output
 
     def record_git_output(target, *arguments):
         probes.append((target, arguments))
-        return git_output(target, *arguments)
+        if arguments[0] == "rev-parse":
+            return str(target / ".git")
+        return f"https://example.test/{target.name}.git"
 
     monkeypatch.setattr(history, "git_output", record_git_output)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))

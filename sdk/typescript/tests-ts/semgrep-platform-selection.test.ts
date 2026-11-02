@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -23,23 +22,9 @@ const page = (id: string, branch = ref, repo = url) =>
   `{"findings":[{"id":${id},"ref":"${branch}","repository":{"url":"${repo}"},"rule":{"name":"example.rule"},"severity":"medium","location":{"file_path":"src/app.ts","line":2},"score":1.00000000000000001,"units":9007199254740993,"magnitude":1e100000}]}`;
 
 test("reimporting two selected IDs from a non-default branch leaves both SQLite records unchanged", async () => {
-  await using fixture = await localFindingsFixture({
-    remote: url,
-    isolatedGit: true,
-  });
-  execFileSync(
-    "git",
-    ["-C", fixture.repository, "switch", "--quiet", "--orphan", "topic"],
-    {
-      env: fixture.environment,
-    },
-  );
-  expect(
-    execFileSync("git", ["-C", fixture.repository, "symbolic-ref", "HEAD"], {
-      encoding: "utf8",
-      env: fixture.environment,
-    }).trim(),
-  ).toBe(ref);
+  await using fixture = await localFindingsFixture({ remote: url });
+  fixture.git("switch", "--quiet", "--orphan", "topic");
+  expect(fixture.git("symbolic-ref", "HEAD").trim()).toBe(ref);
   const options = {
     provider: "semgrep" as const,
     sourceKey: "demo/topic",
@@ -137,6 +122,29 @@ test("each selected finding must match the independently named project, ref, and
     });
   const unrelated = '{"findings":[{"rule_name":"no-id"},{"id":2.5}]}';
   expect(select([first, unrelated, second]).findings).toHaveLength(2);
+  const findingsPage = (rows: unknown[]) => JSON.stringify({ findings: rows });
+  const selectedRow = {
+    id: ids[1],
+    ref,
+    repository: { url },
+    rule_name: "example.rule",
+  };
+  for (const other of [
+    { ai_impact: "Synthetic impact" },
+    { is_malicious: false },
+    { issue_type: "ai_sast" },
+  ]) {
+    const sibling = { ...selectedRow, id: "99", ...other };
+    expect(() => select([first, findingsPage([selectedRow, sibling])])).toThrow(
+      "SAST",
+    );
+    expect(() => select([first, findingsPage([sibling, selectedRow])])).toThrow(
+      "SAST",
+    );
+    expect(
+      select([first, findingsPage([sibling]), second]).findings,
+    ).toHaveLength(2);
+  }
   const unknown = select([
     first,
     second.replace('"severity":"medium"', '"severity":"WARNING"'),
@@ -153,6 +161,22 @@ test("each selected finding must match the independently named project, ref, and
   expect(() => select([first, page(ids[1]!, ref, url + ".git")])).toThrow(
     "project and ref",
   );
+  for (const fields of [
+    { ai_impact: "Synthetic impact" },
+    { epss_score: { score: 0 } },
+    { fix_recommendations: [{ package: "example", version: "2.0.0" }] },
+    { found_dependency: { package: "example" } },
+    { is_malicious: false },
+    { reachability: "reachable" },
+    { reachable_condition: "imported" },
+    { usage: { location: { file_path: "src/app.ts" } } },
+    { vulnerability_identifier: "CVE-2099-0001" },
+  ]) {
+    const finding = { ...selectedRow, ...fields };
+    expect(() =>
+      select([first, JSON.stringify({ findings: [finding] })]),
+    ).toThrow("SAST");
+  }
   for (const product of ['"sca"', '["sast"]']) {
     expect(() =>
       select([
@@ -296,12 +320,12 @@ test("a URL-less row needs the matching project ID and full name, while an exact
   expect(
     select("project", { url: cloneUrl, name }, cloneUrl).findings,
   ).toHaveLength(1);
-  expect(
-    select("project", { url, name: "other/project" }).findings,
-  ).toHaveLength(1);
-  expect(() =>
-    select("project", { url, id: 78, name: "other/project" }),
-  ).toThrow("project and ref");
+  const historicalProject = "old-group/project/api";
+  const sibling = { url, name: "old-group/project/cli" };
+  expect(select(historicalProject, sibling).findings).toHaveLength(1);
+  expect(() => select(historicalProject, { ...sibling, id: 78 })).toThrow(
+    "project and ref",
+  );
 });
 
 test("a fractional source position cannot round to an integer during projection", () => {
@@ -324,16 +348,21 @@ test("only repository-relative files are projected and original paths remain in 
     normalizeSelectedSemgrepPlatformFindings({
       ...source,
       findingIds: ["8"],
-      findingsResponses: page("8").replace("src/app.ts", path),
+      findingsResponses: page("8").replace(
+        '"src/app.ts"',
+        JSON.stringify(path),
+      ),
     }).findings[0]!.evidence;
-  const literal = "src/vendor://app.ts";
-  expect(evidenceFor(literal).locations).toEqual([{ path: literal, line: 2 }]);
+  for (const path of ["src/vendor://app.ts", "src/a\\b.ts", "src/a/b.ts"]) {
+    expect(evidenceFor(path).locations).toEqual([{ path, line: 2 }]);
+  }
   for (const path of [
     "file:src/app.ts",
     "data:text/plain,hello",
     "generated:/api.ts",
     "./C:/work/app.ts",
     "git@host:team/repo/app.ts",
+    "src\\..\\outside.ts",
     ".",
     "src/",
   ]) {
