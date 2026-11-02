@@ -78,6 +78,9 @@ export const runSchema = z
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
       coordinatorGeneration: optionalValue(positiveInteger),
+      phase: optionalValue(
+        z.enum(["setup", "discovery", "reducing", "terminal"]),
+      ),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,

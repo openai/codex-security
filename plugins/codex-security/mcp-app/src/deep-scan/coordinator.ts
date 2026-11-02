@@ -371,7 +371,7 @@ export class DeepScanCoordinator {
       if (this.options.checkFreshTarget && isFreshRun(this.state)) {
         await this.options.checkFreshTarget(
           this.state,
-          this.abortController.signal,
+          this.discoveryAbortController.signal,
         );
       }
       if (this.canceled || this.externallyFailed) return;
@@ -1268,6 +1268,7 @@ function cloneState(state: DeepScanRunState): DeepScanRunState {
 
 function isFreshRun(state: DeepScanRunState): boolean {
   return (
+    state.phase === "setup" &&
     state.dispatchedCount === 0 &&
     (state.persistedWorkers?.length ?? 0) === 0 &&
     (state.persistedDedupInputs?.length ?? 0) === 0

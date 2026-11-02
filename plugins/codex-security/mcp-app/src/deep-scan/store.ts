@@ -119,7 +119,6 @@ const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
 
 export class WorkbenchDeepScanStore {
   private writeTail: Promise<void> = Promise.resolve();
-  private readonly freshRuns = new WeakSet<DeepScanRunState>();
   private readonly coordinatorLeases = new Map<
     string,
     {
@@ -188,12 +187,7 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
-    if (startDisposition === "created") this.freshRuns.add(run);
     return run;
-  }
-
-  isFreshStart(run: DeepScanRunState): boolean {
-    return this.freshRuns.has(run);
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {

@@ -22,8 +22,10 @@ import type {
   DeepScanPublication,
   ScanDraftInput,
 } from "../src/artifact-scan-draft.js";
+import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import {
   DeepScanCoordinator,
+  DeepScanCoordinatorRegistry,
   FakeExecutor,
 } from "./deep_scan_coordinator_fixture.ts";
 
@@ -33,19 +35,29 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const {
   WorkbenchDeepScanStore,
+  startDeepScanEngine,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   saveScanDraftCheckpoint,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
+export { startDeepScanEngine } from "./src/deep-scan/engine.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
 export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
+  loader: { ".md": "text" },
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL("../src/deep-scan/engine.ts", import.meta.url).href,
+    ),
+  },
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
+await testEmptyTargetAdmissionAcrossCoordinatorClaimOrders();
+await testDurableAdmissionPreservesZeroHistoryRecovery();
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -66,6 +78,149 @@ await testReplacementFailureDuringCancellation();
 await testCoordinatorCommitResponseRecovery();
 await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
+
+async function testEmptyTargetAdmissionAcrossCoordinatorClaimOrders() {
+  for (const firstCaller of ["creator", "joiner"] as const) {
+    const { fixtureRoot, targetPath, environment } =
+      await createWorkbenchFixture(`deep-scan-empty-${firstCaller}-`);
+    const runWorkbench = createWorkbenchRunner(environment);
+    const creator = new WorkbenchDeepScanStore(runWorkbench);
+    const joiner = new WorkbenchDeepScanStore(runWorkbench);
+    const scanRoot = path.join(fixtureRoot, "scans");
+    const threadId = `empty-${firstCaller}-owner`;
+    await mkdir(path.join(targetPath, "empty"));
+    try {
+      const created = await creator.begin({
+        targetPath: path.join(targetPath, "empty"),
+        scope: ".",
+        threadId,
+        scanRoot,
+      });
+      const joined = await joiner.begin({
+        scanId: created.scanId,
+        threadId,
+        scanRoot,
+      });
+      assert.equal(created.phase, "setup");
+      assert.equal(joined.phase, "setup");
+      const executor = new FakeExecutor();
+      const registry = registryWithExecutor(executor);
+      const selectedStore = firstCaller === "creator" ? creator : joiner;
+      const selectedRun = firstCaller === "creator" ? created : joined;
+      const { coordinator } = await startDeepScanEngine({
+        run: selectedRun,
+        store: selectedStore,
+        registry,
+        runWorkbench,
+        pluginRoot,
+        pythonCommand: process.env.PYTHON?.trim() || "python3",
+        parentSandbox: { filesystemDenies: [] },
+        threadId,
+      });
+
+      const terminal = await coordinator.wait(undefined, 30_000);
+      assert.equal(terminal?.status, "failed");
+      assert.match(
+        terminal?.error ?? "",
+        /target is empty.*no security audit was performed/iu,
+      );
+      assert.equal(executor.discoveryCalls, 0);
+      assert.equal(executor.dedupCalls, 0);
+      const persisted = await new WorkbenchDeepScanStore(runWorkbench).get(
+        created.scanId,
+        threadId,
+      );
+      assert.equal(persisted.status, "failed");
+      assert.deepEqual(persisted.persistedWorkers, []);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }
+}
+
+async function testDurableAdmissionPreservesZeroHistoryRecovery() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-admitted-zero-history-",
+  );
+  const selected = path.join(targetPath, "selected");
+  await mkdir(selected);
+  const source = path.join(selected, "source.py");
+  await writeFile(source, "print('selected')\n");
+  const runWorkbench = createWorkbenchRunner(environment);
+  const creator = new WorkbenchDeepScanStore(runWorkbench);
+  const scanRoot = path.join(fixtureRoot, "scans");
+  const threadId = "admitted-zero-history-owner";
+  try {
+    const run = await creator.begin({
+      targetPath: selected,
+      scope: ".",
+      threadId,
+      scanRoot,
+    });
+    const claimed = await creator.claimCoordinator({
+      scanId: run.scanId,
+      threadId,
+    });
+    assert.equal(claimed.acquired, true);
+    await creator.updateProgress({
+      scanId: run.scanId,
+      phase: "discovery",
+    });
+    const admitted = await creator.get(run.scanId, threadId);
+    assert.equal(admitted.phase, "discovery");
+    assert.equal(admitted.dispatchedCount, 0);
+    assert.deepEqual(admitted.persistedWorkers, []);
+
+    const python = process.env.PYTHON?.trim() || "python3";
+    await execFileAsync(
+      python,
+      [
+        "-c",
+        "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?\", (sys.argv[2],)); c.commit()",
+        path.join(fixtureRoot, "state", "workbench.sqlite3"),
+        run.scanId,
+      ],
+      { env: environment },
+    );
+    await rm(selected, { recursive: true });
+
+    const replacement = new WorkbenchDeepScanStore(runWorkbench);
+    const joined = await replacement.begin({
+      scanId: run.scanId,
+      threadId,
+      scanRoot,
+    });
+    assert.equal(joined.phase, "discovery");
+    const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+    const { coordinator } = await startDeepScanEngine({
+      run: joined,
+      store: replacement,
+      registry: registryWithExecutor(executor),
+      runWorkbench,
+      pluginRoot,
+      pythonCommand: python,
+      parentSandbox: { filesystemDenies: [] },
+      threadId,
+    });
+    await executor.discoveryStarted.promise;
+    assert.equal(executor.discoveryCalls, 1);
+    coordinator.cancel("fixture complete");
+    assert.equal(
+      (await coordinator.wait(undefined, 30_000))?.status,
+      "canceled",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+function registryWithExecutor(executor: FakeExecutor) {
+  const registry = new DeepScanCoordinatorRegistry();
+  const start = registry.start.bind(registry);
+  registry.start = (options: CoordinatorOptions) =>
+    start({ ...options, executor });
+  return registry;
+}
 
 async function testCoordinatorCommitResponseRecovery(
   exhaustOperation?: "commit-deep-scan-dedup" | "finish-deep-scan",

@@ -1,4 +1,5 @@
-import { readdir, stat } from "node:fs/promises";
+import { promises as fs } from "node:fs";
+import type { Dir, Dirent } from "node:fs";
 import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
@@ -33,7 +34,6 @@ export function startDeepScanEngine(options: {
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
-  const freshStart = options.store.isFreshStart(run);
   return startOrJoinDeepScanCoordinator({
     run,
     registry: options.registry,
@@ -60,7 +60,7 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
-      checkFreshTarget: freshStart ? checkFreshTarget : undefined,
+      checkFreshTarget,
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
@@ -97,7 +97,7 @@ export function startDeepScanEngine(options: {
   });
 }
 
-async function checkFreshTarget(
+export async function checkFreshTarget(
   run: DeepScanRunState,
   signal: AbortSignal,
 ): Promise<void> {
@@ -105,21 +105,76 @@ async function checkFreshTarget(
   let readError: unknown;
 
   for (const selectedPath of run.includePaths ?? [run.scope]) {
-    signal.throwIfAborted();
+    if (signal.aborted) return;
     if (exactFiles.has(selectedPath)) return;
 
     const target = join(run.targetPath, selectedPath);
     try {
-      if (!(await stat(target)).isDirectory()) return;
-      if ((await readdir(target)).length > 0) return;
+      const metadata = await fs.stat(target);
+      if (signal.aborted) return;
+      if (!metadata.isDirectory()) return;
+      const hasEntry = await directoryHasEntry(target, signal);
+      if (signal.aborted) return;
+      if (hasEntry) return;
     } catch (error) {
+      if (signal.aborted) return;
       readError ??= error;
     }
-    signal.throwIfAborted();
   }
 
   if (readError) throw readError;
   throw new Error(
     "Deep Scan target is empty; no security audit was performed.",
   );
+}
+
+const directoryReadAborted = Symbol("directoryReadAborted");
+
+async function directoryHasEntry(
+  target: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const directory = await fs.opendir(target);
+  let operationError: unknown;
+  try {
+    if (signal.aborted) return false;
+    const entry = await readDirectoryEntry(directory, signal);
+    return entry !== directoryReadAborted && entry !== null;
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    try {
+      await directory.close();
+    } catch (error) {
+      if (operationError === undefined && !signal.aborted) throw error;
+    }
+  }
+}
+
+async function readDirectoryEntry(
+  directory: Dir,
+  signal: AbortSignal,
+): Promise<Dirent | null | typeof directoryReadAborted> {
+  if (signal.aborted) return directoryReadAborted;
+  const read = directory.read();
+  return await new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      resolve(directoryReadAborted);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void read.then(
+      (entry) => {
+        cleanup();
+        resolve(entry);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
