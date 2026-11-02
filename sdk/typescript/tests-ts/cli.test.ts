@@ -30,9 +30,11 @@ import {
   PluginBootstrapError,
   DiffTarget,
   InvalidTargetError,
+  IncompleteScanError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
+  SandboxUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
   ScanResult,
@@ -228,6 +230,47 @@ describe("CLI", () => {
       }
     }
   });
+
+  test.each([
+    ["--auth", "chatgpt"],
+    ["--auth", "api-key"],
+    ["--codex", 'model_provider="amazon-bedrock"'],
+  ])(
+    "reports plugin installation permission errors with %s %s",
+    async (flag, value) => {
+      const message =
+        "Codex plugin bootstrap failed: failed to create plugin cache directory: Permission denied (os error 13)";
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-key" },
+        onRun: () => {
+          throw new PluginBootstrapError(message);
+        },
+      });
+      for (const json of [false, true]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "scan",
+              ".",
+              flag,
+              value,
+              "--verbose",
+              ...(json ? ["--json"] : []),
+            ],
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text()).toContain(
+          'scan.failed classification="plugin_bootstrap"',
+        );
+        expect(stderr.text()).not.toContain("cannot access the configured");
+        if (json) expect(JSON.parse(stdout.text()).message).toBe(message);
+        else expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
   test("passes the safety identifier as a per-scan option", async () => {
     const onTurn = mock<(repository: string, options: unknown) => void>();
@@ -4582,6 +4625,23 @@ describe("CLI", () => {
         "python interpreter unavailable",
         new PluginPythonUnavailableError(
           "The configured plugin Python interpreter is unavailable or unusable: /usr/bin/python3",
+        ),
+      ],
+      [
+        "sandbox startup denied",
+        new SandboxUnavailableError(
+          "bwrap: setting up uid map: Permission denied",
+        ),
+      ],
+      [
+        "incomplete scan caused by sandbox startup denial",
+        new IncompleteScanError(
+          "Scan did not complete: bwrap: setting up uid map: Permission denied",
+          {
+            cause: new SandboxUnavailableError(
+              "bwrap: setting up uid map: Permission denied",
+            ),
+          },
         ),
       ],
     ];

@@ -12,11 +12,13 @@ import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
+import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
+  readLocalWizFindings,
   readVendorFindingsForPublication,
   wizFindingRepository,
 } from "./wiz-findings.js";
@@ -33,6 +35,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   inspector: "inspector",
   blackduck: "blackduck",
   veracode: "veracode",
+  sonar: "sonar",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -85,6 +88,15 @@ export async function readExternalFindings(
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "sonar") {
+    const url = options.sourceRepositoryUrl;
+    const findings = await readSonarFindings(path, url ?? "", target);
+    const binding = findings.report?.["repositoryUrl"];
+    return {
+      findings,
+      sourceRepositories: typeof binding === "string" ? [{ url: binding }] : [],
+    };
+  }
   if (options.provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
     return {
@@ -152,16 +164,18 @@ export async function readExternalFindings(
       sourceRepositories: [{ url }],
     };
   }
-  const publication = await readVendorFindingsForPublication(path, target);
-  const sourceRepositories = publication.current.findings.flatMap((finding) =>
+  // A new reader must choose its parser before reaching the Wiz replay path.
+  options.provider satisfies "wiz";
+  const wiz =
+    target === "local"
+      ? await readLocalWizFindings(path)
+      : await readVendorFindingsForPublication(path, target);
+  const sourceRepositories = wiz.current.findings.flatMap((finding) =>
     localFindingRepositories("wiz", finding),
   );
   return {
-    findings: publication.current,
-    publication,
-    sourceRepositories: [
-      ...publication.sourceRepositories,
-      ...sourceRepositories,
-    ],
+    findings: wiz.current,
+    ...("legacy" in wiz && { publication: wiz }),
+    sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
   };
 }

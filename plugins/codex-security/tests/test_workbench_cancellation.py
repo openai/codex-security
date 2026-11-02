@@ -72,15 +72,15 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert delivered["results"]["progress"]["status"] == "canceled"
     assert delivered["results"]["handoffStatus"] == "delivered"
 
-    restarted = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    restarted_scan_id = str(restarted["results"]["scanId"])
+    restarted = start_delivered_scan(state_dir, str(saved["id"]))
+    restarted_scan_id = str(restarted["scanId"])
     assert restarted_scan_id != scan_id
-    assert restarted["results"]["progress"]["status"] == "running"
+    assert restarted["progress"]["status"] == "running"
     previous_scan = get_scan(state_dir, scan_id)
     assert previous_scan["scan"]["scanId"] == scan_id
     assert previous_scan["workspace"]["results"]["scanId"] == scan_id
     assert previous_scan["workspace"]["results"]["progress"]["status"] == "canceled"
-    write_completed_contract(Path(str(restarted["results"]["scanDir"])), restarted_scan_id, target)
+    write_completed_contract(Path(str(restarted["scanDir"])), restarted_scan_id, target)
     scan_command(state_dir, "complete-scan", restarted_scan_id)
     rejected = cancel_scan(state_dir, restarted_scan_id, thread_id, check=False)
     assert rejected["returncode"] != 0

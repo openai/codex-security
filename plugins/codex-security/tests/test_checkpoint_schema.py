@@ -11,7 +11,7 @@ import pytest
     "omitted_versions, legacy_checkpoint, main_reader",
     [
         ((), False, False),
-        ((57,), False, False),
+        ((57, 58), False, False),
         ((), 47, False),
         ((), 47, True),
         ((), 48, False),
@@ -157,7 +157,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             )
         assert connection.execute(
             "SELECT COUNT(*), MAX(version) FROM schema_migrations"
-        ).fetchone()[:] == (len(migrations), 57)
+        ).fetchone()[:] == (len(migrations), migrations[-1][0])
         for version in (43, 44, 45, 46, 47):
             assert (
                 connection.execute(
@@ -168,6 +168,12 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         assert connection.execute(
             "SELECT discovery_user_context_json FROM deep_scan_runs"
         ).fetchone()[0] == (context if legacy_checkpoint != 47 or main_reader else None)
+        assert (
+            connection.execute(
+                "SELECT terminal_reviewed_surface_count FROM deep_scan_runs"
+            ).fetchone()[0]
+            is None
+        )
         if legacy_checkpoint != 47:
             assert (
                 connection.execute(
