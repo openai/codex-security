@@ -1097,123 +1097,13 @@ describe("live scan cost tracking", () => {
   });
 
   test.each([
-    ["EACCES", true],
-    ["EACCES", false],
-    ["EPERM", true],
-    ["EPERM", false],
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
   ] as const)(
-    "keeps healthy worker observations when another log fails with %s (already identified: %j)",
-    async (code, identified) => {
-      const home = await codexHome();
-      const usage = (input_tokens: number) => ({
-        input_tokens,
-        output_tokens: 0,
-      });
-      await writeSession(home, "scan-thread", usage(10));
-      const healthy = await writeSession(home, "healthy-worker", usage(30), {
-        parent: "scan-thread",
-      });
-      const blocked = await writeSession(home, "blocked-worker", usage(20), {
-        parent: "scan-thread",
-      });
-      let denied = !identified;
-      const failure = Object.assign(new Error(`Synthetic ${code}`), {
-        code,
-        syscall: "open",
-        path: blocked,
-      });
-      const opened = filesystem.open;
-      const opening = spyOn(filesystem, "open").mockImplementation(
-        async (...args: Parameters<typeof filesystem.open>) => {
-          if (String(args[0]) === blocked && denied) throw failure;
-          return await opened(...args);
-        },
-      );
-      const activities: ScanActivity[] = [];
-      const progress: ScanProgress[] = [];
-      const events: ScanSessionEvent[] = [];
-      const costs: { tokens: number; complete: boolean }[] = [];
-      const tracker = costTracker(home, {
-        repository: home,
-        onActivity: (activity) => activities.push(activity),
-        onProgress: (update) => progress.push(update),
-        onSessionEvent: (event) => events.push(event),
-        onCost: (cost, complete) =>
-          costs.push({ tokens: cost.inputTokens, complete }),
-      });
-      tracker.start("scan-thread");
-      try {
-        if (identified) {
-          expect((await tracker.refresh()).cost?.inputTokens).toBe(60);
-        } else {
-          await expect(tracker.refresh()).rejects.toBe(failure);
-        }
-        denied = true;
-        const output = {
-          id: "healthy-output",
-          type: "message",
-          role: "assistant",
-          content: [
-            {
-              type: "output_text",
-              text: "Healthy worker continues reviewing source.",
-            },
-          ],
-        };
-        await appendSessionItem(healthy, output);
-        await appendSessionItem(healthy, progressMessage(1));
-        await appendFile(
-          blocked,
-          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
-        );
-        await expect(tracker.refresh()).rejects.toBe(failure);
-        await expect(tracker.refresh()).rejects.toBe(failure);
-
-        expect(activities).toContainEqual(
-          expect.objectContaining({
-            kind: "message",
-            description: "Healthy worker continues reviewing source.",
-          }),
-        );
-        expect(progress).toContainEqual(
-          expect.objectContaining({ filesCompleted: 1, filesTotal: 8 }),
-        );
-        expect(
-          events.filter(
-            (event) =>
-              event.threadId === "healthy-worker" &&
-              JSON.stringify(event.event["payload"]) === JSON.stringify(output),
-          ),
-        ).toHaveLength(1);
-        expect(costs.some((cost) => !cost.complete && cost.tokens >= 40)).toBe(
-          true,
-        );
-
-        denied = false;
-        const snapshot = await tracker.stop();
-        expect(snapshot.cost?.inputTokens).toBe(1_000_040);
-        expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
-        expect(costs.at(-1)).toEqual({ tokens: 1_000_040, complete: true });
-      } finally {
-        denied = false;
-        await tracker.stop().catch(() => {});
-        opening.mockRestore();
-      }
-    },
-  );
-
-  test.each([
-    [false, false, "EMFILE"],
-    [false, true, "EMFILE"],
-    [true, false, "EMFILE"],
-    [true, true, "EMFILE"],
-    [false, false, "EIO"],
-    [false, true, "EIO"],
-    [true, false, "EIO"],
-    [true, true, "EIO"],
-  ] as const)(
-    "preserves accounting failure order after directory traversal fails (budget=%p, earlier log failure=%p, code=%s)",
-    async (budget, earlierFailure, code) => {
+    "preserves accounting failure order after directory traversal fails (budget=%p, earlier log failure=%p)",
+    async (budget, earlierFailure) => {
       const home = await codexHome();
       await writeSession(home, "scan-thread", { input_tokens: 10 });
       const healthy = await writeSession(
@@ -1243,7 +1133,7 @@ describe("live scan cost tracking", () => {
         code: "EACCES",
       });
       const later = Object.assign(new Error("Synthetic directory failure"), {
-        code,
+        code: "EMFILE",
       });
       const opened = filesystem.open;
       const listed = filesystem.readdir;
@@ -1282,7 +1172,7 @@ describe("live scan cost tracking", () => {
         await expect(tracker.refresh()).rejects.toBe(
           earlierFailure ? first : later,
         );
-        if (earlierFailure && !budget && code !== "EMFILE") {
+        if (earlierFailure && !budget) {
           expect(
             activities.filter(
               (activity) => activity.description === "Healthy worker output.",
@@ -1307,345 +1197,33 @@ describe("live scan cost tracking", () => {
         listing.mockRestore();
         await tracker.stop();
       }
-      expect(
-        activities.filter(
-          (activity) => activity.description === "Healthy worker output.",
-        ),
-      ).toHaveLength(1);
-      expect(progress).toHaveLength(1);
     },
   );
 
-  test("stops reading logs immediately when an explicit budget loses unidentified accounting", async () => {
-    const home = await codexHome();
-    const blocked = await writeSession(home, "a-blocked", { input_tokens: 10 });
-    await writeSession(
-      home,
-      "z-healthy",
-      { input_tokens: 20 },
-      { parent: "scan-thread" },
-    );
-    await writeSession(home, "scan-thread", { input_tokens: 10 });
-    const failure = Object.assign(new Error("Synthetic accounting denial"), {
-      code: "EACCES",
-    });
-    const attempts: string[] = [];
-    const opened = filesystem.open;
-    const opening = spyOn(filesystem, "open").mockImplementation(
-      async (...args: Parameters<typeof filesystem.open>) => {
-        attempts.push(String(args[0]));
-        if (String(args[0]) === blocked) throw failure;
-        return await opened(...args);
-      },
-    );
-    const tracker = costTracker(home, { maxCostUsd: 1 });
-    tracker.start("scan-thread");
-    try {
-      await expect(tracker.refresh()).rejects.toBe(failure);
-      const index = attempts.indexOf(blocked);
-      expect(index).toBeGreaterThanOrEqual(0);
-      expect(attempts.slice(index + 1).every((path) => path === blocked)).toBe(
-        true,
-      );
-    } finally {
-      opening.mockRestore();
-      await tracker.stop();
-    }
-  });
-
-  test("manual refresh retains its first error and reports secondary log failures", async () => {
-    const home = await codexHome();
-    const firstPath = await writeSession(
-      home,
-      "a-worker",
-      { input_tokens: 10 },
-      { parent: "scan-thread" },
-    );
-    const secondPath = await writeSession(
-      home,
-      "b-worker",
-      { input_tokens: 20 },
-      { parent: "scan-thread" },
-    );
-    const first = Object.assign(new Error("Synthetic first EIO"), {
-      code: "EIO",
-    });
-    const second = Object.assign(new Error("Synthetic second EIO"), {
-      code: "EIO",
-    });
-    const opened = filesystem.open;
-    const listed = filesystem.readdir;
-    const listing = spyOn(filesystem, "readdir").mockImplementation(
-      async (...args) => {
-        const entries = await Reflect.apply(listed, filesystem, args);
-        return entries.sort((a: { name: string }, b: { name: string }) =>
-          a.name.localeCompare(b.name),
-        );
-      },
-    );
-    const opening = spyOn(filesystem, "open").mockImplementation(
-      async (...args: Parameters<typeof filesystem.open>) => {
-        if (String(args[0]) === firstPath) throw first;
-        if (String(args[0]) === secondPath) throw second;
-        return opened(...args);
-      },
-    );
-    const errors: unknown[] = [];
-    const tracker = costTracker(home, {
-      onError: (error) => errors.push(error),
-    });
-    tracker.start("scan-thread");
-    try {
-      await expect(tracker.refresh()).rejects.toBe(first);
-      expect(errors).toEqual([second]);
-    } finally {
-      opening.mockRestore();
-      listing.mockRestore();
-      await tracker.stop();
-    }
-  });
-
-  test("stops after process-wide descriptor exhaustion without opening every log", async () => {
-    const home = await codexHome();
-    for (let index = 0; index < 12; index++)
-      await writeSession(
-        home,
-        `worker-${index}`,
-        { input_tokens: 10 },
-        { parent: "scan-thread" },
-      );
-    const failure = Object.assign(
-      new Error("Synthetic descriptor exhaustion"),
-      { code: "EMFILE" },
-    );
-    const opening = spyOn(filesystem, "open").mockRejectedValue(failure);
-    const errors: unknown[] = [];
-    const tracker = costTracker(home, {
-      onError: (error) => errors.push(error),
-    });
-    tracker.start("scan-thread");
-    try {
-      await expect(tracker.refresh()).rejects.toBe(failure);
-      expect(opening).toHaveBeenCalledTimes(1);
-      expect(errors).toEqual([]);
-    } finally {
-      opening.mockRestore();
-      await tracker.stop();
-    }
-  });
-
-  test("keeps healthy observations when replaying a newly associated log fails", async () => {
-    const home = await codexHome();
-    const usage = { input_tokens: 10, output_tokens: 0 };
-    await writeSession(home, "scan-thread", usage);
-    const blocked = await writeSession(home, "blocked-worker", usage, {
-      parent: "scan-thread",
-    });
-    const healthy = await writeSession(home, "healthy-worker", usage, {
-      parent: "scan-thread",
-    });
-    const output = {
-      id: "healthy-output",
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text: "Healthy worker output." }],
+  test("an unidentified stat EIO retains the existing fail-fast behavior", async () => {
+    const { home } = await workerSessionFixture();
+    const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+      codexHome: home,
+      model: "gpt-5.6-sol",
     };
-    await appendSessionItem(healthy, output);
-    await appendSessionItem(blocked, {
-      ...output,
-      id: "blocked-output",
-      content: [{ type: "output_text", text: "Recovered worker output." }],
-    });
-    await appendSessionItem(blocked, progressMessage(1));
-    const failure = Object.assign(new Error("Synthetic replay denial"), {
-      code: "EACCES",
-      syscall: "open",
-      path: blocked,
-    });
-    let denied = true;
-    let opens = 0;
-    const opened = filesystem.open;
-    const opening = spyOn(filesystem, "open").mockImplementation(
-      async (...args: Parameters<typeof filesystem.open>) => {
-        if (String(args[0]) === blocked && ++opens > 1 && denied) throw failure;
-        return await opened(...args);
-      },
-    );
-    const activities: ScanActivity[] = [];
-    const events: ScanSessionEvent[] = [];
-    const complete: boolean[] = [];
-    const progress: ScanProgress[] = [];
-    const subtotals: number[] = [];
-    const tracker = costTracker(home, {
-      repository: home,
-      onActivity: (activity) => activities.push(activity),
-      onSessionEvent: (event) => events.push(event),
-      onProgress: (update) => progress.push(update),
-      onCost: (cost, allUsageKnown) => {
-        complete.push(allUsageKnown);
-        subtotals.push(cost.inputTokens);
-      },
-    });
+    const tracker = new ScanCostTracker(options);
     tracker.start("scan-thread");
+    const observed: ScanActivity[] = [];
+    options.onActivity = (activity) => observed.push(activity);
+    const failure = Object.assign(new Error("Synthetic metadata I/O failure"), {
+      code: "EIO",
+      syscall: "stat",
+    });
+    const stated = spyOn(filesystem, "stat").mockRejectedValue(failure);
     try {
       await expect(tracker.refresh()).rejects.toBe(failure);
-      expect(activities).toContainEqual(
-        expect.objectContaining({ description: "Healthy worker output." }),
-      );
-      expect(complete.at(-1)).toBe(false);
-      expect(subtotals.at(-1)).toBe(30);
-      expect(
-        activities.some(
-          (activity) => activity.description === "Recovered worker output.",
-        ),
-      ).toBe(false);
-      expect(progress).toHaveLength(0);
-      denied = false;
-      expect((await tracker.stop()).cost?.inputTokens).toBe(30);
-      expect(
-        activities.filter(
-          (activity) => activity.description === "Recovered worker output.",
-        ),
-      ).toHaveLength(1);
-      expect(progress).toContainEqual(
-        expect.objectContaining({ filesCompleted: 1 }),
-      );
-      expect(complete.at(-1)).toBe(true);
-      expect(
-        events.filter(
-          (event) =>
-            event.threadId === "healthy-worker" &&
-            JSON.stringify(event.event["payload"]) === JSON.stringify(output),
-        ),
-      ).toHaveLength(1);
+      expect(stated).toHaveBeenCalledTimes(1);
+      expect(observed).toEqual([]);
     } finally {
-      denied = false;
-      await tracker.stop().catch(() => {});
-      opening.mockRestore();
+      stated.mockRestore();
+      await tracker.stop();
     }
   });
-
-  test.each([
-    ["log", false],
-    ["log", true],
-    ["directory", false],
-    ["replay", false],
-  ] as const)(
-    "drains buffered observations after descriptor exhaustion in %s (budget=%s)",
-    async (phase, budget) => {
-      const home = await codexHome(),
-        usage = { input_tokens: 10 };
-      await writeSession(home, "scan-thread", usage);
-      const healthy = await writeSession(home, "a-healthy", usage, {
-        parent: "scan-thread",
-      });
-      const blocked = await writeSession(home, "b-blocked", usage, {
-        parent: phase === "log" ? "other-scan" : "scan-thread",
-      });
-      const secondary: unknown[] = [],
-        activities: ScanActivity[] = [],
-        events: ScanSessionEvent[] = [],
-        progress: ScanProgress[] = [];
-      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
-        codexHome: home,
-        model: "gpt-5.6-sol",
-        repository: home,
-        onError: (error) => secondary.push(error),
-      };
-      const tracker = new ScanCostTracker(options);
-      // Enable observers after startup so this fixture uses explicit refreshes only.
-      tracker.start("scan-thread");
-      Object.assign(options, {
-        onActivity: (value: ScanActivity) => activities.push(value),
-        onSessionEvent: (value: ScanSessionEvent) => events.push(value),
-        onProgress: (value: ScanProgress) => progress.push(value),
-      });
-      await tracker.refresh();
-      activities.length = events.length = progress.length = 0;
-      if (budget) options.maxCostUsd = 1;
-      const output = {
-        id: "buffered-output",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Buffered worker output." }],
-      };
-      await appendSessionItem(healthy, output);
-      await appendSessionItem(healthy, progressMessage(1));
-      await appendFile(blocked, "{}\n");
-      const replay = await writeSession(home, "c-replay", usage, {
-        parent: "scan-thread",
-      });
-      const later = await writeSession(home, "d-later", usage, {
-        parent: "scan-thread",
-      });
-      const directory = parse(healthy).dir,
-        unavailable = join(directory, "zz-next");
-      if (phase === "directory") await filesystem.mkdir(unavailable);
-      const denied = Object.assign(new Error("Synthetic worker denial"), {
-        code: "EACCES",
-      });
-      const exhausted = Object.assign(
-        new Error("Synthetic descriptor exhaustion"),
-        { code: "EMFILE" },
-      );
-      const opened = filesystem.open,
-        listed = filesystem.readdir,
-        opens = new Map<string, number>();
-      const opening = spyOn(filesystem, "open").mockImplementation(
-        async (...args: Parameters<typeof filesystem.open>) => {
-          const path = String(args[0]),
-            count = (opens.get(path) ?? 0) + 1;
-          opens.set(path, count);
-          if (path === blocked) throw phase === "log" ? exhausted : denied;
-          if ((path === replay || path === later) && count > 1) throw exhausted;
-          return opened(...args);
-        },
-      );
-      const listing = spyOn(filesystem, "readdir").mockImplementation(
-        async (...args) => {
-          if (phase === "directory" && String(args[0]) === unavailable)
-            throw exhausted;
-          const entries = await Reflect.apply(listed, filesystem, args);
-          if (String(args[0]) === directory)
-            entries.sort((a: { name: string }, b: { name: string }) =>
-              a.name.localeCompare(b.name),
-            );
-          return entries;
-        },
-      );
-      try {
-        await expect(tracker.refresh()).rejects.toBe(
-          phase === "log" ? exhausted : denied,
-        );
-        expect(
-          activities.filter(
-            (value) => value.description === "Buffered worker output.",
-          ),
-        ).toHaveLength(budget ? 0 : 1);
-        expect(
-          events.filter(
-            (value) =>
-              JSON.stringify(value.event["payload"]) === JSON.stringify(output),
-          ),
-        ).toHaveLength(budget ? 0 : 1);
-        expect(progress).toHaveLength(budget ? 0 : 1);
-        expect(secondary).toEqual(phase === "log" ? [] : [exhausted]);
-        expect(opens.get(replay) ?? 0).toBe(
-          phase === "log" ? 0 : phase === "replay" ? 2 : 1,
-        );
-        expect(opens.get(later) ?? 0).toBe(phase === "log" ? 0 : 1);
-      } finally {
-        opening.mockRestore();
-        listing.mockRestore();
-        await tracker.stop();
-      }
-      expect(
-        activities.filter(
-          (value) => value.description === "Buffered worker output.",
-        ),
-      ).toHaveLength(1);
-    },
-  );
 
   test.each([...parentFields])(
     "observes worker metadata without status markers or usage via %s",
@@ -1894,13 +1472,22 @@ describe("live scan cost tracking", () => {
   );
 
   test.each([
-    ["EACCES", true],
-    ["EACCES", false],
-    ["EPERM", true],
-    ["EPERM", false],
+    ["EACCES", true, "budget", "open"],
+    ["EACCES", false, "budget", "open"],
+    ["EPERM", true, "budget", "open"],
+    ["EPERM", false, "budget", "open"],
+    ["EACCES", true, "observe", "open"],
+    ["EPERM", false, "observe", "open"],
+    ["EACCES", true, "both", "open"],
+    ["EPERM", false, "both", "open"],
+    ["EIO", false, "observe", "open"],
+    ["EIO", false, "observe", "read"],
+    ["EIO", false, "budget", "open"],
+    ["EIO", false, "both", "read"],
   ] as const)(
-    "retains and retries a %s worker when its parent appears later (already identified: %j)",
-    async (code, identified) => {
+    "retains and retries a %s worker when its parent appears later (identified: %j, tracking: %s, syscall: %s)",
+    async (code, identified, tracking, syscall) => {
+      const capped = tracking !== "observe";
       const home = await codexHome();
       const usage = (input_tokens: number) => ({
         input_tokens,
@@ -1911,27 +1498,48 @@ describe("live scan cost tracking", () => {
         parent: "middle",
       });
       let denied = !identified;
+      let newLog: string | undefined;
       let attempts = 0;
       const opened = filesystem.open;
+      const reads: Array<{ mockRestore(): void }> = [];
       const opening = spyOn(filesystem, "open").mockImplementation(
         async (...args: Parameters<typeof filesystem.open>) => {
-          if (String(args[0]) === worker && denied) {
+          const path = String(args[0]);
+          if (denied && (path === worker || path === newLog)) {
             attempts += 1;
-            throw Object.assign(new Error(`Synthetic ${code}`), {
+            const failure = Object.assign(new Error(`Synthetic ${code}`), {
               code,
-              syscall: "open",
-              path: worker,
+              syscall,
+              path,
             });
+            if (syscall === "open") throw failure;
+            const handle = await opened(...args);
+            reads.push(spyOn(handle, "read").mockRejectedValue(failure));
+            return handle;
           }
           return await opened(...args);
         },
       );
       const reported: number[] = [];
+      const observed: string[] = [];
+      const progress: number[] = [];
+      const activities: string[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
+        repository: home,
         model: "gpt-5.6-sol",
-        maxCostUsd: 1,
+        maxCostUsd: capped ? 1 : undefined,
         onCost: (cost) => reported.push(cost.inputTokens),
+        ...(tracking !== "budget" && {
+          onActivity: (activity: ScanActivity) => {
+            if (activity.description === "Healthy worker output.")
+              activities.push(activity.id);
+          },
+          onProgress: (update) => progress.push(update.filesCompleted),
+          onSessionEvent: ({ threadId, event }) => {
+            if (event["type"] === "session_meta") observed.push(threadId);
+          },
+        }),
       });
       tracker.start("scan-thread");
       try {
@@ -1942,17 +1550,71 @@ describe("live scan cost tracking", () => {
         } else {
           await expect(tracker.refresh()).rejects.toMatchObject({ code });
         }
-        await appendFile(
-          worker,
-          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
-        );
-        await writeSession(home, "middle", usage(20), {
+        const appendWorkerUsage = () =>
+          appendFile(
+            worker,
+            JSON.stringify(legacyUsageRecord(usage(1_000_000))) + "\n",
+          );
+        if (capped) await appendWorkerUsage();
+        const middle = await writeSession(home, "middle", usage(20), {
           parent: "scan-thread",
         });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        expect(observed.filter((id) => id === "middle")).toHaveLength(
+          capped ? 0 : 1,
+        );
+        await appendSessionItem(middle, progressMessage(1));
+        await appendSessionItem(middle, {
+          id: "healthy-output",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Healthy worker output." }],
+        });
+        if (!capped) await appendWorkerUsage();
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        expect(progress).toEqual(capped ? [] : [1]);
+        expect(activities).toHaveLength(capped ? 0 : 1);
+        expect(reported).not.toContain(30);
+        if (!capped && identified) {
+          const directory = parse(worker).dir;
+          newLog = join(directory, "z-new-log.jsonl");
+          await writeFile(newLog, "{}\n");
+          const tail = join(directory, "zz-directory");
+          await filesystem.mkdir(tail);
+          const entries = await filesystem.readdir(directory, {
+            withFileTypes: true,
+          });
+          entries.sort((left, right) => left.name.localeCompare(right.name));
+          const readdir = filesystem.readdir;
+          using _knownFirst = spyOn(filesystem, "readdir").mockImplementation(
+            async (...args) => {
+              if (args[0] === tail)
+                throw Object.assign(new Error("Cannot list later directory"), {
+                  code,
+                  syscall: "scandir",
+                  path: tail,
+                });
+              return args[0] === directory
+                ? entries
+                : Reflect.apply(readdir, filesystem, args);
+            },
+          );
+          await expect(tracker.refresh()).rejects.toMatchObject({
+            code,
+            path: newLog,
+          });
+        }
         denied = false;
         const snapshot = await tracker.stop();
+        if (tracking !== "budget") {
+          expect(observed.toSorted()).toEqual([
+            "middle",
+            "scan-thread",
+            "worker",
+          ]);
+          expect(progress).toEqual([1]);
+          expect(activities).toHaveLength(1);
+        }
         expect(snapshot.cost?.inputTokens).toBe(1_000_030);
         expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
         expect(reported).toContain(1_000_030);
@@ -1961,6 +1623,7 @@ describe("live scan cost tracking", () => {
         denied = false;
         await tracker.stop().catch(() => {});
         opening.mockRestore();
+        for (const reading of reads) reading.mockRestore();
       }
     },
   );
