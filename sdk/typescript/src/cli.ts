@@ -5575,7 +5575,9 @@ export async function main(
         provider: PROVIDER_OPTION,
         maxAttempts: positiveInteger
           .default(1)
-          .describe("Maximum scan attempts per repository."),
+          .describe(
+            "Maximum scan attempts per pending repository in this invocation.",
+          ),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
