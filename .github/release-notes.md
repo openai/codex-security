@@ -90,6 +90,7 @@
 - share projection and validation logic ([#2183](https://github.com/openai/codex-security/pull/2183))
 - reconcile unacknowledged findings uploads ([#2211](https://github.com/openai/codex-security/pull/2211))
 - reuse scoped GitHub connections for finding intake ([#2223](https://github.com/openai/codex-security/pull/2223))
+- clarify the post-scan findings review prompt ([#2255](https://github.com/openai/codex-security/pull/2255))
 
 <!-- release-section: highlights:end -->
 
