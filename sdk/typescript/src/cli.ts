@@ -17,7 +17,6 @@ import {
   accessSync,
   constants,
   createReadStream,
-  createWriteStream,
   existsSync,
   lstatSync,
   realpathSync,
@@ -1970,6 +1969,27 @@ async function skillDaybreakConfigOverrides(
     overrides.push("--config", `${key}=${inlineToml(value)}`);
   }
   return overrides;
+}
+
+const processLifetimeVerificationStderr = new WeakSet<Writable>();
+
+function ignoreDisconnectedVerificationStderr(error: Error): void {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code !== "EPIPE" && code !== "EIO") throw error;
+}
+
+function protectProcessStderrForBatchedVerification(
+  errorOutput: Writable,
+): boolean {
+  if (errorOutput !== process.stderr) return false;
+  if (!processLifetimeVerificationStderr.has(errorOutput)) {
+    // SIGWINCH can make Node emit getWindowSize EIO after main() returns. Once
+    // a real batched CLI invocation owns fd 2, keep this exact stream protected
+    // through process shutdown; repeated in-process main() calls reuse it.
+    process.stderr.on("error", ignoreDisconnectedVerificationStderr);
+    processLifetimeVerificationStderr.add(errorOutput);
+  }
+  return true;
 }
 
 export async function main(
@@ -6103,11 +6123,9 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: incurError }) {
-        let terminal: ReturnType<typeof createWriteStream> | undefined;
         let failureReported = false;
         const reportDiagnostic = (chunk: string | Uint8Array): void => {
-          if (terminal) terminal.write(chunk);
-          else void writeCliOutput(errorOutput, chunk).catch(() => {});
+          void writeCliOutput(errorOutput, chunk).catch(() => {});
         };
         try {
           if (options.host)
@@ -6171,50 +6189,33 @@ export async function main(
                   options.verificationMode,
                 )
               : [undefined];
-            // Node writes to POSIX terminals synchronously. Queue dashboard frames
-            // on the same descriptor so a paused reader cannot delay the next worker.
-            if (
-              batches.length > 1 &&
-              process.platform !== "win32" &&
-              errorOutput === process.stderr &&
-              process.stderr.isTTY
-            ) {
-              terminal = Object.defineProperties(
-                createWriteStream("", {
-                  fd: process.stderr.fd,
-                  autoClose: false,
-                }),
-                {
-                  isTTY: { value: true },
-                  columns: { get: () => process.stderr.columns },
-                  rows: { get: () => process.stderr.rows },
-                },
-              );
-              terminal.on("error", () => {});
-            }
-            // A pipe may forward results to the same terminal as progress.
-            const interactive = batches.length === 1 || output.isTTY === true;
+            // Multi-batch verification can outlive its stderr reader. Keep
+            // optional progress off that execution path so terminal failures
+            // and backpressure cannot prevent a complete stdout result.
+            const presentProgress = batches.length === 1;
             const progress = new FindingProgressPresenter(
-              terminal ?? errorOutput,
+              errorOutput,
               dependencies,
               repository,
               identifiers.length,
-              interactive,
+              presentProgress,
             );
             const controller =
               batches.length > 1 ? new AbortController() : undefined;
+            const processLifetimeStderr =
+              controller !== undefined &&
+              protectProcessStderrForBatchedVerification(errorOutput);
+            const scopedStderrHandler =
+              controller !== undefined && !processLifetimeStderr;
+            if (scopedStderrHandler)
+              errorOutput.on?.("error", ignoreDisconnectedVerificationStderr);
             const removeSignals =
               controller && listenForAbort(dependencies, controller);
             let restoration: Promise<void> | undefined;
             const stopProgress = () => {
               if (!restoration) {
                 progress.stop();
-                // Keep handling signals until the alternate screen has been restored.
-                restoration = (
-                  interactive && terminal?.writable
-                    ? writeCliOutput(terminal, "").catch(() => {})
-                    : Promise.resolve()
-                ).then(removeSignals);
+                restoration = Promise.resolve().then(removeSignals);
               }
               return restoration;
             };
@@ -6222,7 +6223,7 @@ export async function main(
               once: true,
             });
             try {
-              progress.startVerification();
+              if (presentProgress) progress.startVerification();
               for (const [index, findings] of batches.entries()) {
                 const batchIds =
                   findings?.map(({ occurrenceId }) => occurrenceId) ??
@@ -6252,7 +6253,9 @@ export async function main(
                     signal: controller?.signal,
                     verificationMode: options.verificationMode,
                     environment,
-                    onEvent: (event) => progress.observe(event, `${index}:`),
+                    onEvent: presentProgress
+                      ? (event) => progress.observe(event, `${index}:`)
+                      : undefined,
                   },
                 );
                 if (exitCode === 130 || exitCode === 143) {
@@ -6281,8 +6284,16 @@ export async function main(
             } catch (error) {
               if (!controller?.signal.aborted) throw error;
             } finally {
-              const stopped = stopProgress();
-              if (output.isTTY) await stopped;
+              try {
+                const stopped = stopProgress();
+                if (output.isTTY) await stopped;
+              } finally {
+                if (scopedStderrHandler)
+                  errorOutput.off?.(
+                    "error",
+                    ignoreDisconnectedVerificationStderr,
+                  );
+              }
             }
             if (controller?.signal.aborted) {
               exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
@@ -6316,8 +6327,6 @@ export async function main(
             incurError,
             "VERIFICATION_FAILED",
           );
-        } finally {
-          terminal?.end();
         }
       },
     })

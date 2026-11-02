@@ -453,6 +453,7 @@ describe("read-only finding verification", () => {
           expect(batch[0]!.codeEvidence![0]!.code).toBe(evidence);
           const id = batch[0]!.occurrenceId;
           seen.push(id);
+          expect(output!.appServer!.onEvent).toBeUndefined();
           output!.appServer!.onEvent?.({
             method: "item/reasoning/summaryTextDelta",
             params: { itemId: "reason_0", delta: `Checked ${id}.` },
@@ -524,18 +525,16 @@ describe("read-only finding verification", () => {
       );
       expect(forceExit).not.toHaveBeenCalled();
       expect(exit).toBe(expectedExit);
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+      if (scenario === "closed stderr")
+        expect((errorOutput as Writable).listenerCount("error")).toBe(0);
       if (scenario === "complete" || scenario === "redirected output") {
-        if (scenario === "redirected output") {
-          expect(stderr.text()).toContain(
-            "Verifying 3 findings against the current checkout.",
-          );
-          expect(stderr.text()).not.toContain("\u001B[?1049h");
-        } else {
-          expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
-        }
         expect(seen).toEqual(["occ_0", "occ_1", "occ_2"]);
-        expect(stderr.text()).toContain("Checked occ_1.");
-        expect(stderr.text()).not.toContain("Checked occ_0.Checked occ_1.");
+        expect(stderr.text()).toBe("");
         expect(
           JSON.parse(stdout.text()).results.map(({ id }: { id: string }) => id),
         ).toEqual(seen);
@@ -549,8 +548,7 @@ describe("read-only finding verification", () => {
           scenario === "interrupted worker" ? ["occ_0", "occ_1"] : ["occ_0"],
         );
         expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain("1 / 3 processed");
-        expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+        expect(stderr.text()).toBe("");
       } else {
         expect(seen).toEqual(
           scenario === "oversized finding" ? [] : ["occ_0", "occ_1"],

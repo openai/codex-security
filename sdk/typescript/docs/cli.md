@@ -2599,7 +2599,8 @@ filter for completed Linear issues to check a finished backlog.
 
 Large saved selections use multiple requests, keeping each finding intact. The
 CLI prints verdicts in selection order after every request returns valid results.
-For these selections, redirecting stdout sends plain progress messages to stderr.
+Optional per-event progress is disabled for these selections so stderr terminal
+failures and backpressure cannot interfere with verification results.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
