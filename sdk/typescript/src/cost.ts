@@ -254,21 +254,37 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage(observeUsage);
-        this.#sessions.set(path, session);
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
+    const unreadable = new Map<SessionUsage, unknown>();
+    let blocked: [SessionUsage, unknown] | undefined;
+    try {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, "sessions"),
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage(observeUsage);
+          this.#sessions.set(path, session);
+        }
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          if (session.threadId === null) {
+            if (!observeHealthySessions || !isBlockedLogRead(error))
+              throw error;
+            blocked ??= [session, error];
+          }
+          unreadable.set(session, error);
+        }
       }
-      try {
-        await readSessionUsage(path, session, repository);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
-      }
+    } catch (error) {
+      // Traversal stopped. Preserve the read error that already blocked this poll.
+      if (!blocked) throw error;
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -311,14 +327,24 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
+
+    blocked ??= unreadable
+      .entries()
+      .find(
+        ([session]) =>
+          session.threadId !== null && included.has(session.threadId),
+      );
+    if (blocked && !observeHealthySessions) throw blocked[1];
 
     const usages = new Map(this.#receipts);
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
+      if (
+        threadId === null ||
+        !included.has(threadId) ||
+        unreadable.has(tracked)
+      )
+        continue;
       let session = tracked;
       if (
         this.#options.onSessionEvent !== undefined &&
@@ -327,7 +353,13 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage(observeUsage);
         session.events = [];
-        await readSessionUsage(path, session, repository);
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          if (!observeHealthySessions) throw error;
+          blocked ??= [tracked, error];
+          continue;
+        }
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;
@@ -372,6 +404,8 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
     }
+    // Healthy sessions can report activity even when a read blocks the total.
+    if (blocked) throw blocked[1];
     let usage: ScanTokenUsage | null = null;
     let complete = true;
     for (const value of usages.values()) {
@@ -944,6 +978,16 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isBlockedLogRead(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" ||
+      error["code"] === "EPERM" ||
+      (error["code"] === "EIO" &&
+        (error["syscall"] === "open" || error["syscall"] === "read")))
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
