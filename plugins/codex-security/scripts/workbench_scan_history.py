@@ -452,11 +452,14 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
-    selected = [
-        scan
-        for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
-        if _same_repository(scan, requested)
-    ]
+    selected = []
+    membership: dict[tuple[str | None, str], bool] = {}
+    for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
+        target = (scan["target_id"], scan["target_path"])
+        if target not in membership:
+            membership[target] = _same_repository(scan, requested)
+        if membership[target]:
+            selected.append(scan)
 
     selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 
