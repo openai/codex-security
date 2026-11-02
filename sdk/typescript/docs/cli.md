@@ -170,7 +170,8 @@ and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
 Choose a compatible model available to your project and select Daybreak Blue
-explicitly:
+explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
+with built-in pricing so the scan can enforce the limit.
 
 ```bash
 codex-security scan /path/to/repository \
@@ -183,11 +184,8 @@ Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan
 The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
-The previously documented `gpt-daybreak-blue-latest` alias is
-[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
-Use a current model available to your project. `access_programs.cyber` is a
-Responses API field; use the supported selector instead of passing it as a
-`--codex` configuration key.
+`access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
+instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
