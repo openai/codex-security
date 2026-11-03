@@ -33,9 +33,7 @@ Establish purpose from format and usage. Distinguish credential material from pu
 
 ## Finding Severity
 
-Grade reportable findings with the scan's supplied severity rubric when present. Otherwise use the following grading criteria.
-
-Use the supplied threat model, applicable policy, actual privilege gain, impact, likelihood, and prerequisites. Reserve `critical` for clear, immediately actionable severe compromise. Otherwise: high impact and high likelihood is `high`; high impact and medium or unknown likelihood is `medium`; high impact and low likelihood is `low`. Medium or unknown impact is `medium` only with high likelihood and otherwise `low`; low impact stays `low`. Downgrade internal, same-tenant, localhost, or constrained paths according to the supported impact. Ignore self-only or privileged-only behavior without a meaningful boundary crossing or capability gain. Missing runtime reproduction or deployment evidence affects confidence; it does not alone defeat a source-backed vulnerability.
+Grade findings with the rubric supplied for this scan. When none is supplied, use the [default severity rubric](default-severity-rubric.md). Apply it to the actual privilege gained, impact, likelihood, and prerequisites in the supplied threat model and applicable policy. Exclude self-only or privileged-only behavior without meaningful additional security impact. Keep missing runtime reproduction or deployment evidence visible in the confidence assessment.
 
 ## Shared Worker Instructions
 
