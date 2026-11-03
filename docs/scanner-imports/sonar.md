@@ -49,7 +49,7 @@ Check the account, repository and any environment listed in `cloud`. Confirm
 with the new `capture` path from the successful Cloud preview.
 
 ```sh
-codex-security import sonar "/path/from/cloud-preview.json" --to cloud --yes
+codex-security import sonar "/path/from/cloud-preview.json" --to cloud --yes --format json
 ```
 
 For [readback and verification](README.md#verify-the-import), use

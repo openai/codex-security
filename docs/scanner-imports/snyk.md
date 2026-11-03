@@ -34,14 +34,14 @@ vulnerabilities. A higher exit code stops the export.
 [Snyk CLI test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
 
 ```sh
-snyk_report=
-report_dir=$(mktemp -d) || exit "$?"
-snyk_status=0
-snyk test --file=package.json --json-file-output="$report_dir/snyk-open-source.json" || snyk_status=$?
-if [ "$snyk_status" -gt 1 ]; then
-  exit "$snyk_status"
-fi
-snyk_report="$report_dir/snyk-open-source.json"
+snyk_report=$(
+  snyk_dir=$(mktemp -d) || exit "$?"
+  file="$snyk_dir/snyk-open-source.json"
+  snyk_status=0
+  snyk test --file=package.json --json-file-output="$file" >&2 || snyk_status=$?
+  [ "$snyk_status" -le 1 ] || exit "$snyk_status"
+  [ -s "$file" ] && printf '%s\n' "$file"
+)
 ```
 
 For several projects under one scan root, replace `--file=package.json` with

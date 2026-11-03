@@ -16,8 +16,12 @@ report=/private/path/policy-findings.json
 ```
 
 **Export from Veracode.** With read access to the application and Results API,
-[export the Findings API pages](#export-findings-api-pages) in the same shell
-to set `report`.
+save and configure the [export script](#export-findings-api-pages). Capture
+the path it prints when the export succeeds.
+
+```sh
+report=$(bash "/private/path/export-veracode.sh")
+```
 
 **Preview the report.** Use the verified Git URL and a source key for your
 region, application and scan context. The URL must match a comparable local
@@ -57,15 +61,15 @@ application and repository.
 
 ## Export Findings API pages
 
-Set `VERACODE_APPLICATION_GUID` to the application GUID and `api` to the API
-origin for its region. The example uses HTTPie with the Veracode HMAC plugin
-and `jq`. Apply any Findings API filters in the request and keep the same
-selection on every page.
+Save this Bash script outside the checkout as `export-veracode.sh`. Export
+`VERACODE_APPLICATION_GUID` in your shell and set `api` in the script to the
+API origin for the application's region. The script uses HTTPie with the
+Veracode HMAC plugin and `jq`. Apply any Findings API filters in the request
+and keep the same selection on every page.
 
 ```bash
 set -eu
 umask 077
-report=
 out=$(mktemp -d)
 : "${VERACODE_APPLICATION_GUID:?Set the intended application GUID}"
 api=https://api.veracode.com
@@ -86,7 +90,7 @@ while :; do
 done
 jq -s '.' "$out/pages.stream" > "$out/report.tmp" &&
   mv "$out/report.tmp" "$out/policy-findings.json" &&
-  report="$out/policy-findings.json"
+  printf '%s\n' "$out/policy-findings.json"
 ```
 
 Keep every page intact. The importer checks page counts, the application and

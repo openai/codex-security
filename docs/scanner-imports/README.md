@@ -17,9 +17,10 @@ Keep reports and preview output in a private directory outside the checkout.
 For commands that use `mktemp`, set `TMPDIR` there if needed. In CI, redirect
 both stdout and stderr to private files.
 
-**In the terminal**, follow your scanner's guide. For a saved report,
-`publish findings` with `--to local --dry-run` works offline without a Cloud
-login or model call. Add `--format json` to see every finding and exclusion.
+**In the terminal**, follow your scanner's guide. Run examples that use
+`--repository .` from the checkout root. For a saved report, `publish findings`
+with `--to local --dry-run` works offline without a Cloud login or model call.
+Add `--format json` to see every finding and exclusion.
 For repeat local file imports, reuse the preview's exact `repository` and
 `source.source_key` to update matching findings.
 
