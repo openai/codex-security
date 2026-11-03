@@ -110,6 +110,7 @@
 - report the exact rubric used for severity classification ([#2262](https://github.com/openai/codex-security/pull/2262))
 - support AWS Continuum code findings ([#2264](https://github.com/openai/codex-security/pull/2264))
 - recognize Windows drive and UNC host casing ([#545](https://github.com/openai/codex-security/pull/545))
+- verify large saved scans in bounded requests ([#2251](https://github.com/openai/codex-security/pull/2251))
 
 <!-- release-section: highlights:end -->
 
