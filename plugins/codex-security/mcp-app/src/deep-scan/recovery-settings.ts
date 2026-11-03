@@ -243,7 +243,7 @@ async function originalParentSettings(
 ): Promise<Partial<DeepScanExecutionSettings>> {
   // Native config/read represents omitted selections as null. Recover recorded
   // selections from the original parent; some native records omit the summary.
-  // History can be disabled or unavailable; configured selections still work.
+  // Missing historical sessions are allowed; a failed read cannot establish the original selection.
   try {
     const log = await readScanLogs({
       scanId: parent.threadId,
@@ -337,7 +337,8 @@ async function originalParentSettings(
     // Applied snapshots contain native selected values. Newer turn-context
     // summaries are only a compatibility field, not the active selection.
     return { ...settings, ...applied };
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return {};
   }
 }

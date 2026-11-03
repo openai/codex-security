@@ -5,7 +5,10 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { assertConfigOverrides } from "./assertions.ts";
+import {
+  assertConfigOverrides,
+  workerPermissionProfileOverride,
+} from "./assertions.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
@@ -48,7 +51,10 @@ export async function testRestoredPrivateProfileHomes({
   const fixture = await fakeCodexFixture();
   const owners = [];
   for (const name of ["same", "first", "second"]) {
-    const originalHome = path.join(fixture.root, name, "original");
+    const originalHome =
+      name === "same"
+        ? path.join(fixture.root, name, "original")
+        : path.join(fixture.root, "shared[1]");
     const currentHome =
       name === "same" ? originalHome : path.join(fixture.root, name, "current");
     await mkdir(originalHome, { recursive: true });
@@ -74,13 +80,16 @@ export async function testRestoredPrivateProfileHomes({
       },
     };
     const configPath = path.join(originalHome, "config.toml");
-    await writeFile(configPath, stringifyToml(config));
+    await writeFile(
+      configPath,
+      stringifyToml({ model: config.model, model_provider: provider }),
+    );
     const sandbox = {
-      filesystemDenies: [...new Set([originalHome, currentHome])],
+      filesystemDenies: [currentHome],
     };
     const saved = await captureDeepScanExecutionSettings(
       { model: config.model },
-      sandbox,
+      { filesystemDenies: [] },
       {
         CODEX_HOME: originalHome,
         CODEX_CLI_PATH: process.execPath,
@@ -98,6 +107,13 @@ export async function testRestoredPrivateProfileHomes({
       "NULL_USAGE CAPTURE_SYNTHETIC_OPENAI_AUTH fixture worker\n",
     );
     const markerPath = path.join(fixture.root, name, "invocation.json");
+    const filesystem = Object.fromEntries([
+      [":root", "read"],
+      ...sandbox.filesystemDenies.map((value) => [value, "deny"]),
+      ...(originalHome === currentHome
+        ? []
+        : [[originalHome, { ".": "deny" }]]),
+    ]);
     const environment = {
       ...process.env,
       CODEX_HOME: currentHome,
@@ -113,10 +129,7 @@ export async function testRestoredPrivateProfileHomes({
       ),
       FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify({
         extends: ":read-only",
-        filesystem: Object.fromEntries([
-          [":root", "read"],
-          ...sandbox.filesystemDenies.map((value) => [value, "deny"]),
-        ]),
+        filesystem,
         network: { enabled: false },
       }),
     };
@@ -142,6 +155,7 @@ export async function testRestoredPrivateProfileHomes({
       config,
       originalHome,
       currentHome,
+      filesystem,
       current,
       promptPath,
       markerPath,
@@ -166,21 +180,24 @@ export async function testRestoredPrivateProfileHomes({
     )) as typeof childProcess.spawn;
   syncBuiltinESMExports();
   try {
-    for (const kind of ["discovery", "dedup"] as const) {
+    for (const [kind, resumed] of [
+      ["discovery", false],
+      ["discovery", true],
+      ["dedup", false],
+      ["dedup", true],
+    ] as const) {
       const launches: PromiseSettledResult<void>[] = await Promise.allSettled(
         owners.map(async (owner) => {
           const request = workerRequest(owner.promptPath, fixture.root, {
             kind,
-            ...(kind === "dedup"
+            ...(resumed
               ? { resumeThreadId: `fixture-resumed-${owner.name}` }
               : {}),
           });
           const result = await owner.executor.run(request);
           assert.equal(
             result.threadId,
-            kind === "dedup"
-              ? `fixture-resumed-${owner.name}`
-              : "fixture-thread-id",
+            resumed ? `fixture-resumed-${owner.name}` : "fixture-thread-id",
           );
           const child = await readJson(owner.markerPath);
           assert.equal(child.codexHome, owner.originalHome);
@@ -192,6 +209,20 @@ export async function testRestoredPrivateProfileHomes({
           const preflight = await readJson(
             owner.environment.FAKE_CODEX_PREFLIGHT_MARKER,
           );
+          for (const argv of [child.argv, preflight.argv]) {
+            const permissions = parseToml(workerPermissionProfileOverride(argv))
+              .permissions as {
+              codex_security_deep_scan_worker: { filesystem: unknown };
+            };
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  permissions.codex_security_deep_scan_worker.filesystem,
+                ),
+              ),
+              owner.filesystem,
+            );
+          }
           assertConfigOverrides(child.argv, {
             [`model_providers.${owner.provider}.base_url`]: undefined,
             [`model_providers.${owner.provider}.env_key`]: undefined,
@@ -234,7 +265,7 @@ export async function testRestoredPrivateProfileHomes({
           owner.recreated.map((profile) => profile.name),
         ),
       ).size,
-      4,
+      8,
     );
     const owner = owners[1];
     const acceptedProfile = owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE;

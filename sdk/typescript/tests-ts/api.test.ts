@@ -16198,11 +16198,12 @@ if __name__ == "__main__":
         async (_input: string, options: { signal: AbortSignal }) => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             yield { type: "thread.started", thread_id: "scan-thread" };
-            await writeUsageSession(codexHome, "scan-thread", {
+            const rollout = await writeUsageSession(codexHome, "scan-thread", {
               input_tokens: 1_250,
               cached_input_tokens: 200,
               output_tokens: 30,
             });
+            if (completion === "failed") await appendFile(rollout, '{"type":');
             await (options.signal.aborted
               ? undefined
               : once(options.signal, "abort"));
@@ -16322,6 +16323,12 @@ if __name__ == "__main__":
           (args) => args[0] === "complete-budget-exhausted-scan",
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
+        if (completion === "failed")
+          expect(
+            JSON.parse(recovery![recovery!.indexOf("--cost-json") + 1]!),
+          ).toMatchObject({
+            lowerBound: { coverage: "partial" },
+          });
         expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
           true,
         );

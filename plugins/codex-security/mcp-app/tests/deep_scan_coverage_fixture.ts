@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { importModule } from "./import-module.ts";
+import { importNativeModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -99,7 +99,7 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   recordCodexSecurityDeepReduction,
-} = (await importModule({
+} = (await importNativeModule({
   stdin: {
     contents: [
       'export { archiveDirectory } from "./src/deep-scan/artifacts.ts";',

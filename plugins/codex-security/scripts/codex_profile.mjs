@@ -237,5 +237,6 @@ async function* execute(options, args, input, signal) {
     if (child.exitCode === null && child.signalCode === null) child.kill();
     child.stdout.destroy();
     child.stderr.destroy();
+    await closed;
   }
 }

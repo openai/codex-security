@@ -301,7 +301,8 @@ export class DeepScanCoordinator {
       const parent = await readParentState();
       const parentStatus = parent.status;
       // A committed parent can reject cancellation before the finalizer's reply arrives.
-      if (parentStatus === "complete") await persistCancellation();
+      if (parentStatus === "complete" && this.parentPublicationPending)
+        await persistCancellation();
       if (parentStatus === "failed")
         this.failExternallyPersisted(parent.failureMessage);
       if (parentStatus === "canceled") this.cancel(reason);
@@ -442,6 +443,8 @@ export class DeepScanCoordinator {
       });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
+      await this.completeParentPublication();
+      if (this.canceled || this.externallyFailed) return;
       this.log({
         event: "coordinator_terminal",
         scanId: this.state.scanId,
@@ -658,17 +661,21 @@ export class DeepScanCoordinator {
         }
       },
     });
-    if (this.canceled || this.externallyFailed) return;
+    if (!this.canceled && !this.externallyFailed)
+      await this.completeParentPublication();
+  }
+
+  private async completeParentPublication(): Promise<void> {
+    if (!this.options.onFinalized) return;
     this.parentPublicationPending = true;
     try {
-      await this.options.onFinalized?.(
+      await this.options.onFinalized(
         cloneState(this.state),
         this.publicationAbortController.signal,
       );
     } finally {
       this.parentPublicationPending = false;
     }
-    if (this.canceled || this.externallyFailed) return;
   }
   private stopLocally(): boolean {
     if (this.terminal) return false;

@@ -142,7 +142,7 @@ if sys.argv[9] == "true":
         assert "FROM deep_scan_attempts" in query
         return []
     connection = SimpleNamespace(execute=execute)
-    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
+    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "retained_checkpoint_heads_json": None, "seal_manifest_digest": None}
     frozen, _, heads = saved._recovery_source_digests(db, connection, scan)
 merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen, checkpoint_heads=heads)
 saved._capture_saved_source = original_capture

@@ -394,7 +394,14 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugin");
+    const source = join(root, "plugins", "codex-security");
+    const sdk = join(root, "sdk", "typescript");
+    await mkdir(sdk, { recursive: true });
+    for (const name of ["src", "package.json", "tsconfig.json"]) {
+      await cp(new URL(`../${name}`, import.meta.url), join(sdk, name), {
+        recursive: true,
+      });
+    }
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),

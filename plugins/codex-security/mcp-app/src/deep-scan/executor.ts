@@ -137,7 +137,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
       const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
@@ -230,6 +229,36 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? {}
           : { service_tier: runtimeSettings.serviceTier }),
       };
+      const profileHome = this.modelSettings.nativeProfileHome;
+      let reboundProfileHome: string | undefined;
+      if (
+        runtimeSettings.nativeProfile !== undefined &&
+        profileHome !== undefined &&
+        this.modelSettings.createProviderProfile
+      ) {
+        const boundHome = await fs.realpath(
+          environmentVariable(childEnv, "CODEX_HOME", process.platform) ||
+            join(homedir(), ".codex"),
+        );
+        if ((await fs.realpath(profileHome)) !== boundHome) {
+          // Keep the worker in the original account home while selecting the current provider.
+          const profileConfig = parseToml(
+            await fs.readFile(
+              join(profileHome, `${runtimeSettings.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          );
+          providerProfile = await this.modelSettings.createProviderProfile(
+            boundHome,
+            profileConfig as Parameters<typeof createProviderProfile>[1],
+          );
+          reboundProfileHome = boundHome;
+        }
+      }
+      const workerProfile = workerPermissionProfile(
+        parentSandbox,
+        reboundProfileHome,
+      );
       // Use the same native configuration for preflight and the worker turn.
       const configOverrides = [
         ...(resolved?.configOverrides ?? []),
@@ -263,29 +292,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             workerProfile,
         }),
       ];
-      const profileHome = this.modelSettings.nativeProfileHome;
-      const boundHome =
-        environmentVariable(childEnv, "CODEX_HOME", process.platform) ||
-        join(homedir(), ".codex");
-      if (
-        runtimeSettings.nativeProfile !== undefined &&
-        profileHome !== undefined &&
-        this.modelSettings.createProviderProfile &&
-        (await fs.realpath(profileHome)) !== (await fs.realpath(boundHome))
-      ) {
-        // The account home is bound to the original scan; the current private
-        // provider profile belongs to this execution owner's environment.
-        const profileConfig = parseToml(
-          await fs.readFile(
-            join(profileHome, `${runtimeSettings.nativeProfile}.config.toml`),
-            "utf8",
-          ),
-        );
-        providerProfile = await this.modelSettings.createProviderProfile(
-          boundHome,
-          profileConfig as Parameters<typeof createProviderProfile>[1],
-        );
-      }
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -578,12 +584,18 @@ function workerSubagentConfig(
   };
 }
 
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+function workerPermissionProfile(
+  sandbox: DeepWorkerParentSandbox,
+  reboundProfileHome?: string,
+) {
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
     ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
   ]);
-  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+  // Concurrent workers can each bind a private profile in the original account home.
+  const literalDenies = new Set(sandbox.literalFilesystemDenies);
+  if (reboundProfileHome !== undefined) literalDenies.add(reboundProfileHome);
+  for (const literal of literalDenies) {
     if (sandbox.filesystemDenies.includes(literal)) {
       const root = parse(literal).root;
       const scope = filesystem.get(root);

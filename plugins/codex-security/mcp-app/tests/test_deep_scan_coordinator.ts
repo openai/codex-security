@@ -78,14 +78,14 @@ async function testCappedQueueAndSerialDedup() {
   });
   const executor = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
   const completedDrafts: ScanDraftInput[] = [];
+  const finalizedScans: string[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
     handoffClaimToken: "claim-fixture",
     onComplete: async (draft) =>
       void completedDrafts.push(structuredClone(draft)),
-    onFinalized: async () =>
-      assert.fail("Legacy scans retain explicit parent completion"),
+    onFinalized: async (run) => void finalizedScans.push(run.scanId),
   });
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal?.terminalReason, "capped");
@@ -125,6 +125,7 @@ async function testCappedQueueAndSerialDedup() {
   );
   assert.equal(completedDrafts.length, 1);
   assert.equal(completedDrafts[0].scanId, fixture.run.scanId);
+  assert.deepEqual(finalizedScans, [fixture.run.scanId]);
   assert.deepEqual(completedDrafts[0].findings, manifest.findings);
   const reducerWorkers = [...store.workers.values()].filter(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",

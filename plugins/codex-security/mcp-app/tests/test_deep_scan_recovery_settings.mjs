@@ -509,6 +509,24 @@ profile = "fixture-profile"
       payload: { id: "fixture-other", model_provider: "other-provider" },
     }) + "\n",
   );
+  const badHistoryHome = join(root, "unreadable-history");
+  await mkdir(badHistoryHome);
+  await writeFile(
+    join(badHistoryHome, "sessions"),
+    "synthetic invalid directory",
+  );
+  await assert.rejects(
+    captureSettings(
+      {},
+      { filesystemDenies: [] },
+      {
+        CODEX_HOME: badHistoryHome,
+        CODEX_CLI_PATH: process.execPath,
+      },
+      { threadId: "original-parent" },
+    ),
+    { code: "ENOTDIR" },
+  );
   const parentSettings = await captureSettings(
     {},
     { filesystemDenies: [] },

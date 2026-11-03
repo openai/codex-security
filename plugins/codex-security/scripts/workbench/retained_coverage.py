@@ -3085,7 +3085,7 @@ def merge_saved_results(
                         item = copy.deepcopy(item)
                         item["receiptRefs"] = coverage_receipts(item, worker, relative)
                     if (
-                        projected_row
+                        (projected_row or field == "openQuestions")
                         and isinstance(item, dict)
                         and retained_coverage_record(field, item) is not None
                     ):

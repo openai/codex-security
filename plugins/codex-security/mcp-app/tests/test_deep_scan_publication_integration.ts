@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildServer } from "./build-server.ts";
-import { importModule } from "./import-module.ts";
+import { importNativeModule } from "./import-module.ts";
 import { legacyAcceptedFinding } from "./legacy-accepted-finding.ts";
 import type {
   DeepScanRunState,
@@ -100,7 +100,7 @@ await buildServer(serverPath, {
   },
   target: "node20",
 });
-const host = (await importModule({
+const host = (await importNativeModule({
   stdin: {
     contents: [
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
@@ -1356,6 +1356,7 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
         },
       });
       let publications = 0;
+      let parentCompletions = 0;
       const coordinator = new DeepScanCoordinator({
         run: await f.store.get(f.run.scanId, owner),
         store: f.store,
@@ -1366,6 +1367,10 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
           },
         },
         clock: { now: () => Date.parse(f.instant), sleep: async () => {} },
+        onFinalized: async (run) => {
+          await f.runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+          parentCompletions++;
+        },
         onComplete: async (draft, signal, publication) => {
           publications++;
           assert.deepEqual(draft, expectedDraft);
@@ -1407,8 +1412,9 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
         await Promise.all(f.results.map((file) => readFile(file))),
         sources,
       );
+      assert.equal(parentCompletions, 1);
       const parent = await f.runWorkbench([
-        "complete-scan",
+        "get-scan",
         "--scan-id",
         f.run.scanId,
       ]);

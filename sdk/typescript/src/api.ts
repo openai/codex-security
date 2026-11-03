@@ -3863,7 +3863,10 @@ export class CodexSecurity {
       ) {
         try {
           const budgetScanId = activeScan.id;
-          const budgetCost = snapshot?.cost ?? { lowerBound: failure.cost };
+          const budgetCost =
+            snapshot?.cost && snapshot.cost.coverage !== "partial"
+              ? snapshot.cost
+              : { lowerBound: failure.cost };
           const completionOptions = {
             ...activeScan.options,
             signal: completionSignal,
@@ -5988,7 +5991,7 @@ function scanPrompt(
         ]
       : skillName === "security-scan" || enforceCostLimit || customValidation
         ? [
-            "The Deep Scan coordinator already wrote the canonical scan artifacts. Leave them unchanged and end the scan turn without calling a completion tool; the SDK accounts for the completed turn, enforces its budget, and owns finalization, report generation, and sealing.",
+            "Write the complete canonical scan-manifest.json and findings.json with review bookkeeping in scan.reviewState, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",

@@ -90,9 +90,16 @@ def _coverage_comparison_row(row: Any, field: str) -> Any:
             row["receiptRefs"] = refs
         return row
     if field == "openQuestions":
-        coverage = {"openQuestions": [copy.deepcopy(row)]}
+        coverage = {"openQuestions": [row]}
         _normalize_unsealed_open_questions(coverage)
-        return next(iter(coverage["openQuestions"]), row)
+        normalized = next(iter(coverage["openQuestions"]), row)
+        if (
+            isinstance(normalized, dict)
+            and isinstance(provenance := normalized.get("provenance"), dict)
+            and normalized.get("workerId") == provenance.get("workerId")
+        ):
+            return {key: value for key, value in normalized.items() if key != "workerId"}
+        return normalized
     return row
 
 
@@ -313,11 +320,9 @@ class SavedCoverageProjection:
                 original.pop("id", None)  # Canonical publication can assign an ID.
             if field == "openQuestions":
                 # Compare the same canonical form that publication writes.
-                previous_question = {"openQuestions": [original]}
-                source_question = {"openQuestions": [item]}
-                _normalize_unsealed_open_questions(previous_question)
-                _normalize_unsealed_open_questions(source_question)
-                if previous_question == source_question:
+                if _coverage_comparison_row(original, field) == _coverage_comparison_row(
+                    item, field
+                ):
                     return record
             elif original == item:
                 return record
