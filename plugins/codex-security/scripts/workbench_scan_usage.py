@@ -225,7 +225,6 @@ def collect_scan_usage(
     by_role = {role: {**_empty_token_usage(), "threadCount": 0} for role in ("parent", "workers")}
     rate_limits: dict[str, dict[str, Any]] = {}
     tokens_updated_at = None
-    measured_thread_ids: set[str] = set()
     accepted_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     model_usage: dict[str | None, dict[str, int]] = {}
@@ -287,7 +286,6 @@ def collect_scan_usage(
         if "token_usage_unavailable" in usage.warnings:
             missing_thread_ids.add(session.thread_id)
             continue
-        measured_thread_ids.add(session.thread_id)
         role = by_role["parent" if session.thread_id in parent_ids else "workers"]
         _add_token_usage(role, usage.tokens)
         role["threadCount"] += 1
@@ -298,7 +296,8 @@ def collect_scan_usage(
 
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
-    if not measured_thread_ids:
+    thread_count = sum(role["threadCount"] for role in by_role.values())
+    if not thread_count:
         return _unavailable_usage(
             "token_usage_unavailable", warnings=warnings, rate_limits=rate_limits
         )
@@ -318,7 +317,7 @@ def collect_scan_usage(
         "coverage": "partial" if missing_thread_ids or warnings else "complete",
         "source": "codex_rollout",
         **{key: sum(role[key] for role in by_role.values()) for key in TOKEN_FIELDS.values()},
-        "threadCount": len(measured_thread_ids),
+        "threadCount": thread_count,
         "byRole": by_role,
         "window": {"startedAt": started_at.isoformat(), "endedAt": stopped_at.isoformat()},
         "observedAt": observed_at.isoformat(),
@@ -946,6 +945,14 @@ def _read_rollout_usage(
     excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
 
+    def past_scan_end(timestamp: datetime, turn_id: object) -> bool:
+        # The requested completion turn may finish after the scan was marked complete.
+        return (
+            completed_at is not None
+            and timestamp > completed_at
+            and (completed_turn_id is None or turn_id != completed_turn_id)
+        )
+
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
             if not raw_line.endswith(b"\n"):
@@ -1008,10 +1015,8 @@ def _read_rollout_usage(
                     if task_started_at is None:
                         warnings.add("thread_ownership_unavailable")
                         return result
-                    if task_started_at < started_at or (
-                        completed_at is not None
-                        and task_started_at > completed_at
-                        and payload.get("turn_id") != completed_turn_id
+                    if task_started_at < started_at or past_scan_end(
+                        task_started_at, payload.get("turn_id")
                     ):
                         warnings.add("thread_outside_scan_window")
                         return result
@@ -1026,16 +1031,10 @@ def _read_rollout_usage(
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
-                task_started_at = _timestamp(event.get("timestamp"))
-                if (
-                    completed_at is None
-                    or task_started_at is None
-                    or task_started_at <= completed_at
-                    or (
-                        completed_turn_id is not None
-                        and payload.get("turn_id") == completed_turn_id
-                    )
-                ):
+                # The same owner can resume as a model-backed coordinator. Only
+                # a provably post-scan turn leaves the original control zero intact.
+                timestamp = _timestamp(event.get("timestamp"))
+                if timestamp is None or not past_scan_end(timestamp, payload.get("turn_id")):
                     direct_control_session = False
                 if (
                     completed_turn_id is not None
@@ -1051,17 +1050,9 @@ def _read_rollout_usage(
                 current_turn_id = payload.get("turn_id")
                 if owner_turn_id is not None and current_turn_id != owner_turn_id:
                     continue
-                if (
-                    not isinstance(current_turn_id, str)
-                    or not current_turn_id
-                    or task_started_at is None
-                ):
+                if not isinstance(current_turn_id, str) or not current_turn_id or timestamp is None:
                     warnings.add("turn_record_invalid")
-                elif (
-                    completed_at is None
-                    or task_started_at <= completed_at
-                    or current_turn_id == completed_turn_id
-                ):
+                elif not past_scan_end(timestamp, current_turn_id):
                     started_turns.add(current_turn_id)
                     open_turns.add(current_turn_id)
                 continue
@@ -1079,11 +1070,7 @@ def _read_rollout_usage(
                     or timestamp is None
                 ):
                     warnings.add("turn_record_invalid")
-                elif (
-                    completed_at is None
-                    or timestamp <= completed_at
-                    or terminal_turn_id == completed_turn_id
-                ):
+                elif not past_scan_end(timestamp, terminal_turn_id):
                     open_turns.discard(terminal_turn_id)
                     if timestamp >= started_at:
                         if terminal_turn_id in started_turns:
@@ -1102,11 +1089,7 @@ def _read_rollout_usage(
                 if (
                     timestamp is not None
                     and timestamp >= started_at
-                    and (
-                        completed_at is None
-                        or timestamp <= completed_at
-                        or (completed_turn_id is not None and current_turn_id == completed_turn_id)
-                    )
+                    and not past_scan_end(timestamp, current_turn_id)
                     and (owner_turn_id is None or current_turn_id == owner_turn_id)
                     and "compaction_response_id" not in payload
                     and not current_response_usage_observed
@@ -1133,10 +1116,8 @@ def _read_rollout_usage(
                 cumulative = _token_snapshot(
                     {"info": {"total_token_usage": payload.get("thread_token_usage")}}
                 )
-                is_completion_turn = (
-                    completed_turn_id is not None and payload.get("turn_id") == completed_turn_id
-                )
-                if completed_at is not None and timestamp > completed_at and not is_completion_turn:
+                receipt_turn_id = payload.get("turn_id")
+                if past_scan_end(timestamp, receipt_turn_id):
                     continue
                 if cumulative is not None:
                     record_receipt_counter(
@@ -1186,7 +1167,7 @@ def _read_rollout_usage(
                         if any(tokens.values())
                     }
                 response_usage_observed = True
-                if is_completion_turn:
+                if completed_turn_id is not None and receipt_turn_id == completed_turn_id:
                     completed_turn_measured = True
                 if turn_usage is not None and any(
                     turn_usage[key] > observed_response_usage[key] for key in TOKEN_FIELDS.values()
@@ -1207,11 +1188,7 @@ def _read_rollout_usage(
             in_window = (
                 timestamp is not None
                 and timestamp >= started_at
-                and (
-                    completed_at is None
-                    or timestamp <= completed_at
-                    or (completed_turn_id is not None and current_turn_id == completed_turn_id)
-                )
+                and not past_scan_end(timestamp, current_turn_id)
                 and (owner_turn_id is None or current_turn_id == owner_turn_id)
             )
             if in_window:
@@ -1226,7 +1203,6 @@ def _read_rollout_usage(
             # Native rate-limit updates can carry no token usage.
             if "info" in payload and payload["info"] is None:
                 continue
-            timestamp = _timestamp(event.get("timestamp"))
             snapshot = _token_snapshot(payload)
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
@@ -1250,9 +1226,9 @@ def _read_rollout_usage(
             is_completion_turn = (
                 completed_turn_id is not None and current_turn_id == completed_turn_id
             )
-            if (
-                completed_at is not None and timestamp > completed_at and not is_completion_turn
-            ) or (owner_turn_id is not None and current_turn_id != owner_turn_id):
+            if (past_scan_end(timestamp, current_turn_id)) or (
+                owner_turn_id is not None and current_turn_id != owner_turn_id
+            ):
                 previous = snapshot
                 continue
             if snapshot["totalTokens"] < previous["totalTokens"]:

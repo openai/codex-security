@@ -10,9 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 from test_workbench_deep_scan import (
+    DeepScan,
     begin_target_scan,
-    dispatch_discovery_worker,
-    upsert_worker,
     worker_paths,
 )
 from workbench_test_support import run_workbench
@@ -25,11 +24,8 @@ def test_state_snapshot_does_not_mix_concurrent_acceptance(
     target.mkdir()
     initial = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
     scan_id = initial["scanId"]
-    worker_id, _, _, _ = dispatch_discovery_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        scan_dir=Path(initial["scanDir"]),
+    deep = DeepScan(state_dir, codex_home, scan_id, Path(initial["scanDir"]))
+    worker_id, _, _, _ = deep.dispatch_discovery_worker(
         name="discovery-1",
         succeed=False,
     )
@@ -108,15 +104,15 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
     worker_id = str(uuid.uuid4())
     prompt, artifacts, _ = worker_paths(Path(run["scanDir"]), "discovery-1")
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
     )
-    upsert_worker(state, home, **mutation, status="running", attempt=3, thread_id="replacement")
-    upsert_worker(state, home, **mutation, status="canceled", attempt=3, thread_id="replacement")
+    deep.upsert_worker(**mutation, status="running", attempt=3, thread_id="replacement")
+    deep.upsert_worker(**mutation, status="canceled", attempt=3, thread_id="replacement")
     # The writer release recorded these prior attempts and observed sessions.
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -214,15 +210,15 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
     worker_id = str(uuid.uuid4())
     prompt, artifacts, result = worker_paths(Path(run["scanDir"]), "discovery")
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
         attempt=1,
     )
-    upsert_worker(state, home, **mutation, status="running")
+    deep.upsert_worker(**mutation, status="running")
     draft = {"scanId": run["scanId"], "findings": [], "coverage": {"deferred": ["unresolved"]}}
     content = json.dumps(draft).encode()
     checkpoint = artifacts / "checkpoints" / f"{hashlib.sha256(content).hexdigest()}.json"
@@ -231,7 +227,7 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     (artifacts / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
     result.write_text(json.dumps({**draft, "coverage": {}}))
     with pytest.raises(subprocess.CalledProcessError) as failure:
-        upsert_worker(state, home, **mutation, status="succeeded", result_path=result)
+        deep.upsert_worker(**mutation, status="succeeded", result_path=result)
     assert "does not match its current checkpoint head" in failure.value.stderr
     assert checkpoint.read_bytes() == content
 
@@ -241,12 +237,8 @@ def test_claim_replay_preserves_original_inputs_after_concurrent_discovery(tmp_p
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
-    inputs = [
-        dispatch_discovery_worker(
-            state, home, scan_id=scan_id, scan_dir=scan_dir, name=f"discovery-{index}"
-        )[0]
-        for index in range(2)
-    ]
+    deep = DeepScan(state, home, scan_id, scan_dir)
+    inputs = [deep.dispatch_discovery_worker(name=f"discovery-{index}")[0] for index in range(2)]
     prompt, artifacts, _ = worker_paths(scan_dir, "reducer")
     args = [
         "claim-deep-scan-dedup",
@@ -262,9 +254,7 @@ def test_claim_replay_preserves_original_inputs_after_concurrent_discovery(tmp_p
     for worker in inputs:
         args.extend(["--input-worker-id", worker])
     claimed = run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
-    dispatch_discovery_worker(
-        state, home, scan_id=scan_id, scan_dir=scan_dir, name="concurrent-discovery"
-    )
+    deep.dispatch_discovery_worker(name="concurrent-discovery")
     replayed = run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
     assert replayed["deepScan"]["mergeClaims"] == claimed["deepScan"]["mergeClaims"]
     assert replayed["deepScan"]["dedupInputs"] == claimed["deepScan"]["dedupInputs"]

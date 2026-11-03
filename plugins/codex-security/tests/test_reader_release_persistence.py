@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_workbench_deep_scan import commit_reducer, dispatch_discovery_worker, upsert_worker
+from test_workbench_deep_scan import DeepScan
 from workbench_test_support import SCRIPT, run_workbench
 
 
@@ -80,21 +80,15 @@ def test_legacy_execution_defers_new_persistence(tmp_path: Path, version: str) -
         environment={"CODEX_HOME": str(home)},
     )["deepScan"]
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
+    deep = DeepScan(state, home, scan_id, scan_dir)
     stages = {"begin": introduced_metadata(state, scan_dir)}
     workers = []
     for index in range(2):
-        worker, prompt, artifacts, result = dispatch_discovery_worker(
-            state,
-            home,
-            scan_id=scan_id,
-            scan_dir=scan_dir,
+        worker, prompt, artifacts, result = deep.dispatch_discovery_worker(
             name=f"discovery-{index}",
             succeed=False,
         )
-        upsert_worker(
-            state,
-            home,
-            scan_id=scan_id,
+        deep.upsert_worker(
             worker_id=worker,
             kind="discovery",
             status="running",
@@ -104,10 +98,7 @@ def test_legacy_execution_defers_new_persistence(tmp_path: Path, version: str) -
             thread_id=f"replacement-{index}",
         )
         result.write_text("{}\n")
-        upsert_worker(
-            state,
-            home,
-            scan_id=scan_id,
+        deep.upsert_worker(
             worker_id=worker,
             kind="discovery",
             status="succeeded",
@@ -119,11 +110,7 @@ def test_legacy_execution_defers_new_persistence(tmp_path: Path, version: str) -
         )
         workers.append(worker)
     stages["discovery"] = introduced_metadata(state, scan_dir)
-    committed = commit_reducer(
-        state,
-        home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
+    committed = deep.commit_reducer(
         name="dedup-1",
         input_worker_ids=workers,
         new_findings_count=0,

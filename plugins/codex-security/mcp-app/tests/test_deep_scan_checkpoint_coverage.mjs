@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { publishCoverageFixture } from "./deep_scan_coverage_fixture.mjs";
 
 for (const continueAfterResume of [false, true]) {
@@ -18,9 +19,7 @@ for (const continueAfterResume of [false, true]) {
         continueAfterResume,
         immutableInputs: true,
       });
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(Object.hasOwn(coverage, "completeness"), false);
       assert.deepEqual(
         coverage.reviews.map((review) => review.attempt),
@@ -30,14 +29,17 @@ for (const continueAfterResume of [false, true]) {
       assert.equal(
         new Set(
           coverage.deferred.map((item) =>
-            JSON.stringify([item.workerId, item.candidateId]),
+            JSON.stringify([
+              item.provenance.workerId,
+              item.provenance.candidateId,
+            ]),
           ),
         ).size,
         2,
       );
       const report = await readFile(path.join(scanDir, "report.md"), "utf8");
-      for (const item of coverage.deferred)
-        assert.ok(report.includes(item.reason));
+      for (const item of coverage.explicitExclusions)
+        assert.ok(report.includes(item.pattern));
       for (const surface of coverage.surfaces) {
         for (const receipt of surface.receiptRefs) {
           assert.equal(

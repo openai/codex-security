@@ -5,7 +5,7 @@ export interface ScanDraftInput {
   scope?: Record<string, unknown>;
   threatModel?: Record<string, unknown>;
   findings: Record<string, unknown>[];
-  coverage: Record<string, unknown>;
+  reviewState: Record<string, unknown>;
 }
 
 /** Accepted evidence may still describe partial or unknown source coverage. */

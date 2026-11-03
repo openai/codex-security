@@ -10,9 +10,9 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
+const module = await importModule({
   stdin: {
     contents: `export * from "./src/artifact-scan-draft.ts";
       export { recordCodexSecurityScanDraft } from "./tests/scan-draft-writer-fixture.ts";
@@ -21,10 +21,7 @@ const bundle = await build({
       export * from "./src/accepted-audit.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+
   footer: { js: "//# sourceURL=audit-acceptance-contract.js" },
 });
 const {
@@ -35,9 +32,7 @@ const {
   readDiscoveryAuditDraft,
   auditEvidence,
   runAcceptedAudit,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
 const finding = {
@@ -77,7 +72,7 @@ for (const completeness of ["complete", "partial", "unknown"]) {
           summary: "An untrusted caller supplies archive entries.",
         },
         findings: [finding],
-        coverage: {
+        reviewState: {
           completeness,
           surfaces: [
             {
@@ -198,7 +193,7 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         "explicitExclusions",
         "deferred",
       ]) {
-        assert.deepEqual(coverage[field], accepted.coverage[field]);
+        assert.deepEqual(coverage[field], accepted.reviewState[field]);
       }
       assert.equal(accepted.scanId, scanId);
       const audit = await runAcceptedAudit({

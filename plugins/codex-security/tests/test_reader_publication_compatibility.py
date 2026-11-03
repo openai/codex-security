@@ -15,15 +15,17 @@ from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_stop_conditions import canceled_discovery_output
 from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
 from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
-from test_deep_scan_successful_publication import complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import committed_standard_reducer, deep_scan_fixture
 from workbench_test_support import (
     finish_deep_scan,
+    read_review_state,
     run_workbench,
     saved_coverage,
+    select_checkpoint,
     upsert_deep_worker,
     worker_paths,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -85,8 +87,7 @@ def test_capped_deadline_replays_selected_publication(
         workbench_api, workbench_db, scan, reason="capped", digest_bound=digest_bound
     )
     original = accepted.read_bytes()
-    coverage_path = scan.scan_dir / "coverage.json"
-    prior_coverage = coverage_path.read_bytes()
+    prior_coverage = read_review_state(workbench_db, scan.scan_dir)
     workbench_api["deep_scan"].finish_deep_scan(
         workbench_db,
         Namespace(
@@ -98,11 +99,11 @@ def test_capped_deadline_replays_selected_publication(
             coordinator_generation=2,
         ),
     )
-    coverage = json.loads(coverage_path.read_bytes())
-    assert (coverage_path.read_bytes() == prior_coverage) is digest_bound
+    coverage = read_review_state(workbench_db, scan.scan_dir)
+    assert (coverage == prior_coverage) is digest_bound
     assert any(row["id"] == "scan-deadline" for row in coverage["deferred"]) is not digest_bound
-    complete(workbench_api, workbench_db, scan, prepare_only=True)
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    scan.complete(prepare_only=True)
+    assert scan.complete()["progress"]["status"] == "complete"
     assert accepted.read_bytes() == original
 
 
@@ -140,13 +141,19 @@ def test_reader_completion_validates_saved_publication(
         assert {p: p.read_bytes() for p in before} == before
 
 
+@pytest.mark.parametrize("legacy", [True, False], ids=["coverage-file", "review-state"])
 @pytest.mark.parametrize("change", [None, "producer", "host"])
 def test_prepared_selection_replays_its_sealed_warnings(
-    workbench_api, workbench_db, publication_scan, change
+    workbench_api, workbench_db, publication_scan, change, legacy
 ):
     scan = publication_scan()
     manifest_path = scan.scan_dir / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
+    if not legacy:
+        manifest["scan"].pop("coverageRef", None)
+        scan.coverage["deferred"] = [{"id": "later", "reason": "Review an outstanding call."}]
+        manifest["scan"].update(mode="deep_repository", reviewState=scan.coverage)
+        (scan.scan_dir / "coverage.json").unlink()
     producer = "Review was limited to local routes."
     manifest["scan"]["warnings"] = [producer]
     manifest_path.write_text(json.dumps(manifest))
@@ -160,6 +167,22 @@ def test_prepared_selection_replays_its_sealed_warnings(
     sealed = manifest_path.read_bytes()
     manifest = json.loads(sealed)
     assert manifest["scan"]["warnings"] == [producer, host_warning]
+    if not legacy:
+        selection = json.loads(
+            workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
+        )
+        retained = read_review_state(workbench_db, scan.scan_dir)
+        findings = json.loads((scan.scan_dir / "findings.json").read_text())
+        assert retained["deferred"] == scan.coverage["deferred"]
+        assert selection["sealedPublicationSha256"] == publication_digest(
+            manifest, findings, retained
+        )
+        # Older workers retained completeness alongside the signed review data.
+        head = json.loads((scan.scan_dir / "checkpoint-head.json").read_bytes())
+        checkpoints = scan.scan_dir / "checkpoints"
+        checkpoint = json.loads((checkpoints / head["checkpoint"]).read_bytes())
+        checkpoint["reviewState"]["completeness"] = "partial"
+        select_checkpoint(scan.scan_dir, write_checkpoint(checkpoints, checkpoint))
 
     if change is not None:
         manifest["scan"]["warnings"] = (
@@ -309,13 +332,13 @@ def test_reader_budget_validates_publication_before_changing_the_projection(
     run_after = dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone())
     selection_before = json.loads(run_before.pop("finalization_input_json"))
     selection_after = json.loads(run_after.pop("finalization_input_json"))
-    assert run_after == run_before
+    assert run_after == {**run_before, "terminal_reviewed_surface_count": 0}
     after_publication_sha256 = selection_after.pop("publicationSha256")
     before_publication_sha256 = selection_before.pop("publicationSha256")
     assert after_publication_sha256 != before_publication_sha256
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())
     findings = json.loads((scan.scan_dir / "findings.json").read_bytes())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert selection_after.pop("sealedPublicationSha256") == publication_digest(
         manifest, findings, coverage
     )
@@ -456,6 +479,7 @@ def test_legacy_reducer_replay_fences_partial_drafts_after_output_failure(
     before = {
         name: (scan_dir / name).read_bytes()
         for name in ["scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json"]
+        if (scan_dir / name).exists()
     }
     partial = copy.deepcopy(documents)
     partial["manifest"]["scan"]["complete"] = False

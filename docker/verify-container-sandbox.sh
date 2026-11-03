@@ -13,7 +13,9 @@ if docker info --format '{{json .SecurityOptions}}' | grep -Fq '"name=apparmor"'
   sudo grep -Fxq 'codex-security-container (enforce)' \
     /sys/kernel/security/apparmor/profiles
   apparmor_options=(--security-opt apparmor=codex-security-container)
-  printf '%s\n' 'COMPOSE_FILE=compose.yaml:compose.apparmor.yaml' >> "$GITHUB_ENV"
+  if [[ -n ${GITHUB_ENV:-} ]]; then
+    printf '%s\n' 'COMPOSE_FILE=compose.yaml:compose.apparmor.yaml' >> "$GITHUB_ENV"
+  fi
 fi
 
 docker run --rm \
@@ -21,7 +23,7 @@ docker run --rm \
   --security-opt no-new-privileges \
   --security-opt "seccomp=$repository_root/docker/codex-security-seccomp.json" \
   "${apparmor_options[@]}" \
-  --entrypoint node \
-  "$image" \
-  /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js \
-  sandbox /usr/bin/true
+  --entrypoint /bin/sh "$image" -ec '
+    cd "$(dirname "$(readlink -f /usr/local/bin/codex-security)")"
+    exec npm exec --offline -- codex sandbox /usr/bin/true
+  '

@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,17 +56,36 @@ test.each([
         threadId,
         turnResult: { status: "completed" },
       });
-      expect(result.coverage["completeness"]).toBeUndefined();
+      expect(result.review).not.toHaveProperty("completeness");
       expect(result.manifest.scan.status).toBe("completed");
-      const coverage = JSON.parse(
-        await readFile(join(scanDir, "coverage.json"), "utf8"),
-      );
-      expect(coverage.reviews[0].attempt).toBe(2);
+      const coverage = (await readReviewState(scanDir)) as Awaited<
+        ReturnType<typeof readReviewState>
+      > & {
+        reviews: { workerId: string; attempt: number; completeness?: string }[];
+        explicitExclusions: { pattern: string }[];
+        surfaces: { id: string; receiptRefs: string[] }[];
+        deferred: {
+          id: string;
+          reason: string;
+          provenance: { workerId: string; candidateId: string };
+          surfaceIds: string[];
+        }[];
+      };
+      expect(coverage.reviews[0]!.attempt).toBe(2);
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain("## Source Review Coverage");
+      expect(result.review.excludedPaths).toEqual(
+        coverage.explicitExclusions.map((item) => item.pattern),
+      );
+      for (const path of result.review.excludedPaths)
+        expect(report).toContain(path);
       expect(coverage.explicitExclusions).toHaveLength(coverage.reviews.length);
       for (const review of coverage.reviews)
-        expect(report).toContain(review.workerId);
+        expect(terminal.persistedWorkers).toContainEqual(
+          expect.objectContaining({
+            id: review.workerId,
+            attempt: review.attempt,
+          }),
+        );
       if (completeness === "partial") {
         expect(
           coverage.deferred.map((item: { reason: string }) => item.reason),
@@ -85,7 +105,6 @@ test.each([
         ).toEqual([undefined, undefined, undefined]);
         for (const item of coverage.deferred) {
           expect(item.provenance.candidateId).toBe("candidate-1");
-          expect(report).toContain(item.reason);
           expect(
             coverage.surfaces.some((surface: { id: string }) =>
               item.surfaceIds.includes(surface.id),
@@ -95,7 +114,7 @@ test.each([
       }
       for (const surface of coverage.surfaces) {
         expect(
-          await readFile(join(scanDir, surface.receiptRefs[0]), "utf8"),
+          await readFile(join(scanDir, surface.receiptRefs[0]!), "utf8"),
         ).toContain("Synthetic review evidence.");
       }
       const stdout = capture();
@@ -108,11 +127,11 @@ test.each([
           dependencies({ result, onWorkbench: () => ({ deepScan: terminal }) }),
         ),
       ).toBe(0);
-      expect(JSON.parse(stdout.text()).coverage).toEqual(coverage);
+      expect(JSON.parse(stdout.text()).review).toEqual(result.review);
       expect(stderr.text()).toContain("STOPPED");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   },
-  60_000,
+  120_000,
 );

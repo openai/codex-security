@@ -12,7 +12,6 @@ import pytest
 from test_accepted_publication_references import accept_reducer
 from test_checkpoint_publication_authority import save_disposition
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
@@ -107,7 +106,7 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
 ):
     scan = publication_scan()
     _, accepted, coverage = accept_reducer(workbench_db, scan)
-    omitted = add_worker(workbench_db, scan)
+    omitted = scan.add_worker()
     rejected = save_disposition(scan, omitted.parent, "reported")
     omitted.write_text(json.dumps(rejected))
     save_disposition(scan, omitted.parent, "rejected")
@@ -217,7 +216,7 @@ def test_interrupted_selection_recovery_fences_observers_and_keeps_original_dead
 ):
     scan = publication_scan()
     _, accepted, _ = accept_reducer(workbench_db, scan)
-    omitted = add_worker(workbench_db, scan)
+    omitted = scan.add_worker()
     selection = saved_selection(workbench_db, scan, accepted, omitted)
     with workbench_db:
         workbench_db.execute(

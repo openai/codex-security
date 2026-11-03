@@ -1,19 +1,14 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
+const module = await importModule({
   entryPoints: [path.resolve(import.meta.dirname, "../src/deep-scan/store.ts")],
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+
   footer: { js: "//# sourceURL=deep-scan-selection-store.js" },
 });
-const { WorkbenchDeepScanStore } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+const { WorkbenchDeepScanStore } = module;
 
 test("selection uses the dedicated function bridge and the store's existing replay policy", async () => {
   const scanId = "ed8ff2da-01d9-4338-aeba-8bcfd4b530a9";

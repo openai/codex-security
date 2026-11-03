@@ -18,7 +18,13 @@ from test_workbench_db import (
     initialize_git_repository,
     run_workbench,
 )
-from workbench_test_support import get_scan, scan_command, start_scan_command, update_progress
+from workbench_test_support import (
+    empty_target_paths,
+    get_scan,
+    scan_command,
+    start_scan_command,
+    update_progress,
+)
 
 
 def start_prompt_only_scan(
@@ -97,15 +103,21 @@ def prompt_scan_arguments(target: Path, root: Path) -> argparse.Namespace:
 
 
 def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('fixture')\n")
 
-    started = start_headless_standard_scan(state_dir, target, tmp_path / "scans")
+    user_context = (
+        "Repository: https://github.com/example/security-review\n"
+        "OAuth issuer: https://accounts.example.test"
+    )
+    started = start_headless_standard_scan(
+        state_dir, target, tmp_path / "scans", user_context=user_context
+    )
     scan = started["scan"]
     workspace = started["workspace"]
     assert started["startDisposition"] == "created"
+    assert scan["userContext"] == user_context
+    assert workspace["userContext"] == user_context
     assert scan["mode"] == "standard"
     assert scan["progress"]["status"] == "running"
     assert scan["progress"]["phase"] == "preflight"
@@ -116,30 +128,9 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     assert workspace["results"]["scanId"] == scan["scanId"]
 
 
-def test_headless_standard_scan_preserves_url_user_context(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "fixture.py").write_text("print('fixture')\n")
-    user_context = (
-        "Repository: https://github.com/example/security-review\n"
-        "OAuth issuer: https://accounts.example.test"
-    )
-
-    started = start_headless_standard_scan(
-        state_dir,
-        target,
-        tmp_path / "scans",
-        user_context=user_context,
-    )
-
-    assert started["scan"]["userContext"] == user_context
-    assert started["workspace"]["userContext"] == user_context
-
-
 def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    target = tmp_path / "target"
+    target = tmp_path / "target-"
     target.mkdir()
     (target / "fixture.py").write_text("print('fixture')\n")
     scan_root = tmp_path / "scans"
@@ -151,6 +142,7 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
     )
 
     assert first["startDisposition"] == "created"
+    assert Path(first["scan"]["scanDir"]).parent == scan_root / target.name
     assert joined["startDisposition"] == "joined"
     assert joined["scan"]["scanId"] == first["scan"]["scanId"]
     assert joined["scan"]["handoffClaimToken"] == first["scan"]["handoffClaimToken"]
@@ -160,9 +152,7 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
 
 
 def test_headless_standard_scan_serializes_concurrent_starts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('fixture')\n")
     run_workbench(state_dir, "database-info")
 
@@ -178,23 +168,10 @@ def test_headless_standard_scan_serializes_concurrent_starts(tmp_path: Path) -> 
     assert len({result["scan"]["scanId"] for result in results}) == 1
 
 
-def test_prompt_only_scan_starts_without_persisted_opt_out(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    scan_root = tmp_path / "scans"
-    started = start_prompt_only_scan(state_dir, target, scan_root)
-    assert started["startDisposition"] == "created"
-
-
 def test_prompt_only_scan_creates_submitted_delivered_scan(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('fixture')\n")
     started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
     assert started["startDisposition"] == "created"
@@ -212,9 +189,7 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
 
     started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
     scan_id = str(started["scan"]["scanId"])
@@ -241,9 +216,7 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
 def test_prompt_scan_revalidates_target_after_concurrent_database_write(
     tmp_path: Path, target_changes: bool, existing_scan: bool, headless_standard: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "fixture.py"
     source.write_text("original\n")
     saved = create_saved_workspace(state_dir, target)
@@ -301,9 +274,7 @@ def test_prompt_scan_revalidates_target_after_concurrent_database_write(
 def test_prompt_scan_revalidates_target_after_database_lock_wait(
     tmp_path: Path, target_changes: bool, writer_arrival: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "fixture.py"
     source.write_text("original\n")
     namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_lock_test")
@@ -392,9 +363,7 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
 def test_concurrent_prompt_scan_starts_join_the_winner(
     tmp_path: Path, headless_standard: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("original\n")
     create_saved_workspace(state_dir, target)
     namespace = runpy.run_path(str(SCRIPT), run_name="prompt_scan_concurrent_test")
@@ -433,9 +402,7 @@ def test_concurrent_prompt_scan_starts_join_the_winner(
 
 
 def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     namespace = runpy.run_path(str(SCRIPT), run_name="setup_scan_target_identity_test")
     start = namespace["start_scan"]
@@ -488,9 +455,7 @@ def test_setup_scan_reuses_checked_target_metadata(tmp_path: Path) -> None:
 
 
 def test_prompt_only_scan_does_not_join_setup_owned_scans(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_root = tmp_path / "scans"
     saved = create_saved_workspace(
         state_dir,
@@ -530,9 +495,7 @@ def test_prompt_only_diff_scan_validates_and_persists_canonical_diff_identity(
 def test_prompt_registration_keeps_existing_scans_readable(
     tmp_path: Path, change_target: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "fixture.py"
     source.write_text("original\n")
     existing = start_prompt_only_scan(state_dir, target, tmp_path / "scans")

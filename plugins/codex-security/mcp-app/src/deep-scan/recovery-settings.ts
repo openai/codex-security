@@ -53,7 +53,10 @@ export function retainDeepScanExecutionSettings(
 }
 
 export async function captureDeepScanExecutionSettings(
-  original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
+  original: Pick<
+    DeepScanRunState,
+    "model" | "reasoningEffort" | "serviceTier" | "usageOwner"
+  >,
   parentSandbox: DeepWorkerParentSandbox,
   environment: NodeJS.ProcessEnv = process.env,
   parent?: {
@@ -118,8 +121,12 @@ export async function captureDeepScanExecutionSettings(
       (selected.model_reasoning_summary as string | undefined) ??
       native.reasoningSummary,
     serviceTier:
-      (selected.service_tier as string | undefined) ?? native.serviceTier,
-    ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
+      original.serviceTier ??
+      (selected.service_tier as string | undefined) ??
+      native.serviceTier,
+    ...(original.serviceTier === undefined &&
+    selected.service_tier === undefined &&
+    native.nativeServiceTierAbsent
       ? { nativeServiceTierAbsent: true as const }
       : {}),
     cyberAccessProgram:

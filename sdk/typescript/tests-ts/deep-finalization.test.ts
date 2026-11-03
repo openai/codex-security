@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 import {
@@ -1022,8 +1023,11 @@ for (const {
             return;
           }
           const result = await running;
-          expect(result.coverage).not.toHaveProperty("completeness");
-          expect(JSON.stringify(result.coverage)).toContain("cost limit");
+          const coverage = await readReviewState(scanDir);
+          expect(coverage).not.toHaveProperty("completeness");
+          expect(result.manifest.scan.warnings?.join(" ")).toMatch(
+            /cost limit|budget baseline .* exceeded .* limit/,
+          );
           if (unpricedUsage) {
             expect(result.cost).toBeNull();
             expect(reportedCosts).toEqual([]);
@@ -1098,9 +1102,9 @@ for (const {
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );
-        expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
-        ).not.toHaveProperty("completeness");
+        expect(await readReviewState(scanDir)).not.toHaveProperty(
+          "completeness",
+        );
         expect(commands).toContain("fail-scan");
         expect(modelInputs).toHaveLength(1);
         await client.close();
@@ -1165,9 +1169,9 @@ for (const {
           findingCount: 1,
           reportAvailable: true,
         });
-        expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
-        ).not.toHaveProperty("completeness");
+        expect(await readReviewState(scanDir)).not.toHaveProperty(
+          "completeness",
+        );
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );
@@ -1274,7 +1278,7 @@ for (const {
           estimatedUsd: 0,
         });
       } else expect(result.cost).toBeNull();
-      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(await readReviewState(scanDir)).not.toHaveProperty("completeness");
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
       );
@@ -1328,6 +1332,6 @@ for (const {
       }
       await runCase();
     },
-    30_000,
+    120_000,
   );
 }

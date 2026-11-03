@@ -11,23 +11,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
-  bundle: true,
+const module = await importModule({
   nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   entryPoints: [
     fileURLToPath(
       new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
     ),
   ],
-  platform: "node",
-  format: "esm",
-  write: false,
 });
-const { loadDeepScanExecutionSettings } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+const { loadDeepScanExecutionSettings } = module;
 
 for (const state of ["absent", "saved", "unsupported"]) {
   test(`reader release uses ${state} settings without persisting new metadata`, async () => {

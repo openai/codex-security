@@ -12,19 +12,16 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
+const module = await importModule({
   stdin: {
     contents: `export * from "./src/deep-scan/finalization.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/artifact-scan-draft.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+
   footer: { js: "//# sourceURL=deep-scan-finalization-contract.js" },
 });
 const {
@@ -32,9 +29,7 @@ const {
   readSelectedDeepScanDraft,
   createDeepScanArtifacts,
   saveScanDraftCheckpoint,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 const scanId = "4e7b4acb-ac80-4d68-98cd-3d5ac5581cd1";
 
 for (const terminalReason of ["capped", "saturated"]) {
@@ -50,7 +45,7 @@ for (const terminalReason of ["capped", "saturated"]) {
         scanId,
         complete: true,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [
@@ -58,12 +53,12 @@ for (const terminalReason of ["capped", "saturated"]) {
           ],
         },
       };
-      const { coverage, ...reduction } = draft;
+      const { reviewState, ...reduction } = draft;
       await saveScanDraftCheckpoint(
         { root, repoRoot: scanDir, layout: "reducer" },
         {
           ...reduction,
-          sourceCoverage: coverage,
+          sourceCoverage: reviewState,
         },
       );
       const [name] = await readdir(path.join(root, "checkpoints"));
@@ -125,8 +120,8 @@ test("recreates only partial coverage for a persisted zero-success deadline sele
   );
   assert.equal(result.scanId, scanId);
   assert.deepEqual(result.findings, []);
-  assert.equal(Object.hasOwn(result.coverage, "completeness"), false);
-  assert.equal(result.coverage.deferred.length, 1);
+  assert.equal(Object.hasOwn(result.reviewState, "completeness"), false);
+  assert.equal(result.reviewState.deferred.length, 1);
   await assert.rejects(
     readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {
       ...selection,
@@ -201,9 +196,7 @@ for (const parentStatus of ["running", "complete", "invalid-seal"]) {
     const root = await realpath(
       await mkdtemp(path.join(tmpdir(), "selected-parent-")),
     );
-    const { resumeSelectedDeepScan } = await import(
-      `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-    );
+    const { resumeSelectedDeepScan } = module;
     const resultPath = "selected.json";
     await writeFile(path.join(root, resultPath), "{}\n");
     const calls = [];

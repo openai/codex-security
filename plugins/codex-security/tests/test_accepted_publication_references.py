@@ -6,12 +6,11 @@ from argparse import Namespace
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
 def accept_reducer(connection, scan):
-    result = add_worker(connection, scan)
+    result = scan.add_worker(connection)
     worker_id = result.parent.name
     coverage = {
         **scan.coverage,

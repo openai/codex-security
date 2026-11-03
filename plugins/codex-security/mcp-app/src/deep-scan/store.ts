@@ -1,4 +1,6 @@
+import { parseDeepScan as parseRunResponse } from "./response.js";
 import { workbenchArgs } from "../workbench-arguments.js";
+import { readDeepScanProjectConfig } from "./project-config.js";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,8 +13,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  DeepScanConfig,
-  DeepScanRunStatus,
   DeepScanWorkerStatus,
   DeepScanWorkerKind,
   DeepScanMergeState,
@@ -139,30 +139,56 @@ export class WorkbenchDeepScanStore {
     targetPath?: string;
     scope?: string;
     userContext?: string;
+    projectConfigPath?: string;
     handoffClaimToken?: string;
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
     threadId: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
-    const result = await this.enqueueWrite(
+    const args = {
+      threadId: input.threadId,
+      scanId: input.scanId || undefined,
+      targetPath: input.targetPath || undefined,
+      projectConfigPath: input.projectConfigPath,
+      scope: input.scope || undefined,
+      userContextStdin: Boolean(userContext),
+      claimToken: input.handoffClaimToken || undefined,
+      model: input.model || undefined,
+      reasoningEffort: input.reasoningEffort || undefined,
+      serviceTier: input.serviceTier,
+      scanRoot: input.scanRoot,
+      availableParallelism: availableParallelism(),
+      workflowVersion: WORKFLOW_VERSION,
+    };
+    let result = await this.enqueueWrite(
       workbenchArgs("begin-deep-scan", {
-        threadId: input.threadId,
-        scanId: input.scanId || undefined,
-        targetPath: input.targetPath || undefined,
-        scope: input.scope || undefined,
-        userContextStdin: Boolean(userContext),
-        claimToken: input.handoffClaimToken || undefined,
-        model: input.model || undefined,
-        reasoningEffort: input.reasoningEffort || undefined,
-        scanRoot: input.scanRoot,
-        availableParallelism: availableParallelism(),
-        workflowVersion: WORKFLOW_VERSION,
+        ...args,
+        joinOnly: input.projectConfigPath !== undefined,
       }),
       false,
       userContext,
     );
+    if (
+      input.projectConfigPath !== undefined &&
+      typeof result.newScanTarget === "string"
+    ) {
+      const project = await readDeepScanProjectConfig(
+        input.projectConfigPath,
+        result.newScanTarget,
+      );
+      result = await this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", {
+          ...args,
+          targetPath: result.newScanTarget,
+          deepScanProjectJson: JSON.stringify(project),
+        }),
+        false,
+        userContext,
+      );
+    }
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {
@@ -715,58 +741,8 @@ function argumentValue(args: string[], flag: string): string | undefined {
 
 export function parseDeepScan(result: JsonObject): DeepScanRunState {
   const value = objectValue(result.deepScan, "deepScan");
-  const configValue = objectValue(value.config, "deepScan.config");
-  const status = requiredString(
-    value.status,
-    "deepScan.status",
-  ) as DeepScanRunStatus;
-  if (
-    !["running", "succeeded", "canceled", "failed", "interrupted"].includes(
-      status,
-    )
-  ) {
-    throw new Error(`Unsupported Deep Scan status: ${status}`);
-  }
-  const stopAfterNoNew = positiveInteger(
-    configValue.stopAfterNoNew,
-    "deepScan.config.stopAfterNoNew",
-  );
-  const config: DeepScanConfig = {
-    workers: positiveInteger(configValue.workers, "deepScan.config.workers"),
-    subagents: nonNegativeInteger(
-      configValue.subagents,
-      "deepScan.config.subagents",
-    ),
-    stopAfterNoNew,
-    stopAfterConsecutiveErrors: positiveInteger(
-      configValue.stopAfterConsecutiveErrors ?? stopAfterNoNew,
-      "deepScan.config.stopAfterConsecutiveErrors",
-    ),
-    maxDiscoveryRuns: positiveInteger(
-      configValue.maxDiscoveryRuns,
-      "deepScan.config.maxDiscoveryRuns",
-    ),
-    ...(configValue.maxTimeHours === undefined
-      ? {}
-      : {
-          maxTimeHours: boundedPositiveNumber(
-            configValue.maxTimeHours,
-            "deepScan.config.maxTimeHours",
-            96,
-          ),
-        }),
-  };
-  for (const field of ["includePaths", "filePaths"] as const) {
-    const paths = value[field];
-    if (
-      paths !== undefined &&
-      (!Array.isArray(paths) || paths.some((path) => typeof path !== "string"))
-    ) {
-      throw new Error(`deepScan.${field} must be an array of paths.`);
-    }
-  }
   return {
-    scanId: requiredString(value.scanId, "deepScan.scanId"),
+    ...parseRunResponse(result),
     schemaVersion: optionalPositiveInteger(value.schemaVersion),
     workflowVersion: optionalString(value.workflowVersion),
     finalizationInput: parseFinalizationInput(value.finalizationInput),
@@ -778,34 +754,8 @@ export function parseDeepScan(result: JsonObject): DeepScanRunState {
             value.executionSettings,
             "deepScan.executionSettings",
           ) as unknown as DeepScanRunState["executionSettings"]),
-    status,
-    coordinatorGeneration: optionalPositiveInteger(value.coordinatorGeneration),
-    createdAt: optionalString(value.createdAt),
-    updatedAt: optionalString(value.updatedAt),
-    targetPath: requiredString(value.targetPath, "deepScan.targetPath"),
-    scope: requiredString(value.scope, "deepScan.scope"),
-    includePaths: value.includePaths as string[] | undefined,
-    filePaths: value.filePaths as string[] | undefined,
-    userContext: optionalString(value.userContext),
     model: optionalString(value.model),
     reasoningEffort: optionalString(value.reasoningEffort),
-    scanDir: requiredString(value.scanDir, "deepScan.scanDir"),
-    config,
-    dispatchedCount: nonNegativeInteger(
-      value.dispatchedCount,
-      "deepScan.dispatchedCount",
-    ),
-    noNewStreak: nonNegativeInteger(value.noNewStreak, "deepScan.noNewStreak"),
-    consecutiveErrors: nonNegativeInteger(
-      value.consecutiveErrors ?? 0,
-      "deepScan.consecutiveErrors",
-    ),
-    manifestPath: optionalString(value.manifestPath),
-    terminalReason:
-      value.terminalReason === "saturated" || value.terminalReason === "capped"
-        ? value.terminalReason
-        : undefined,
-    error: optionalString(value.error),
     persistedWorkers: parsePersistedWorkers(value.workers),
     persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs),
     persistedMergeClaims: Array.isArray(value.mergeClaims)
@@ -1059,22 +1009,6 @@ function positiveInteger(value: unknown, field: string): number {
     throw new Error(`Codex Security workbench returned invalid ${field}.`);
   }
   return Number(value);
-}
-
-function boundedPositiveNumber(
-  value: unknown,
-  field: string,
-  maximum: number,
-): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isFinite(value) ||
-    value <= 0 ||
-    value > maximum
-  ) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return value;
 }
 
 function optionalPositiveInteger(value: unknown): number | undefined {

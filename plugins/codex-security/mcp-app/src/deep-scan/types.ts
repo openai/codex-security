@@ -37,6 +37,9 @@ export interface DeepScanRunState {
   scanId: string;
   startDisposition?: "created" | "joined";
   schemaVersion?: number;
+  sdkOwnsCompletion?: boolean;
+  serviceTier?: string;
+  severityRubric?: { markdown: string; revision: number; sha256: string };
   workflowVersion?: string;
   finalizationInput?: DeepScanFinalizationInput;
   usageOwner?: {
@@ -143,17 +146,6 @@ export interface DedupCommit {
 
 /** Durable operations implemented by the Python workbench. */
 export interface DeepScanStore {
-  begin(input: {
-    scanId?: string;
-    targetPath?: string;
-    scope?: string;
-    userContext?: string;
-    handoffClaimToken?: string;
-    model?: string;
-    reasoningEffort?: string;
-    threadId: string;
-    scanRoot: string;
-  }): Promise<DeepScanRunState>;
   get(scanId: string, threadId: string): Promise<DeepScanRunState>;
   claimCoordinator(
     input: DeepScanCoordinatorLeaseInput,
@@ -161,7 +153,6 @@ export interface DeepScanStore {
   heartbeatCoordinator(
     input: DeepScanCoordinatorLeaseInput,
   ): Promise<DeepScanRunState>;
-  cancel(scanId: string, threadId: string): Promise<Record<string, unknown>>;
   updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker>;

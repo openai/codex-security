@@ -3,13 +3,13 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const exec = promisify(execFile);
-const bundled = await build({
+const runtime = await importModule({
   bundle: true,
   stdin: {
     contents: [
@@ -42,8 +42,6 @@ export async function publishCoverageFixture(
     selectedRecovery = false,
   } = {},
 ) {
-  const runtimePath = path.join(root, "fixture-runtime.mjs");
-  await writeFile(runtimePath, bundled.outputFiles[0].contents);
   const {
     DeepScanCoordinator,
     createDeepScanArtifacts,
@@ -54,7 +52,7 @@ export async function publishCoverageFixture(
     recordCodexSecurityDeepReduction,
     getCodexSecurityDeepReducerInputs,
     saveScanDraftCheckpoint,
-  } = await import(pathToFileURL(runtimePath).href);
+  } = runtime;
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
@@ -210,7 +208,7 @@ export async function publishCoverageFixture(
       scanId: run.scanId,
       complete: true,
       findings,
-      coverage,
+      reviewState: coverage,
     });
     await writeFile(resultPath, bytes);
     rawSources.set(resultPath, bytes);
@@ -469,7 +467,7 @@ export async function publishCoverageFixture(
   let terminal;
   if (selectedRecovery) {
     await assert.rejects(
-      coordinator.wait(undefined, 30_000),
+      coordinator.wait(undefined),
       /Synthetic selected publication failure/,
     );
     const pending = await store.get(run.scanId, threadId);
@@ -482,7 +480,7 @@ export async function publishCoverageFixture(
       scanId: run.scanId,
       complete: false,
       findings: [],
-      coverage: {
+      reviewState: {
         completeness: "complete",
         surfaces: [],
         explicitExclusions: [],
@@ -514,11 +512,11 @@ export async function publishCoverageFixture(
     }
     const restarted = new DeepScanCoordinator({ ...options, run: pending });
     restarted.start();
-    terminal = await restarted.wait(undefined, 30_000);
+    terminal = await restarted.wait(undefined);
     assert.deepEqual(terminal.finalizationInput, run.finalizationInput);
     assert.equal(publicationCalls, 2);
   } else {
-    terminal = await coordinator.wait(undefined, 30_000);
+    terminal = await coordinator.wait(undefined);
   }
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(

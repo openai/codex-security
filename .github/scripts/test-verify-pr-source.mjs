@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
-  checkCheckout,
+  checkoutBase,
   confirmEdit,
   realSource,
   verifyEdit,
@@ -23,6 +23,7 @@ const passed = { status: "completed", conclusion: "success" };
 function run(id, changes = {}) {
   return {
     id,
+    html_url: `https://github.com/example/repo/actions/runs/${id}`,
     run_number: id,
     run_attempt: 1,
     run_started_at: id,
@@ -39,11 +40,7 @@ function run(id, changes = {}) {
 const edit = (id, changes) =>
   run(id, { display_title: "PR edit CI · PR #42 → main", ...changes });
 function evidence(id, selected = "success") {
-  const names = [
-    "ci",
-    "classify changes",
-    ...["ubuntu", "macos", "windows"].map((os) => os + "-latest / node-22"),
-  ];
+  const names = ["ci", "classify changes"];
   const selection = {
     name: "Select required checks",
     status: "completed",
@@ -60,7 +57,14 @@ function evidence(id, selected = "success") {
 }
 function fixture(
   history,
-  { jobs = evidence, targets = [target], wait = false, runAttempt = 1 } = {},
+  {
+    jobs = evidence,
+    targets = [target],
+    wait = false,
+    runAttempt = 1,
+    base = pr.base.sha,
+    comparisons = [],
+  } = {},
 ) {
   let current = [],
     live = target;
@@ -70,6 +74,12 @@ function fixture(
       if (live instanceof Error) throw live;
       return live;
     }
+    if (path.startsWith("compare/")) {
+      assert.equal(path, "compare/refs%2Fheads%2Fmain...base?per_page=1");
+      const result = comparisons.shift();
+      if (result instanceof Error) throw result;
+      return result;
+    }
     const runId = path.match(/runs\/(\d+)\/jobs/);
     if (runId) return jobs(Number(runId[1]));
     current = history.shift() ?? current;
@@ -78,7 +88,7 @@ function fixture(
     const runs = [edit(99, { run_attempt: runAttempt }), ...current];
     return { total_count: runs.length, workflow_runs: runs };
   };
-  const input = { pr, sha, runId: 99, runAttempt, api };
+  const input = { pr, sha, base, runId: 99, runAttempt, api };
   return {
     check: () => verifyEdit(input, () => wait),
     finish: (id, classifierAttempt = runAttempt) =>
@@ -134,8 +144,9 @@ test("only fresh canonical source jobs and genuine selection can qualify a sourc
   assert.ok(realSource(page, source));
   for (const change of [
     { total_count: 99 },
-    { jobs: page.jobs.slice(1) },
-    { total_count: 6, jobs: [...page.jobs, page.jobs[0]] },
+    { total_count: 1, jobs: page.jobs.slice(1) },
+    { total_count: 1, jobs: page.jobs.slice(0, 1) },
+    { total_count: 3, jobs: [...page.jobs, page.jobs[0]] },
     { jobs: page.jobs.map((j) => ({ ...j, run_id: 1 })) },
     { jobs: page.jobs.map((j) => ({ ...j, run_attempt: 2 })) },
     {
@@ -148,7 +159,7 @@ test("only fresh canonical source jobs and genuine selection can qualify a sourc
     assert.ok(!realSource({ ...page, ...change }, source));
 });
 
-test("pending sources settle, genuine red remains red, and newer attempts cannot be masked", async () => {
+test("pending sources settle, genuine red remains red, and newer attempts cannot be masked", async (t) => {
   const green = run(3),
     red = run(3, { conclusion: "failure" }),
     pending = run(3, { status: "in_progress" });
@@ -163,10 +174,14 @@ test("pending sources settle, genuine red remains red, and newer attempts cannot
     await fixture([[green, run(1, { run_attempt: 2 })]]).check(),
     "full",
   );
+  const log = t.mock.method(console, "log", () => {});
   assert.equal(
     await fixture([[edit(8, { conclusion: "failure" }), red]]).check(),
     "failed",
   );
+  assert.deepEqual(log.mock.calls[0]?.arguments, [
+    `Failed source CI: ${red.html_url}/attempts/1`,
+  ]);
   for (const changed of [
     [run(3, { run_attempt: 2 })],
     [run(5, { conclusion: "failure" }), green],
@@ -187,7 +202,7 @@ test("retrying a failed edit cannot replace its full checks with older green res
   await retry.finish();
 });
 
-test("even full fallback needs a current target; repeat this check just before the aliases", async () => {
+test("even full fallback needs a current target when the CI gate finishes", async () => {
   const stale = { ...target, base: { ...pr.base, ref: "other" } },
     unavailable = new Error("target unavailable");
   for (const history of [
@@ -216,6 +231,45 @@ test("even full fallback needs a current target; repeat this check just before t
     fixture([], { targets: [unavailable] }).finish(),
     /target unavailable/,
   );
+});
+
+test("an edit can use a newer test-merge base only while its named branch still proves that advance", async () => {
+  const base = "new-base";
+  const current = { base_commit: { sha: base }, status: "behind" };
+  const changed = { base_commit: { sha: "moved" }, status: "behind" };
+  const check = (comparisons, history = [[run(2)]]) =>
+    fixture(history, { base, comparisons });
+  const updated = { ...target, base: { ...pr.base, sha: base } };
+  const source = run(2, { pull_requests: [updated] });
+  const caughtUp = fixture([[run(2)], [source]], {
+    base,
+    comparisons: [current, current, current],
+    targets: [target, updated],
+  });
+  assert.equal(await caughtUp.check(), 2);
+  await caughtUp.finish(2);
+  await assert.rejects(
+    fixture([[source]], {
+      base,
+      targets: [{ ...updated, base: { ...pr.base, sha: "unrelated" } }],
+    }).finish(2),
+    /target changed/,
+  );
+  assert.equal(await check([current, current], [[]]).check(), "full");
+  for (const invalid of [
+    changed,
+    { ...current, status: "ahead" },
+    { ...current, status: "diverged" },
+    { ...current, status: "identical" },
+    new Error("comparison unavailable"),
+  ]) {
+    const error =
+      invalid instanceof Error ? /comparison unavailable/ : /Stale test merge/;
+    await assert.rejects(check([invalid]).check(), error);
+    await assert.rejects(check([current, invalid]).check(), error);
+    await assert.rejects(check([invalid]).finish(2), error);
+    await assert.rejects(check([invalid]).finish(), error);
+  }
 });
 
 test("the final gate reads both actual merge parents from a depth-one checkout", (t) => {
@@ -262,14 +316,10 @@ test("the final gate reads both actual merge parents from a depth-one checkout",
   );
   assert.equal(git(checkout, "rev-parse", "--is-shallow-repository"), "true");
   const pull = { base: { sha: base }, head: { sha: head } };
-  checkCheckout(pull, merge, checkout);
+  assert.equal(checkoutBase(pull, merge, checkout), base);
   assert.throws(
-    () => checkCheckout({ ...pull, base: { sha: head } }, merge, checkout),
-    /checked-out merge/,
+    () => checkoutBase({ ...pull, head: { sha: base } }, merge, checkout),
+    /Stale test merge/,
   );
-  assert.throws(
-    () => checkCheckout({ ...pull, head: { sha: base } }, merge, checkout),
-    /checked-out merge/,
-  );
-  assert.throws(() => checkCheckout(pull, base, checkout), /checked-out merge/);
+  assert.throws(() => checkoutBase(pull, base, checkout), /Stale test merge/);
 });

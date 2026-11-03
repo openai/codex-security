@@ -5,9 +5,8 @@ import json
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
-from workbench_test_support import write_checkpoint
+from workbench_test_support import read_review_state, write_checkpoint
 
 
 def save_checkpoint(scan, result, *, rejected=False):
@@ -58,12 +57,12 @@ def preserve(workbench_api, connection, scan):
 
 
 @pytest.mark.parametrize("has_head", [False, True])
-def test_legacy_stop_does_not_create_frozen_checkpoint_metadata(
+def test_legacy_stop_replays_the_same_frozen_checkpoint_metadata(
     workbench_api, workbench_db, publication_scan, has_head
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = scan.add_worker(status="canceled")
     draft, _ = save_checkpoint(scan, result)
     result.write_text(json.dumps(draft))
     if not has_head:
@@ -81,9 +80,10 @@ def test_legacy_stop_does_not_create_frozen_checkpoint_metadata(
     )
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
     assert row["retained_source_digests_json"]
-    assert row["retained_checkpoint_heads_json"] is None
+    heads = json.loads(row["retained_checkpoint_heads_json"])
+    assert bool(heads) is has_head
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    assert "preservedCheckpointHeads" not in manifest["scan"]
+    assert manifest["scan"]["preservedCheckpointHeads"] == heads
 
 
 @pytest.fixture
@@ -92,7 +92,7 @@ def frozen_stop(workbench_api, workbench_db, publication_scan, monkeypatch):
 
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = scan.add_worker(status="canceled")
     previous, _ = save_checkpoint(scan, result)
     result.write_text(json.dumps(previous))
     _, selected = save_checkpoint(scan, result, rejected=True)
@@ -106,7 +106,7 @@ def frozen_stop(workbench_api, workbench_db, publication_scan, monkeypatch):
     failed_writes = []
 
     def obstruct_coverage(directory, relative, payload, **kwargs):
-        if relative != "coverage.json" or failed_writes:
+        if relative != "scan-manifest.json" or failed_writes:
             return write_bytes(directory, relative, payload, **kwargs)
         failed_writes.append(json.loads((directory / "findings.json").read_text()))
         path = directory / relative
@@ -131,8 +131,7 @@ def frozen_stop(workbench_api, workbench_db, publication_scan, monkeypatch):
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
     assert row["retained_source_digests_json"]
     assert row["seal_manifest_digest"] is None
-    # A later writer freezes this existing checkpoint map before output writes.
-    # Seed its recorded input; this release only consumes that saved authority.
+    # A preexisting writer may have retained a direct checkpoint path.
     with workbench_db:
         workbench_db.execute(
             "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = ?",
@@ -160,7 +159,7 @@ def test_reader_replays_frozen_rejection_after_real_output_fault(
     assert replayed["failureMessage"] == "Audit stopped."
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert findings[0]["identity"]["anchor"] == "independent-finding"
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert any(
         surface.get("candidateId") == "candidate-disposition"
@@ -175,19 +174,15 @@ def test_reader_replays_frozen_rejection_after_real_output_fault(
     assert preserve(workbench_api, workbench_db, scan)["findingCount"] == 1
 
 
-def test_reader_requires_writer_to_select_new_recovery_heads(
+def test_explicit_recovery_can_select_new_checkpoint_heads(
     workbench_api, workbench_db, frozen_stop
 ):
     scan, result, _ = frozen_stop
     assert preserve(workbench_api, workbench_db, scan)["findingCount"] == 1
     save_checkpoint(scan, result)
-    before_db = list(workbench_db.iterdump())
-    before_files = {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
-    with pytest.raises(SystemExit, match="newer version"):
-        workbench_api["saved_results"].recover_scan_results(
-            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
-        )
-    assert list(workbench_db.iterdump()) == before_db
-    assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()} == (
-        before_files
-    )
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["progress"]["status"] == "failed"
+    row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    assert row["retained_checkpoint_heads_json"] is not None

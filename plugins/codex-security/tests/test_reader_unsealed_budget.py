@@ -6,9 +6,9 @@ import json
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state
 
 
 def host_checkpoint(directory, source):
@@ -23,7 +23,7 @@ def host_checkpoint(directory, source):
 def legacy_budget(workbench_db, publication_scan):
     def create(*, named=True, duplicate=True, receipt_owner=None, scoped_checkpoint=False):
         scan = publication_scan(scope="subdir/extract.py" if scoped_checkpoint else ".")
-        worker_id = add_worker(workbench_db, scan).parent.name
+        worker_id = scan.add_worker().parent.name
         result = (
             scan.scan_dir / "artifacts/deep_discovery/workers/discovery-0001/output/result.json"
         )
@@ -177,9 +177,12 @@ def test_reader_completes_old_unsealed_budget_and_replays(
         Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None),
     )
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-    assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == run
+    assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == {
+        **run,
+        "terminal_reviewed_surface_count": 2,
+    }
     assert list(workbench_db.execute("SELECT * FROM deep_scan_attempts")) == attempts
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert len(coverage["surfaces"]) == 2
     for actual, source in zip(
@@ -212,7 +215,7 @@ def test_reader_seals_evidence_from_the_accepted_receipt_owner(
         Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None),
     )
     expected = scan.receipt.relative_to(scan.scan_dir).as_posix()
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert [surface["receiptRefs"] for surface in coverage["surfaces"]] == [[expected], [expected]]
     artifacts = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())["scan"]["artifacts"]
     assert (
@@ -225,7 +228,7 @@ def test_reader_rejects_buffered_work_outside_the_legacy_selection(
     workbench_api, workbench_db, legacy_budget
 ):
     scan = legacy_budget()
-    extra = add_worker(workbench_db, scan)
+    extra = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",

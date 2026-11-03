@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import {
   materialRemediations,
   materialRemediationTests,
@@ -46,9 +47,7 @@ for (const [resume, continueAfterResume] of [
           `canonical report retains ${text}`,
         );
       }
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(Object.hasOwn(coverage, "completeness"), false);
       assert.deepEqual(
         coverage.reviews.map((review) => review.attempt),
@@ -62,13 +61,16 @@ for (const [resume, continueAfterResume] of [
       assert.equal(
         new Set(
           coverage.deferred.map((item) =>
-            JSON.stringify([item.workerId, item.candidateId]),
+            JSON.stringify([
+              item.provenance.workerId,
+              item.provenance.candidateId,
+            ]),
           ),
         ).size,
         2,
       );
-      for (const item of coverage.deferred)
-        assert.ok(report.includes(item.reason));
+      for (const item of coverage.explicitExclusions)
+        assert.ok(report.includes(item.pattern));
       for (const surface of coverage.surfaces) {
         assert.equal(
           await readFile(path.join(scanDir, surface.receiptRefs[0]), "utf8"),

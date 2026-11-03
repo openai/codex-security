@@ -7,10 +7,9 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import * as zlib from "node:zlib";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
-  bundle: true,
+const module = await importModule({
   nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   define: {
     "import.meta.url": JSON.stringify(
@@ -22,18 +21,13 @@ const bundle = await build({
       new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
     ),
   ],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
 const {
   captureDeepScanExecutionSettings: captureSettings,
   retainDeepScanExecutionSettings: retainSettings,
   restoredDeepScanWorkerSettings: restoreSettings,
   loadDeepScanExecutionSettings: loadRecordedSettings,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 const snapshots = new Map();
 const loadSettings = (directory, original, ...rest) =>
   loadRecordedSettings(
@@ -416,6 +410,14 @@ access_key_id = "synthetic-secret"
     },
     { threadId: "fixture-parent", startedAt: "2026-01-01T00:01:00Z" },
   );
+  const requestedTier = await captureSettings(
+    { serviceTier: "fixture-future-tier" },
+    { filesystemDenies: [] },
+    { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root },
+    { threadId: "fixture-parent", startedAt: "2026-01-01T00:01:00Z" },
+  );
+  assert.equal(requestedTier.serviceTier, "fixture-future-tier");
+  assert.equal(requestedTier.nativeServiceTierAbsent, undefined);
   assert.equal(
     parentSettings.model,
     "native-home-model",

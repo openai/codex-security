@@ -16,7 +16,6 @@ test.each([
   ["gpt-5.6-sol", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
   ["gpt-5.6-terra", [2, 0.2, 2.5, 12], [4, 0.4, 5, 18]],
   ["gpt-5.6-luna", [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 1.8]],
-  ["gpt-daybreak-blue-latest", [4, 0.4, 5, 20], [8, 0.8, 10, 30]],
 ] as const)(
   "%s bounds each token category with verified rates",
   (model, short, long) => {
@@ -36,6 +35,16 @@ test.each([
         });
       }
     }
+  },
+);
+
+test.each(["blue", "red"])(
+  "leaves the Daybreak %s latest alias unpriced",
+  (program) => {
+    const alias = `gpt-daybreak-${program}-latest`;
+    const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+    expect(estimateScanCost(alias, usage)).toBeNull();
+    expect(estimateScanCost(`openai.${alias}`, usage)).toBeNull();
   },
 );
 
@@ -185,7 +194,7 @@ test("widens the maximum for unreported cache writes without changing token coun
 });
 
 test("keeps unverified long-context prices unavailable", () => {
-  const cost = estimateScanCost("gpt-daybreak-red-latest", {
+  const cost = estimateScanCost("gpt-5.6-cyber", {
     input_tokens: 1_000_000,
     cache_write_input_tokens: 0,
     output_tokens: 0,
@@ -247,7 +256,7 @@ test.each([false, true])(
     };
     const second = {
       ...first,
-      model: unknownUpper ? "gpt-daybreak-red-latest" : "gpt-5.6-terra",
+      model: unknownUpper ? "openai.gpt-5.6-cyber" : "gpt-5.6-terra",
     };
     const cost = estimateScanCost("gpt-6-astra", {
       input_tokens: 2_000_000,
@@ -262,7 +271,7 @@ test.each([false, true])(
       first.model,
       second.model,
     ]);
-    expect(cost.estimatedUsd).toBe(unknownUpper ? 16.5 : 6);
+    expect(cost.estimatedUsd).toBe(unknownUpper ? 17.75 : 6);
     expect(cost.estimatedUsdRange).toEqual({
       min: cost.estimatedUsd,
       max: unknownUpper ? null : 12,

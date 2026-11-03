@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import saved_selection
 
@@ -56,7 +55,7 @@ raise AssertionError("publication never reached the requested crash boundary")
 
 @pytest.mark.parametrize(
     "boundary",
-    ["findings.json", "coverage.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
+    ["findings.json", "scan-manifest.json", "sqlite-before", "sqlite-after"],
 )
 @pytest.mark.parametrize("selection_reason", [None, "saturated", "capped"])
 def test_publication_crash_replays_selected_input_without_stale_overwrite(
@@ -64,7 +63,7 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
 ):
     scan = publication_scan()
     if selection_reason is None:
-        result_path = add_worker(workbench_db, scan)
+        result_path = scan.add_worker()
     else:
         _, result_path, _ = accept_reducer(workbench_db, scan)
         saved_selection(workbench_db, scan, result_path, reason=selection_reason)
@@ -145,7 +144,10 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
         )["scan"]
         assert completed["progress"]["status"] == "complete"
         assert completed["findingCount"] == 1
-        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == run_before
+        assert dict(connection.execute("SELECT * FROM deep_scan_runs").fetchone()) == {
+            **run_before,
+            "terminal_reviewed_surface_count": 0,
+        }
         assert [
             dict(row) for row in connection.execute("SELECT * FROM deep_scan_workers")
         ] == workers_before

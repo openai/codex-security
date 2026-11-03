@@ -1,21 +1,15 @@
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 import { fileURLToPath } from "node:url";
 
-const bundle = await build({
-  bundle: true,
+const module = await importModule({
   entryPoints: [
     fileURLToPath(new URL("../src/deep-scan/registry.ts", import.meta.url)),
   ],
-  format: "esm",
+
   loader: { ".md": "text" },
-  platform: "node",
-  write: false,
 });
-const { startOrJoinDeepScanCoordinator, DeepScanRemoteCoordinator } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-  );
+const { startOrJoinDeepScanCoordinator, DeepScanRemoteCoordinator } = module;
 
 await testUnsupportedWorkflowDoesNotAcquireOwnership();
 await testUnsupportedSelectionDoesNotAcquireOwnership();

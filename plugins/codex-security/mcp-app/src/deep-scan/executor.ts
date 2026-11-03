@@ -26,7 +26,7 @@ import {
   type ThreadEvent,
 } from "@openai/codex-sdk";
 import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   createCodexProfileClient,
   preflightProviderDefinitions,
@@ -52,6 +52,7 @@ import type {
   CodexWorkerExecutor,
   CodexWorkerRequest,
   CodexWorkerResult,
+  DeepScanConfig,
 } from "./types.js";
 
 export interface CodexSdkWorkerModelSettings {
@@ -62,6 +63,8 @@ export interface CodexSdkWorkerModelSettings {
   cyberAccessProgram?: CyberAccessProgram;
   /** Recorded selections override defaults while preserving private SDK transport. */
   runtimeSettings?: CodexSdkWorkerRuntimeSettings;
+  serviceTier?: string;
+  deepScanConfig?: DeepScanConfig;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
   parentTurn?: DeepScanParentTurn;
@@ -106,6 +109,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       includePaths === undefined
         ? undefined
         : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
+    const deepConfigFile =
+      this.modelSettings.deepScanConfig === undefined
+        ? undefined
+        : resolve(dirname(request.promptPath), `limits-${randomUUID()}.toml`);
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -137,6 +144,31 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      if (deepConfigFile !== undefined) {
+        const config = this.modelSettings.deepScanConfig!;
+        // The saved run owns these limits, including after a coordinator restart.
+        // Runtime/provider inheritance was read above; workers only need the limits.
+        await writePrivateFile(
+          deepConfigFile,
+          stringifyToml({
+            deep_scan: {
+              workers: config.workers,
+              subagents: config.subagents,
+              stop_after_no_new: config.stopAfterNoNew,
+              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
+              max_discovery_runs: config.maxDiscoveryRuns,
+              ...(config.maxTimeHours === undefined
+                ? {}
+                : { max_time_hours: config.maxTimeHours }),
+            },
+          }),
+        );
+        for (const name of Object.keys(childEnv)) {
+          if (name.toUpperCase() === "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH")
+            delete childEnv[name];
+        }
+        childEnv.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfigFile;
+      }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
         await writePrivateFile(includePathsFile, scopeInput);
@@ -158,6 +190,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
           : {}),
+        ...(this.modelSettings.serviceTier === undefined
+          ? {}
+          : { service_tier: this.modelSettings.serviceTier }),
       };
       // The preflight file has catalog defaults; the private profile owns routing.
       if (runtimeSettings.nativeProfile !== undefined)
@@ -188,11 +223,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             "codex-security": { command: "node", enabled: false },
             ...this.compactArtifactServer(request, includePathsFile),
           },
-          ...workerSubagentConfig(
-            request.subagents,
-            modelConfig.features,
-            modelConfig.agents,
-          ),
+          ...workerSubagentConfig(request.subagents, modelConfig.features),
           approval_policy: "never",
           default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
           [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
@@ -361,6 +392,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     } finally {
       if (includePathsFile !== undefined)
         await fs.rm(includePathsFile, { force: true });
+      if (deepConfigFile !== undefined)
+        await fs.rm(deepConfigFile, { force: true });
     }
   }
 
@@ -432,23 +465,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerSubagentConfig(
-  subagents: number,
-  inheritedFeatures: unknown,
-  inheritedAgents: unknown,
-) {
+function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0
-      ? {
-          agents: {
-            ...(isRecord(inheritedAgents) ? inheritedAgents : {}),
-            max_threads: subagents,
-          },
-        }
-      : {}),
+    ...(subagents > 0 ? { "agents.max_threads": subagents } : {}),
     features: {
       ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
@@ -830,6 +852,28 @@ export async function workerRuntimeSettings(
     "approvals_reviewer",
   ]) {
     delete settings.config[key];
+  }
+  const parentScanDirectory = environmentVariable(
+    environment,
+    "CODEX_SECURITY_SCAN_DIR",
+    process.platform,
+  );
+  if (parentScanDirectory) {
+    for (const key of [
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+    ]) {
+      const value = settings.config[key];
+      if (
+        typeof value === "string" &&
+        value.length > 0 &&
+        !isAbsolute(value) &&
+        !value.startsWith("~")
+      ) {
+        settings.config[key] = resolve(parentScanDirectory, value);
+      }
+    }
   }
   return settings;
 }

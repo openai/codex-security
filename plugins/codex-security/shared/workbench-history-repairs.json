@@ -2,12 +2,28 @@
   [
     "-- Relocate known Deep Scan preview histories before applying main migrations.",
     "WITH input AS (SELECT :history AS history),",
-    "moves(version, destination, name) AS (VALUES (45, 54, 'retain deep scan attempts and exact merge inputs'), (47, 54, 'retain deep scan attempts and exact merge inputs'), (48, 54, 'retain deep scan attempts and exact merge inputs'), (46, 55, 'persist selected deep scan finalization input'), (48, 55, 'persist selected deep scan finalization input'), (49, 55, 'persist selected deep scan finalization input'), (47, 56, 'freeze stopped scan checkpoint selections'), (49, 56, 'freeze stopped scan checkpoint selections'), (50, 56, 'freeze stopped scan checkpoint selections'), (48, 57, 'bind original deep scan parent usage turn'), (50, 57, 'bind original deep scan parent usage turn'), (51, 57, 'bind original deep scan parent usage turn'), (51, 58, 'bind original deep scan execution settings'), (52, 58, 'bind original deep scan execution settings'), (52, 54, 'retain deep scan attempts and exact merge inputs'), (53, 55, 'persist selected deep scan finalization input'), (54, 56, 'freeze stopped scan checkpoint selections'), (55, 57, 'bind original deep scan parent usage turn'), (56, 58, 'bind original deep scan execution settings'), (53, 54, 'retain deep scan attempts and exact merge inputs'), (54, 55, 'persist selected deep scan finalization input'), (55, 56, 'freeze stopped scan checkpoint selections'), (56, 57, 'bind original deep scan parent usage turn'), (57, 58, 'bind original deep scan execution settings'))",
+    "moves(version, destination, name) AS (VALUES (45, 61, 'retain deep scan attempts and exact merge inputs'), (47, 61, 'retain deep scan attempts and exact merge inputs'), (48, 61, 'retain deep scan attempts and exact merge inputs'), (52, 61, 'retain deep scan attempts and exact merge inputs'), (53, 61, 'retain deep scan attempts and exact merge inputs'), (54, 61, 'retain deep scan attempts and exact merge inputs'), (46, 62, 'persist selected deep scan finalization input'), (48, 62, 'persist selected deep scan finalization input'), (49, 62, 'persist selected deep scan finalization input'), (53, 62, 'persist selected deep scan finalization input'), (54, 62, 'persist selected deep scan finalization input'), (55, 62, 'persist selected deep scan finalization input'), (47, 57, 'freeze stopped scan checkpoint selections'), (49, 57, 'freeze stopped scan checkpoint selections'), (50, 57, 'freeze stopped scan checkpoint selections'), (54, 57, 'freeze stopped scan checkpoint selections'), (55, 57, 'freeze stopped scan checkpoint selections'), (56, 57, 'freeze stopped scan checkpoint selections'), (48, 63, 'bind original deep scan parent usage turn'), (50, 63, 'bind original deep scan parent usage turn'), (51, 63, 'bind original deep scan parent usage turn'), (55, 63, 'bind original deep scan parent usage turn'), (56, 63, 'bind original deep scan parent usage turn'), (57, 63, 'bind original deep scan parent usage turn'), (51, 64, 'bind original deep scan execution settings'), (52, 64, 'bind original deep scan execution settings'), (56, 64, 'bind original deep scan execution settings'), (57, 64, 'bind original deep scan execution settings'), (58, 64, 'bind original deep scan execution settings'))",
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = ' || destination ||",
     "    ' WHERE version = ' || version || ' AND name = ' || quote(name) AS value",
     "FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY destination DESC;"
+  ],
+  [
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (58, 59) AND name = 'record classification rubric provenance';"
+  ],
+  [
+    "-- Move checkpoint previews before source-scope history checks.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 57 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (47, 48, 50, 52, 53, 54)",
+    "    AND name = 'freeze stopped scan checkpoint selections';"
   ],
   [
     "-- Move source-scope previews before the shared history repairs.",
@@ -66,6 +82,18 @@
     "        ' WHERE version = ' || version || ' AND name = ' || quote(name)",
     "    FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY position;"
+  ],
+  [
+    "-- A main-branch reader may have added discovery context under the old checkpoint number.",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (47, ' ||",
+    "    quote(json_extract(value, '$.name')) || ', ?)' AS value",
+    "FROM json_each(:history) WHERE json_extract(value, '$.version') = 47",
+    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 57",
+    "        AND name = 'freeze stopped scan checkpoint selections')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 47)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info('deep_scan_runs')",
+    "        WHERE name = 'discovery_user_context_json');"
   ],
   [
     "-- profiles: preserve legacy columns before the later repairs.",

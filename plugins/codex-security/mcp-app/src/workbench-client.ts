@@ -99,11 +99,10 @@ async function executeWorkbench(
       ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
       "-B",
       "-c",
-      WORKBENCH_PYTHON.replace(
-        "workbench_db.main()",
-        `workbench_db.main(select_finalization=${options.selectFinalization ? "True" : "False"}, with_execution_settings=${options.withExecutionSettings ? "True" : "False"})`,
-      ),
+      WORKBENCH_PYTHON,
       workbenchScriptPath(),
+      ...(options.selectFinalization ? ["select_finalization"] : []),
+      ...(options.withExecutionSettings ? ["with_execution_settings"] : []),
     ],
     {
       cwd: PLUGIN_ROOT,
