@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.ts";
 import { chmod, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { privateWindowsOutputRoot } from "./support/windows-output-fixture.ts";
@@ -51,11 +52,12 @@ const environment = {
   cacheDirectory: process.env.XDG_CACHE_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH,
   deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR,
   runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH,
+  providerHeaders: Object.fromEntries(['SYNTHETIC_HEADER_VALUE', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY'].map(name => [name, process.env[name]])),
   providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE,
-  gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])),
+  gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])),
 };
 const preflight = { ...environment, requests: [] };
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH', 'CODEX_ELECTRON_RESOURCES_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 function capture() {
   if (!thread) return;
   const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
@@ -74,6 +76,7 @@ function capture() {
   writeFileSync(invocationMarkerPath, JSON.stringify({
     ...environment, deepConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : undefined, ...(scopeInput === undefined ? {} : { scopeInput }), rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
     mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment,
+    codexConfig: stdin.includes('CAPTURE_SYNTHETIC_CODEX_CONFIG') ? readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') : undefined,
     originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
     ...(process.argv.includes('--profile') ? {profileContents: readFileSync(join(process.env.CODEX_HOME, process.argv[process.argv.indexOf('--profile') + 1] + '.config.toml'), 'utf8')} : {}),
     ...(stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { openaiAuthentication: { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } } : {}),
@@ -250,4 +253,16 @@ process.stdin.on('end', async () => {
     completionMarkerPath,
     executablePath: scriptPath,
   };
+}
+
+export async function recordedWorkerLaunches<T extends { markerPath: string }>(
+  launches: readonly T[],
+) {
+  const recorded = await Promise.all(
+    launches.map(async (launch) => ({
+      ...launch,
+      invocation: await readJson(launch.markerPath),
+    })),
+  );
+  return recorded.filter(({ invocation }) => invocation.thread !== undefined);
 }

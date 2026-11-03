@@ -9,9 +9,8 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { getEventListeners } from "node:events";
-import { loadBundledRuntime } from "./plugin-root.js";
-import { nodeCommand } from "./support/shell.js";
-import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
+import { readdir, readFile } from "node:fs/promises";
+import { brotliDecompressSync } from "node:zlib";
 
 type WorkerExecutorConstructor = new (settings: {
   parentSandbox: { filesystemDenies: string[] };
@@ -85,7 +84,17 @@ async function bundledWorkerExecutor(
     preflight?: () => Promise<{ useOpenAiApiKey: boolean }>;
   } = {},
 ) {
-  const runtime = await loadBundledRuntime();
+  const { nodeCommand } = await import("./support/shell.js");
+  const { profileConfigOverrides } =
+    await import("../../../plugins/codex-security/scripts/codex_profile.mjs");
+  const bundle = new URL("../_bundled_plugin/mcp/", import.meta.url);
+  const names = (await readdir(bundle))
+    .filter((name) => name.startsWith("server.mjs.br.part-"))
+    .sort();
+  const parts = await Promise.all(
+    names.map((name) => readFile(new URL(name, bundle))),
+  );
+  const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
   const node = nodeCommand().command;
   const extract = (pattern: RegExp) => {
     const source = pattern.exec(runtime)?.[0];
@@ -402,13 +411,19 @@ test("rejects bundled worker EOF without a terminal turn", async () => {
   }
 });
 
+// Always keep this file in the same shard for local replay and JUnit reporting.
+const it = test.skipIf(
+  process.platform === "linux" &&
+    process.env["CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE"] === "true",
+);
+
 for (const boundary of [
   "lifecycle",
   "runtime settings",
   "executable selection",
   "diagnostics",
 ]) {
-  test(`Deep worker ${boundary} at the child-process boundary`, async () => {
+  it(`Deep worker ${boundary} at the child-process boundary`, async () => {
     // Keep each portable boundary in the SDK's macOS and Windows test shards.
     const { stdout, stderr } = await promisify(execFile)(
       "node",
@@ -438,3 +453,22 @@ for (const boundary of [
     }
   }, 120_000);
 }
+
+it("preserves worker error classification, parent sandbox denials and workbench subprocess deadlines", async () => {
+  await promisify(execFile)("node", [
+    "--experimental-strip-types",
+    "--test",
+    ...[
+      "test_deep_scan_errors.ts",
+      "test_deep_scan_parent_sandbox.ts",
+      "test_workbench_timeouts.ts",
+    ].map((file) =>
+      fileURLToPath(
+        new URL(
+          `../../../plugins/codex-security/mcp-app/tests/${file}`,
+          import.meta.url,
+        ),
+      ),
+    ),
+  ]);
+}, 30_000);

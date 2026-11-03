@@ -5,9 +5,10 @@ import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const { normalizeCandidatesCommand } = await importSource(
-  join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
-);
+const { normalizeCandidateBatch, normalizeCandidatesCommand } =
+  await importSource(
+    join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
+  );
 
 const cases = [
   {
@@ -97,3 +98,59 @@ for (const fixture of cases) {
     }
   });
 }
+
+test("reports the candidate field that invalidates the second batch row", async (t) => {
+  const root = await temporaryDirectory("normalize-candidates-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scopePath = join(root, "inventory.txt");
+  await writeFile(scopePath, "source.ts\n");
+  await writeFile(join(root, "source.ts"), "one\ntwo\n");
+  const location = { path: "source.ts", start_line: 2, role: "entrypoint" };
+  const valid = {
+    cwe_ids: ["CWE-89"],
+    locations: [location],
+    summary: "Synthetic candidate",
+    evidence: "Synthetic evidence",
+  };
+
+  for (const [change, error] of [
+    [{ cwe_ids: null }, "cwe_ids: expected an array"],
+    [{ cwe_ids: [12] }, "cwe_ids: expected CWE strings"],
+    [
+      { cwe_ids: ["SQL injection"] },
+      'cwe_ids: unsupported value "SQL injection"',
+    ],
+    [{ cwe_ids: ["CWE-0"] }, 'cwe_ids: unsupported value "CWE-0"'],
+    [{ locations: [] }, "locations: expected a non-empty array"],
+    [{ locations: [null] }, "locations: expected location objects"],
+    [
+      { locations: [{ ...location, end_line: 1 }] },
+      "end_line: must be greater than or equal to start_line",
+    ],
+    [
+      { locations: [{ ...location, role: "rootControl" }] },
+      "role: unsupported value rootControl",
+    ],
+    [
+      { locations: [{ ...location, line: 2 }] },
+      "locations: unsupported fields line",
+    ],
+    [{ disposition: "reportable" }, "unsupported fields disposition"],
+    [{ candidate_id: " " }, "candidate_id: expected a non-empty string"],
+    [{ summary: " \t\r\n" }, "summary: expected a non-empty string"],
+    [{ evidence: null }, "evidence: expected a non-empty string"],
+    [{ context: " " }, "context: expected a non-empty string"],
+    [{ instance: false }, "instance: expected a non-empty string"],
+  ] as const) {
+    assert.throws(
+      () =>
+        normalizeCandidateBatch({
+          repoRoot: root,
+          scopePath,
+          allowMissing: false,
+          candidates: [valid, { ...valid, ...change }],
+        }),
+      { message: `discovery candidates: candidate input row 2: ${error}` },
+    );
+  }
+});

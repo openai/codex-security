@@ -282,7 +282,7 @@ async function runWorker(args, config, resumed, model, signal) {
       const draft = {
         scanId: env.CODEX_SECURITY_SCAN_ID,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [],

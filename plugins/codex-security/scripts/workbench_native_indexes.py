@@ -1,9 +1,9 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import os
 import sqlite3
 import sys
-from collections import Counter
 from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
@@ -203,64 +203,72 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    scan_count_by_target = Counter()
-    latest_scan_by_target: dict[str, dict[str, Any]] = {}
-    for scan in (
-        scan_history.scan_summary(row)
-        for row in connection.execute(
-            f"""{scan_history.SCAN_SUMMARY_QUERY}
-            ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
-            """
-        ).fetchall()
-    ):
-        scan_count_by_target[scan["targetId"]] += 1
-        latest_scan_by_target.setdefault(scan["targetId"], scan)
+    by_target: dict[str, dict[str, Any]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT targets.id AS repository_id, targets.display_name, targets.current_path,
+               {scan_history.SCAN_SUMMARY_COLUMNS}
+        FROM security_targets AS targets
+        LEFT JOIN scans ON scans.target_id = targets.id
+            AND scans.id IN (SELECT scan_id FROM scan_progress)
+        LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC, targets.id
+        """
+    ).fetchall():
+        scan = scan_history.scan_summary(row) if row["id"] is not None else None
+        target_id = row["repository_id"]
+        if target_id not in by_target:
+            by_target[target_id] = {
+                "displayName": row["display_name"],
+                "latestScan": scan,
+                "openFindingsCount": 0,
+                "scanCount": 0,
+                "targetId": target_id,
+                "targetPath": row["current_path"],
+            }
+        if scan is not None:
+            by_target[target_id]["scanCount"] += 1
 
-    open_findings_by_target = Counter(
-        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
-    )
-    targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
-    repositories = [
-        {
-            "checkoutAvailable": Path(target["current_path"]).is_dir(),
-            "displayName": target["display_name"],
-            "latestScan": latest_scan,
-            "openFindingsCount": open_findings_by_target.get(target_id, 0),
-            "scanCount": scan_count_by_target[target_id],
-            "targetId": target_id,
-            "targetPath": target["current_path"],
-        }
-        for target_id, latest_scan in latest_scan_by_target.items()
-        if (target := targets.get(target_id)) is not None
-    ]
-    if args is None:
-        return {"repositories": repositories}
-
-    query = args.query.strip().casefold() if args.query else ""
-    repositories = [
-        repository
-        for repository in repositories
-        if (args.target_id is None or repository["targetId"] == args.target_id)
-        and args.status != "not_scanned"
-        and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
-        and (
-            not query
-            or query in repository["displayName"].casefold()
-            or query in repository["targetPath"].casefold()
-        )
-    ]
-    if args.limit is None and args.offset == 0:
-        return {"repositories": repositories}
-
-    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
-    page = repositories[args.offset : args.offset + limit]
-    next_offset = args.offset + len(page)
-    return {
-        "repositories": page,
-        "limit": limit,
-        "nextOffset": next_offset if next_offset < len(repositories) else None,
-        "offset": args.offset,
-    }
+    # A writer can publish a target or its first scan after the repository query.
+    for finding in _indexed_findings(connection):
+        repository = by_target.get(finding["target_id"])
+        if finding["status"] == "open" and repository is not None and repository["scanCount"]:
+            repository["openFindingsCount"] += 1
+    repositories = list(by_target.values())
+    pagination = {}
+    if args is not None:
+        query = args.query.strip().casefold() if args.query else ""
+        repositories = [
+            repository
+            for repository in repositories
+            if (args.target_id is None or repository["targetId"] == args.target_id)
+            and (args.status != "scanned" or repository["scanCount"] > 0)
+            and (args.status != "not_scanned" or repository["scanCount"] == 0)
+            and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
+            and (
+                not query
+                or query in repository["displayName"].casefold()
+                or query in repository["targetPath"].casefold()
+            )
+        ]
+        if args.limit is not None or args.offset:
+            limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+            end = args.offset + limit
+            pagination = {
+                "limit": limit,
+                "nextOffset": end if end < len(repositories) else None,
+                "offset": args.offset,
+            }
+            repositories = repositories[args.offset : end]
+    for repository in repositories:
+        path = os.path.expanduser(repository["targetPath"])
+        try:
+            repository["checkoutAvailable"] = Path(path).is_absolute() and os.path.isdir(
+                os.path.realpath(path)
+            )
+        except (OSError, RecursionError):
+            repository["checkoutAvailable"] = False
+    return {"repositories": repositories, **pagination}
 
 
 if __name__ == "__main__":

@@ -139,7 +139,7 @@ export function createStandardRunner({
         result.turnResult.usage ?? options.observation.usage;
       const semanticResult = {
         findings: result.findings.findings,
-        coverage: result.coverage,
+        review: result.review,
         threatModel: result.threatModel,
       };
       return {

@@ -60,11 +60,7 @@ describe("offline artifact export", () => {
           manifest.scan.warnings = warnings;
           await writeFile(manifestPath, JSON.stringify(manifest));
         }
-        const canonicalPaths = [
-          manifestPath,
-          join(scanDir, "findings.json"),
-          join(scanDir, "coverage.json"),
-        ];
+        const canonicalPaths = [manifestPath, join(scanDir, "findings.json")];
         const before = await Promise.all(
           canonicalPaths.map((path) => readFile(path)),
         );

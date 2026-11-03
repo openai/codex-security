@@ -92,10 +92,10 @@ test("checkout preserves source size with autocrlf", () => {
     git(root, "add", "--", ".gitattributes", name);
     unlinkSync(source);
     git(root, "checkout-index", "--", name);
-    const result = runChecker("--plugin-root", root);
-    assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readFileSync(source), content);
   }
+  const result = runChecker("--plugin-root", root);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("accepts Markdown structures, natural line endings, and inline markup", () => {

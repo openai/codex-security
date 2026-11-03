@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
+import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
 export const scanThreadId = "scan-thread";
@@ -24,6 +25,51 @@ export const ownedPythonUsage = {
   reasoningOutputTokens: 0,
   totalTokens: 110,
 };
+
+export function progressMarker(
+  phase: string,
+  filesCompleted: number,
+  filesTotal: number,
+): string {
+  return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
+}
+
+export function nativeCommand(
+  command: string | readonly string[],
+  output: string,
+  id?: string,
+) {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        type: "CommandExecution",
+        ...(id === undefined ? {} : { id }),
+        command: typeof command === "string" ? [command] : command,
+        aggregated_output: output,
+      },
+    },
+  };
+}
+
+export function completedCommand(
+  command: string,
+  output: string,
+  id = command,
+): ThreadEvent {
+  return {
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      id,
+      command,
+      aggregated_output: output,
+      status: "completed",
+      exit_code: 0,
+    },
+  };
+}
 
 function uuid7TaskStarted(turnId: string): Record<string, unknown> {
   return {
@@ -146,20 +192,37 @@ export function parentMetadata(
     : { [field]: parentThreadId };
 }
 
+export function taskEvent(
+  type: "task_started" | "task_complete" | "turn_complete" | "turn_aborted",
+): string {
+  return JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type,
+      turn_id: "fixture-turn",
+      started_at: 1_785_067_320,
+      ...(type === "task_started" ? {} : { completed_at: 1_785_067_321 }),
+      ...(type === "turn_aborted" ? { reason: "interrupted" } : {}),
+    },
+  });
+}
+
 export async function writeSession(
   home: string,
   threadId: string,
-  usage: Record<string, number>,
+  usage: Record<string, number> | null,
   {
     parent,
     cwd,
     timestamp,
     parentField = "source",
+    completed = false,
   }: {
     parent?: string;
     cwd?: string;
     timestamp?: string;
     parentField?: SessionParentField;
+    completed?: boolean;
   } = {},
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
@@ -177,13 +240,19 @@ export async function writeSession(
           ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
         },
       }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
+      ...(completed ? [taskEvent("task_started")] : []),
+      ...(usage === null
+        ? []
+        : [
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "token_count",
+                info: { total_token_usage: usage },
+              },
+            }),
+          ]),
+      ...(completed ? [taskEvent("task_complete")] : []),
       "",
     ].join("\n"),
   );

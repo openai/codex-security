@@ -32,6 +32,29 @@ function createDashboard(
   });
 }
 
+function budgetRequest(signal = new AbortController().signal) {
+  return {
+    maxCostUsd: 20,
+    cost: fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 1,
+    }).cost!,
+    signal,
+  };
+}
+
+function recordActions(dashboard: ScanDashboard, count: number): void {
+  for (let index = 1; index <= count; index += 1) {
+    dashboard.record({
+      id: `action-${index}`,
+      kind: "command",
+      status: "completed",
+      description: `rg -n finding-${index} routes.ts`,
+      paths: [],
+    });
+  }
+}
+
 function lastFrame(stderr: ReturnType<typeof capture>): string {
   return stripVTControlCharacters(stderr.text())
     .split("CODEX SECURITY  ·  juice-shop")
@@ -120,14 +143,7 @@ describe("live scan dashboard", () => {
     dashboard.start();
     try {
       input.emit("data", "d");
-      const answer = dashboard.requestBudgetIncrease({
-        maxCostUsd: 20,
-        cost: fakeResult([], "complete", {
-          input_tokens: 100,
-          output_tokens: 1,
-        }).cost!,
-        signal: new AbortController().signal,
-      });
+      const answer = dashboard.requestBudgetIncrease(budgetRequest());
       input.emit("data", "\u001BO");
       input.emit("data", "1;5P\u001B\u001B[A");
       await expect(answer).resolves.toBeUndefined();
@@ -150,14 +166,7 @@ describe("live scan dashboard", () => {
           onInterrupt: interrupted,
         });
         dashboard.start();
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         input.emit("data", prefix);
         expect(lastFrame(stderr)).toContain("Raise total USD limit");
         input.emit("data", key);
@@ -192,14 +201,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", "d");
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         for (const chunk of chunks) input.emit("data", chunk);
         expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
         await expect(answer).resolves.toBeUndefined();
@@ -346,27 +348,29 @@ describe("live scan dashboard", () => {
   )(
     "keeps %s intact at ASCII wrapping boundaries with code=%p",
     (cluster, code) => {
-      for (let padding = 0; padding < 40; padding++) {
-        const stderr = capture(true);
-        const dashboard = createDashboard({
-          ...stderr.stream,
-          columns: 40,
-          rows: 24,
-        });
-        dashboard.start();
+      const stderr = capture(true);
+      const dashboard = createDashboard({
+        ...stderr.stream,
+        columns: 40,
+        rows: 160,
+      });
+      const lines = Array.from(
+        { length: 40 },
+        (_, padding) => "x".repeat(padding) + cluster + "yyy",
+      );
+      dashboard.start();
+      try {
         dashboard.record({
           id: "mixed-code",
           kind: "message",
           status: "completed",
-          description:
-            (code ? "```text\n" : "") +
-            "x".repeat(padding) +
-            cluster +
-            "yyy" +
-            (code ? "\n```" : ""),
+          description: (code ? ["```text", ...lines, "```"] : lines).join("\n"),
           paths: [],
         });
-        expect(lastFrame(stderr)).toContain(cluster);
+        const frame = lastFrame(stderr);
+        expect(frame.replace(/\s+/gu, "")).toContain(lines.join(""));
+        expect(frame.split(cluster).length - 1).toBe(lines.length);
+      } finally {
         dashboard.stop();
       }
     },
@@ -978,14 +982,7 @@ describe("live scan dashboard", () => {
         const dashboard = createDashboard(capture(true).stream, { input });
         dashboard.start();
         try {
-          const answer = dashboard.requestBudgetIncrease({
-            maxCostUsd: 20,
-            cost: fakeResult([], "complete", {
-              input_tokens: 100,
-              output_tokens: 1,
-            }).cost!,
-            signal: new AbortController().signal,
-          });
+          const answer = dashboard.requestBudgetIncrease(budgetRequest());
           input.emit("data", "30");
           const prefix = "\u001B".repeat(escapes);
           const chunks = coalesced
@@ -1100,14 +1097,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", sequence);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         await Promise.resolve();
         expect(jest.getTimerCount()).toBe(0);
         jest.runAllTimers();
@@ -1138,14 +1128,9 @@ describe("live scan dashboard", () => {
       try {
         for (let index = 0; index < 20; index++)
           dashboard.note(`Activity ${index}`);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: controller.signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(
+          budgetRequest(controller.signal),
+        );
         input.emit("data", prefix);
         controller.abort();
         await expect(answer).resolves.toBeUndefined();
@@ -1194,39 +1179,39 @@ describe("live scan dashboard", () => {
     "preserves Escape-prefixed cancellation and chunk ownership in %s",
     async (mode) => {
       jest.useFakeTimers();
-      for (const chunks of [
-        ["\u001B", "\u0003"],
-        ["\u001B\u0003"],
-        ["\u001B", "\u001B"],
-        ["\u001B\u001B"],
-        ["\u001B[", "\u0003"],
-        ["\u001B[\u0003"],
-        ["\u001BO", "\u0003"],
-        ["\u001BO\u0003"],
-        ["\u001B", "\u0003d"],
-        ["\u001B\u0003d"],
-        ["\u001B", "\u001B\u0003"],
-        ["\u001B\u001B", "\u0003"],
-        ["\u001B\u001B\u0003"],
-        ["\u001B", "\u001B\u0003d"],
-        ["\u001B\u001B[\u0003"],
-        ["\u001B", "\u001B[\u0003"],
-        ["\u001B\u001B", "[\u0003"],
-        ["\u001B\u001B[", "\u0003"],
-        ["\u001B", "\u001B", "[\u0003"],
-        ["\u001B", "\u001B[", "\u0003"],
-        ["\u001B\u001B", "[", "\u0003"],
-        ["\u001B", "\u001B", "[", "\u0003"],
-        ...Array.from({ length: 8 }, (_, index) => {
-          const escapes = "\u001B".repeat(index + 1);
-          return [
-            ["\u001B", `${escapes}\u0003`],
-            [escapes, "\u001B\u0003"],
-            [escapes, "\u0003"],
-            [`${escapes}\u0003`],
+      // The scan and budget handlers differ in who owns the rest of a chunk
+      // after Escape. Both component views use the ordinary key decoder.
+      const layouts = mode.startsWith("component")
+        ? [["\u001B\u0003"], ["\u001B", "\u0003d"], ["\u001B", "\u001B"]]
+        : [
+            ["\u001B", "\u001B"],
+            ["\u001B\u001B"],
+            ["\u001B[", "\u0003"],
+            ["\u001B[\u0003"],
+            ["\u001BO", "\u0003"],
+            ["\u001BO\u0003"],
+            ["\u001B", "\u0003d"],
+            ["\u001B\u0003d"],
+            ["\u001B", "\u001B\u0003d"],
+            ["\u001B\u001B[\u0003"],
+            ["\u001B", "\u001B[\u0003"],
+            ["\u001B\u001B", "[\u0003"],
+            ["\u001B\u001B[", "\u0003"],
+            ["\u001B", "\u001B", "[\u0003"],
+            ["\u001B", "\u001B[", "\u0003"],
+            ["\u001B\u001B", "[", "\u0003"],
+            ["\u001B", "\u001B", "[", "\u0003"],
+            ...Array.from({ length: 8 }, (_, index) => {
+              const escapes = "\u001B".repeat(index + 1);
+              return [
+                ...(index === 0 ? [] : [["\u001B", `${escapes}\u0003`]]),
+                [escapes, "\u001B\u0003"],
+                [escapes, "\u0003"],
+                [`${escapes}\u0003`],
+              ];
+            }).flat(),
           ];
-        }).flat(),
-      ]) {
+      for (const chunks of layouts) {
         const stderr = capture(true);
         const input = new DashboardTestInput();
         input.isRaw = true;
@@ -1241,8 +1226,9 @@ describe("live scan dashboard", () => {
           onInterrupt,
         });
         let answer: number | undefined | "pending" = "pending";
+        // Exercise bytewise UTF-8 before the split and coalesced following-key cases.
         const pasted =
-          mode === "budget"
+          mode === "budget" && chunks.at(-1)?.endsWith("d")
             ? Array.from(Buffer.from("é🙂界"), (byte) => Uint8Array.of(byte))
             : [];
         dashboard.start();
@@ -1261,19 +1247,12 @@ describe("live scan dashboard", () => {
           }
           if (mode === "budget")
             void dashboard
-              .requestBudgetIncrease({
-                maxCostUsd: 20,
-                cost: fakeResult([], "complete", {
-                  input_tokens: 100,
-                  output_tokens: 1,
-                }).cost!,
-                signal: controller.signal,
-              })
+              .requestBudgetIncrease(budgetRequest(controller.signal))
               .then((value) => {
                 answer = value;
               });
           for (const chunk of pasted) input.emit("data", chunk);
-          if (mode === "budget") {
+          if (pasted.length > 0) {
             expect(lastFrame(stderr)).toContain("é🙂界");
             expect(lastFrame(stderr)).not.toContain("\uFFFD");
           }
@@ -2000,15 +1979,7 @@ describe("live scan dashboard", () => {
 
     dashboard.start();
     expect(input.isRaw).toBe(true);
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     let frame = lastFrame(stderr);
     expect(frame).toContain("finding-16");
@@ -2063,15 +2034,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 30; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 30);
 
     const framesBefore = stderr.text().match(/\u001B\[H/gu)?.length ?? 0;
     input.emit("data", Buffer.from("\u001B[A".repeat(6)));
@@ -2100,15 +2063,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     input.emit("data", "\u0015");
     let frame = lastFrame(stderr);
@@ -2732,52 +2687,84 @@ function failingDashboardOutput(output: string[]) {
   };
 }
 
-test("aligns component columns by terminal width and retains trailing cost", async () => {
-  const stderr = capture(true);
-  const dashboard = createDashboard(
-    { ...stderr.stream, columns: 160, rows: 24 },
-    { presentation: "components", showCost: true },
-  );
-  const receipts: ComponentReceipt[] = [
-    "a".repeat(74),
-    "界".repeat(37),
-    "e\u0301".repeat(37),
-  ].map((name, index) => ({
-    id: String(index),
-    name,
-    paths: ["src"],
-    status: "pending",
-    outputDir: `/synthetic/results/${index}`,
-  }));
-  dashboard.start();
-  dashboard.setComponents(receipts);
-  for (const receipt of receipts)
-    dashboard.recordComponentEvent({
-      componentId: receipt.id,
-      type: "cost",
-      value: {
-        model: "synthetic-model",
-        inputTokens: 1,
-        cachedInputTokens: 0,
-        cacheWriteInputTokens: 0,
-        outputTokens: 1,
-        estimatedUsd: 1,
-        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
-      },
-    });
-  await Promise.resolve();
-  const frame = stripVTControlCharacters(
-    stderr.text().split("\u001B[H").at(-1)!,
-  );
-  const rows = frame.split("\n").filter((line) => line.includes("Queued"));
-  expect(rows).toHaveLength(3);
-  for (const row of rows) expect(row).toContain("$1.00");
-  expect(
-    new Set(rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))))
-      .size,
-  ).toBe(1);
-  dashboard.stop();
-});
+test.each([80, 160])(
+  "fits component progress at %i columns",
+  async (columns) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns, rows: 24 },
+      { presentation: "components", showCost: true },
+    );
+    const receipts: ComponentReceipt[] = [
+      "a".repeat(74),
+      "界".repeat(37),
+      "e\u0301".repeat(37),
+      "unpriced",
+    ].map((name, index) => ({
+      id: String(index),
+      name,
+      paths: ["src"],
+      status: "pending",
+      outputDir: `/synthetic/results/${index}`,
+    }));
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const [index, receipt] of receipts.slice(0, -1).entries()) {
+      if (index < 2) {
+        dashboard.updateComponent({ ...receipt, status: "started" });
+        dashboard.recordComponentEvent({
+          componentId: receipt.id,
+          type: "progress",
+          value: {
+            phase: "attack_path",
+            filesCompleted: 2,
+            filesTotal: 8,
+            ...(index === 1 && {
+              reviewItems: { completed: 1_234, total: 12_345 },
+            }),
+          },
+        });
+      }
+      const max = index === 2 ? 1 : 12.34;
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: {
+          model: "synthetic-model",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1,
+          estimatedUsd: 1,
+          estimatedUsdRange: { min: 1, max, context: "unknown" },
+        },
+      });
+    }
+    await Promise.resolve();
+    const frame = stripVTControlCharacters(
+      stderr.text().split("\u001B[H").at(-1)!,
+    );
+    const lines = frame.split("\n");
+    const header = lines.findIndex((line) =>
+      /Status\s+Progress\s+Findings\s+Cost/u.test(line),
+    );
+    expect(header).toBeGreaterThanOrEqual(0);
+    const rows = lines.slice(header + 1, header + 1 + receipts.length);
+    expect(rows).toHaveLength(receipts.length);
+    expect(rows[0]).toContain("2/8 files");
+    expect(rows[1]).toContain("1,234/12,345 reviews");
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00(?:\s|$)/u);
+    const column = (line: string, value: string) =>
+      stringWidth(line.slice(0, line.lastIndexOf(value)));
+    const costColumn = column(lines[header]!, "Cost");
+    for (const row of rows.slice(0, 2)) expect(row).toContain("$1.00–$12.34");
+    for (const row of rows.slice(0, -1)) {
+      expect(column(row, "$1.00")).toBe(costColumn);
+    }
+    expect(column(rows.at(-1)!, "—")).toBe(costColumn);
+    dashboard.stop();
+  },
+);
 
 test.each([16, 25, 120])(
   "preserves markup after clipped prefixes at width %i",

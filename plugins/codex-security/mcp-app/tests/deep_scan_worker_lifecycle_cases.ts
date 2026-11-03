@@ -9,20 +9,26 @@ import { readJson } from "./support/json.ts";
 import type { createFakeCodexFixture } from "./deep_scan_native_fixture.ts";
 import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { DeepScanWorkerKind } from "../src/deep-scan/types.js";
-import type * as WorkerErrors from "../src/deep-scan/errors.js";
+import type {
+  CodexWorkerRequest,
+  DeepScanWorkerKind,
+} from "../src/deep-scan/types.js";
 
 type WorkerFixture = Awaited<ReturnType<typeof createFakeCodexFixture>>;
 
 export function createWorkerLifecycleCases({
+  runWorker,
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
   trustedParentSandbox,
   withWorkerFixture,
   restoreEnv,
-  codexWorkerTurnError,
-  DeepScanNonRetryableError,
 }: {
+  runWorker: (
+    prompt: string,
+    cwd: string,
+    options: Partial<CodexWorkerRequest>,
+  ) => ReturnType<WorkerExecutor["run"]>;
   CodexSdkWorkerExecutor: typeof WorkerExecutor;
   fakeCodexFixture: () => Promise<WorkerFixture>;
   trustedParentSandbox: DeepWorkerParentSandbox;
@@ -34,15 +40,14 @@ export function createWorkerLifecycleCases({
     ) => Promise<Result>,
   ) => Promise<Result>;
   restoreEnv: (name: string, value: string | undefined) => void;
-  codexWorkerTurnError: typeof WorkerErrors.codexWorkerTurnError;
-  DeepScanNonRetryableError: typeof WorkerErrors.DeepScanNonRetryableError;
 }) {
   return {
+    testCancellationBeforeAcceptedTurnHasNoOwnership,
+    testOwnershipRegistrationSettlesBeforeWorker,
     testCompletedWorkerDrainPreservesCancellation,
     testCancelCompletedWorkerDrain,
     testCompletedWorkerFlushesBeforeSettling,
     testCompletedWorkerClosesIdleServer,
-    testUsageLimitClassification,
     testWorkerTerminalEvents,
   };
 
@@ -452,30 +457,6 @@ export function createWorkerLifecycleCases({
     }
   }
 
-  function testUsageLimitClassification() {
-    for (const message of [
-      "Quota exceeded. Check your plan and billing details.",
-      "Your workspace is out of credits. Add credits to continue.",
-      "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-      "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
-      "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
-      "You’ve hit your usage limit. Try again later.",
-      "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
-    ]) {
-      const error = codexWorkerTurnError(message);
-      assert.ok(error instanceof DeepScanNonRetryableError);
-      assert.equal(error.message, message);
-    }
-    for (const message of [
-      "429 Too Many Requests",
-      "Command failed: Quota exceeded. Check your plan and billing details.",
-    ]) {
-      const error = codexWorkerTurnError(message);
-      assert.equal(error.name, "Error");
-      assert.equal(error.message, message);
-    }
-  }
-
   async function testWorkerTerminalEvents() {
     const fixture = await fakeCodexFixture();
     const previousPath = process.env.CODEX_CLI_PATH;
@@ -556,6 +537,180 @@ export function createWorkerLifecycleCases({
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
       restoreEnv("CODEX_CLI_PATH", previousPath);
+    }
+  }
+  async function waitForWorkerFixture(predicate: () => Promise<boolean>) {
+    const deadline = Date.now() + 3_000;
+    while (!(await predicate())) {
+      assert.ok(
+        Date.now() < deadline,
+        "worker fixture did not reach its boundary",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  async function testCancellationBeforeAcceptedTurnHasNoOwnership() {
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(promptPath, "unsubmitted fixture prompt\n");
+            const previous = process.env.FAKE_CODEX_HOLD_THREAD_START;
+            process.env.FAKE_CODEX_HOLD_THREAD_START = "true";
+            const controller = new AbortController();
+            const registered = mock.fn();
+            const execution = runWorker(promptPath, workingDirectory, {
+              kind,
+              signal: controller.signal,
+              ...(resumed ? { resumeThreadId: "fixture-existing-thread" } : {}),
+              onThreadStarted: registered,
+            });
+            void execution.catch(() => {});
+            try {
+              await waitForWorkerFixture(
+                async () =>
+                  (await readFile(fixture.completionMarkerPath, "utf8").catch(
+                    () => "",
+                  )) === "thread-pending\n",
+              );
+              controller.abort("canceled before turn acceptance");
+              await assert.rejects(
+                execution,
+                (error: Error) =>
+                  error.name === "AbortError" &&
+                  error.cause === "canceled before turn acceptance",
+              );
+              const invocation = await readJson(fixture.markerPath);
+              assert.equal(registered.mock.callCount(), 0);
+              assert.equal(invocation.turn, undefined);
+              assert.equal(
+                invocation.rpc.some(
+                  (message: { method: string }) =>
+                    message.method === "turn/start",
+                ),
+                false,
+              );
+              assert.deepEqual(invocation.sequence, [
+                "thread-pending",
+                "eof",
+                "flushed",
+              ]);
+              assert.equal(
+                invocation.thread.method,
+                resumed ? "thread/resume" : "thread/start",
+              );
+            } finally {
+              controller.abort("fixture cleanup");
+              await execution.catch(() => {});
+              restoreEnv("FAKE_CODEX_HOLD_THREAD_START", previous);
+            }
+          },
+        );
+      }
+    }
+  }
+
+  async function testOwnershipRegistrationSettlesBeforeWorker() {
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        for (const outcome of ["success", "abort", "failure"] as const) {
+          await withWorkerFixture(
+            async (fixture, promptPath, workingDirectory) => {
+              await writeFile(
+                promptPath,
+                outcome === "abort"
+                  ? "BLOCK_AFTER_START\n"
+                  : "COMPLETE_THEN_FLUSH\n",
+              );
+              const controller = new AbortController();
+              const registration = Promise.withResolvers<void>();
+              let callbacks = 0;
+              let callbackStarted = false;
+              let callbackFinished = false;
+              let settled = false;
+              const registrationFailure = new Error(
+                "synthetic ownership registration failed",
+              );
+              const execution = runWorker(promptPath, workingDirectory, {
+                kind,
+                signal: controller.signal,
+                ...(resumed
+                  ? { resumeThreadId: "fixture-existing-thread" }
+                  : {}),
+                onThreadStarted: async (threadId) => {
+                  callbacks++;
+                  assert.equal(
+                    threadId,
+                    resumed ? "fixture-existing-thread" : "fixture-thread-id",
+                  );
+                  callbackStarted = true;
+                  await registration.promise;
+                  callbackFinished = true;
+                  if (outcome === "failure") throw registrationFailure;
+                },
+              });
+              const observed = execution.finally(() => {
+                settled = true;
+              });
+              void observed.catch(() => {});
+              try {
+                await waitForWorkerFixture(async () => callbackStarted);
+                if (outcome === "abort")
+                  controller.abort("canceled while saving accepted ownership");
+                await waitForWorkerFixture(
+                  async () =>
+                    (await readFile(fixture.completionMarkerPath, "utf8").catch(
+                      () => "",
+                    )) === "flushed\n",
+                );
+                const invocation = await readJson(fixture.markerPath);
+                await waitForWorkerFixture(async () => {
+                  try {
+                    process.kill(invocation.pid, 0);
+                    return false;
+                  } catch (error) {
+                    return (error as NodeJS.ErrnoException).code === "ESRCH";
+                  }
+                });
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(callbackFinished, false);
+                assert.equal(
+                  settled,
+                  false,
+                  "worker settled before its accepted turn ownership was saved",
+                );
+                registration.resolve();
+                if (outcome === "failure") {
+                  await assert.rejects(
+                    observed,
+                    (error: Error) => error === registrationFailure,
+                  );
+                } else if (outcome === "abort") {
+                  await assert.rejects(
+                    observed,
+                    (error: Error) =>
+                      error.name === "AbortError" &&
+                      error.cause ===
+                        "canceled while saving accepted ownership",
+                  );
+                } else {
+                  assert.equal(
+                    (await observed).threadId,
+                    resumed ? "fixture-existing-thread" : "fixture-thread-id",
+                  );
+                }
+                assert.equal(callbackFinished, true);
+                assert.equal(callbacks, 1);
+              } finally {
+                registration.resolve();
+                controller.abort("fixture cleanup");
+                await observed.catch(() => {});
+              }
+            },
+          );
+        }
+      }
     }
   }
 }

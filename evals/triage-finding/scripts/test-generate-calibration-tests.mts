@@ -28,6 +28,8 @@ const tmpDir = fs.realpathSync(
 );
 const generated = path.join(tmpDir, "calibration-oss.yaml");
 const generatedSmoke = path.join(tmpDir, "calibration-smoke.yaml");
+const markedDataset = path.join(tmpDir, "calibration.json");
+fs.writeFileSync(markedDataset, "\uFEFF" + fs.readFileSync(dataset, "utf8"));
 
 execFileSync(
   process.execPath,
@@ -119,7 +121,7 @@ execFileSync(
     "--experimental-strip-types",
     generator,
     "--dataset",
-    dataset,
+    markedDataset,
     "--output",
     generatedSmoke,
     "--case",
@@ -158,6 +160,8 @@ const hydration = execFileSync(
   [
     "--experimental-strip-types",
     path.join(evalDir, "scripts", "hydrate-calibration-repos.mts"),
+    "--dataset",
+    markedDataset,
     "--case",
     "oss-dompurify-ghsa-v8jm-5vwx-cfxm",
     "--variant",
