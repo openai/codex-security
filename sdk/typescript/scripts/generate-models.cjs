@@ -8,13 +8,17 @@ const schemas = resolve(packageRoot, "../../plugins/codex-security/schemas");
 
 if (!existsSync(schemas)) throw new Error("Could not find the plugin schemas.");
 
-function withoutAllOf(value) {
-  if (Array.isArray(value)) return value.map(withoutAllOf);
+function modelSchema(value, root = value) {
+  if (Array.isArray(value))
+    return value.map((child) => modelSchema(child, root));
   if (value === null || typeof value !== "object") return value;
+  if (typeof value.$ref === "string") {
+    return modelSchema(root.$defs[value.$ref.slice("#/$defs/".length)], root);
+  }
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== "allOf")
-      .map(([key, child]) => [key, withoutAllOf(child)]),
+      .filter(([key]) => key !== "allOf" && key !== "$defs")
+      .map(([key, child]) => [key, modelSchema(child, root)]),
   );
 }
 
@@ -26,9 +30,10 @@ async function generate() {
   ];
   const models = await Promise.all(
     documents.map(async ([filename, name]) => {
-      const schema = JSON.parse(readFileSync(join(schemas, filename), "utf8"));
       // json-schema-to-typescript drops object fields when allOf uses contains or if/then.
-      const input = withoutAllOf(schema);
+      const input = modelSchema(
+        JSON.parse(readFileSync(join(schemas, filename), "utf8")),
+      );
       input.title = name;
       return compile(input, name, {
         bannerComment: "",
@@ -70,7 +75,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
@@ -83,15 +87,30 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const output = join(packageRoot, "src", "models.ts");
-  if (process.argv.includes("--check")) {
-    if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
-      console.error(
-        "src/models.ts is out of date. Run `pnpm generate:models`.",
-      );
-      process.exitCode = 1;
-    }
-    return;
+  const pluginSource = "../../plugins/codex-security/mcp-app/src";
+  const shared = [
+    "workbench-arguments",
+    "executable-path",
+    "contract-values",
+    "finding-normalization",
+    "windows-path",
+  ].map((name) => [
+    `src/${name}.ts`,
+    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+      readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
+  ]);
+  const outputs = [
+    [`${pluginSource}/models.ts`, models],
+    ["src/models.ts", models],
+    ...shared,
+  ];
+  for (const [name, content] of outputs) {
+    const output = join(packageRoot, name);
+    if (process.argv.includes("--check")) {
+      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
+        console.error(`${name} is out of date. Run \`pnpm generate:models\`.`);
+        process.exitCode = 1;
+      }
+    } else writeFileSync(output, content);
   }
-  writeFileSync(output, models);
 });
