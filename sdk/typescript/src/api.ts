@@ -6012,13 +6012,7 @@ export async function runScanEvents(
         }
         options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(
-            {
-              onProgress: (update) => options.onProgress?.(update, { event }),
-              onObserverError: options.onObserverError,
-            },
-            "onProgress",
-          )(progress);
+          notifyObserver(options, "onProgress")(progress, { event });
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
