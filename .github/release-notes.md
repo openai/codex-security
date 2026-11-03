@@ -6,6 +6,7 @@
 
 - identify invalid committed receipt lines ([#2180](https://github.com/openai/codex-security/pull/2180))
 - use the singular for one additional finding in the job summary ([#2252](https://github.com/openai/codex-security/pull/2252))
+- keep scrolled history in place at the history cap ([#2266](https://github.com/openai/codex-security/pull/2266))
 
 <!-- release-section: highlights:end -->
 
