@@ -138,8 +138,6 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 "updatedAt": row["updated_at"],
             }
         )
-        if len(false_positives) == 50:
-            break
     return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": false_positives}
 
 
