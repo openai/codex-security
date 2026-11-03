@@ -17,6 +17,12 @@ const text = z
   .refine((value) => value.trim().length > 0, "Must not be blank.");
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const revision = z.number().int().nonnegative();
+export const severityRubricSnapshotSchema = z.strictObject({
+  revision: revision.positive(),
+  markdown: text,
+  sha256: digest,
+});
+
 const reportSchema = z
   .object({
     findingId: text,
@@ -38,14 +44,7 @@ const reportSchema = z
 export const classifySeverityRecordsInputSchema = z
   .object({
     version: z.literal(1),
-    rubric: z
-      .object({
-        revision: revision.positive(),
-        markdown: text,
-        sha256: digest,
-      })
-      .strict()
-      .optional(),
+    rubric: severityRubricSnapshotSchema.optional(),
     model: text,
     effort: z.enum([
       "minimal",
