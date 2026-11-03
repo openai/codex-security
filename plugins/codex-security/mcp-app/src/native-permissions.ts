@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
@@ -6,6 +7,7 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 export type NativeParentSandbox = {
   /** Workspace writes are never inferred from the parent's read access. */
   readonly workspaceAccess: "read" | "write";
+  readonly workspaceWriteRoot?: string;
   /** Trusted parent denials retained by the ordinary scan permission profile. */
   readonly filesystemDenies: readonly string[];
   /** Literal paths with glob characters retain native point-deny semantics. */
@@ -46,6 +48,8 @@ export function resolveNativeParentSandbox(
   const globScanMaxDepth = resolveGlobScanMaxDepth(filesystem);
 
   let hasRootRead = false;
+  let hasProjectWrite = false;
+  let hasScopedRead = false;
   let workspaceAccess: "read" | "write" = "read";
   const filesystemDenies: string[] = [];
   const literalFilesystemDenies: string[] = [];
@@ -64,6 +68,15 @@ export function resolveNativeParentSandbox(
       );
     }
 
+    if (
+      entry.access === "read" &&
+      !(
+        (path.type === "special" ||
+          path.type === "generated_default_special") &&
+        record(path.value)?.kind === "root"
+      )
+    )
+      hasScopedRead = true;
     const isDeny = entry.access === "deny" || entry.access === "none";
     if (isDeny) {
       validateDenyMissingPathBehavior(entry);
@@ -82,12 +95,14 @@ export function resolveNativeParentSandbox(
         );
       }
       if (special.kind === "root") hasRootRead = true;
+      if (entry.access === "write" && special.kind === "root")
+        workspaceAccess = "write";
       if (
         entry.access === "write" &&
-        (special.kind === "root" ||
-          (special.kind === "project_roots" && special.subpath == null))
+        special.kind === "project_roots" &&
+        special.subpath == null
       )
-        workspaceAccess = "write";
+        hasProjectWrite = true;
     } else if (path.type === "path" || path.type === "generated_default_path") {
       if (!isNonEmptyString(path.path)) {
         throw unsupportedParentSandbox(
@@ -135,8 +150,24 @@ export function resolveNativeParentSandbox(
     );
   }
 
+  // Symbolic child writes cannot preserve narrower parent read-only entries.
+  if (hasScopedRead) workspaceAccess = "read";
+  let workspaceWriteRoot: string | undefined;
+  if (
+    hasProjectWrite &&
+    !hasScopedRead &&
+    workspaceAccess === "read" &&
+    typeof state.sandboxCwd === "string"
+  ) {
+    try {
+      workspaceWriteRoot = fileURLToPath(state.sandboxCwd);
+    } catch {
+      // Without a local parent root the child can only inherit read access.
+    }
+  }
   return {
     workspaceAccess,
+    ...(workspaceWriteRoot === undefined ? {} : { workspaceWriteRoot }),
     filesystemDenies,
     ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),

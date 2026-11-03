@@ -23,6 +23,7 @@ import {
 import { Database } from "bun:sqlite";
 import { loadContract } from "../src/contract.js";
 
+import { workflowDigest } from "../src/finding-workflow.js";
 import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { SeverityStore } from "../src/severity-store.js";
 import type { JsonObject } from "../src/config.js";
@@ -61,7 +62,7 @@ async function fixture(scanId?: string, savedRoot?: string) {
     manifest.scan.id = scanId;
     document.scanId = scanId;
     for (const finding of document.findings)
-      finding.occurrenceId = `occ_${sha256([scanId, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      setFindingIdentity(manifest.scan, finding);
     const coveragePath = join(scanDirectory, "coverage.json");
     const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
     coverage.scanId = scanId;
@@ -610,6 +611,10 @@ test("migration preserves assessments for unindexed scan directories", async () 
     "INSERT INTO finding_severity_assessments (finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger) SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
   query(environment, "DROP TABLE scan_severity_assessments");
+  query(
+    environment,
+    "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json",
+  );
   for (const table of [
     "finding_severity_assessments",
     "scan_severity_classifications",
@@ -618,8 +623,14 @@ test("migration preserves assessments for unindexed scan directories", async () 
   }
   query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (43, 52, 55, 57)",
+    "DELETE FROM schema_migrations WHERE version IN (43, 52, 60) OR name IN ('reuse scan severity assessments', 'recover unindexed severity assessments')",
   );
+  const legacyClassification = {
+    ...classification,
+    classificationRuns: undefined,
+    rubricRevision: undefined,
+    rubricSha256: workflowDigest([defaultSeverityRubric]),
+  };
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -628,7 +639,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
       undefined,
       environment,
     ),
-  ).toEqual({ ...classification, classificationRuns: undefined });
+  ).toEqual(legacyClassification);
   expect(
     query(
       environment,
@@ -647,15 +658,19 @@ test("migration preserves assessments for unindexed scan directories", async () 
       undefined,
       environment,
     ),
-  ).toEqual({ ...classification, classificationRuns: undefined });
+  ).toEqual(legacyClassification);
   expect(
-    (
-      await classifyScanDirectorySeverity(first.scanDirectory, {
-        environment,
-        codex: recordingClassifier().codex,
-      })
-    ).assessments,
-  ).toEqual(classification.assessments);
+    await classifyScanDirectorySeverity(first.scanDirectory, {
+      environment,
+      codex: recordingClassifier().codex,
+    }),
+  ).toMatchObject({
+    scanId,
+    assessments: classification.assessments,
+    classificationRuns: classification.classificationRuns,
+    rubricRevision: classification.rubricRevision,
+    rubricSha256: classification.rubricSha256,
+  });
   expect(
     query(
       environment,
@@ -1079,28 +1094,7 @@ test("migrates existing databases without changing findings and reads older stat
 
 test("classifying another scan preserves both recurring-finding assessments", async () => {
   const first = await fixture();
-  const second = await fixture();
-  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  manifest.scan.id = "scan_example_002";
-  for (const file of ["findings.json", "coverage.json"]) {
-    const path = join(second.scanDirectory, file);
-    const document = JSON.parse(await readFile(path, "utf8"));
-    document.scanId = manifest.scan.id;
-    if (file === "findings.json") {
-      for (const finding of document.findings as Finding[]) {
-        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
-      }
-    }
-    await writeFile(path, JSON.stringify(document));
-  }
-  for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = sha256(
-      await readFile(join(second.scanDirectory, artifact.path)),
-    );
-  await writeFile(manifestPath, JSON.stringify(manifest));
+  const second = await fixture("scan_example_002");
   const { codex, calls } = recordingClassifier();
   const options = {
     environment: first.environment,

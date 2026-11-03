@@ -9,7 +9,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import checkpoint, register, run_workbench, write_completed_contract
+from workbench_test_support import (
+    checkpoint,
+    read_review_state,
+    register,
+    run_workbench,
+    run_workbench_with_review,
+    write_completed_contract,
+)
 
 
 @pytest.fixture
@@ -194,10 +201,7 @@ def test_later_commits_retire_accepted_markers_after_cleanup_interruption(
     fixture.publish(rejected)
     run_workbench(fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id)
     assert json.loads((directory / "findings.json").read_text())["findings"] == []
-    assert (
-        json.loads((directory / "coverage.json").read_text())["surfaces"][0]["disposition"]
-        == "rejected"
-    )
+    assert read_review_state(fixture.state, directory)["surfaces"][0]["disposition"] == "rejected"
     assert fixture.expected["title"] not in (directory / "report.md").read_text()
     assert (directory / "checkpoints" / acknowledged[0]).read_bytes() == evidence
     assert list((directory / "checkpoints/pending").glob("*.json")) == []
@@ -306,8 +310,9 @@ def test_pending_review_on_an_already_resolved_surface_survives_completion(
         patch.setattr(fixture.saved, "write_scan_local_bytes", fail_commit)
         with pytest.raises(OSError, match="commit interruption"):
             fixture.publish(pending)
-    run_workbench(fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id)
-    coverage = json.loads((fixture.directory / "coverage.json").read_text())
+    _, coverage = run_workbench_with_review(
+        fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id
+    )
     assert coverage["deferred"] == pending["coverage"]["deferred"]
     assert "completeness" not in coverage
 

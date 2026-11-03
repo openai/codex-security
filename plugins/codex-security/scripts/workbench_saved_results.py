@@ -39,6 +39,7 @@ from finalize_scan_contract import (
     _write_prepared_scan_finalization,
     finalize_scan,
     finding_candidate_id,
+    manifest_is_sealed,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
@@ -417,9 +418,7 @@ def _recovery_source_digests(
         manifest_scan = manifest.get("scan")
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
-        if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        ):
+        if scan["seal_manifest_digest"] is not None or manifest_is_sealed(manifest_scan):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"], "Published scan"
@@ -1713,10 +1712,7 @@ def _stopped_child_draft(
     manifest_path = db.artifact_path(child_dir, "scan-manifest.json", required=False)
     manifest_scan = db.read_json_object(manifest_path).get("scan", {}) if manifest_path else {}
     if child["seal_manifest_digest"] is not None or (
-        isinstance(manifest_scan, dict)
-        and (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        )
+        isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan)
     ):
         db.require_recorded_manifest_digest(child, child_dir)
         prepared = _prepare_scan_finalization(child_dir)
@@ -2136,10 +2132,7 @@ def preserve_scan_results_locked(
         existing_scan = {}
     existing = None
     if scan["seal_manifest_digest"] is not None or (
-        isinstance(existing_scan, dict)
-        and (
-            existing_scan.get("sealedAt") is not None or existing_scan.get("artifacts") is not None
-        )
+        isinstance(existing_scan, dict) and manifest_is_sealed(existing_scan)
     ):
         db.require_recorded_manifest_digest(scan, scan_dir)
         existing, existing_findings, _ = finalize_scan(
@@ -2339,7 +2332,7 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("The scan stopped; its artifacts cannot be modified.")
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest = db.read_scan_manifest(scan, scan_dir).get("scan", {})
-        if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+        if manifest_is_sealed(manifest):
             raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
         output = args.artifact_path
         key = output.lower()
@@ -2838,9 +2831,7 @@ def _retained_composed_draft(
         manifest_scan = manifest.get("scan")
         if not isinstance(manifest_scan, dict):
             raise ContractError("Saved scan manifest has no scan object")
-        if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        ):
+        if scan["seal_manifest_digest"] is not None or manifest_is_sealed(manifest_scan):
             if "preservedSources" in manifest_scan:
                 published_sources = _source_digests(
                     manifest_scan["preservedSources"], "Published scan"

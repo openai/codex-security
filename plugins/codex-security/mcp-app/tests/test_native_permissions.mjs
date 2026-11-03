@@ -77,7 +77,7 @@ assert.deepEqual(
     }),
   ),
   {
-    workspaceAccess: "write",
+    workspaceAccess: "read",
     filesystemDenies: [],
   },
 );
@@ -352,7 +352,30 @@ for (const invalid of [
   );
 }
 
-// Cwd is unused metadata; actual inherited paths remain independently checked.
+// A read-only subtree cannot be widened through a project-root grant.
+const scopedRead = {
+  ...pinnedReadOnly,
+  file_system: {
+    type: "restricted",
+    entries: [
+      rootRead,
+      {
+        path: { type: "special", value: { kind: "project_roots" } },
+        access: "write",
+      },
+      { path: { type: "path", path: "/parent/private" }, access: "read" },
+    ],
+  },
+};
+assert.deepEqual(
+  resolveNativeParentSandbox(extra(scopedRead, "file:///parent")),
+  {
+    workspaceAccess: "read",
+    filesystemDenies: [],
+  },
+);
+
+// Cwd is irrelevant for a read-only parent.
 assert.deepEqual(
   resolveNativeParentSandbox(
     extra(pinnedReadOnly, "relative/working-directory"),

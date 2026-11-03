@@ -14,7 +14,8 @@ import {
 } from "node:fs";
 import { delimiter, dirname, join, parse, relative, sep } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { nodeCommand } from "./support/shell.js";
+import { nodeCommand, pythonExecutable } from "./support/shell.js";
+import { runNodePython } from "./support/python-probe.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { resolveCodexCommand } from "../src/runtime.js";
@@ -435,6 +436,38 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   }
 }
 
+// Node's string argv and env cannot represent every POSIX path.
+function runWithPosixBytes(
+  executable: string,
+  args: (string | Buffer)[],
+  env: NodeJS.ProcessEnv,
+  rawEnv: Record<string, Buffer> = {},
+) {
+  const encodedEnv = Object.fromEntries(
+    Object.entries(rawEnv).map(([name, bytes]) => [
+      name,
+      bytes.toString("hex"),
+    ]),
+  );
+  return runNodePython(
+    pythonExecutable(false)!,
+    [
+      "-c",
+      `
+import json, os, sys
+for name, value in json.loads(sys.argv[1]).items():
+    os.environb[name.encode()] = bytes.fromhex(value)
+executable = sys.argv[2]
+os.execv(executable, [executable, *(bytes.fromhex(arg) for arg in sys.argv[3:])])
+`,
+      JSON.stringify(encodedEnv),
+      executable,
+      ...args.map((arg) => Buffer.from(arg).toString("hex")),
+    ],
+    { env },
+  );
+}
+
 function runPathInventory(
   f: ReturnType<typeof fixture>,
   command: string,
@@ -448,14 +481,9 @@ function runPathInventory(
       ? ["--scope", "scope"]
       : ["--scopes-file", scopes];
   if (!rawHome) return f.run(command, args, env);
-  return spawnSync(
-    "/bin/sh",
+  return runWithPosixBytes(
+    node,
     [
-      "-c",
-      'HOME=$(printf "%s/\\377" "$1"); export HOME; shift; exec "$@"',
-      "inventory-raw-home",
-      f.root,
-      node,
       join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       command,
       "--repo",
@@ -464,7 +492,8 @@ function runPathInventory(
       f.out,
       ...args,
     ],
-    { env, encoding: "utf8" },
+    env,
+    { HOME: Buffer.concat([Buffer.from(f.root + "/"), Buffer.from([0xff])]) },
   );
 }
 
@@ -1347,32 +1376,26 @@ for (const ending of ["\n", "\r"])
         ]),
         "scoped source\n",
       );
-      const literal = (bytes: Buffer) =>
-        [...bytes]
-          .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-          .join("");
       const launcher = join(
         PLUGIN_ROOT,
         "scripts",
         "launch_codex_security_mcp",
       );
       const run = (command: string, scoped: boolean) =>
-        spawnSync(
-          "/bin/sh",
+        runWithPosixBytes(
+          launcher,
           [
-            "-c",
-            [
-              `repository=$(printf '%b.' '${literal(rawRoot)}'); repository=\${repository%.}`,
-              `scope=$(printf '%b.' '${literal(rawScope)}'); scope=\${scope%.}`,
-              `exec "$1" --helper "$2" --repo "$repository" --out "$3" ${scoped ? '--scope "$scope"' : '--base "$4" --head HEAD'}`,
-            ].join("\n"),
-            "inventory-fixture",
-            launcher,
+            "--helper",
             command,
+            "--repo",
+            rawRoot,
+            "--out",
             f.out,
-            base,
+            ...(scoped
+              ? ["--scope", rawScope]
+              : ["--base", base, "--head", "HEAD"]),
           ],
-          { encoding: "utf8", env: f.toolEnvironment },
+          f.toolEnvironment,
         );
       const diff = run("make-diff-rank-input", false);
       expect(diff.status, diff.stderr).toBe(0);
@@ -1498,48 +1521,33 @@ for (const rawExecutable of [false, true])
         Buffer.from(f.root + "/git-"),
         rawExecutable ? pathNameBytes : Buffer.from("wrapper"),
       ]);
-      const hostGit = Bun.which("git")!;
-      const quote = (value: string) =>
-        "'" + value.replaceAll("'", "'\\''") + "'";
       writeFileSync(
         gitPath,
-        `#!/bin/sh\nset -e\ntest "$GIT_LITERAL_PATHSPECS" = 1\ntest -z "\${GIT_DIR+x}"\ninventory-child-tool\nexec ${quote(hostGit)} "$@"\n`,
+        '#!/bin/sh\nset -e\ntest "$GIT_LITERAL_PATHSPECS" = 1\ntest -z "${GIT_DIR+x}"\ninventory-child-tool\nexec "$INVENTORY_HOST_GIT" "$@"\n',
         { mode: 0o700 },
       );
-      const octal = (bytes: Buffer) =>
-        [...bytes]
-          .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-          .join("");
       const marker = join(f.root, "child-ran");
-      const script = [
-        `HOME=$(printf '%b' '${octal(home)}'); export HOME`,
-        `raw_bin=$(printf '%b' '${octal(bin)}'); PATH="$raw_bin"; export PATH`,
-        `CODEX_SECURITY_GIT=$(printf '%b' '${octal(gitPath)}'); export CODEX_SECURITY_GIT`,
-        'exec "$1" "$2" make-repo-scope-input --repo "$3" --out "$4" --scopes-file "$5"',
-      ].join("\n");
-      const result = spawnSync(
-        "/bin/sh",
+      const result = runWithPosixBytes(
+        node,
         [
-          "-c",
-          script,
-          "inventory-env",
-          node,
           join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-scope-input",
+          "--repo",
           f.repo,
+          "--out",
           f.out,
-          f.scopeArgs()[1]!,
+          ...f.scopeArgs(),
         ],
         {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            GIT_CONFIG_GLOBAL: undefined,
-            GIT_CONFIG_NOSYSTEM: "1",
-            GIT_DIR: join(f.root, "wrong-git"),
-            GIT_LITERAL_PATHSPECS: "0",
-            INVENTORY_CHILD_MARKER: marker,
-          },
+          ...process.env,
+          GIT_CONFIG_GLOBAL: undefined,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_DIR: join(f.root, "wrong-git"),
+          GIT_LITERAL_PATHSPECS: "0",
+          INVENTORY_CHILD_MARKER: marker,
+          INVENTORY_HOST_GIT: Bun.which("git")!,
         },
+        { HOME: home, PATH: bin, CODEX_SECURITY_GIT: gitPath },
       );
       expect(result.status, result.stderr).toBe(0);
       expect(
@@ -1567,27 +1575,20 @@ test.skipIf(process.platform === "win32")(
       '#!/bin/sh\nset -e\nIFS= read -r value < "$HOME/marker"\ntest "$value" = raw-home\nprintf "./visible.py\\0"\n',
       { mode: 0o700 },
     );
-    const octal = (bytes: Buffer) =>
-      [...bytes]
-        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-        .join("");
-    const script = [
-      `HOME=$(printf '%b' '${octal(home)}'); export HOME`,
-      `PATH=$(printf '%b' '${octal(bin)}'); export PATH`,
-      'exec "$1" "$2" generate-in-scope-files --repo "$3" --scope . --out "$4"',
-    ].join("\n");
-    const result = spawnSync(
-      "/bin/sh",
+    const result = runWithPosixBytes(
+      node,
       [
-        "-c",
-        script,
-        "inventory-env",
-        node,
         join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        "--repo",
         f.repo,
+        "--scope",
+        ".",
+        "--out",
         f.out,
       ],
-      { encoding: "utf8", env: { ...process.env, CODEX_SECURITY_GIT: "" } },
+      { ...process.env, CODEX_SECURITY_GIT: "" },
+      { HOME: home, PATH: bin },
     );
     expect(result.status, result.stderr).toBe(0);
     expect(readFileSync(f.out, "utf8")).toBe("./visible.py\n");
@@ -1608,18 +1609,15 @@ for (const tool of ["git", "rg"])
           rawLoader ? Buffer.from([0xff, 0xfe]) : Buffer.from("ascii"),
           Buffer.from("' $value\n"),
         ]);
-        const octal = [...value]
-          .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-          .join("");
-        const quote = (text: string) =>
-          "'" + text.replaceAll("'", "'\\''") + "'";
         const marker = join(f.root, "child-ran");
+        const expectedFile = join(f.root, "expected-loader-value");
+        writeFileSync(expectedFile, value);
         writeFileSync(
           join(tools, tool),
           [
             "#!/bin/sh",
             "set -e",
-            `expected=$(printf '%b.' '${octal}'); expected=\${expected%.}`,
+            'expected=$(cat "$INVENTORY_EXPECTED_FILE"; printf .); expected=${expected%.}',
             'test "$LD_LIBRARY_PATH" = "$expected"',
             'test "$LD_PROFILE_OUTPUT" = "$expected"',
             'test "${LD_PROFILE+x}" = x && test -z "$LD_PROFILE"',
@@ -1628,26 +1626,16 @@ for (const tool of ["git", "rg"])
             ...(tool === "git"
               ? ['test -z "${GIT_DIR+x}"', 'test "$GIT_LITERAL_PATHSPECS" = 1']
               : []),
-            `printf executed > ${quote(marker)}`,
+            'printf executed > "$INVENTORY_CHILD_MARKER"',
             tool === "git"
-              ? `exec ${quote(Bun.which("git")!)} "$@"`
+              ? 'exec "$INVENTORY_HOST_GIT" "$@"'
               : "printf './visible.py\\0'",
           ].join("\n") + "\n",
           { mode: 0o700 },
         );
-        const result = spawnSync(
-          "/bin/sh",
+        const result = runWithPosixBytes(
+          node,
           [
-            "-c",
-            [
-              `value=$(printf '%b.' '${octal}'); value=\${value%.}`,
-              'LD_LIBRARY_PATH="$value"; export LD_LIBRARY_PATH',
-              'LD_PROFILE_OUTPUT="$value"; export LD_PROFILE_OUTPUT',
-              ...(rawLoader ? [] : ["HOME=$(printf '\\377'); export HOME"]),
-              'exec "$@"',
-            ].join("\n"),
-            "inventory-loader-environment",
-            node,
             join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
             "generate-in-scope-files",
             "--repo",
@@ -1658,17 +1646,22 @@ for (const tool of ["git", "rg"])
             f.out,
           ],
           {
-            encoding: "utf8",
-            env: {
-              ...f.toolEnvironment,
-              PATH: `${tools}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
-              CODEX_SECURITY_GIT: tool === "git" ? join(tools, tool) : "",
-              GIT_DIR: join(f.root, "wrong-git"),
-              GIT_LITERAL_PATHSPECS: "0",
-              LD_PROFILE: "",
-              LD_PRELOAD: undefined,
-              INVENTORY_CALLER_VALUE: "preserved",
-            },
+            ...f.toolEnvironment,
+            PATH: `${tools}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+            CODEX_SECURITY_GIT: tool === "git" ? join(tools, tool) : "",
+            GIT_DIR: join(f.root, "wrong-git"),
+            GIT_LITERAL_PATHSPECS: "0",
+            LD_PROFILE: "",
+            LD_PRELOAD: undefined,
+            INVENTORY_EXPECTED_FILE: expectedFile,
+            INVENTORY_CHILD_MARKER: marker,
+            INVENTORY_HOST_GIT: Bun.which("git")!,
+            INVENTORY_CALLER_VALUE: "preserved",
+          },
+          {
+            LD_LIBRARY_PATH: value,
+            LD_PROFILE_OUTPUT: value,
+            ...(rawLoader ? {} : { HOME: Buffer.from([0xff]) }),
           },
         );
         expect(result.status, result.stderr).toBe(0);
@@ -1770,52 +1763,43 @@ for (const setting of [
             : `[core]\nexcludesFile = ${JSON.stringify(ignore)}\n`,
         );
       }
-      const octal = [...value]
-        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-        .join("");
       const command =
         setting === "RIPGREP_CONFIG_PATH"
           ? "generate-in-scope-files"
           : "make-repo-scope-input";
-      const result = spawnSync(
-        "/bin/sh",
+      const result = runWithPosixBytes(
+        node,
         [
-          "-c",
-          `${setting}=$(printf '%b' '${octal}'); export ${setting}\nexec "$1" "$2" "$3" --repo "$4" --out "$5" "$6" "$7"`,
-          "inventory-config",
-          node,
           join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           command,
+          "--repo",
           f.repo,
+          "--out",
           f.out,
           ...(command === "generate-in-scope-files"
             ? ["--scope", "."]
             : f.scopeArgs()),
         ],
         {
-          encoding: "utf8",
-          env: {
-            ...f.toolEnvironment,
-            ...(setting === "RIPGREP_CONFIG_PATH" ? {} : { HOME: f.root }),
-            CODEX_SECURITY_GIT: Bun.which("git")!,
-            GIT_CONFIG_GLOBAL:
-              setting === "XDG_CONFIG_HOME" ? undefined : "/dev/null",
-            GIT_CONFIG_SYSTEM: "/dev/null",
-            GIT_CONFIG_PARAMETERS: undefined,
-            GIT_CONFIG_COUNT:
-              setting === "GIT_CONFIG_KEY_0" || setting === "GIT_CONFIG_VALUE_0"
-                ? "1"
-                : undefined,
-            GIT_CONFIG_KEY_0: "core.excludesFile",
-            GIT_CONFIG_VALUE_0:
-              setting === "GIT_CONFIG_KEY_0"
-                ? join(f.root, "config")
-                : undefined,
-            GIT_CONFIG_NOSYSTEM: undefined,
-            XDG_CONFIG_HOME: undefined,
-            RIPGREP_CONFIG_PATH: undefined,
-          },
+          ...f.toolEnvironment,
+          ...(setting === "RIPGREP_CONFIG_PATH" ? {} : { HOME: f.root }),
+          CODEX_SECURITY_GIT: Bun.which("git")!,
+          GIT_CONFIG_GLOBAL:
+            setting === "XDG_CONFIG_HOME" ? undefined : "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_CONFIG_PARAMETERS: undefined,
+          GIT_CONFIG_COUNT:
+            setting === "GIT_CONFIG_KEY_0" || setting === "GIT_CONFIG_VALUE_0"
+              ? "1"
+              : undefined,
+          GIT_CONFIG_KEY_0: "core.excludesFile",
+          GIT_CONFIG_VALUE_0:
+            setting === "GIT_CONFIG_KEY_0" ? join(f.root, "config") : undefined,
+          GIT_CONFIG_NOSYSTEM: undefined,
+          XDG_CONFIG_HOME: undefined,
+          RIPGREP_CONFIG_PATH: undefined,
         },
+        { [setting]: value },
       );
       expect(result.status, result.stderr).toBe(0);
       const lines = readFileSync(f.out, "utf8").trim().split("\n");

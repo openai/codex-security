@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
   codexSecurityStateDirectory,
   requireModelSafeOutputDir,
@@ -34,7 +35,11 @@ import {
   environmentValue,
   expandHome,
 } from "../../../../sdk/typescript/src/codex-home.js";
-import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
+import {
+  gitMarkerRoot,
+  gitProtectionRoots,
+  nullIfMissingFile,
+} from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
 import {
@@ -48,6 +53,7 @@ import {
   resolveTrustedCodex,
   snapshotNativeEnvironment,
 } from "./native-executable.js";
+import { isWithin } from "../../../../sdk/typescript/src/trusted-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
 import {
   nativeScanConfiguration,
@@ -351,6 +357,37 @@ export async function prepareNativeScan(
       workspaceAccess === "read"
         ? readOnlyFilesystem(savedPermissions?.filesystem ?? {})
         : (savedPermissions?.filesystem ?? {});
+    if (parentSandbox.workspaceWriteRoot !== undefined) {
+      // Workers change cwd for discovery, merge, and resume. Bind a project
+      // grant to the concrete scan output instead of rebinding :workspace_roots.
+      const [root, target, output] = await Promise.all(
+        [
+          parentSandbox.workspaceWriteRoot,
+          input.scan.targetPath,
+          input.scan.scanDir,
+        ].map((path) => realpath(path).catch(nullIfMissingFile)),
+      );
+      if (
+        root &&
+        target &&
+        output &&
+        isWithin(root, target) &&
+        isWithin(root, output)
+      ) {
+        const previous = savedPermissions?.filesystem[output];
+        const access = isRecord(previous)
+          ? previous["."]
+          : (previous ?? savedPermissions?.filesystem[":workspace_roots"]);
+        if (access === undefined || access === "write") {
+          savedFilesystem[output] = {
+            ...(isRecord(previous)
+              ? readOnlyFilesystem(previous as JsonObject)
+              : {}),
+            ".": "write",
+          };
+        }
+      }
+    }
     const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
     for (const path of parentSandbox.literalFilesystemDenies ?? []) {
       const saved = savedPermissions?.filesystem[path];
@@ -428,19 +465,26 @@ export async function prepareNativeScan(
   const protectedRoots = [
     input.scan.scanDir,
     ...(await Promise.all(
-      [
-        input.scan.targetPath,
-        ...(options.knowledgeBasePaths ?? []),
-        ...[
-          executionPaths["model_instructions_file"],
-          executionPaths["experimental_compact_prompt_file"],
-        ].filter((path): path is string => typeof path === "string"),
-      ].map(async (path) => {
-        const source = expandHome(path, inheritedEnvironment);
-        return (await gitMarkerRoot(source, signal, "outermost")) ?? source;
-      }),
+      [input.scan.targetPath, ...(options.knowledgeBasePaths ?? [])].map(
+        async (path) => {
+          const source = expandHome(path, inheritedEnvironment);
+          return (await gitMarkerRoot(source, signal, "outermost")) ?? source;
+        },
+      ),
     )),
   ];
+  for (const promptPath of [
+    executionPaths["model_instructions_file"],
+    executionPaths["experimental_compact_prompt_file"],
+  ]) {
+    if (typeof promptPath !== "string") continue;
+    const destination = await realpath(promptPath).catch(nullIfMissingFile);
+    protectedRoots.push(
+      ...(await gitProtectionRoots(promptPath, signal)),
+      dirname(promptPath),
+      ...(destination === null ? [] : [dirname(destination)]),
+    );
+  }
   const codex = publicationOnly
     ? null
     : await resolveTrustedCodex(inheritedEnvironment, protectedRoots);

@@ -774,6 +774,11 @@ describe("CodexSecurity orchestration", () => {
           { mode: "standard" },
         ]);
       }
+      const restored = parseToml(
+        await readFile(join(credentialHome, "config.toml"), "utf8"),
+      );
+      expect(restored).not.toHaveProperty("model");
+      expect(restored).not.toHaveProperty("features.multi_agent_v2");
       expect(existsSync(credentialHome)).toBe(true);
     } finally {
       concurrentScans.resolve();

@@ -23,8 +23,8 @@ import { configuredCodexHome } from "./codex-home.js";
 /** @internal */
 export { configuredCodexHome, environmentEntry } from "./codex-home.js";
 
-/** @internal */
-export function withoutOpenAiApiKeys<Value>(
+/** Copy the child environment so configured authentication takes precedence over ambient OpenAI keys. @internal */
+export function configuredAuthEnvironment<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
   const child = Object.fromEntries(

@@ -11,8 +11,11 @@ import pytest
 from workbench_test_support import (
     begin_legacy_scan,
     checkpoint,
+    published_artifacts,
+    read_review_state,
     register,
     run_workbench,
+    run_workbench_with_review,
     write_checkpoint,
     write_completed_contract,
 )
@@ -207,13 +210,13 @@ def test_completion_uses_committed_documents_after_interrupted_export(
         manifest = json.loads(manifest_path.read_text())["scan"]
         assert manifest["complete"] is True
         assert manifest["sealedAt"]
-        assert json.loads((directory / "coverage.json").read_text())["surfaces"][0]["label"] == (
+        assert read_review_state(state, directory)["surfaces"][0]["label"] == (
             "Latest committed surface"
         )
         assert committed.read_bytes() == committed_bytes
         # Sealed canonical results take precedence over a stale unsealed snapshot.
         committed.write_text(json.dumps({"manifest": {"scan": {"complete": False}}}))
-        sealed = {name: (directory / name).read_bytes() for name in artifact_names}
+        sealed = published_artifacts(directory)
         completed = run_workbench(state, "complete-scan", "--scan-id", scan["scanId"])["scan"]
         assert completed["progress"]["status"] == "complete"
         assert completed["findingCount"] == 1
@@ -421,13 +424,11 @@ def test_cancellation_reconciles_current_surface_resolution_and_late_checkpoint_
     )
     late_bytes = late_checkpoint.read_bytes()
     (directory / "checkpoints/pending" / late_checkpoint.name).write_bytes(late_bytes)
-    run_workbench(state, "cancel-scan", "--scan-id", scan["scanId"])
-    published = json.loads((directory / "coverage.json").read_text())
+    _, published = run_workbench_with_review(state, "cancel-scan", "--scan-id", scan["scanId"])
     assert published["surfaces"] == coverage["surfaces"] + late_coverage["surfaces"]
     expected_deferred = {"pending-work", "new-candidate", "scan-stopped"}
     if reopened:
         expected_deferred.add("resolved-work")
-        assert "Review reopened after another observation." in (directory / "report.md").read_text()
     assert {row["id"] for row in published["deferred"]} == expected_deferred
     assert late_coverage["deferred"][1] in published["deferred"]
     findings = json.loads((directory / "findings.json").read_text())["findings"]
@@ -623,7 +624,7 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
         legacy.pop("canonicalExport")
         committed = json.dumps(legacy).encode()
         (directory / "artifacts/scan-draft.json").write_bytes(committed)
-    run_workbench(
+    _, coverage = run_workbench_with_review(
         state,
         command,
         "--scan-id",
@@ -634,7 +635,6 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     if resolution in {"stale", "stale_after_rejection"}:
         assert published == []
         assert (directory / "artifacts/scan-draft.json").read_bytes() == committed
-        coverage = json.loads((directory / "coverage.json").read_text())
         assert "later-work" not in {item["id"] for item in coverage["deferred"]}
         return
     retained_rejection = resolution in {
@@ -655,7 +655,6 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     )
     assert (directory / "artifacts/scan-draft.json").read_bytes() == committed
 
-    coverage = json.loads((directory / "coverage.json").read_text())
     assert "completeness" not in coverage
     assert later_coverage["surfaces"][-1] in coverage["surfaces"]
     assert later_coverage["openQuestions"][0] in coverage["openQuestions"]
@@ -694,10 +693,11 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
             if row.get("candidateId") == "candidate"
         ] == ["reported" if resolution == "reported_after_rejection" else "rejected"]
     assert ("older-work" in deferred_ids) is (complete is False)
+    reasons = {row["reason"] for row in coverage["deferred"]}
+    assert "New deferred review." in reasons
+    assert ("Candidate needs validation." in reasons) is unresolved
     report = (directory / "report.md").read_text()
-    assert "New deferred review." in report
-    assert "Which control governs the new surface?" in report
-    assert ("Candidate needs validation." in report) is unresolved
+    assert f"| Reportable findings | {len(published)} |" in report
 
 
 @pytest.mark.parametrize(

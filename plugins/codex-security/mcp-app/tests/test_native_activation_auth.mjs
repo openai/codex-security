@@ -13,7 +13,14 @@ const sourceUrl = new URL("../src/native-scan.ts", import.meta.url);
 const bundle = await build({
   bundle: true,
   entryPoints: [fileURLToPath(sourceUrl)],
-  define: { "import.meta.url": JSON.stringify(sourceUrl.href) },
+  define: {
+    "import.meta.url": JSON.stringify(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+        import.meta.url,
+      ).href,
+    ),
+  },
   format: "cjs",
   platform: "node",
   write: false,

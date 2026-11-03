@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { lstat } from "node:fs/promises";
 import { readScanFile } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
@@ -108,11 +108,17 @@ export async function loadDeepScanCheckpointSummary(
     // errors, including the artifact reader's existing path protections.
     const cause =
       error instanceof Error
-        ? (error.cause as
-            (NodeJS.ErrnoException & { path?: string }) | undefined)
+        ? (error.cause as NodeJS.ErrnoException | undefined)
         : undefined;
-    if (cause?.code === "ENOENT" && cause.path !== resolve(scanDir))
-      return null;
+    if (cause?.code === "ENOENT") {
+      const root = await lstat(scanDir).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+          return undefined;
+        },
+      );
+      if (root?.isDirectory()) return null;
+    }
     throw error;
   }
 }

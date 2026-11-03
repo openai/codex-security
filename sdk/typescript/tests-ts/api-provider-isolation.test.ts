@@ -374,7 +374,9 @@ test.each([
                     for (const [name, value] of Object.entries(
                       providerEnvironment,
                     )) {
-                      expect(environment[name]).toBe(value);
+                      expect(environment[name]).toBe(
+                        name === provider.env_key ? value.trim() : value,
+                      );
                     }
                     const persistedPath = join(sharedHome, "config.toml");
                     const persisted = parseToml(

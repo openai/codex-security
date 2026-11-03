@@ -35,7 +35,7 @@ import {
   ScanCostTrackingError,
 } from "../src/deep-scan.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
-import { readReviewState } from "./support/review-state.js";
+import { acceptedReviewCheckpoint } from "./support/review-state.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 
 import { DeepScanProgressTracker } from "../src/deep-progress.js";
@@ -87,7 +87,9 @@ test.each(["active", "completed"] as const)(
     const findings = JSON.parse(
       await readFile(join(h.outputDir, "findings.json"), "utf8"),
     );
-    const coverage = await readReviewState(h.outputDir);
+    const { reviewState: coverage } = await acceptedReviewCheckpoint(
+      h.outputDir,
+    );
     expect(findings.findings).toHaveLength(1);
     expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.deferred).toContainEqual(
@@ -935,8 +937,9 @@ test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", 
       reason: deferredReason,
     }),
   ]);
-  expect(await readFile(join(h.outputDir, "report.md"), "utf8")).toContain(
-    deferredReason,
+  const { reviewState } = await acceptedReviewCheckpoint(h.outputDir);
+  expect(reviewState.deferred).toContainEqual(
+    expect.objectContaining({ reason: deferredReason }),
   );
   expect(h.launches).toHaveLength(0);
 });

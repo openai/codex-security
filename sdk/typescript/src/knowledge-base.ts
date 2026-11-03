@@ -176,7 +176,10 @@ export async function prepareKnowledgeBase(
       path,
       sources: [...snapshot.sources],
       protectedRoots,
-      snapshot,
+      snapshot:
+        snapshot.protectedRoots === undefined
+          ? { ...snapshot, protectedRoots }
+          : snapshot,
       // Keep the persisted document identity independent of execution metadata.
       sha256: snapshotDigest(snapshot),
       cleanup: () => rm(path, { recursive: true, force: true }),

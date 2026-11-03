@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shlex
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -50,6 +51,31 @@ def published_artifacts(scan_dir: Path) -> dict[str, bytes]:
     if "coverageRef" in scan:
         names.append("coverage.json")
     return {name: (scan_dir / name).read_bytes() for name in names}
+
+
+def run_workbench_with_review(state: Path, command: str, *arguments: str) -> tuple[dict, dict]:
+    """Run the workbench command and inspect the review passed to its compact publisher."""
+    db = load_script("workbench_db")
+    publisher = db.saved_results if command in {"cancel-scan", "fail-scan"} else db
+    publish = publisher._write_prepared_scan_finalization
+    reviews = []
+
+    def capture(prepared, **kwargs):
+        reviews.append(prepared.coverage)
+        return publish(prepared, **kwargs)
+
+    output = io.StringIO()
+    with (
+        io.TextIOWrapper(io.BytesIO()) as stdin,
+        mock.patch.object(sys, "stdin", stdin),
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state)}),
+        mock.patch.object(sys, "argv", [str(SCRIPT), command, *arguments]),
+        mock.patch.object(publisher, "_write_prepared_scan_finalization", capture),
+        redirect_stdout(output),
+    ):
+        db.main()
+    (review,) = reviews
+    return json.loads(output.getvalue()), review
 
 
 def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:

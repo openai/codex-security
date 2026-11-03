@@ -1,3 +1,4 @@
+import { acceptedReviewCheckpoint } from "./support/review-state.js";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -184,16 +185,17 @@ test("projects child deferred closures without applying them to the parent", asy
     workbench,
   );
   await workbench(["complete-scan", "--scan-id", h.fixture.sourceScanId]);
+  const { path: checkpointPath, reviewState: childCoverage } =
+    await acceptedReviewCheckpoint(h.source);
   const sourcePaths = [
     "scan-manifest.json",
     "findings.json",
-    "coverage.json",
+    checkpointPath,
     "report.md",
   ];
   const original = await Promise.all(
     sourcePaths.map((path) => readFile(join(h.source, path))),
   );
-  const childCoverage = JSON.parse(original[2]!.toString("utf8"));
   expect(childCoverage.resolvedDeferred).toEqual([
     { id: closed.id, reason: "Review is complete." },
   ]);

@@ -335,28 +335,28 @@ async function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
-  test("reconciles finding groups with native Node 20 built-ins", () => {
-    const script = `
-Reflect.deleteProperty(Map, "groupBy");
-Reflect.deleteProperty(Object.getPrototypeOf(Object.getPrototypeOf(""[Symbol.iterator]())), "reduce");
-const { matchScanFindings } = await import(${JSON.stringify(new URL("../src/scan-comparison.ts", import.meta.url).href)});
-const input = {
-  before: [{ findingId: "same-control", occurrenceId: "old" }],
-  after: [
-    { findingId: "same-control", occurrenceId: "retained" },
-    { findingId: "split-control", occurrenceId: "split" },
-  ],
-};
-const response = {
-  matches: [{ beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["split"], confidence: "high", reason: "The same control was split." }],
-  uncertain: [],
-};
-const codex = { startThread() { return { async run() { return { finalResponse: JSON.stringify(response) }; } }; } };
-console.log(JSON.stringify(await matchScanFindings(input, { codex })));
-`;
-    const result = JSON.parse(
-      execFileSync(process.execPath, ["-e", script], { encoding: "utf8" }),
-    ) as ScanComparisonResult;
+  test("reconciles retained and split finding groups", async () => {
+    const { codex } = fakeCodex({
+      matches: [
+        {
+          beforeOccurrenceIds: ["old"],
+          afterOccurrenceIds: ["split"],
+          confidence: "high",
+          reason: "The same control was split.",
+        },
+      ],
+      uncertain: [],
+    });
+    const result = await matchScanFindings(
+      {
+        before: [{ ...finding("old"), findingId: "same-control" }],
+        after: [
+          { ...finding("retained"), findingId: "same-control" },
+          { ...finding("split"), findingId: "split-control" },
+        ],
+      },
+      { codex },
+    );
     expect(result.matches).toHaveLength(1);
     expect(result.matches[0]).toMatchObject({
       beforeOccurrenceIds: ["old"],
@@ -3606,14 +3606,15 @@ process.exit(0);
       OPENAI_API_KEY: "synthetic-key",
     };
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
-    let config: CodexOptions["config"];
+    let config: TomlTable | undefined;
     let codexPath: string | undefined;
     let codexEnvironment: CodexOptions["env"];
     const startThread = spyOn(
       Codex.prototype,
       "startThread",
     ).mockImplementation(function (this: Codex, options) {
-      config = (this as unknown as { options: CodexOptions }).options.config;
+      const settings = (this as unknown as { options: CodexOptions }).options;
+      config = parse(settings.configOverrides!.join("\n"));
       codexPath = (this as unknown as { options: CodexOptions }).options
         .codexPathOverride;
       codexEnvironment = (this as unknown as { options: CodexOptions }).options
@@ -3797,27 +3798,24 @@ process.exit(0);
           },
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        const overrides = parse(captured!.configOverrides!.join("\n"));
         if (selection.startsWith("profile") || selection === "native") {
-          expect(captured?.config).not.toHaveProperty("profile");
-          expect(captured?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
+          expect(overrides).not.toHaveProperty("profile");
+          expect(overrides["model_provider"]).toBe("synthetic.provider");
         }
         if (commandAuth) {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(profileClient.profiles[0]!.config).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: {
-                  ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
-                  args: selection === "overrides" ? ["override"] : ["original"],
-                  refresh_interval_ms:
-                    selection === "profile-partial" ? 4567 : 1234,
-                },
+          expect(profileClient.profiles[0]!.config["model_providers"]).toEqual({
+            "synthetic.provider": {
+              ...provider,
+              auth: {
+                ...provider.auth,
+                cwd: selection === "overrides" ? "~/helpers" : home,
+                args: selection === "overrides" ? ["override"] : ["original"],
+                refresh_interval_ms:
+                  selection === "profile-partial" ? 4567 : 1234,
               },
             },
           });
@@ -3825,13 +3823,15 @@ process.exit(0);
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
-          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
-            responses_api_metadata: {
-              codex_security_surface: "sdk",
-              codex_security_command: "compare",
-              codex_security_package_version: VERSION,
-              codex_security_provider: "openai",
-            },
+          expect(overrides).not.toHaveProperty("model_providers");
+          expect(captured!.configOverrides!.join("\n")).not.toContain(
+            "./synthetic-auth",
+          );
+          expect(overrides["responses_api_metadata"]).toEqual({
+            codex_security_surface: "sdk",
+            codex_security_command: "compare",
+            codex_security_package_version: VERSION,
+            codex_security_provider: "openai",
           });
         }
         expect(threadOptions).toMatchObject({

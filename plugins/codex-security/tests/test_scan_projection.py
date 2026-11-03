@@ -9,7 +9,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from workbench_test_support import checkpoint, register, run_workbench, write_completed_contract
+from workbench_test_support import (
+    checkpoint,
+    published_artifacts,
+    register,
+    run_workbench,
+    write_completed_contract,
+)
 
 
 @pytest.fixture
@@ -121,6 +127,7 @@ def test_completed_projection_pairs_candidate_coverage_and_keeps_child_reports_d
 
     assert len(set(candidate_ids)) == 2
     manifest = json.loads((child_dir / "scan-manifest.json").read_text())
+    manifest["scan"]["mode"] = coverage_mode
     coverage["mode"] = coverage_mode
     coverage["inventoryStrategy"] = (
         "scoped_path" if coverage_mode == "scoped_path" else "repository"
@@ -208,10 +215,7 @@ def test_completed_projection_rejects_rewritten_saved_scan(
         manifest["scan"]["target"]["displayName"] = "Different target"
         message = "target displayName must match the workbench target"
     manifest_path.write_text(json.dumps(manifest))
-    source_bytes = {
-        name: (child_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
-    }
+    source_bytes = published_artifacts(child_dir)
     listed = run_workbench(state, "list-scans", "--scan-root", str(child_dir))["scans"]
     assert len(listed) == 1
     assert listed[0]["scanId"] == child["scanId"]

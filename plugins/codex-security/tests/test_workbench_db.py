@@ -34,6 +34,7 @@ from workbench_test_support import (
     read_review_state,
     register,
     run_workbench,
+    run_workbench_with_review,
     save_workspace,
     scan_claim_command,
     scan_command,
@@ -182,11 +183,20 @@ def test_budget_completion_preserves_ordinary_aggregate_and_unresolved_work(
         }
     ]
     coverage_path.write_text(json.dumps(coverage))
-    completed = complete_budget_scan(state, scan_id)["scan"]
+    result, retained = run_workbench_with_review(
+        state,
+        "complete-budget-exhausted-scan",
+        "--scan-id",
+        scan_id,
+        "--cost-json",
+        json.dumps(BUDGET_COST),
+        "--message",
+        BUDGET_WARNING,
+    )
+    completed = result["scan"]
     assert completed["progress"]["status"] == "complete"
     assert completed["cost"] == BUDGET_COST
     assert completed["findingCount"] == len(findings)
-    retained = json.loads(coverage_path.read_text())
     assert "completeness" not in retained
     assert any(row["reason"] == coverage["deferred"][0]["reason"] for row in retained["deferred"])
     assert any(row["reason"] == BUDGET_WARNING for row in retained["deferred"])

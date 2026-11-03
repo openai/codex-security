@@ -60,6 +60,7 @@ const cases: {
   complete?: boolean;
   mutation?: Mutation;
   accepted: boolean;
+  canonicalAccepted?: boolean;
 }[] = [
   { name: "scope notes", complete: true, accepted: true },
   {
@@ -74,7 +75,12 @@ const cases: {
     mutation: "legacy-details",
     accepted: false,
   },
-  { name: "legacy surface ID", mutation: "legacy-surface", accepted: false },
+  {
+    name: "legacy surface ID",
+    mutation: "legacy-surface",
+    accepted: false,
+    canonicalAccepted: true,
+  },
   { name: "unfinished checkpoint", complete: false, accepted: false },
   { name: "missing findings", mutation: "missing-findings", accepted: false },
   {
@@ -217,17 +223,26 @@ describe.each(["standard", "deep"] as const)(
           scanId,
         );
 
-        if (scenario.accepted) {
+        const manifest = JSON.parse(
+          await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
+        );
+        if (scenario.canonicalAccepted ?? scenario.accepted) {
           expect(standard.error).toBe(standard.finalization);
           expect(standard.finalizations).toBe(1);
-          const canonicalDraft = parseCanonicalScanDraft({
+        } else {
+          expect(standard.error).toBeInstanceOf(Error);
+          expect(standard.error).not.toBe(standard.finalization);
+          expect(standard.finalizations).toBe(0);
+        }
+        const parseDraft = () =>
+          parseCanonicalScanDraft({
             scanId,
-            manifest: JSON.parse(
-              await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
-            ),
+            manifest,
             findings,
             reviewState: coverage,
           });
+        if (scenario.accepted) {
+          const canonicalDraft = parseDraft();
           expect(canonicalDraft.coverage).not.toHaveProperty("completeness");
           expect(canonicalDraft.coverage.deferred).toEqual(
             semantic.coverage["deferred"],
@@ -239,14 +254,9 @@ describe.each(["standard", "deep"] as const)(
               limitations: ["Legacy persisted limitation."],
             });
           }
-        } else {
-          expect(standard.error).toBeInstanceOf(Error);
-          expect(standard.error).not.toBe(standard.finalization);
-          expect(standard.finalizations).toBe(0);
+        } else if (scenario.canonicalAccepted) {
+          expect(parseDraft).toThrow();
         }
-        const manifest = JSON.parse(
-          await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
-        );
         expect(manifest.scan.sealedAt).toBeUndefined();
         await expect(
           readFile(join(standardRoot, "report.md")),

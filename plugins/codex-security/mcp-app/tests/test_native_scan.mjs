@@ -43,6 +43,7 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+      export { resolveNativeParentSandbox } from ${JSON.stringify(fileURLToPath(new URL("../src/native-permissions.ts", import.meta.url)))};
       export { saveScanKnowledge, scanInputIdentity } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-inputs.ts", import.meta.url)))};
       export { readKnowledgeBaseSnapshot, prepareKnowledgeBase } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/knowledge-base.ts", import.meta.url)))};
       export { mergedCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/config.ts", import.meta.url)))};
@@ -100,6 +101,7 @@ new Function(
 )(createRequire(import.meta.url), module, module.exports, nativeFixture);
 const {
   NativeScanHost,
+  resolveNativeParentSandbox,
   saveScanKnowledge,
   scanInputIdentity,
   readKnowledgeBaseSnapshot,
@@ -966,7 +968,13 @@ test("native prompt sources follow selected and saved path semantics before exec
     ])
       await mkdir(directory, { recursive: true, mode: 0o700 });
     await mkdir(join(guidance, ".git"));
-    await writeFile(instructions, "Synthetic selected model instructions.");
+    if (process.platform === "win32") {
+      await writeFile(instructions, "Synthetic selected model instructions.");
+    } else {
+      const destination = join(repository, "instructions.md");
+      await writeFile(destination, "Synthetic selected model instructions.");
+      await symlink(destination, instructions);
+    }
     for (const directory of [guidance, external])
       await writeFile(join(directory, name), "inert executable fixture", {
         mode: 0o700,
@@ -2038,7 +2046,11 @@ test(
       scanDir: join(root, fixture.id, "scan"),
       capture: join(root, `${fixture.id}.jsonl`),
       stateDirectory: join(root, fixture.id, "selected state "),
-      workspaceAccess: index % 2 === 0 ? "read" : "write",
+      parentRoot:
+        index === 0
+          ? join(root, fixture.id, "repository")
+          : join(root, fixture.id),
+      outputWritable: index % 2 === 1,
       deniedPath: join(root, fixture.id, "repository", "private"),
       sandboxResolutions: 0,
     }));
@@ -2069,7 +2081,13 @@ else {
       );
       for (const fixture of cases) {
         await mkdir(fixture.home, { recursive: true });
-        await mkdir(fixture.repository);
+        await mkdir(fixture.scanDir);
+        if (fixture.id === "saved-absent") {
+          await mkdir(join(root, "outside"));
+          await symlink(join(root, "outside"), fixture.repository, "dir");
+        } else {
+          await mkdir(fixture.repository);
+        }
         await writeFile(
           join(fixture.home, "config.toml"),
           'forced_login_method = "api"\n',
@@ -2102,12 +2120,48 @@ else {
             },
             parentSandbox: () => {
               fixture.sandboxResolutions++;
-              return {
-                workspaceAccess: fixture.workspaceAccess,
-                filesystemDenies: [fixture.deniedPath],
-              };
+              return resolveNativeParentSandbox({
+                _meta: {
+                  "codex/sandbox-state-meta": {
+                    sandboxCwd: pathToFileURL(fixture.parentRoot).href,
+                    permissionProfile: {
+                      type: "managed",
+                      file_system: {
+                        type: "restricted",
+                        entries: [
+                          {
+                            path: { type: "special", value: { kind: "root" } },
+                            access: "read",
+                          },
+                          {
+                            path: {
+                              type: "special",
+                              value: { kind: "project_roots" },
+                            },
+                            access: "write",
+                          },
+                          {
+                            path: { type: "path", path: fixture.deniedPath },
+                            access: "deny",
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              });
             },
-            ...(fixture.recipe === undefined ? {} : { recipe: fixture.recipe }),
+            ...(fixture.recipe === undefined
+              ? {}
+              : {
+                  recipe: {
+                    ...fixture.recipe,
+                    inheritedPermissions: {
+                      filesystem: { ":workspace_roots": "write" },
+                      network: { enabled: false },
+                    },
+                  },
+                }),
           });
         }),
       );
@@ -2204,9 +2258,10 @@ else {
               const config = Object.assign({}, ...fragments);
               const filesystem =
                 config.permissions[config.default_permissions].filesystem;
+              assert.equal(filesystem[":workspace_roots"], "read");
               assert.equal(
-                filesystem[":workspace_roots"],
-                fixture.workspaceAccess,
+                filesystem[await realpath(fixture.scanDir)]?.["."],
+                fixture.outputWritable ? "write" : undefined,
               );
               assert.equal(filesystem[fixture.deniedPath], "deny");
               for (const other of cases)

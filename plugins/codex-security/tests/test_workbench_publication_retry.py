@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 from test_workbench_stopped_worker_coverage import child_scan, composed_scan
-from workbench_test_support import register, run_workbench, write_completed_contract
+from workbench_test_support import (
+    read_review_state,
+    register,
+    run_workbench,
+    write_completed_contract,
+)
 
 
 def test_canceled_composition_retries_publication_after_io_failure(
@@ -66,6 +71,17 @@ def test_legacy_sealed_results_survive_publication_failure_and_retry(
     run_workbench(state, "fail-scan", "--scan-id", scan["scanId"], "--message", "Synthetic stop")
     manifest_path = directory / "scan-manifest.json"
     legacy = json.loads(manifest_path.read_text())
+    coverage_bytes = json.dumps(read_review_state(state, directory)).encode()
+    (directory / "coverage.json").write_bytes(coverage_bytes)
+    legacy["scan"]["artifacts"].append(
+        {
+            "path": "coverage.json",
+            "mediaType": "application/json",
+            "sha256": hashlib.sha256(coverage_bytes).hexdigest(),
+        }
+    )
+    legacy["scan"].pop("review")
+    legacy["scan"]["coverageRef"] = "coverage.json"
     legacy["scan"]["status"] = "completed"
     legacy["scan"].pop("preservedSources", None)
     manifest_path.write_text(json.dumps(legacy))

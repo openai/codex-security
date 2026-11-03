@@ -16,7 +16,6 @@ import {
   environmentValue,
   definedEnvironment,
   withoutCodexHome,
-  withoutOpenAiApiKeys,
   type ScanAuthentication,
 } from "./execution-auth.js";
 export {
@@ -150,6 +149,7 @@ import {
   loginApiKey as persistApiKey,
   logout as codexLogout,
   type AccountStatus,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import { jsonForPrompt, shellEnvironmentReference } from "./codex-prompt.js";
 import {
@@ -874,7 +874,6 @@ export class CodexSecurity {
               status: "completed",
               usage: usage ?? (cost === null ? null : scanCostUsage(cost)),
             },
-            cost,
           };
         } else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
@@ -2320,7 +2319,7 @@ export class CodexSecurity {
         let git: InspectedExecutable = { executable: null, environment };
         for (const root of [
           (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
-          ...(knowledgeBase?.snapshot.protectedRoots ?? []),
+          ...(knowledgeBase?.protectedRoots ?? []),
         ]) {
           git = await inspectTrustedExecutable("git", git.environment, root);
         }
@@ -2513,7 +2512,7 @@ export class CodexSecurity {
       };
       for (const root of [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
-        ...(knowledgeBase?.snapshot.protectedRoots ?? []),
+        ...(knowledgeBase?.protectedRoots ?? []),
       ]) {
         git = await inspectTrustedExecutable("git", git.environment, root);
         if (this.#dependencies.hostedScan !== undefined) {
@@ -4596,9 +4595,16 @@ export class CodexSecurity {
                 const request = {
                   version: 2 as const,
                   requestId: randomUUID(),
-                  ...hosted.context,
+                  ...structuredClone(hosted.context),
                   scanId: runtimePaths["CODEX_SECURITY_SCAN_ID"]!,
-                  prompt,
+                  prompt: hosted.context.severityRubric
+                    ? [
+                        prompt,
+                        severityRubricInstructions(
+                          hosted.context.severityRubric,
+                        ),
+                      ].join("\n")
+                    : prompt,
                   ...model,
                   runtime: {
                     pluginRoot: session.runtime.plugin.pluginRoot,
@@ -4877,7 +4883,7 @@ export class CodexSecurity {
         ? runtimeEnvironment
         : selectedScanEnvironment(
             commandAuth
-              ? withoutOpenAiApiKeys(runtimeEnvironment)
+              ? configuredAuthEnvironment(runtimeEnvironment)
               : runtimeEnvironment,
             options.auth,
             modelProvider,
@@ -5850,7 +5856,9 @@ async function prepareSavedScanRecipe({
       };
     }
   }
-  let replay = scanReplaySettings(session.sessionConfig);
+  let replay = scanReplaySettings(
+    resolveExecutionPaths(session.sessionConfig, scanDir, source.environment),
+  );
   if (fileProfile) {
     config["profile"] = profileName;
     delete config["skills"];

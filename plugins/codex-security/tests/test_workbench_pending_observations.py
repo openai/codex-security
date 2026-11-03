@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from test_workbench_checkpoint_heads import saved, select
 from workbench_test_support import (
+    read_review_state,
     register,
     run_workbench,
     saved_binding,
@@ -194,7 +195,7 @@ def test_stopping_after_acknowledged_progress_retains_completed_tasks(
         scan["scanId"],
         *(("--message", "Synthetic interruption") if action == "fail-scan" else ()),
     )
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert coverage["resolvedDeferred"] == [closure]
     assert remaining in coverage["deferred"]
 

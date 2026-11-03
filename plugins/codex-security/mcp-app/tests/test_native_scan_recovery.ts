@@ -12,12 +12,7 @@ const applicationRoot = path.resolve(import.meta.dirname, "..");
 const pluginRoot =
   process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
   path.resolve(applicationRoot, "../../../sdk/typescript/_bundled_plugin");
-const artifacts = [
-  "scan-manifest.json",
-  "findings.json",
-  "coverage.json",
-  "report.md",
-];
+const artifacts = ["scan-manifest.json", "findings.json", "report.md"];
 type FixtureState =
   "completed" | "sealed-running" | "fresh" | "unsealed" | "post-scan";
 type SandboxMetadata = "missing" | "unsupported" | "valid";
@@ -192,7 +187,7 @@ async function fixture(state: FixtureState) {
           scanId,
           handoffClaimToken,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
             explicitExclusions: [],

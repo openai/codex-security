@@ -47,6 +47,7 @@ const bundle = await build({
           export function scanInputIdentity() { throw new Error("unexpected target semantic identity read"); }`,
           "node:child_process": `
           import { PassThrough } from "node:stream";
+          export function spawn() { throw new Error("unexpected child process"); }
           export function execFile() {}
           execFile[Symbol.for("nodejs.util.promisify.custom")] = () => {
             const stdin = new PassThrough();

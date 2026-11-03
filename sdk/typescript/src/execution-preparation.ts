@@ -6,6 +6,7 @@ import {
   accountStatus,
   configuredCodexHome,
   readCodexHomeConfig,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import { resolveConfigPath } from "./config-path.js";
@@ -43,7 +44,6 @@ import {
   environmentValue,
   selectedScanEnvironment,
   withoutCodexHome,
-  withoutOpenAiApiKeys,
   definedEnvironment,
   type ScanAuthentication,
 } from "./execution-auth.js";
@@ -158,7 +158,7 @@ export function prepareExecutionSource(input: {
     environment: preserveProviderEnvironment
       ? environment
       : selectedScanEnvironment(
-          commandAuth ? withoutOpenAiApiKeys(environment) : environment,
+          commandAuth ? configuredAuthEnvironment(environment) : environment,
           input.auth,
           modelProvider,
           providerEnvKey,
@@ -365,7 +365,7 @@ export async function createExecutionCodex(
     preserveProviderEnvironment
       ? environment
       : {
-          ...withoutOpenAiApiKeys(environment),
+          ...configuredAuthEnvironment(environment),
           ...(externalProvider === null || apiKey === null
             ? {}
             : { [externalProvider.env_key]: apiKey }),

@@ -763,9 +763,26 @@ async function testSemanticScanDraftCompletion() {
       findings: [finding],
       reviewState: { ...coverage },
     };
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", checkpoint),
+    const threatModel = {
+      summary: "Legacy structured model.",
+      format: "markdown",
+      content: "# Saved model\r\n\r\n    Preserve  spacing.\r\n",
+      origin: false,
+      scope: { includePaths: ["src/[api]"] },
+    };
+    const firstDraft = requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...checkpoint,
+        threatModel,
+      }),
     );
+    assert.equal(firstDraft.warnings, undefined);
+    const documentPath = path.join(scanDirectory, "threatmodel.md");
+    const savedDocument = await readFile(documentPath, "utf8");
+    assert.ok(savedDocument.startsWith(threatModel.content));
+    assert.match(savedDocument, /Model origin: not recorded\n/);
+    assert.match(savedDocument, /Model scope: src\/\\\[api\\\]\n/);
+    assert.match(savedDocument, /provisional/);
     const savedFindings = JSON.parse(
       await readFile(path.join(scanDirectory, "findings.json"), "utf8"),
     );
@@ -805,6 +822,11 @@ async function testSemanticScanDraftCompletion() {
     );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
+    );
+    assert.equal(await readFile(documentPath, "utf8"), savedDocument);
+    assert.deepEqual(
+      (await readJson(scanDirectory, "scan-manifest.json")).scan.threatModel,
+      threatModel,
     );
     const validation = await progress();
     assert.equal(validation.phase, "validation");
@@ -1072,6 +1094,27 @@ async function testClaimedParentArtifactOperations() {
     );
     assert.equal(reloaded.scan.continuationThreadId, executionThread);
     assertPrivateRecipeOmitted(reloadedResult, recipe, "reloaded context");
+    requireToolError(
+      await call("list_codex_security_review_items", { scanId }),
+      /requires its current continuation claim/,
+      "loading the owner context alone cannot claim a different execution thread",
+    );
+    runWorkbenchFixture(environment, [
+      "set-scan-thread",
+      "--scan-id",
+      scanId,
+      "--claim-token",
+      claimToken,
+      "--thread-id",
+      ownerThread,
+    ]);
+    requireSuccessfulTool(
+      await call("get_codex_security_scan_context", {
+        scanId,
+        handoffClaimToken: claimToken,
+      }),
+      "authenticate the current continuation before accessing its artifacts",
+    );
     const progressResult = await call("update_codex_security_scan_progress", {
       scanId,
       handoffClaimToken: claimToken,

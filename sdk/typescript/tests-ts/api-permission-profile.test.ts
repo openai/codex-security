@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { stringify } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
-import type { JsonObject } from "../src/config.js";
+import { DEFAULT_CODEX_CONFIG, type JsonObject } from "../src/config.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
@@ -169,16 +169,6 @@ async function fixture(
             'record({ kind: "plugin-selection", marker: servers.find(({ name }) => name === "synthetic-plugin")?.transport.args[0] });',
           ]
         : []),
-      "if (config.profile !== undefined) {",
-      '  const result = require("node:child_process").spawnSync(' +
-        JSON.stringify(
-          executablePathForSpawn(resolveCodexCommand({}).command),
-        ) +
-        ', ["mcp", "list", "--json", ...overrides], { encoding: "utf8" });',
-      '  record({ kind: "profile-validation", exitCode: result.status, stderr: result.stderr });',
-      '  process.stderr.write(result.stderr ?? "");',
-      "  process.exit(result.status ?? 1);",
-      "}",
       'if (args.includes("mcp")) {',
       '  const result = require("node:child_process").spawnSync(' +
         JSON.stringify(
@@ -526,7 +516,6 @@ async function fixture(
             for (const file of [
               "scan-manifest.json",
               "findings.json",
-              "coverage.json",
               "report.md",
             ])
               completedArtifacts.set(file, await readFile(join(scanDir, file)));
@@ -1070,7 +1059,7 @@ test.each(["rejected", "fallback"] as const)(
       ).toHaveLength(1);
       expect(h.commands).not.toContain("save-scan-comparison");
       expect(h.commands).not.toContain("fail-scan");
-      expect(h.completedArtifacts.size).toBe(4);
+      expect(h.completedArtifacts.size).toBe(3);
       for (const [file, bytes] of h.completedArtifacts)
         expect(await readFile(join(h.scanDir, file))).toEqual(bytes);
     } finally {
@@ -1171,7 +1160,7 @@ test.each([
         h.commands.filter((command) => command === "complete-scan"),
       ).toHaveLength(1);
       expect(h.commands).not.toContain("fail-scan");
-      expect(h.completedArtifacts.size).toBe(4);
+      expect(h.completedArtifacts.size).toBe(3);
       for (const [file, bytes] of h.completedArtifacts)
         expect(await readFile(join(h.scanDir, file))).toEqual(bytes);
     } finally {
@@ -1187,21 +1176,23 @@ test.each([
   ["merge", false],
   ["merge", true],
 ] as const)(
-  "unresolved profiles reach native validation for %s execution (resumed: %p)",
+  "a missing file profile preserves base settings for %s execution (resumed: %p)",
   async (role, resumed) => {
     const h = await fixture(role, resumed, "fallback", "sdk", false, "missing");
     try {
       await expect(h.run()).rejects.toThrow();
       const observations = await h.observations();
-      expect(observations[0]?.kind).toBe(
-        role === "standard" ? "exec" : "preflight",
+      expect(observations.map(({ kind }) => kind)).toEqual(
+        role === "standard" ? ["exec"] : ["preflight", "exec"],
       );
-      expect(observations[0]?.selectedProfile).toBe("missing");
-      const validation = observations.find(
-        ({ kind }) => kind === "profile-validation",
-      );
-      expect(validation).toMatchObject({ exitCode: 1 });
-      expect(validation.stderr).toContain("missing");
+      for (const child of observations) {
+        expect(child).toMatchObject({
+          selectedProfile: null,
+          model: DEFAULT_CODEX_CONFIG["model"],
+          endpoint: "https://overridden.example.test/v1",
+        });
+      }
+      expect(observations.at(-1)?.args.includes("resume")).toBe(resumed);
       expect(h.commands).not.toContain("complete-scan");
     } finally {
       await h.close();

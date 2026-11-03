@@ -24,6 +24,7 @@ from workbench_test_support import (
     recipe,
     register,
     run_workbench,
+    run_workbench_with_review,
     write_checkpoint,
     write_completed_contract,
 )
@@ -106,8 +107,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     (report_dir / "trace.txt").write_text("Synthetic supporting evidence\n")
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
     names = ("scan-manifest.json", "findings.json")
-    child_names = (*names, "coverage.json")
-    child_bytes = {name: (child_dir / name).read_bytes() for name in child_names}
+    child_bytes = published_artifacts(child_dir)
     saved = checkpoint(
         state,
         parent,
@@ -122,7 +122,8 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
             child["scanId"],
             child_dir,
             parent_dir,
-            *(json.loads(child_bytes[name]) for name in child_names),
+            *(json.loads(child_bytes[name]) for name in names),
+            read_review_state(state, child_dir),
         )["draft"]
         run_workbench(
             state,
@@ -196,7 +197,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     report = parent_dir / retained["writeup"]["reportPath"]
     assert report.read_bytes() == (report_dir / "proof.md").read_bytes()
     assert (report.parent / "trace.txt").read_bytes() == (report_dir / "trace.txt").read_bytes()
-    assert {name: (child_dir / name).read_bytes() for name in child_names} == child_bytes
+    assert {name: (child_dir / name).read_bytes() for name in child_bytes} == child_bytes
     assert (parent_dir / CHECKPOINT).read_bytes() == composition_bytes
 
     published = {name: (parent_dir / name).read_bytes() for name in (*names, "report.md")}
@@ -2076,14 +2077,7 @@ def test_stop_before_first_merge_preserves_ordinary_children(
         if child_state == "complete":
             run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
             findings = json.loads(findings_path.read_text())["findings"]
-            protected = {
-                name: (directory / name).read_bytes()
-                for name in (
-                    "scan-manifest.json",
-                    "findings.json",
-                    "coverage.json",
-                )
-            }
+            protected = published_artifacts(directory)
         else:
             write_checkpoint(
                 directory / "checkpoints",
@@ -2327,10 +2321,10 @@ def test_native_budget_completion_checks_claim_before_publication(
     rejected = run_workbench(state, *arguments, check=False)
     assert "owned by another continuation" in rejected["stderr"]
     assert (directory / "coverage.json").read_bytes() == original
-    completed = run_workbench(state, *arguments, "--claim-token", token)["scan"]
+    result, coverage = run_workbench_with_review(state, *arguments, "--claim-token", token)
+    completed = result["scan"]
     assert completed["progress"]["status"] == "complete"
     assert completed["cost"] == cost
-    coverage = json.loads((directory / "coverage.json").read_text())
     assert "completeness" not in coverage
     assert any(row["id"] == "scan-cost-limit" for row in coverage["deferred"])
     joined = run_workbench(
@@ -3207,10 +3201,7 @@ def test_native_stop_retains_accepted_and_later_unmerged_findings(
             directory, child["scanId"], target, relative_path="app.py", identity_anchor=anchor
         )
         run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-        protected = {
-            name: (directory / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        }
+        protected = published_artifacts(directory)
         children.append((child, directory, protected))
     first, _, first_bytes = children[0]
     original = json.loads(first_bytes["findings.json"])["findings"][0]

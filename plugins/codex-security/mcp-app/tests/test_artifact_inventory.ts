@@ -335,22 +335,18 @@ async function testInventoryChildPreservesRawPaths() {
       ),
     },
   });
-  const octal = (value: Buffer) =>
-    [...value]
-      .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
-      .join("");
   const { stdout } = await execFile(
-    "/bin/sh",
+    process.env.PYTHON ?? "python3",
     [
       "-c",
-      [
-        // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
-        'HOME=$(printf "/fixture/home-\\377"); export HOME',
-        `GIT_CONFIG_GLOBAL=$(printf '%b' '${octal(config)}'); export GIT_CONFIG_GLOBAL`,
-        `CODEX_SECURITY_GIT=$(printf '%b' '${octal(git)}'); export CODEX_SECURITY_GIT`,
-        'exec "$1" "$2"',
-      ].join("\n"),
-      "inventory-fixture",
+      // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
+      String.raw`import os, sys
+os.environb[b"HOME"] = b"/fixture/home-\xff"
+os.environb[b"GIT_CONFIG_GLOBAL"] = bytes.fromhex(sys.argv[1])
+os.environb[b"CODEX_SECURITY_GIT"] = bytes.fromhex(sys.argv[2])
+os.execv(sys.argv[3], sys.argv[3:])`,
+      config.toString("hex"),
+      git.toString("hex"),
       process.execPath,
       driver,
     ],

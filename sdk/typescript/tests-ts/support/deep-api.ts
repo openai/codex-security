@@ -524,10 +524,11 @@ export function createDeepApiFixtures() {
                       !prompt.endsWith("Write follow-up notes")
                     ) {
                       if (reducerFailure) throw reducerFailure;
-                      if (prompt.startsWith("Compare every finding")) {
-                        const { findings } = JSON.parse(
-                          prompt.split("\n").at(-1)!,
-                        );
+                      const catalogue = prompt
+                        .split("\n")
+                        .find((line) => line.startsWith('{"page":'));
+                      if (catalogue !== undefined) {
+                        const { findings } = JSON.parse(catalogue);
                         matchingDecision = {
                           matches: mergeDuplicates
                             ? [

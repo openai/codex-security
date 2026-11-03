@@ -622,6 +622,8 @@ for (const [promptFile, scenario] of [
 ].flatMap((promptFile) =>
   [
     "instruction-repository-PATH",
+    "symlink-instruction-repository-PATH",
+    "standalone-instruction-directory-PATH",
     "saved-instruction-repository-PATH",
     "running-instruction-repository-PATH",
     "target-repository-PATH",
@@ -669,16 +671,21 @@ for (const [promptFile, scenario] of [
         assert.ok(tools.git);
         await symlink(process.execPath, path.join(helpers, "node"));
         await symlink(tools.git, path.join(helpers, "git"));
-        await mkdir(path.join(guidance, ".git"));
+        if (scenario !== "standalone-instruction-directory-PATH")
+          await mkdir(path.join(guidance, ".git"));
         await mkdir(path.join(target, ".git"));
         await writeFile(
           path.join(target, "app.py"),
           "print('synthetic fixture')\n",
         );
-        await writeFile(
-          path.join(guidance, "instructions.md"),
-          "Synthetic security guidance.\n",
-        );
+        const instructions = path.join(guidance, "instructions.md");
+        if (scenario === "symlink-instruction-repository-PATH") {
+          const destination = path.join(target, "instructions.md");
+          await writeFile(destination, "Synthetic security guidance.\n");
+          await symlink(destination, instructions);
+        } else {
+          await writeFile(instructions, "Synthetic security guidance.\n");
+        }
         await writeFile(
           executable,
           `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({argv:process.argv.slice(2), syntheticProvider:process.env.SYNTHETIC_PROVIDER_KEY === 'synthetic-provider-proof-value'})); process.stderr.write('synthetic Codex fixture stopped after marker\\n'); process.exit(42);\n`,

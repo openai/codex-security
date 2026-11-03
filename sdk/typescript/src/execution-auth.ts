@@ -1,6 +1,5 @@
 import { forwardExternalImportSetting } from "./external-imports-feature.js";
 /** @internal */
-export { withoutOpenAiApiKeys } from "./auth.js";
 import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 import { readFile } from "node:fs/promises";

@@ -5,7 +5,6 @@ import {
   mkdtemp,
   readFile,
   realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,6 +23,7 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 const modelCatalog = fileURLToPath(
   new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
@@ -140,7 +140,7 @@ test.each([
       clearTimeout(timeout);
       lines.close();
       child.stderr.destroy();
-      await rm(root, { recursive: true, force: true });
+      await removeTemporaryDirectory(root);
     }
   },
 );
@@ -273,7 +273,7 @@ test.each([
         projectServerConfigured: trust === "trusted",
       });
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTemporaryDirectory(root);
     }
   },
 );
@@ -370,7 +370,7 @@ async function withStoredApiKey(
       },
     });
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeTemporaryDirectory(root);
   }
 }
 

@@ -22,7 +22,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
-  withoutOpenAiApiKeys,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import {
   deepMerge,
@@ -564,6 +564,7 @@ async function startReadOnlyCodexThread(
       : resolveCodexProfile(requestedConfig);
   let providerConfig: JsonObject = {};
   let homeExecutionConfig: JsonObject = {};
+  let suppliedConfig: JsonObject = {};
   if (preparedFactory === undefined) {
     const homeConfig = await readCodexHomeConfig(source, options.signal);
     homeExecutionConfig = resolveCodexProfile(homeConfig);
@@ -572,16 +573,24 @@ async function startReadOnlyCodexThread(
       homeConfig,
       structuredClone(requestedConfig ?? {}),
     );
-    const requestedSettings = resolveCodexProfile({
-      ...(await readCodexFileProfile(
+    suppliedConfig = resolveCodexProfile(
+      deepMerge(
+        await readCodexFileProfile(
+          options.config?.codexOverrides ?? {},
+          configuredCodexHome(source),
+        ),
         options.config?.codexOverrides ?? {},
-        configuredCodexHome(source),
-      )),
-      ...options.config?.codexOverrides,
-      profiles: mergedConfig["profiles"] ?? {},
-    });
+      ),
+    );
+    // Native TOML omits null overrides, so their inherited provider settings still apply.
     providerConfig = resolveCommandAuthConfig(
-      deepMerge(resolveCodexProfile(mergedConfig), requestedSettings),
+      deepMerge(
+        deepMerge(
+          structuredClone(homeExecutionConfig),
+          resolveCodexProfile(mergedConfig),
+        ),
+        suppliedConfig,
+      ),
       configuredCodexHome(source),
     );
     config = deepMerge(
@@ -594,7 +603,7 @@ async function startReadOnlyCodexThread(
               profiles: mergedConfig["profiles"] ?? {},
             }),
       }),
-      requestedSettings,
+      suppliedConfig,
     );
     const selectedProvider = scanModelProvider(config);
     const providers = providerConfig["model_providers"] as
@@ -618,7 +627,7 @@ async function startReadOnlyCodexThread(
     "medium";
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(
-      deepMerge(providerConfig, config ?? {}),
+      deepMerge(structuredClone(providerConfig), config ?? {}),
       options.cyberAccessProgram,
     ),
   )["features"] as JsonObject | undefined;
@@ -658,15 +667,6 @@ async function startReadOnlyCodexThread(
   );
   delete sdkConfig["responses_api_metadata"];
   if (preparedFactory === undefined) {
-    const suppliedConfig = resolveCodexProfile(
-      deepMerge(
-        await readCodexFileProfile(
-          options.config?.codexOverrides ?? {},
-          configuredCodexHome(source),
-        ),
-        options.config?.codexOverrides ?? {},
-      ),
-    );
     normalizeLegacyWindowsSandboxOverride(suppliedConfig);
     const windows =
       suppliedConfig["windows"] === undefined
@@ -1326,7 +1326,7 @@ export async function comparisonEnvironment(
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {
-    return withoutOpenAiApiKeys(environment);
+    return configuredAuthEnvironment(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
@@ -1344,7 +1344,7 @@ export async function comparisonEnvironment(
   if (existsSync(credentialHome)) {
     const canonicalCredentialHome = await prepareCredentialHome(source);
     signal?.throwIfAborted();
-    const storedEnvironment = withoutOpenAiApiKeys(environment);
+    const storedEnvironment = configuredAuthEnvironment(environment);
     for (const key of Object.keys(storedEnvironment)) {
       if (key.toUpperCase() === "CODEX_HOME") {
         delete storedEnvironment[key];
@@ -1359,7 +1359,7 @@ export async function comparisonEnvironment(
     if (status.authenticated) return storedEnvironment;
   }
   if (existsSync(join(home, "auth.json"))) {
-    return withoutOpenAiApiKeys(environment);
+    return configuredAuthEnvironment(environment);
   }
   return environment;
 }

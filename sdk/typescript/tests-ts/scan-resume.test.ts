@@ -1045,12 +1045,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     sealedProducerVersion: expect.any(String),
     threadId: f.threadId,
   });
-  const names = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+  const names = ["scan-manifest.json", "findings.json", "report.md"];
   const before = await Promise.all(
     names.map((name) => readFile(join(f.scanDir, name))),
   );
@@ -2149,7 +2144,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];
@@ -2473,12 +2467,7 @@ test.each([
       },
     });
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    const names = [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-      "report.md",
-    ];
+    const names = ["scan-manifest.json", "findings.json", "report.md"];
     const artifacts = await Promise.all(
       names.map((name) => readFile(join(f.scanDir, name))),
     );
@@ -3167,14 +3156,7 @@ test.each([
       unsealed ? "undefined" : "string",
     );
     const names = [
-      ...(unsealed
-        ? []
-        : [
-            "scan-manifest.json",
-            "findings.json",
-            "coverage.json",
-            "report.md",
-          ]),
+      ...(unsealed ? [] : ["scan-manifest.json", "findings.json", "report.md"]),
       DEEP_SCAN_CHECKPOINT,
     ];
     const before = await Promise.all(
@@ -3390,7 +3372,6 @@ test.each([
     const files = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];

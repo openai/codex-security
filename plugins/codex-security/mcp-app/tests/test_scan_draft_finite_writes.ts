@@ -28,14 +28,17 @@ function requestInput(input: unknown, token = "1e400") {
     params: { name: "record_codex_security_scan_draft", arguments: input },
   }).replaceAll(JSON.stringify(marker), token);
   const request = CallToolRequestSchema.parse(deserializeMessage(line));
-  return scanDraftInputSchema.parse(request.params.arguments);
+  const { reviewState, ...draft } = scanDraftInputSchema.parse(
+    request.params.arguments,
+  );
+  return { ...draft, coverage: reviewState };
 }
 
 function draft(overrides: Record<string, unknown> = {}) {
   return {
     scanId,
     findings: [],
-    coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+    reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     ...overrides,
   };
 }
@@ -167,7 +170,7 @@ for (const field of ["deferred", "surfaces", "threatModel"] as const) {
         threatModel: { summary: "API model", ...metadata },
       });
     else
-      Object.assign(input.coverage, {
+      Object.assign(input.reviewState, {
         [field]: [
           field === "deferred"
             ? { reason: "Review API", ...metadata }
