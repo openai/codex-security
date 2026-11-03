@@ -1369,16 +1369,30 @@ same destination and saved submission. Use the ID if several connectors share
 the URL. Use a file-backed ChatGPT login for the selected Cloud
 account. If you use your regular Codex login, set `cli_auth_credentials_store = "file"`
 in Codex `config.toml` and sign in again. API-key-only and keyring-only logins
-cannot publish. The destination needs an authorized environment. It can receive
-scanner findings before its first native scan.
+cannot publish. You can import scanner findings before the first native scan.
 
-Cloud preview reads current source versions and lists the account, endpoint,
-repository, and environments. Existing source records keep their environment.
-New records use the repository's current authorized default. The terminal
-summarizes severities, shows up to five finding IDs and titles, and identifies
-the evidence file and exclusions. Inspect the full preview with `--dry-run --format json`.
-The interactive confirmation defaults to No and identifies skipped records.
-Without a terminal, uploading requires `--yes`.
+### Review the Cloud destination
+
+Run with `--dry-run --format json`. Check the account, `cloudApiUrl`,
+repository, source key, selected findings and exclusions. For a new import,
+the deployment determines which destination appears in the preview.
+
+- **Private findings inbox.** When the deployment advertises private import for
+  the scanner, `privateImport` shows the report format, byte count and SHA-256.
+  The signed-in account receives the report. The selected repository and
+  connector are suggested targets for assessment. For complete Endor findings
+  and Wiz vulnerability JSON exports, the CLI sends the original bytes when
+  Cloud accepts the format and every record matches the reviewed selection.
+  Other selections and in-memory collectors use `security.findings.v1`.
+- **Repository publisher.** Review the environments in `requests`. The
+  publisher reads the current source versions. Existing source records keep
+  their environment, and new records use the repository's authorized default
+  environment.
+
+Remove `--dry-run` to confirm. The terminal summarizes severities, shows up
+to five finding IDs and titles, and identifies the evidence file and exclusions.
+The prompt defaults to No. Without a terminal, use `--yes` after reviewing the
+full preview.
 
 ### Configure an alternate Cloud deployment
 
@@ -1397,23 +1411,43 @@ instructions. API requests always use the API root. The older
 
 ### Resume interrupted imports
 
-The publisher saves request IDs and bodies privately in the configured state
-directory before uploading batches of up to 100 findings within Cloud payload
-limits. After a lost response, use the same input, destination, account, API
-endpoint, and state directory to resume. Deployments have separate checkpoints
-even if their account and repository IDs match. Check `cloudApiUrl` for the API
-endpoint and `savedSubmission` for the checkpoint. A repository reset retires
-the old request and requires a fresh preview and approval.
+If the result includes `savedSubmission`, preview the same input again with the
+same destination, account, API endpoint and state directory. Check `cloudApiUrl`
+and `resumed` before confirming. Each deployment has its own checkpoints.
+
+- **Private inbox.** The CLI checks the report digest, reuses the saved request
+  IDs and reads an accepted job even when new uploads are disabled. After an
+  inbox reset, review the new preview before confirming.
+- **Repository publisher.** The CLI saves request IDs and bodies privately
+  before uploading batches of up to 100 findings. An in-flight submission
+  resumes with the repository publisher. A repository reset retires the old
+  request and requires a fresh preview and approval.
+
 [Retry a Cloud submission](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md#retry-a-cloud-submission)
 
 ### Results and exit codes
 
-| Status        | Exit code | Meaning                                                                 |
-| ------------- | --------- | ----------------------------------------------------------------------- |
-| `complete`    | 0         | All selected records were acknowledged and read back.                   |
-| `partial`     | 1         | Some records were excluded locally or rejected by Cloud.                |
-| `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation. |
-| `failed`      | 2         | Preparation failed before upload.                                       |
+| Status        | Exit code | Meaning                                                                                |
+| ------------- | --------- | -------------------------------------------------------------------------------------- |
+| `complete`    | 0         | The inbox job processed every record successfully, or the publisher verified each one. |
+| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed or was cancelled.  |
+| `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation.                |
+| `failed`      | 2         | Preparation failed before upload.                                                      |
+
+Check `excluded` for skipped input and `error` before retrying.
+
+- **Private inbox.** `privateJob` contains the job ID, input file ID, status and
+  counts. Check `privateJob.counts.error` and `privateJob.counts.unprocessed`.
+  A successful job can have `verified: 0` because the CLI reads the job receipt.
+  To share a finding, open it in the inbox, assess it against a pinned
+  repository revision, and publish the reportable assessment.
+- **Repository publisher.** `verified` counts records read back with matching
+  identity and evidence. `unacknowledged` counts records still awaiting a receipt.
+  A lost response can leave accepted records unacknowledged. Each receipt item
+  identifies the request item by `client_id`. Each entry in `failures` identifies
+  the vendor record by `source_finding_id`. Counts include earlier acknowledged
+  batches in this submission. `cloudUrl`, when available, opens the destination
+  repository. Assessment and visibility in shared Cloud Findings are separate.
 
 With `--format json` or `--format jsonl`, add `--full-output` for an envelope.
 Failed and interrupted imports set `ok` to `false` and `error.code` to
@@ -1421,18 +1455,9 @@ Failed and interrupted imports set `ok` to `false` and `error.code` to
 Other formats reject `--full-output` before reading the file or contacting
 Cloud. Ctrl-C and SIGTERM retain exit codes 130 and 143.
 
-`verified` and `unacknowledged` are counts. Each receipt item identifies a
-request item by `client_id`. Each entry in `failures` identifies the vendor
-record by `source_finding_id`. A lost response can leave accepted records
-unacknowledged. Review `error` before retrying, and check `excluded` for local
-input errors. Counts include previously acknowledged batches in the same
-saved submission.
-
-Progress goes to stderr and JSON results to stdout. Lookups and readback use up
-to four concurrent requests. Uploads are sequential. Saved receipts and
-readback verify source-record identity and evidence. Codex assessment and
-visibility in the shared Cloud Findings view are separate. `cloudUrl`, when
-available, links to the destination repository in Cloud.
+Progress goes to stderr and JSON results to stdout. The repository publisher
+uploads sequentially and uses up to four concurrent requests for lookups and
+readback.
 
 ### Import Snyk Open Source findings
 
@@ -1446,32 +1471,6 @@ collection and preview commands.
 The [Wiz guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/wiz.md) shows how to preview saved package vulnerabilities,
 SAST findings, repository secrets, or IaC findings. The format reference below
 describes the fields to preserve when preparing those exports.
-
-#### Review the Cloud destination
-
-The preview shows which Cloud destination will receive the selected records.
-When the deployment advertises private import for the scanner, the CLI puts a
-report in the signed-in account’s **private findings inbox**. The preview
-identifies its format and byte count. For complete Endor findings and Wiz
-vulnerability JSON exports, the CLI sends the original bytes when Cloud
-advertises the format and every record matches the reviewed selection. Other
-selections and in-memory collectors use `security.findings.v1`. The CLI
-attaches the selected repository and connector as a suggested assessment
-target. Review the selection, exclusions, source key and destination before
-confirming.
-
-The job receipt contains the file and job identifiers and record counts. To
-share a finding, open it in Cloud, assess it against a pinned repository
-revision, and explicitly publish a reportable assessment. An import can
-finish with record errors. Check the error and unprocessed counts in the
-receipt.
-
-Repeat the same command to recover an interrupted private import. The CLI
-checks the report digest, reuses its saved request IDs, and reads an accepted
-job even when new uploads are disabled. Resetting the inbox requires a new
-preview and confirmation. Deployments and scanners using the repository
-publisher continue to show the repository destination and per-finding receipts.
-An in-flight repository publication resumes on its original protocol.
 
 #### Select findings and a destination
 
