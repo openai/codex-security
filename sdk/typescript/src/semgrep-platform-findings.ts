@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CLOUD_STRING_BYTES,
   validateCodeLineRange,
   canonicalNumber,
   validateExternalEvidence,
@@ -80,8 +81,6 @@ export function semgrepPlatformReportScope(
   input: ExternalFindings,
   provider?: string,
   references: readonly ExternalSourceRepository[] = [],
-  isPlatform = (row: ExternalFinding) =>
-    isSemgrepPlatformEvidence(row, provider),
 ) {
   const format = "sourceFormat" in input ? input.sourceFormat : undefined;
   if (
@@ -97,7 +96,8 @@ export function semgrepPlatformReportScope(
     provider === "semgrep" &&
     "sourceRepositoryUrl" in input &&
     input.sourceRepositoryUrl !== undefined &&
-    (input.findings.length === 0 || input.findings.some(isPlatform))
+    (input.findings.length === 0 ||
+      input.findings.some((row) => isSemgrepPlatformEvidence(row, provider)))
   ) {
     // The object-row SDK retained only the binding on the envelope, including empty reports.
     return {
@@ -135,9 +135,8 @@ export function semgrepPlatformReportScope(
 export function semgrepPlatformReportRepository(
   input: ExternalFindings,
   provider?: string,
-  isPlatform?: (row: ExternalFinding) => boolean,
 ) {
-  return semgrepPlatformReportScope(input, provider, [], isPlatform)?.url;
+  return semgrepPlatformReportScope(input, provider)?.url;
 }
 
 export interface SemgrepPlatformScope {
@@ -471,13 +470,15 @@ export function semgrepNativeProjectUrl(
 
 function referenceRepositoryKey(
   references: readonly ExternalSourceRepository[],
+  target: ExternalImportTarget = "local",
 ) {
-  return (url: string) => repositoryContext(url, references).key(url);
+  return (url: string) => repositoryContext(url, references, target).key(url);
 }
 
 function repositoryContext(
   projectUrl: string,
   references: SemgrepRepositoryReference = [],
+  target: ExternalImportTarget = "local",
 ) {
   const source = semgrepPlatformRepositoryReference(
     projectUrl,
@@ -491,9 +492,10 @@ function repositoryContext(
       typeof references === "function"
         ? references(nativeHttp(url))
         : hostedRepositoryUrlKey(
-            nativeHttp(url),
+            target === "cloud" ? url : nativeHttp(url),
             github,
             source.platform === "gitlab",
+            target,
           ),
     name: (name: string) => (github ? name.toLowerCase() : name),
   };
@@ -502,12 +504,20 @@ function repositoryContext(
 export function selectionRepository(
   projectUrl: string,
   references: readonly ExternalSourceRepository[] = [],
+  target: ExternalImportTarget = "local",
 ) {
-  const repository = repositoryContext(projectUrl, references);
+  const repository = repositoryContext(projectUrl, references, target);
   if (
-    !references.every(({ url }) =>
-      semgrepReferenceMatches(repository.source, url),
-    )
+    !references.every(({ url }) => {
+      if (target === "local")
+        return semgrepReferenceMatches(repository.source, url);
+      const mapped = normalizeHostedGitRepositoryUrl(
+        url,
+        projectUrl,
+        repository.source.platform !== undefined,
+      );
+      return repository.key(mapped) === repository.key(projectUrl);
+    })
   )
     throw new Error(
       "The reader's source repository does not match the selected Semgrep project.",
@@ -832,6 +842,7 @@ function scopeProduct(native: unknown, complete: boolean) {
 function readScope(
   input: Record<string, unknown>,
   references: SemgrepRepositoryReference,
+  target: ExternalImportTarget = "local",
 ) {
   const complete =
     input["format"] === semgrepPlatformFormat ||
@@ -874,7 +885,7 @@ function readScope(
       "Semgrep native project URL does not match its recorded HTTP repository.",
     );
   if (mapping && projectUrl != null) {
-    const key = native && repositoryContext(native, references).key;
+    const key = native && repositoryContext(native, references, target).key;
     if (key ? key(native!) !== key(mapping) : projectUrl !== mapping)
       throw new Error(
         "Semgrep project does not match its recorded source repository URL.",
@@ -920,7 +931,7 @@ export function isSemgrepPlatformEvidence(
   finding: ExternalFinding,
   provider?: string,
 ): boolean {
-  const data = finding.evidence?.source_data;
+  const data = finding.evidence.source_data;
   if (generatedId.test(finding.source_finding_id)) return true;
   if (!data) return false;
   if (
@@ -947,6 +958,7 @@ export function isSemgrepPlatformEvidence(
 function upgradeOriginalSemgrepFinding(
   data: Record<string, unknown>,
   references: SemgrepRepositoryReference,
+  target: ExternalImportTarget,
 ): Record<string, unknown> {
   const {
     numericFields: _witness,
@@ -958,7 +970,7 @@ function upgradeOriginalSemgrepFinding(
     undefined,
     typeof references === "function"
       ? references
-      : referenceRepositoryKey(references),
+      : referenceRepositoryKey(references, target),
     references,
   );
   return {
@@ -1023,6 +1035,7 @@ function legacyWitnessKey(
 function nativeOccurrence(
   retained: Record<string, unknown>,
   references: SemgrepRepositoryReference,
+  target: ExternalImportTarget,
 ) {
   let data = !isSemgrepPlatformFormat(retained["format"])
     ? {
@@ -1039,9 +1052,9 @@ function nativeOccurrence(
     : retained;
   const legacy = data["format"] === semgrepPlatformLegacyFormat;
   const original = legacy && !Object.hasOwn(data, "semgrepPlatformFindingJson");
-  if (original) data = upgradeOriginalSemgrepFinding(data, references);
-  const { scope, aliases } = readScope(data, references);
-  const repository = repositoryContext(scope.project.url, references);
+  if (original) data = upgradeOriginalSemgrepFinding(data, references, target);
+  const { scope, aliases } = readScope(data, references, target);
+  const repository = repositoryContext(scope.project.url, references, target);
   const row = parseSemgrepResponse(
     requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
   );
@@ -1053,6 +1066,7 @@ export function semgrepLegacyRepositoryWitnesses(
   findings: readonly ExternalFinding[],
   provider: string,
   references: SemgrepRepositoryReference = [],
+  target: ExternalImportTarget = "local",
 ): ReadonlyMap<string, string> {
   const witnesses = new Map<string, string>();
   // Current occurrences carry their own witness. Only original rows need a sibling lookup.
@@ -1068,6 +1082,7 @@ export function semgrepLegacyRepositoryWitnesses(
     const { scope, aliases, repository, row, legacy } = nativeOccurrence(
       data,
       references,
+      target,
     );
     const repo = row["repository"];
     if (!isRecord(repo)) continue;
@@ -1231,7 +1246,7 @@ function checkProjectedProduct(
 }
 
 /** A marked report reserves the v1 finding's repository, ref and product for Semgrep scope. */
-function hasRetainedSemgrepScope(finding: unknown): boolean {
+export function hasRetainedSemgrepScope(finding: unknown): boolean {
   if (!isRecord(finding)) return false;
   const repository = finding["repository"];
   if (
@@ -1262,10 +1277,14 @@ export function semgrepPlatformFindingBinding(
   projectedSources: readonly (
     { url?: string; branch?: string } | undefined
   )[] = [],
+  target: ExternalImportTarget = "local",
+  replayApprovedRequest = false,
 ) {
   const retained = finding.evidence.source_data;
   if (!isSemgrepPlatformEvidence(finding, provider)) {
+    // Previously approved Cloud requests keep the released projection and native checks below.
     if (
+      !replayApprovedRequest &&
       provider === "semgrep" &&
       reportScope?.format !== undefined &&
       hasRetainedSemgrepScope(retained?.["finding"])
@@ -1307,7 +1326,7 @@ export function semgrepPlatformFindingBinding(
   if (!retained)
     throw new Error("Missing the original Semgrep finding evidence.");
   const { data, legacy, original, scope, aliases, repository, row } =
-    nativeOccurrence(retained, references);
+    nativeOccurrence(retained, references, target);
   checkProjectedProduct(finding, scope.product, true);
   if (
     reportScope?.deployment !== undefined &&
@@ -1320,6 +1339,23 @@ export function semgrepPlatformFindingBinding(
       "The Semgrep report repository scope does not match the finding's deployment, project ID, ref, or product.",
     );
 
+  const other = data["finding"];
+  if (
+    (legacy && Object.hasOwn(data, "finding")) ||
+    (isRecord(other) && Object.hasOwn(other, "id"))
+  ) {
+    const restored = restoreLegacyHostedNumbers(data)["finding"];
+    const originalRow = parseSemgrepResponse(JSON.stringify(restored));
+    const id = originalRow["id"];
+    const nativeId =
+      semgrepPlatformIdOrUndefined(id) ??
+      (typeof id === "string" ? legacyDecimalInteger(id) : undefined);
+    if (
+      (legacy || nativeId !== undefined) &&
+      stringifySemgrepFinding(originalRow) !== stringifySemgrepFinding(row)
+    )
+      throw new Error("The retained Semgrep finding representations disagree.");
+  }
   const selectable = checkSemgrepPlatformRow(
     row,
     scope,
@@ -1444,6 +1480,7 @@ export function semgrepPlatformFindingBinding(
   const details = migration?.details ?? finding.evidence.details;
   return {
     url: scope.project.url,
+    nativeId,
     migration:
       oldMappedUrl && details?.repository
         ? {
@@ -1462,7 +1499,7 @@ export function semgrepPlatformFindingBinding(
   };
 }
 
-/** Normalize a saved selection or a scoped Platform project export for local replay. */
+/** Normalize a saved selection or Platform project export. The default target is local. */
 export function normalizeSemgrepPlatformFindings(
   report: unknown,
   options: string | Partial<SemgrepImportOptions> = {},
@@ -1471,8 +1508,6 @@ export function normalizeSemgrepPlatformFindings(
     ? (options.sourceRepositories ?? [])
     : [],
 ) {
-  if (target !== "local")
-    throw new Error("Semgrep Platform findings require a local import.");
   const declaredUrl =
     typeof options === "string" ? options : options.sourceRepositoryUrl;
   const saved = record(report, "Semgrep Platform report");
@@ -1485,12 +1520,12 @@ export function normalizeSemgrepPlatformFindings(
     ? upgradeSemgrepPlatformReport(
         saved,
         declaredUrl,
-        referenceRepositoryKey(references),
+        referenceRepositoryKey(references, target),
         references,
       )
     : saved;
-  const { scope, aliases } = readScope(input, references);
-  const repository = selectionRepository(scope.project.url, references);
+  const { scope, aliases } = readScope(input, references, target);
+  const repository = selectionRepository(scope.project.url, references, target);
   if (
     declaredUrl &&
     repository.key(hostedRepositoryUrl(declaredUrl, "Semgrep")) !==
@@ -1705,11 +1740,19 @@ function normalizePlatformRows(
           readId,
         ),
       };
-      const messageTitle =
+      let messageTitle =
         description ??
         (legacy || scope.product === "sast"
           ? null
           : `Semgrep finding ${readId(finding["id"])}`);
+      if (
+        target === "cloud" &&
+        description &&
+        Buffer.byteLength(description) > DEFAULT_CLOUD_STRING_BYTES
+      ) {
+        const id = finding["id"];
+        messageTitle = `Semgrep finding ${text(id) ?? readId(id)}`;
+      }
       if (scope.product === "sca") {
         const dependency = responseRecord(
           finding["found_dependency"] ?? {},

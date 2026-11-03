@@ -1364,7 +1364,7 @@ Use `publish findings FILE --provider semgrep --to local` for a
 or a [saved Semgrep Web API selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 Guardian uses its existing sign-in. Its imported IDs are separate from Web API IDs.
 To [collect a full Semgrep project and branch](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch), use
-`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`.
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`. Both saved formats support local and Cloud import.
 
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
@@ -1459,7 +1459,7 @@ available, links to the destination repository in Cloud.
 
 For an existing monitored Snyk project, use
 `codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
-and save its output for `publish findings --to local --provider snyk`. Set
+and save its output for `publish findings --provider snyk` with `--to local` or `--to cloud`. Set
 `SNYK_TOKEN` with read access. The default product is Open Source. Select
 `--snyk-product code` for Code and `--snyk-api-origin` for a regional API
 (default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).

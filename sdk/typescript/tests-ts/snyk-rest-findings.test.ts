@@ -47,6 +47,18 @@ function transport(...responses: unknown[]) {
   };
 }
 
+test("the Issues normalizer keeps long issue titles by default", async () => {
+  const row = issue(false);
+  row.attributes.title = "é".repeat(257);
+  const report = await transport(project(), { data: [row] }).collect();
+  expect(normalizeSnykIssues(report).findings[0]?.evidence.title).toBe(
+    row.attributes.title,
+  );
+  const cloud = normalizeSnykIssues(report, "cloud");
+  expect(cloud.findings).toHaveLength(0);
+  expect(cloud.excluded[0]?.reason).toContain("title");
+});
+
 test.each(["open-source", "code"] as const)(
   "Snyk %s follows scoped pagination, saves original evidence, and replays unchanged in SQLite",
   async (product) => {

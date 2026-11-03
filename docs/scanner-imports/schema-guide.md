@@ -119,6 +119,24 @@ export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
 Use the same SDK version throughout a submission when possible.
 
+Older SDK checkpoints saved the destination repository ID without the catalog
+URL. After a repository rename, retry those requests with the original
+normalized findings and report metadata, omitting supplemental source
+repository declarations. A new declaration needs a matching current catalog
+entry or a URL recorded when the request was approved.
+
+If a hosted Semgrep or Snyk request is pending, rerun the original input to
+finish it before submitting updated evidence for any of the same findings.
+Selections with distinct scanner-issued IDs can proceed independently on the
+same deployment, account, repository, connector, provider and source key.
+When an older checkpoint establishes only the source, finish that request
+before submitting another selection for that source. Use the SDK build that
+created the request and include the original report context and caller-added
+fields. Older SDKs included some fields in the checkpoint filename without
+retaining them in the saved request. If the publisher cannot identify the
+deployment of an older request, rerun it on its original deployment. An
+identified repository reset retires the request and requires fresh approval.
+
 After an SDK upgrade, retry with the original input. An older SDK could approve
 different bytes from those its JSON export contained. When the SDK verifies
 the old selection and request bytes, it resumes with the original request IDs
