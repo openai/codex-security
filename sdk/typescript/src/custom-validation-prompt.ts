@@ -1,20 +1,27 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { JsonObject } from "./config.js";
+import { resolveCodexProfile, type JsonObject } from "./config.js";
 import { IncompleteScanError } from "./errors.js";
 import { PLUGIN_NAME } from "./runtime.js";
 
 // Review this adapter when the bundled workflows change. Never silently run
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
-  "references/core-scan.md":
+  "references/core-scan.md": [
+    "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
-  "skills/security-scan/SKILL.md":
+    "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
+    "848eb40d42b0bf9cf21748b9927d031b0461a4443f63e3954139f9801f41c3f6",
+  ],
+  "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
-  "skills/security-diff-scan/SKILL.md":
+    "99cfcbbaa9d5b0450881ec752a116888b05b7fe21ea7af28fd22d088882dcd46",
+  ],
+  "skills/security-diff-scan/SKILL.md": [
     "09232fd5d96cfed2a5bdccd176c09b7e9ca53ebd7ac136d283bec884fde94b0d",
-} as const;
+  ],
+};
 
 const DISABLED_TOOLS = [
   "start_codex_security_standard_scan",
@@ -33,7 +40,8 @@ async function source(pluginRoot: string, name: keyof typeof SOURCES) {
     "\r\n",
     "\n",
   );
-  if (createHash("sha256").update(text).digest("hex") !== SOURCES[name]) {
+  const digest = createHash("sha256").update(text).digest("hex");
+  if (!SOURCES[name].includes(digest)) {
     throw new IncompleteScanError(
       `Custom validation is incompatible with the installed plugin workflow (${name}). Update the SDK and plugin together. Default validation was not started.`,
     );
@@ -105,6 +113,7 @@ export async function customValidationConfig(
   config: JsonObject,
   pluginRoot: string,
 ): Promise<JsonObject> {
+  config = resolveCodexProfile(config);
   const manifest = JSON.parse(
     await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
   );
