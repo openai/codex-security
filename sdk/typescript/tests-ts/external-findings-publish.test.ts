@@ -4563,6 +4563,45 @@ async function stageReleasedCheckpoint(
 }
 
 // These filenames, request IDs and projections were recorded by the old SDK.
+test("a verified retry checks the scanner evidence in its saved request", async () => {
+  const f = await fixture();
+  const marker = "semgrep-platform-selection/v1";
+  class Format extends String {
+    toJSON() {
+      return "ordinary";
+    }
+  }
+  const input = {
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: "example",
+        evidence: {
+          title: "Example",
+          severity: "low" as const,
+          source_data: { format: new Format(marker) as unknown as string },
+        },
+      },
+    ],
+  };
+  const preview = await prepareReleased(f, input);
+  const request = structuredClone(preview.preview.requests[0]!);
+  expect(request.items[0]!.evidence.source_data?.["format"]).toBe("ordinary");
+  request.items[0]!.evidence.source_data!["format"] = marker;
+  // The released publisher saved this string after detaching the evidence.
+  const { path, saved } = await stageReleasedCheckpoint(f, {
+    filename:
+      "52123d2374947cb5393a2305c5dd90bf77749966cb9e4c7bfd9871293eab7b70.pending.json",
+    requests: [request],
+    inputDigest:
+      "90deee40efc1c9475a8850da689b5b6da4ba22b1c9ded04592eb29b35cfb4c08",
+  });
+  await expect(prepareReleased(f, input)).rejects.toThrow("local import");
+  expect(f.posts).toHaveLength(0);
+  expect(await readFile(path, "utf8")).toBe(saved);
+});
+
 async function oldScoreApproval(field: string, stageApproval = true) {
   const f = await fixture();
   const { filename, requestId, inputProjection } =

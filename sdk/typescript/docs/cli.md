@@ -1359,6 +1359,8 @@ source key and finding ID reports created, updated, or unchanged records.
 Records omitted from the new selection stay stored. An import with exclusions
 exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
 
+Use `--provider semgrep` for a [saved Semgrep Platform selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
 

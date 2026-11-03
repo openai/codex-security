@@ -36,6 +36,8 @@ const distModules = [
   "scanner-repository-url",
   "semgrep-findings",
   "semgrep-platform-findings",
+  "hosted-git-remotes",
+  "hosted-git-repository",
   "sonar-findings",
   "sonar-collector",
   "sonar-import",
