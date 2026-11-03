@@ -12,6 +12,7 @@
     "scripts/fixtures/findings-service-sqlite.ts",
     "scripts/fixtures/prepare-runner-scan.ts",
     "scripts/run-ci-tests.mts",
+    "scripts/run-mcp-test-shard.mts",
     "scripts/update-test-timings.mts"
   ],
   "compilerOptions": {

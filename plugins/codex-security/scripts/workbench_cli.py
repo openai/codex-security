@@ -30,7 +30,7 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
     context.add_argument("--user-context-stdin", action="store_true")
 
 
-def parse_args(description: str) -> argparse.Namespace:
+def parse_args(description: str, *, inspection_only: bool = False) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -59,9 +59,11 @@ def parse_args(description: str) -> argparse.Namespace:
 
     inspect_setup = add_command("inspect-setup", "--target-path", "--scope")
     inspect_setup.add_argument("--mode", choices=MODES, required=True)
+    inspect_setup.add_argument("--deep-scan-project-json")
 
     save_workspace = add_command("save-workspace", "--workspace-id", "--target-path", "--scope")
     save_workspace.add_argument("--mode", choices=MODES, required=True)
+    save_workspace.add_argument("--deep-scan-project-json")
     save_workspace.add_argument("--target-summary")
     add_user_context(save_workspace)
 
@@ -80,6 +82,12 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_parser.add_argument("--diff-head-revision")
         diff_parser.add_argument("--diff-content-digest")
 
+    if inspection_only:
+        # Unknown arguments use the full parser below for its normal usage diagnostic.
+        args, unknown = parser.parse_known_args()
+        if not unknown:
+            return args
+
     start_headless_standard_scan = add_command(
         "start-headless-standard-scan", "--thread-id", "--target-path", "--scope"
     )
@@ -97,8 +105,7 @@ def parse_args(description: str) -> argparse.Namespace:
         diff_content_digest=None,
     )
 
-    begin_deep_scan = subparsers.add_parser("begin-deep-scan")
-    begin_deep_scan.add_argument("--thread-id", required=True)
+    begin_deep_scan = add_command("begin-deep-scan", "--thread-id")
     begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
     begin_target.add_argument("--scan-id")
     begin_target.add_argument("--target-path")
@@ -108,6 +115,11 @@ def parse_args(description: str) -> argparse.Namespace:
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
     begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.add_argument("--service-tier")
+    begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
+    begin_deep_scan.add_argument("--deep-scan-project-json")
+    begin_deep_scan.add_argument("--project-config-path")
+    begin_deep_scan.add_argument("--join-only", action="store_true")
     begin_deep_scan.add_argument("--completed-inputs-json")
     begin_deep_scan.set_defaults(
         mode="deep",
@@ -120,6 +132,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
+    get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
 
@@ -337,6 +350,7 @@ def parse_args(description: str) -> argparse.Namespace:
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
     set_finding_remediation.add_argument("--summary")
+    set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")
     set_finding_remediation.add_argument("--patch-digest")
     set_finding_remediation.add_argument("--base-revision")
@@ -353,7 +367,6 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")

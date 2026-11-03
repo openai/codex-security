@@ -1,9 +1,13 @@
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
 import { createCodexSecurityServer } from "./server.js";
 
 async function main(): Promise<void> {
   const server = createCodexSecurityServer();
-  await server.connect(new StdioServerTransport());
+  await server.connect(
+    new CodexSecurityStdioTransport(process.stdin, process.stdout, {
+      maxBufferSize: Infinity,
+    }),
+  );
   let closing = false;
   const close = async (exitCode?: number): Promise<void> => {
     if (closing) return;

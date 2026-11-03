@@ -1,4 +1,9 @@
-import { lstat, realpath } from "node:fs/promises";
+import {
+  severityRubricInstructions,
+  type SeverityRubricSnapshot,
+} from "./severity-rubric.js";
+import { isRecord } from "./record.js";
+import { lstat, realpath, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { IncompleteScanError, OutputDirectoryError } from "./errors.js";
 import {
@@ -63,7 +68,7 @@ export async function prepareScanSkill({
 }
 
 export function scanPrompt(
-  target: NormalizedTarget,
+  targetDescription: string,
   skillName: string,
   scanId: string,
   hasConfigPath = false,
@@ -73,8 +78,8 @@ export function scanPrompt(
   discoveryPrompt?: string,
   modelProvider?: unknown,
   ownerSuggestions = false,
+  severityRubric?: SeverityRubricSnapshot,
 ): string {
-  const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
   return [
     "Use [$codex-security](mcp://codex-security) for this scan's artifact tools.",
@@ -106,10 +111,10 @@ export function scanPrompt(
           "This exhaustive scan authorizes the delegated-worker phases required by the selected skill; use available subagent tools and continue with parent-agent fallback if capacity changes.",
         ]),
     "This SDK host does not render MCP Apps; use the terminal/chat workflow.",
-    `Use ${python} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
+    `Use ${pluginPythonCommand()} as <python_command> for plugin Python helper scripts (.py files); replace any literal python or python3 helper invocation with this exact interpreter.`,
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
-    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
+    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest and findings.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_ID")} as scan.target.targetId; do not derive a different target ID.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_DISPLAY_NAME")} as scan.target.displayName; do not infer a display name from the Git remote.`,
     `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_KIND")} as scan.target.kind; do not infer the target kind from the checkout.`,
@@ -137,12 +142,13 @@ export function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target, python),
+    targetDescription,
+    ...(severityRubric ? [severityRubricInstructions(severityRubric)] : []),
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
-          "During the audit, checkpoint the unsealed canonical scan-manifest.json, findings.json, and coverage.json before combining or revalidating returned baseline or investigator results and after each validation decision. Reuse these same files; do not wait for the final report or depend on a draft MCP tool.",
+          "During the audit, checkpoint the unsealed canonical scan-manifest.json and findings.json with review bookkeeping in scan.reviewState before combining or revalidating returned baseline or investigator results and after each validation decision. Reuse these same files; do not wait for the final report or depend on a draft MCP tool.",
           "For unfinished checkpoints, set scan.complete to false. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
-          "Write the final canonical scan-manifest.json, findings.json, and coverage.json with the provisional scan.complete marker removed, retaining truthful coverage and any deferred work. Do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          "Write the final canonical scan-manifest.json and findings.json. Remove the provisional scan.complete marker and retain truthful coverage and any deferred work in scan.reviewState. Do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
         ]
       : [
           "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
@@ -159,26 +165,77 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget, python: string): string {
+export async function targetInstruction(
+  target: NormalizedTarget,
+  pluginRoot: string,
+  hosted: boolean,
+): Promise<string> {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths") {
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
-      "/scripts/generate_rank_input.py",
+      "/scripts/launch_codex_security_mcp",
     );
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
+    let legacyGenerator = false;
+    try {
+      legacyGenerator = (
+        await stat(join(pluginRoot, "scripts", "generate_rank_input.py"))
+      ).isFile();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+    const inventory = shellEnvironmentReference(
+      "CODEX_SECURITY_SCAN_DIR",
+      "/scoped-source-input.jsonl",
+    );
+    const scopeArgs = `--repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${inventory}`;
     // CMD expands the environment references once, preserving percent signs in path values.
     const bindScopes =
       process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json" --coverage "%CODEX_SECURITY_SCAN_DIR%\coverage.json""'`
-        : `${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/launch_codex_security_mcp")} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")} --coverage ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/coverage.json")}`;
-    return `Scan target paths: resolve every requested file and all non-ignored descendants of requested directories using ${python} ${helper} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}. Before finalization, preserve every requested scope with ${bindScopes}. Do not print, evaluate, or modify the target-paths file.`;
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --manifest "%CODEX_SECURITY_SCAN_DIR%\scan-manifest.json""'`
+        : `${helper} --helper bind-repo-scopes --scopes-file ${scopes} --manifest ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scan-manifest.json")}`;
+    const scanTarget =
+      "Scan target paths: resolve every requested file and all non-ignored descendants of requested directories";
+    const finalize = `Before finalization, preserve every requested scope with:\n${bindScopes}\nDo not print, evaluate, or modify the target-paths file.`;
+    if (hosted && process.platform === "linux" && !legacyGenerator) {
+      const capabilities = await pluginCapabilities(pluginRoot).catch(
+        () => undefined,
+      );
+      if (capabilities?.["hostedScopeInventory"] === 1) {
+        const hostedHelper = `${helper} --helper make-hosted-repo-scope-input ${scopeArgs}`;
+        return [
+          `${scanTarget} using the hosted scope helper:`,
+          `${hostedHelper} --state-dir ${shellEnvironmentReference("CODEX_SECURITY_STATE_DIR")}`,
+          "Use the reported path. If a later shell cannot read it, use the path reported by this recovery command:",
+          hostedHelper,
+          finalize,
+        ].join("\n");
+      }
+    }
+    const makeScope = legacyGenerator
+      ? `${pluginPythonCommand()} ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/generate_rank_input.py")} make-repo-scope-input ${scopeArgs}`
+      : process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
+        : `${helper} --helper make-repo-scope-input ${scopeArgs}`;
+    return `${scanTarget} using ${makeScope}. ${finalize}`;
   }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
   return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
+}
+
+async function pluginCapabilities(pluginRoot: string) {
+  const manifest: unknown = JSON.parse(
+    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const capabilities = isRecord(manifest)
+    ? manifest["codexSecurity"]
+    : undefined;
+  return isRecord(capabilities) ? capabilities : undefined;
 }

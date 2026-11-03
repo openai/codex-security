@@ -22,6 +22,7 @@ from finalize_scan_contract import (
     ContractError,
     _legacy_sealed_findings_for_validation,
     _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
     finding_candidate_id,
     open_scan_local_file_descriptor,
     scan_root_identity,
@@ -157,10 +158,59 @@ def project_scan_artifacts(
     }
 
 
-def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
-    source_directory, _, manifest, findings, coverage, sealed, _, _ = _prepare_scan_finalization(
-        Path(request["sourceDirectory"])
+def retained_review_state(
+    db: Any, saved_scan: Any, prepared: Any, *, composed_child_ids: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Project the accepted observations behind a current sealed review summary."""
+    from review_state import review_state
+    from workbench.saved_sources import _read_saved_result
+    from workbench_saved_results import merge_saved_results
+
+    scan = prepared.manifest["scan"]
+    if "review" not in scan:
+        return prepared.coverage
+    if "preservedSources" not in scan:
+        head, _, _ = _read_saved_result(prepared.scan_dir, "checkpoint-head.json", saved_scan["id"])
+        filename = head["checkpoint"]
+        checkpoint, contents = _read_scan_local_json_bytes(
+            prepared.scan_dir, f"checkpoints/{filename}", "Accepted review"
+        )
+        if filename != f"{hashlib.sha256(contents).hexdigest()}.json":
+            raise ContractError("Accepted review no longer matches its checkpoint digest")
+        return review_state(
+            {**scan, "reviewState": checkpoint.get("reviewState", checkpoint.get("coverage", {}))}
+        )
+    binding = db.workbench_completion_binding(saved_scan, scan["completedAt"], prepared.manifest)
+    binding["status"] = scan["status"]
+    documents = merge_saved_results(
+        prepared.scan_dir,
+        saved_scan["id"],
+        binding,
+        [],
+        stopped=scan["status"] != "completed",
+        reason=saved_scan["failure_message"] or "",
+        frozen_source_digests=scan["preservedSources"],
+        write_snapshots=False,
+        reuse_sealed_result=False,
+        composed_child_ids=composed_child_ids,
+        finding_scope=db.requested_finding_scope(saved_scan)
+        if saved_scan["mode"] == "deep"
+        else None,
     )
+    if documents is None:
+        raise ContractError("Accepted review could not be reconstructed from its checkpoints")
+    return _prepare_scan_finalization(
+        prepared.scan_dir,
+        completion_binding=binding,
+        draft_documents=documents,
+        recover_unsealed=True,
+        allow_missing_writeups=scan["status"] == "completed",
+    ).coverage
+
+
+def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
+    prepared = _prepare_scan_finalization(Path(request["sourceDirectory"]))
+    source_directory, _, manifest, findings, _, sealed, _, _ = prepared
     scan = manifest["scan"]
     if scan["id"] != request["sourceScanId"]:
         raise ContractError("Scan projection source does not match the requested scan")
@@ -173,6 +223,7 @@ def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
         source = workbench_db.require_scan(connection, request["sourceScanId"])
         workbench_db.require_recorded_manifest_digest(source, source_directory)
         workbench_db.verify_manifest_binding(source, manifest)
+        coverage = retained_review_state(workbench_db, source, prepared)
     expected = request["expectedParentIdentity"]
     return project_scan_artifacts(
         request["parentScanId"],

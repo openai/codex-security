@@ -378,7 +378,7 @@ const draft_scanDraftInput = z.strictObject({
   complete: z
     .boolean()
     .describe(
-      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings.",
+      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings.",
     )
     .optional(),
   scanId: scanId,
@@ -386,7 +386,7 @@ const draft_scanDraftInput = z.strictObject({
   scope: draft_scope.optional(),
   threatModel: draft_threatModel.optional(),
   findings: z.array(draft_finding),
-  coverage: draft_coverage,
+  reviewState: draft_coverage,
 });
 
 /** Native tool contracts; JSON resources are generated compatibility exports. */
@@ -481,7 +481,7 @@ export const artifactSchemaDocuments = {
       scope: draft_scope,
       threatModel: draft_threatModel,
       surface: draft_surface,
-      coverage: draft_coverage,
+      reviewState: draft_coverage,
       scanDraftInput: draft_scanDraftInput,
       completedScanInput: z.strictObject({
         scanId: scanId,

@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
 import pytest
-from workbench_test_support import write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    empty_target_scan,
+    get_scan,
+    scan_command,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 @pytest.mark.parametrize(
@@ -168,3 +177,72 @@ def deep_scan_fixture(tmp_path: Path):
     scan = register(state, target, directory, mode="deep")
     checkpoint(state, scan)
     return state, tmp_path / "codex-home", target, directory, scan["scanId"]
+
+
+def run_workbench_with_fault(script_path, state_dir, codex_home, setup, *args):
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    script_path.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+        "import workbench_db\n"
+        "import workbench_saved_results\n" + setup + "raise SystemExit(workbench_db.main())\n"
+    )
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "CODEX_SECURITY_STATE_DIR": str(state_dir),
+        },
+        text=True,
+    )
+
+
+def test_canonical_finding_validation_survives_frozen_publication_retry(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["severity"]["level"] = "informational"
+    stronger = copy.deepcopy(finding)
+    stronger["severity"]["level"] = "critical"
+    malformed_identity = copy.deepcopy(finding)
+    malformed_identity["identity"] = {"anchor": []}
+    findings["findings"].extend([stronger, malformed_identity])
+    findings_path.write_text(json.dumps(findings))
+    original = findings_path.read_bytes()
+
+    failed = run_workbench_with_fault(
+        tmp_path / "fail_canonical_publication.py",
+        state_dir,
+        tmp_path / "codex-home",
+        "def fail_publication(*args, **kwargs):\n"
+        "    raise OSError('injected publication failure')\n"
+        "workbench_saved_results._write_prepared_scan_finalization = fail_publication\n",
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Finding repair was interrupted.",
+    )
+    assert failed.returncode == 0, failed.stderr
+    assert findings_path.read_bytes() == original
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+    frozen = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
+    assert frozen
+
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert recovered["findingCount"] == 1
+    finding = json.loads(findings_path.read_text())["findings"][0]
+    assert finding["severity"]["level"] == "critical"
+    assert any(
+        previous["severity"]["level"] == "informational"
+        for previous in finding["provenance"]["previousFindings"]
+    )
+    assert any("duplicate logical finding" in warning for warning in recovered["warnings"])
+    assert any("identity" in warning for warning in recovered["warnings"])
+    assert all(path.read_bytes() == content for path, content in frozen.items())

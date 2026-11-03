@@ -9,11 +9,7 @@ from pathlib import Path
 import pytest
 from test_workbench_recovery_edges import select_checkpoint
 from test_workbench_stopped_worker_coverage import child_scan, composed_scan, stop_parent
-from workbench_test_support import run_workbench, saved_draft, write_checkpoint
-
-
-def coverage(directory: Path) -> dict:
-    return json.loads((directory / "coverage.json").read_text())
+from workbench_test_support import read_review_state, run_workbench, saved_draft, write_checkpoint
 
 
 def save_child(
@@ -43,7 +39,7 @@ def assert_replay(state: Path, parent: dict, originals: dict[Path, bytes]) -> No
     directory = Path(parent["scanDir"])
     published = {
         name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
     }
     run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"])
     assert all((directory / name).read_bytes() == contents for name, contents in published.items())
@@ -111,7 +107,7 @@ def test_child_projection_normalizes_receipts_and_preserves_extension_metadata(
     originals = original_evidence(directory)
     stopped = stop_parent(state, parent, [(child, directory, selected)])
     assert stopped["progress"]["status"] == "failed"
-    result = coverage(parent_dir)
+    result = read_review_state(state, parent_dir)
     surface = result["surfaces"][0]
     assert surface["receiptRefs"] == [
         (directory / "artifacts/review.md").relative_to(parent_dir).as_posix()
@@ -150,7 +146,7 @@ def test_distinct_child_tasks_keep_unique_identities_during_stopped_replay(tmp_p
     stop_parent(state, parent, [(child, directory, selected)])
     retained = [
         row
-        for row in coverage(parent_dir)["deferred"]
+        for row in read_review_state(state, parent_dir)["deferred"]
         if row["id"].startswith(f"{child['scanId']}/")
         and row["id"] != f"{child['scanId']}/scan-stopped"
     ]
@@ -187,7 +183,9 @@ def test_stopped_child_receipt_collisions_preserve_other_child_findings(tmp_path
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 1
     failed_rows = [
-        row for row in coverage(parent_dir)["surfaces"] if row["id"].startswith(child["scanId"])
+        row
+        for row in read_review_state(state, parent_dir)["surfaces"]
+        if row["id"].startswith(child["scanId"])
     ]
     assert any(row["disposition"] == "needs_follow_up" for row in failed_rows)
     child_state = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]
@@ -244,7 +242,7 @@ def test_terminal_child_closeout_replaces_invalid_historical_receipt(
     )
     originals = original_evidence(directory)
     stop_parent(state, parent, [(child, directory, selected)])
-    result = coverage(parent_dir)
+    result = read_review_state(state, parent_dir)
     retained = next(row for row in result["surfaces"] if row["id"] == f"{child['scanId']}/api")
     assert retained["label"] == "Accepted review"
     assert retained["notes"] == "Accepted notes"
@@ -301,7 +299,7 @@ def test_selected_child_receipt_spelling_precedes_historical_surface_receipts(tm
     )
     originals = original_evidence(directory)
     stop_parent(state, parent, [(child, directory, selected)])
-    rows = {row["label"]: row for row in coverage(parent_dir)["surfaces"]}
+    rows = {row["label"]: row for row in read_review_state(state, parent_dir)["surfaces"]}
     for label, name in [("Reader", "replacement.md"), ("Writer", "Review.md")]:
         assert rows[label]["disposition"] == "no_issue_found"
         assert rows[label]["receiptRefs"] == [
@@ -324,7 +322,7 @@ def test_parent_refresh_preserves_repaired_child_receipts(tmp_path):
     replacement = receipt(directory, "Review.md")
     latest = save_child(child, directory, surfaces=[{**surface, "receiptRefs": [replacement]}])
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
-    expected = coverage(directory)["surfaces"][0]
+    expected = read_review_state(state, directory)["surfaces"][0]
     assert expected["disposition"] == "no_issue_found"
     assert expected["receiptRefs"] == [replacement]
     originals = original_evidence(directory)
@@ -334,7 +332,9 @@ def test_parent_refresh_preserves_repaired_child_receipts(tmp_path):
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         retained = next(
-            row for row in coverage(parent_dir)["surfaces"] if row["id"] == f"{child['scanId']}/api"
+            row
+            for row in read_review_state(state, parent_dir)["surfaces"]
+            if row["id"] == f"{child['scanId']}/api"
         )
         assert retained["disposition"] == "no_issue_found"
         assert retained["receiptRefs"] == [

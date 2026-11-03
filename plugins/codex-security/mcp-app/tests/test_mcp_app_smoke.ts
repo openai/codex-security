@@ -12,6 +12,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -87,9 +88,11 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
+    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
@@ -523,8 +526,9 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
       );
     }
     const inventoryPath = path.join(fixtureRoot, "in_scope_files.txt");
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
-      path.join(pluginRoot, "scripts", "generate_in_scope_files.py"),
+    execFileSync(process.execPath, [
+      path.join(pluginRoot, "mcp", "helpers.mjs"),
+      "generate-in-scope-files",
       "--repo",
       canonicalTarget,
       `--scope=${scope}`,
@@ -901,7 +905,9 @@ async function assertUserInputFailureLogging() {
       },
     });
     const elicitationRequest = await failingElicitationServer.waitForMessage(
-      (message) => message.method === "elicitation/create",
+      (message) =>
+        message.method === "elicitation/create" &&
+        message.params.message.includes("Should Codex Security continue?"),
       "failing Codex Security elicitation request",
     );
     failingElicitationServer.sendError(
@@ -910,7 +916,11 @@ async function assertUserInputFailureLogging() {
       "Fixture elicitation failure",
     );
     const logMessage = await failingElicitationServer.waitForMessage(
-      (message) => message.method === "notifications/message",
+      (message) =>
+        message.method === "notifications/message" &&
+        message.params.data?.error?.message?.includes(
+          "Fixture elicitation failure",
+        ),
       "Codex Security elicitation failure log",
     );
     assert.equal(logMessage.params.level, "warning");
@@ -1933,7 +1943,7 @@ try {
   ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
-  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
+  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app", "model"]);
   assert.deepEqual(start._meta.ui.visibility, ["app"]);
   assert.deepEqual(startDeepScan._meta.ui.visibility, ["model"]);
   assert.ok(startDeepScan.inputSchema.properties.scanId);
@@ -2873,7 +2883,11 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
-  const remediationPatchPath = " remediation.patch";
+  const manifestPath = path.join(initializedScanDir, "scan-manifest.json");
+  const sealedManifest = await readFile(manifestPath);
+  const filesBeforeGeneration = await readdir(initializedScanDir, {
+    recursive: true,
+  });
   const remediationPatch = `diff --git a/src/a.py b/src/a.py
 --- a/src/a.py
 +++ b/src/a.py
@@ -2881,14 +2895,6 @@ try {
 -vulnerable
 +fixed
 `;
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath),
-    remediationPatch,
-  );
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath.trim()),
-    "different patch contents\n",
-  );
   const generatedPatch = await testServer.callTool(62, {
     name: "set_codex_security_finding_remediation",
     arguments: {
@@ -2897,27 +2903,34 @@ try {
       requestId: remediationRequestId,
       expectedVersion: 1,
       state: "generated",
-      patchPath: remediationPatchPath,
-      patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
+      patch: remediationPatch,
       summary: "Contain archive extraction under the output root.",
     },
   });
   assertNoError(generatedPatch);
+  const generatedFinding =
+    generatedPatch.result.structuredContent.scan.findings[0];
+  const remediation = generatedFinding.remediationState;
+  const savedPatchPath = path.join(initializedScanDir, remediation.patchPath);
+  assert.equal(remediation.state, "generated");
+  assert.equal(remediation.patch, remediationPatch);
   assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .state,
-    "generated",
+    remediation.patchDigest,
+    `sha256:${hash("sha256", remediationPatch)}`,
   );
+  assert.ok(
+    !filesBeforeGeneration.includes(path.normalize(remediation.patchPath)),
+  );
+  assert.deepEqual(
+    await readFile(savedPatchPath),
+    Buffer.from(remediationPatch),
+  );
+  assert.deepEqual(await readFile(manifestPath), sealedManifest);
   assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .patch,
-    remediationPatch,
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    "vulnerable\n",
   );
-  assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .patchPath,
-    remediationPatchPath,
-  );
+  assert.equal(generatedFinding.triage.status, "open");
 
   const applyActionToken = randomUUID();
   const requestedApply = await testServer.callTool(65, {
@@ -2954,16 +2967,10 @@ try {
     markedApplyDelivered.result.structuredContent.scan.findings[0]
       .remediationState.actionDeliveredAt,
   );
-  execFileSync(
-    "git",
-    [
-      "apply",
-      "--no-index",
-      path.join(initializedScanDir, remediationPatchPath),
-    ],
-    {
-      cwd: target,
-    },
+  execFileSync("git", ["apply", "--no-index", savedPatchPath], { cwd: target });
+  assert.match(
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    /^fixed\r?\n$/,
   );
 
   const appliedPatch = await testServer.callTool(66, {
@@ -2975,9 +2982,7 @@ try {
       occurrenceId,
       requestId: remediationRequestId,
       state: "applied",
-      patchPath:
-        generatedPatch.result.structuredContent.scan.findings[0]
-          .remediationState.patchPath,
+      patchPath: remediation.patchPath,
     },
   });
   assertNoError(appliedPatch);
@@ -3062,6 +3067,55 @@ try {
     "Focused remediation checks passed.",
   );
 
+  const latin1Source = path.join(target, "src/info.py");
+  await writeFile(latin1Source, "café\n", "latin1");
+  const latin1Patch = Buffer.from(
+    "--- a/src/info.py\n+++ b/src/info.py\n@@ -1 +1 @@\n-café\n+résolu\n",
+    "latin1",
+  );
+  const latin1Request = {
+    occurrenceId: results.findings[1].occurrenceId,
+    actionToken: randomUUID(),
+    requestId: randomUUID(),
+  };
+  assertNoError(
+    await testServer.callTool(174, {
+      name: "request_codex_security_finding_remediation",
+      arguments: latin1Request,
+    }),
+  );
+  const latin1Generation = {
+    ...latin1Request,
+    expectedVersion: 1,
+    state: "generated",
+  };
+  const malformedPatch = await testServer.callTool(175, {
+    name: "set_codex_security_finding_remediation",
+    arguments: { ...latin1Generation, patch: "bad\ud800" },
+  });
+  assert.equal(malformedPatch.result.isError, true);
+  assert.match(
+    malformedPatch.result.content[0].text,
+    /unpaired Unicode surrogate.*base64/,
+  );
+  const generatedLatin1 = await testServer.callTool(176, {
+    name: "set_codex_security_finding_remediation",
+    arguments: {
+      ...latin1Generation,
+      patch: { encoding: "base64", content: latin1Patch.toString("base64") },
+    },
+  });
+  assertNoError(generatedLatin1);
+  const { patchDigest, patchPath } =
+    generatedLatin1.result.structuredContent.scan.findings[1].remediationState;
+  const latin1PatchPath = path.join(initializedScanDir, patchPath);
+  assert.equal(patchDigest, `sha256:${hash("sha256", latin1Patch)}`);
+  assert.deepEqual(await readFile(latin1PatchPath), latin1Patch);
+  execFileSync("git", ["apply", "--no-index", latin1PatchPath], {
+    cwd: target,
+  });
+  assert.match(await readFile(latin1Source, "latin1"), /^résolu\r?\n$/);
+
   const findingsPage = await testServer.callTool(67, {
     name: "list_codex_security_findings",
     arguments: { scanId, offset: 0, limit: 1 },
@@ -3143,6 +3197,37 @@ try {
     unclaimedContext.result.content[0].text,
     /Claim the pending Codex Security scan handoff/,
   );
+  const unattachedToken = randomUUID();
+  const unattachedClaim = await testServer.callTool(20180, {
+    name: "claim_codex_security_scan_handoff_delivery",
+    arguments: { claimToken: unattachedToken, scanId: canceledScanId },
+  });
+  assertNoError(unattachedClaim);
+  const unattachedContext = await testServer.callTool(20181, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken: unattachedToken, scanId: canceledScanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assertNoError(unattachedContext);
+  assert.equal(
+    unattachedContext.result.structuredContent.scan.handoffStatus,
+    "delivered",
+  );
+  assert.equal(
+    unattachedContext.result.structuredContent.scan.continuationThreadId,
+    null,
+  );
+  const unattachedRead = await testServer.callTool(20182, {
+    name: "list_codex_security_review_items",
+    arguments: { scanId: canceledScanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.equal(unattachedRead.result.isError, true);
+  assert.match(
+    unattachedRead.result.content[0].text,
+    /current continuation claim/,
+  );
+
   const rejectedWrongThreadCancel = await testServer.callTool(1169, {
     name: "cancel_codex_security_scan",
     arguments: { scanId: canceledScanId },
@@ -3229,6 +3314,16 @@ try {
       .continuationThreadId,
     "fixture-recovery-thread",
   );
+  const malformedRecovery = await testServer.callTool(20170, {
+    name: "get_codex_security_scan_context",
+    arguments: {
+      handoffClaimToken: `${fallbackClaimToken}-extra`,
+      scanId: fallbackScanId,
+    },
+    _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
+  });
+  assert.equal(malformedRecovery.result.isError, true);
+  assert.match(malformedRecovery.result.content[0].text, /invalid/i);
   const wrongRecoveryContext = await testServer.callTool(20171, {
     name: "get_codex_security_scan_context",
     arguments: {
@@ -3263,6 +3358,18 @@ try {
       .handoffClaimToken,
     undefined,
   );
+  const recoveryArtifactRead = (id: number) =>
+    testServer.callTool(id, {
+      name: "list_codex_security_review_items",
+      arguments: { scanId: fallbackScanId },
+      _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
+    });
+  const beforeRecovery = await recoveryArtifactRead(20174);
+  assert.equal(beforeRecovery.result.isError, true);
+  assert.match(
+    beforeRecovery.result.content[0].text,
+    /current continuation claim/,
+  );
   const recoveredThreadContext = await testServer.callTool(20172, {
     name: "get_codex_security_scan_context",
     arguments: {
@@ -3288,6 +3395,12 @@ try {
     recoveredThreadContext.result.structuredContent.workspace.results
       .handoffClaimToken,
     undefined,
+  );
+  const afterRecovery = await recoveryArtifactRead(20175);
+  assert.equal(afterRecovery.result.isError, true);
+  assert.match(
+    afterRecovery.result.content[0].text,
+    /only available for Deep or diff scans/,
   );
   const fallbackAppAcknowledgement = await testServer.callTool(2014, {
     name: "mark_codex_security_scan_handoff_delivered",
@@ -3489,7 +3602,7 @@ try {
     },
   });
   assertNoError(rotatedProgress);
-  const failureMessage = "--failure\nline";
+  const failureMessage = `--failure\n${"diagnostic ".repeat(500)}final cause`;
   const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {

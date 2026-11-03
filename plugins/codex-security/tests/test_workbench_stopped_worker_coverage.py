@@ -7,6 +7,7 @@ import pytest
 from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
+    read_review_state,
     register,
     run_workbench,
     saved_draft,
@@ -94,7 +95,7 @@ def test_stopped_composition_preserves_independent_coverage_and_receipts(
     assert stopped["progress"]["status"] == termination
     assert stopped["findingCount"] == 1
     assert not any("coverage receipt" in warning for warning in stopped["warnings"])
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{child['scanId']}/api" for child, _, _ in children
@@ -109,7 +110,7 @@ def test_stopped_composition_preserves_independent_coverage_and_receipts(
         ]
     sealed = {
         name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "coverage.json", "report.md")
+        for name in ("scan-manifest.json", "findings.json", "report.md")
     }
     run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"])
     assert all((parent_dir / name).read_bytes() == contents for name, contents in sealed.items())
@@ -138,7 +139,7 @@ def test_stopped_child_recovers_invalid_receipts_before_projection(
     original = selected.read_bytes()
     stopped = stop_parent(state, parent, [(child, directory, selected)])
     assert stopped["progress"]["status"] == "failed"
-    surface = json.loads((parent_dir / "coverage.json").read_text())["surfaces"][0]
+    surface = read_review_state(state, parent_dir)["surfaces"][0]
     assert surface["id"] == f"{child['scanId']}/api"
     assert surface["disposition"] == "needs_follow_up"
     assert surface["receiptRefs"] == []
@@ -163,7 +164,7 @@ def test_child_links_remain_bound_to_explicit_surface_through_generated_id_colli
         deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
     )
     stop_parent(state, parent, [(child, directory, selected)])
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
     assert len(surfaces) == 2
     assert surfaces["Explicit"]["id"] != surfaces["Anonymous"]["id"]

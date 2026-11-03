@@ -37,19 +37,6 @@ export function semanticScanDraft(
     delete scope["includePaths"];
     delete scope["excludePaths"];
   }
-  const semanticCoverage = structuredClone(coverage);
-  for (const field of [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "mode",
-    "includePaths",
-    "excludePaths",
-    "receiptRefs",
-    "inventoryStrategy",
-    "completeness",
-  ])
-    delete semanticCoverage[field];
   return {
     scanId,
     ...(scan["complete"] === false ? { complete: false } : {}),
@@ -63,8 +50,25 @@ export function semanticScanDraft(
         delete semantic[field];
       return semantic;
     }),
-    coverage: semanticCoverage,
+    coverage: semanticReviewState(coverage),
   } as SemanticScan;
+}
+
+function semanticReviewState(coverage: JsonObject): SemanticCoverage {
+  const semanticCoverage = structuredClone(coverage);
+  for (const field of [
+    "documentType",
+    "schemaVersion",
+    "scanId",
+    "mode",
+    "includePaths",
+    "excludePaths",
+    "receiptRefs",
+    "inventoryStrategy",
+    "completeness",
+  ])
+    delete semanticCoverage[field];
+  return semanticCoverage as SemanticCoverage;
 }
 
 function withoutPreviousFindings(finding: JsonObject): JsonObject {
@@ -337,6 +341,7 @@ export interface PreparedScanDraft {
   manifest: {
     scan: {
       complete?: boolean;
+      reviewState: SemanticCoverage;
       target: ScanTargetRecord;
       scope: ScanScope;
       threatModel?: SemanticScan["threatModel"];
@@ -397,6 +402,13 @@ export function prepareSemanticScanDraft(
   );
   const target = buildTarget(context, contract, trustedTarget);
   const scope = buildScope(context, trustedScope, input.scope);
+  const coverage = buildCoverage(
+    context,
+    contract,
+    input.coverage,
+    scope,
+    target,
+  );
   return {
     findings: {
       findings: prepareScanFindings(
@@ -410,10 +422,11 @@ export function prepareSemanticScanDraft(
         context.mode,
       ),
     },
-    coverage: buildCoverage(context, contract, input.coverage, scope, target),
+    coverage,
     manifest: {
       scan: {
         ...(input.complete === false ? { complete: false } : {}),
+        reviewState: semanticReviewState(coverage),
         target,
         scope,
         ...(input.threatModel === undefined

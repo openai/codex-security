@@ -102,7 +102,7 @@ test("composed discovery and canonical draft admission require typed surface IDs
         scanId: "7fc17317-9594-49e0-b06a-d72fd7e14bba",
         manifest: { scan: { id: "7fc17317-9594-49e0-b06a-d72fd7e14bba" } },
         findings: { findings: [] },
-        coverage,
+        reviewState: coverage,
       }),
     /Invalid string/,
   );

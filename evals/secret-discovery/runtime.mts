@@ -133,14 +133,16 @@ export async function shouldUseOpenAiApiKey(
 /** Share saved login updates without importing the caller's configuration. */
 export async function createEvalHome(
   createHome: (root?: string) => Promise<string>,
-  ambientHome: string,
+  ambientHome: string | undefined,
 ) {
   let auth;
-  try {
-    const path = await realpath(join(ambientHome, "auth.json"));
-    if ((await stat(path)).isFile()) auth = path;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  if (ambientHome !== undefined) {
+    try {
+      const path = await realpath(join(ambientHome, "auth.json"));
+      if ((await stat(path)).isFile()) auth = path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
   // A hard link must stay on the saved login's filesystem, including symlinks.
   const home = await createHome(auth ? dirname(auth) : undefined);

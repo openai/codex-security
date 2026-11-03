@@ -38,12 +38,16 @@ export interface RepositoryFinding extends Pick<
 export interface ScanResultOptions {
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review?: NonNullable<ScanManifest["scan"]["review"]>;
+  coverage?: CoverageDocument;
+  mode?: NonNullable<ScanManifest["scan"]["mode"]>;
   scanDir: string;
   threadId: string | null;
   turnResult: TurnResultMetadata;
   /** An authoritative saved or aggregated receipt, when one was measured. */
   cost?: Readonly<ScanCost> | null;
+  /** Cost saved when this scan completed. */
+  recordedCost?: Readonly<ScanCost>;
   sarifPath?: string | null;
   threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
@@ -52,9 +56,10 @@ export interface ScanResultOptions {
 }
 
 export class ScanResult {
+  public readonly mode: NonNullable<ScanManifest["scan"]["mode"]>;
   public readonly manifest: ScanManifest;
   public readonly findings: FindingsDocument;
-  public readonly coverage: CoverageDocument;
+  public readonly review: NonNullable<ScanManifest["scan"]["review"]>;
   public readonly scanDir: string;
   /** Null when an empty capped composition completed without a model session. */
   public readonly threadId: string | null;
@@ -67,9 +72,16 @@ export class ScanResult {
   public ownerSuggestionsError: string | undefined;
 
   public constructor(options: ScanResultOptions) {
+    this.mode =
+      options.mode ?? options.manifest.scan.mode ?? options.coverage!.mode;
     this.manifest = options.manifest;
     this.findings = options.findings;
-    this.coverage = options.coverage;
+    this.review = options.review ??
+      options.manifest.scan.review ?? {
+        excludedPaths: options.coverage!.explicitExclusions.map(
+          (item) => item.pattern,
+        ),
+      };
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
@@ -79,7 +91,8 @@ export class ScanResult {
     this.threatModelPath = options.threatModelPath ?? null;
     this.cost =
       options.cost === undefined
-        ? estimateScanCost(options.turnResult.model, options.turnResult.usage)
+        ? (options.recordedCost ??
+          estimateScanCost(options.turnResult.model, options.turnResult.usage))
         : options.cost;
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
@@ -121,10 +134,6 @@ export class ScanResult {
     return join(this.scanDir, "findings.json");
   }
 
-  public get coveragePath(): string {
-    return join(this.scanDir, "coverage.json");
-  }
-
   public get artifactsDir(): string {
     return join(this.scanDir, "artifacts");
   }
@@ -147,7 +156,7 @@ export class ScanResult {
         ? {}
         : { ownerSuggestionsError: this.ownerSuggestionsError }),
       findings: this.findings,
-      coverage: this.coverage,
+      review: this.review,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

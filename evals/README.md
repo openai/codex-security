@@ -10,10 +10,15 @@ being embedded in its source tree or shipped npm runtime.
   findings, with deterministic grading and harness checks.
 - [Completed-report merge](../sdk/typescript/scripts/merge-eval/README.md):
   synthetic grouping quality checks and negative controls.
+- [Standard time budget](standard-time-budget/README.md): paired comparison of
+  production Standard scans with and without an advisory time allowance on
+  synthetic vulnerabilities and safe controls, with source-evidence grading.
 - [Workflow routing](workflow-routing/README.md): checks whether repository-installed
   production skills route natural-language requests to the appropriate workflow,
   stopping before workflow execution.
+- The [skill review fixtures](check-skills/README.md) cover pre-install decisions
+  for individual skill files and bundles, including cross-file behavior.
 
-Model runs are opt-in. CI runs the deterministic triage, secret-discovery, and
+Model runs are opt-in. CI runs the deterministic triage, secret-discovery, time-budget, and
 workflow-routing helper checks. The SDK test suite includes the completed-report
 merge oracle and its negative controls.

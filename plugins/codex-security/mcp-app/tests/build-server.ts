@@ -15,5 +15,11 @@ export function buildServer(outfile: string, options: BuildOptions = {}) {
     outfile,
     platform: "node",
     ...options,
+    banner: {
+      ...options.banner,
+      js: [mcpBundleOptions.banner?.js, options.banner?.js]
+        .filter(Boolean)
+        .join("\n"),
+    },
   });
 }

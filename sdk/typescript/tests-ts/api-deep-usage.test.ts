@@ -90,7 +90,7 @@ test.each(
     expect(h.launches).toHaveLength(runs);
     if (observe) expect(updates.at(-1)).toEqual(expected);
     if (stage === "budget")
-      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(result.review).not.toHaveProperty("completeness");
   },
 );
 

@@ -1,0 +1,82 @@
+{
+  "accountId": "synthetic-account",
+  "requests": [
+    {
+      "request_id": "4d815058-28ce-4c37-9c59-36188c3372be",
+      "repository": {
+        "id": "cloud-repository",
+        "repo_connector_id": "github",
+        "environment_id": "environment-1",
+        "reset_marker": "generation-1"
+      },
+      "source": {
+        "provider": "wiz",
+        "source_key": "synthetic-tenant/wiz"
+      },
+      "items": [
+        {
+          "client_id": "item-1",
+          "source_finding_id": "unicode-evidence",
+          "expected_version": 0,
+          "evidence": {
+            "title": "Unicode vendor metadata",
+            "severity": "high",
+            "source_data": {
+              "é": "precomposed",
+              "é": "combining",
+              "Z": 1,
+              "a": 2,
+              "ä": 3
+            },
+            "description": null,
+            "url": null,
+            "advisory_ids": [],
+            "packages": [],
+            "locations": [],
+            "branch": null,
+            "code_revision": null,
+            "source_scan_id": null,
+            "image_digests": [],
+            "source_updated_at": null
+          }
+        }
+      ]
+    }
+  ],
+  "receipts": [
+    {
+      "id": "4d815058-28ce-4c37-9c59-36188c3372be",
+      "repository": {
+        "id": "cloud-repository",
+        "repo_connector_id": "github",
+        "environment_id": "environment-1",
+        "reset_marker": "generation-1"
+      },
+      "source": {
+        "provider": "wiz",
+        "source_key": "synthetic-tenant/wiz"
+      },
+      "actor": "synthetic-user",
+      "created_at": 1,
+      "item_count": 1,
+      "counts": {
+        "created": 1,
+        "updated": 0,
+        "unchanged": 0,
+        "error": 0
+      },
+      "results": [
+        {
+          "client_id": "item-1",
+          "outcome": "created",
+          "source_report_id": "aif_4fb0fb6973a0ba27504f384bf21a7408bfca3a4b281cc7d11012e8cac270d591",
+          "observation_id": "aio_85b5b4200540ca44d31f8b8ca9ee8314461d55b8d94f5e97b35a832da08d9b81",
+          "canonical_finding_id": "acf_4fb0fb6973a0ba27504f384bf21a7408",
+          "version": 1,
+          "error": null
+        }
+      ],
+      "object": "security.finding_import"
+    }
+  ]
+}

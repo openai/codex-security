@@ -12,9 +12,11 @@ import {
 } from "./codex-home.js";
 import {
   resolveCodexProfile,
+  deepMerge,
   modelProviderConfigOverride,
   inlineToml,
   writeCodexConfig,
+  writePrivateConfig,
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
@@ -83,16 +85,40 @@ export function scanReplaySettings(config: JsonObject): JsonObject {
   );
 }
 
+/** Retain explicit settings omitted from the readable recipe when its file reloads. */
+export function privateReplayOverrides(
+  config: JsonObject,
+  recipe: JsonObject,
+): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, value] of Object.entries(config)) {
+    const saved = recipe[key];
+    if (value === null || saved === undefined) {
+      result[key] = structuredClone(value);
+    } else if (isRecord(value) && isRecord(saved)) {
+      const nested = privateReplayOverrides(
+        value as JsonObject,
+        saved as JsonObject,
+      );
+      if (Object.keys(nested).length > 0) result[key] = nested;
+    }
+  }
+  return result;
+}
+
 /** Provider definitions and saved execution settings use a private native file layer. */
 export async function createProviderProfile(
   codexHome: string,
   config: JsonObject,
-  options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
+  options: Parameters<typeof requirePrivateCredentialHome>[2] & {
+    replay?: boolean;
+  } = {},
 ): Promise<ProviderProfile> {
-  const resolved = resolveCodexProfile(config);
-  const providers = resolved["model_providers"];
   const name = `codex_security_${randomUUID()}`;
-  const path = join(codexHome, `${name}.config.toml`);
+  const path = join(
+    codexHome,
+    `${name}.config.${options.replay ? "json" : "toml"}`,
+  );
   if ((options.platform ?? process.platform) === "win32") {
     await mkdir(codexHome, { recursive: true, mode: 0o700 });
     await requirePrivateCredentialHome(
@@ -101,14 +127,20 @@ export async function createProviderProfile(
       options,
     );
   }
-  await writeCodexConfig(path, {
-    model_providers: isRecord(providers) ? providers : {},
-    ...scanReplaySettings(resolved),
-  });
+  if (options.replay) {
+    await writePrivateConfig(path, JSON.stringify(config));
+  } else {
+    const resolved = resolveCodexProfile(config);
+    const providers = resolved["model_providers"];
+    await writeCodexConfig(path, {
+      model_providers: isRecord(providers) ? providers : {},
+      ...scanReplaySettings(resolved),
+    });
+  }
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
 
-/** Restore a saved provider from the credential home, never from scan artifacts. */
+/** Restore private replay settings from the credential home, never scan artifacts. */
 export async function restoreProviderProfile(
   config: JsonObject,
   profile: unknown,
@@ -137,24 +169,36 @@ export async function restoreProviderProfile(
           environment,
         )
       : codexSecurityCredentialHome(environment);
-  // The managed home has stricter ownership rules. Native execution preserves
-  // the invoking home's permissions and reads the same private profile files.
   if (profile["home"] === "managed")
     await requireSecureCredentialHome(codexHome);
-  const saved = parse(
-    await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
-  );
-  if (!isRecord(saved["model_providers"])) {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.json`), "utf8"),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    saved = parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
+    );
+  }
+  if (
+    !isRecord(saved) ||
+    (saved["model_providers"] !== undefined &&
+      saved["model_providers"] !== null &&
+      !isRecord(saved["model_providers"]))
+  ) {
     throw new CodexSecurityError(
       "The saved provider profile contains no provider configuration.",
     );
   }
+  const { model_providers: providers, ...overrides } = saved;
   return {
-    ...config,
-    ...scanReplaySettings(saved as JsonObject),
-    ...(Object.keys(saved["model_providers"]).length === 0
-      ? {}
-      : { model_providers: saved["model_providers"] as JsonObject }),
+    ...deepMerge({ ...config }, overrides as JsonObject),
+    ...(providers === null ||
+    (isRecord(providers) && Object.keys(providers).length > 0)
+      ? { model_providers: providers as JsonObject | null }
+      : {}),
   };
 }
 

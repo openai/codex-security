@@ -29,6 +29,7 @@ import {
   type DeepScanComposition,
 } from "../src/deep-scan.js";
 import { loadContract } from "../src/contract.js";
+import { readReviewState } from "./support/review-state.js";
 import { ScanResult } from "../src/result.js";
 import { abortable } from "../src/targets.js";
 import {
@@ -46,7 +47,7 @@ import type {
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
-const example = join(pluginRoot, "examples/completed-scan");
+const example = join(pluginRoot, "examples/legacy-completed-scan");
 const roots: string[] = [];
 let exampleManifest: ScanManifest;
 let exampleFindings: FindingsDocument;
@@ -211,7 +212,9 @@ async function harness(
         scanId,
         completed.manifest.scan,
         sourceFindings,
-        completed.coverage,
+        projectedResults.has(childId)
+          ? { ...exampleCoverage, scanId: childId, surfaces: [] }
+          : await readReviewState(childDir),
       );
       for (const [index, finding] of draft.findings.entries()) {
         finding.provenance.sourceFindingIds = [`${childId}:${index}`];

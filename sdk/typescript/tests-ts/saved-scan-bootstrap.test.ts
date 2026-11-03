@@ -20,18 +20,30 @@ import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { FindingEmbeddingBinding } from "../src/deduplication/local.js";
 import type { Finding } from "../src/models.js";
+import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
+import { git } from "./git-fixture.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import { scanRegistrationArguments } from "./support/workbench-command.js";
+import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
-  "saved-scan-bootstrap-",
+  "saved-scan-bootstrap-résumé-",
 );
 afterEach(cleanup);
 
-async function fixture(git = false) {
+function writePythonProbe(path: string) {
+  return writeFile(
+    path,
+    '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+    { mode: 0o700 },
+  );
+}
+
+async function workspace(versioned = false) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(join(repository, "src"), { recursive: true });
@@ -39,20 +51,11 @@ async function fixture(git = false) {
     join(repository, "src", "extract.py"),
     "# Synthetic fixture\n",
   );
-  if (git) {
-    execFileSync("git", ["init", "-q", repository]);
-    execFileSync("git", ["-C", repository, "add", "."]);
-    execFileSync("git", [
-      "-C",
-      repository,
-      "-c",
-      "user.name=Synthetic Fixture",
-      "-c",
-      "user.email=fixture@example.test",
-      "commit",
-      "-qm",
-      "Synthetic fixture",
-    ]);
+  if (versioned) {
+    git(repository, "init", "-q");
+    git(repository, "config", "--local", "core.autocrlf", "false");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "Synthetic fixture");
   }
   const environment = {
     PATH: process.env["PATH"],
@@ -61,37 +64,42 @@ async function fixture(git = false) {
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
   };
   const python = await resolvePluginPython({ environment });
+  return { root, repository, environment, python };
+}
+
+async function registerScan(
+  f: Awaited<ReturnType<typeof workspace>>,
+  scanDir: string,
+) {
+  await mkdir(scanDir, { mode: 0o700 });
+  const registered = await runWorkbench(
+    { environment: f.environment, python: f.python, pluginRoot: PLUGIN_ROOT },
+    scanRegistrationArguments(f.repository, scanDir),
+  );
+  return registered["scanId"] as string;
+}
+
+async function fixture(versioned = false, separateSetupCommands = false) {
+  const base = await workspace(versioned);
+  const { root, repository, environment, python } = base;
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
-  async function scan(name: string) {
+  const registrationArguments = (scanDir: string) =>
+    scanRegistrationArguments(repository, scanDir);
+  async function scan(name: string, registration?: JsonObject) {
     const scanDir = join(root, name);
-    await mkdir(scanDir, { mode: 0o700 });
-    const registered = await runWorkbench(options, [
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "standard",
-        repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
-    const scanId = registered["scanId"] as string;
+    const scanId = registration
+      ? (registration["scanId"] as string)
+      : await registerScan(base, scanDir);
     await copyCompletedScanFixture(scanDir);
     const manifest = JSON.parse(
       await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
     );
     manifest.scan.id = scanId;
-    manifest.scan.target.kind = git ? "git_revision" : "directory_snapshot";
-    if (git)
-      manifest.scan.target.revision = execFileSync(
-        "git",
-        ["-C", repository, "rev-parse", "HEAD"],
-        { encoding: "utf8" },
-      ).trim();
+    manifest.scan.target.kind = versioned
+      ? "git_revision"
+      : "directory_snapshot";
+    if (versioned)
+      manifest.scan.target.revision = git(repository, "rev-parse", "HEAD");
     delete manifest.scan.sealedAt;
     delete manifest.scan.artifacts;
     await writeFile(
@@ -128,11 +136,36 @@ async function fixture(git = false) {
     );
     coverage.scanId = scanId;
     await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
-    await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
+    if (separateSetupCommands)
+      await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
     return { scanId, scanDir };
   }
-  const first = await scan("first");
-  const second = await scan("second");
+  let first: Awaited<ReturnType<typeof scan>>;
+  let second: Awaited<ReturnType<typeof scan>>;
+  if (separateSetupCommands) {
+    first = await scan("first");
+    second = await scan("second");
+  } else {
+    const directories = [join(root, "first"), join(root, "second")];
+    for (const directory of directories)
+      await mkdir(directory, { mode: 0o700 });
+    const registrations = await runWorkbenchFixtureCommands(
+      python,
+      environment,
+      directories.map(registrationArguments),
+    );
+    first = await scan("first", registrations[0]!);
+    second = await scan("second", registrations[1]!);
+    await runWorkbenchFixtureCommands(
+      python,
+      environment,
+      [first, second].map(({ scanId }) => [
+        "complete-scan",
+        "--scan-id",
+        scanId,
+      ]),
+    );
+  }
   const embed = mock(async (findings: readonly Finding[]) =>
     findings.map(() => ({ model: "synthetic", vector: [1, 0, 0] })),
   );
@@ -161,10 +194,7 @@ async function fixture(git = false) {
     })),
   };
   return {
-    root,
-    repository,
-    environment,
-    python,
+    ...base,
     first,
     second,
     embedding,
@@ -174,7 +204,8 @@ async function fixture(git = false) {
 }
 
 test("historical reviews carry the saved occurrence revision instead of the current checkout", async () => {
-  const f = await fixture(true);
+  // Keep an end-to-end registration/completion fixture on separate processes.
+  const f = await fixture(true, true);
   const manifest = JSON.parse(
     await readFile(join(f.first.scanDir, "scan-manifest.json"), "utf8"),
   );
@@ -183,23 +214,9 @@ test("historical reviews carry the saved occurrence revision instead of the curr
     join(f.repository, "src", "extract.py"),
     "# Changed synthetic source\n",
   );
-  execFileSync("git", ["-C", f.repository, "add", "."]);
-  execFileSync("git", [
-    "-C",
-    f.repository,
-    "-c",
-    "user.name=Synthetic Fixture",
-    "-c",
-    "user.email=fixture@example.test",
-    "commit",
-    "-qm",
-    "Changed synthetic source",
-  ]);
-  expect(
-    execFileSync("git", ["-C", f.repository, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-    }).trim(),
-  ).not.toBe(revision);
+  git(f.repository, "add", ".");
+  git(f.repository, "commit", "-qm", "Changed synthetic source");
+  expect(git(f.repository, "rev-parse", "HEAD")).not.toBe(revision);
   let calls = 0;
   await deduplicateScanInternal(
     f.first.scanId,
@@ -254,11 +271,7 @@ for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
           await deduplicateScanInternal(f.first.scanId, options, dependencies);
         const executable = join(f.repository, "python3");
         const marker = join(f.root, "probed");
-        await writeFile(
-          executable,
-          '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-        );
-        await chmod(executable, 0o700);
+        await writePythonProbe(executable);
         const linked = join(f.root, "linked-python");
         if (source === "linked PYTHON") await symlink(executable, linked);
         const environment = {
@@ -564,11 +577,7 @@ test.skipIf(process.platform === "win32")(
     );
     const executable = join(f.repository, "python3");
     const marker = join(f.root, "probed");
-    await writeFile(
-      executable,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(executable, 0o700);
+    await writePythonProbe(executable);
     const options = {
       environment: {
         ...f.environment,
@@ -663,17 +672,13 @@ test("latest explains the explicit scan-ID fallback when history protects the ho
 test.skipIf(process.platform === "win32")(
   "Python rediscovery keeps protecting the caller checkout when a saved target is supplied",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const caller = join(f.root, "caller-checkout");
     await mkdir(caller);
     await mkdir(join(caller, ".git"));
     const python = join(caller, "python3");
     const marker = join(f.root, "caller-probed");
-    await writeFile(
-      python,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(python, 0o700);
+    await writePythonProbe(python);
     const source = new URL("../src/runtime.ts", import.meta.url).href;
     const script = `
     const { resolvePluginPython } = await import(${JSON.stringify(source)});
@@ -704,11 +709,7 @@ test.skipIf(process.platform === "win32")(
     );
     const python = join(f.repository, "python3");
     const marker = join(f.root, "cli-probed");
-    await writeFile(
-      python,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(python, 0o700);
+    await writePythonProbe(python);
     const source = new URL("../src/cli.ts", import.meta.url).href;
     for (const args of [
       ["dedupe", "--scan", f.first.scanId],
@@ -739,7 +740,7 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
   "an unrelated working directory does not exclude trusted Python",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const source = new URL("../src/runtime.ts", import.meta.url).href;
     for (const cwd of ["/", f.root]) {
       const result = spawnSync(
@@ -770,7 +771,11 @@ for (const entry of [
   test.skipIf(process.platform === "win32")(
     `non-Git caller PATH is protected before Python probes through ${entry}`,
     async () => {
-      const f = await fixture();
+      const f = await workspace();
+      const scanId =
+        entry === "helper" || entry === "bootstrap"
+          ? await registerScan(f, join(f.root, "scan"))
+          : undefined;
       const caller = join(f.root, "non-git-caller");
       const callerBin = join(caller, "bin");
       const trustedBin = join(f.root, "trusted-bin");
@@ -783,11 +788,7 @@ for (const entry of [
       const marker = join(f.root, "untrusted-python-probed");
       for (const path of [caller, callerBin]) {
         const python = join(path, "python3");
-        await writeFile(
-          python,
-          '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-        );
-        await chmod(python, 0o700);
+        await writePythonProbe(python);
         await symlink(python, join(path, ".python"));
       }
       await symlink(join(callerBin, "python3"), join(linkedBin, "python3"));
@@ -801,13 +802,14 @@ for (const entry of [
         import assert from "node:assert/strict";
         import { realpath } from "node:fs/promises";
         const { resolvePluginPython, runWorkbench } = await import(${JSON.stringify(runtime)});
+        const scanId = ${JSON.stringify(scanId)};
         const options = { environment: process.env, protectedRoot: ${JSON.stringify(f.repository)}, pluginRoot: ${JSON.stringify(PLUGIN_ROOT)} };
         if (${JSON.stringify(entry)} === "bootstrap") {
           const { savedScanWorkbench } = await import(${JSON.stringify(bootstrap)});
-          const workbench = await savedScanWorkbench(${JSON.stringify(f.first.scanId)}, { ...options, currentDirectory: ${JSON.stringify(caller)} });
-          assert.equal((await workbench(["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+          const workbench = await savedScanWorkbench(scanId, { ...options, currentDirectory: ${JSON.stringify(caller)} });
+          assert.equal((await workbench(["get-scan", "--scan-id", scanId])).scan.scanId, scanId);
         } else if (${JSON.stringify(entry)} === "helper") {
-          assert.equal((await runWorkbench(options, ["get-scan", "--scan-id", ${JSON.stringify(f.first.scanId)}])).scan.scanId, ${JSON.stringify(f.first.scanId)});
+          assert.equal((await runWorkbench(options, ["get-scan", "--scan-id", scanId])).scan.scanId, scanId);
         } else {
           const selected = await resolvePluginPython({ ...options, managedRuntimeRoots: [], ...(${JSON.stringify(entry)} === "configured dot-name resolver" ? { configuredPath: ".python" } : {}) });
           assert.equal(await realpath(selected), await realpath(${JSON.stringify(f.python)}));
@@ -837,17 +839,13 @@ for (const entry of [
 test.skipIf(process.platform === "win32")(
   "Python discovery protects the enclosing checkout of a nested target",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
     const target = join(f.repository, "component");
     await mkdir(target);
     await mkdir(join(f.repository, ".git"));
     const python = join(f.repository, "python3");
     const marker = join(f.root, "enclosing-checkout-probed");
-    await writeFile(
-      python,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(python, 0o700);
+    await writePythonProbe(python);
     await expect(
       resolvePluginPython({
         environment: {
@@ -862,60 +860,50 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-for (const selector of ["latest", "workflow"] as const) {
-  test(`bootstrap ${selector} ignores unrelated history enclosing trusted Python`, async () => {
-    const f = await fixture(true);
-    const workflowId = "scoped-bootstrap";
-    await deduplicateScanInternal(
-      f.first.scanId,
-      { workflowId, embedding: f.embedding },
-      { environment: f.environment, reviewer: f.reviewer },
+test("latest and workflow selectors ignore unrelated history enclosing trusted Python", async () => {
+  const f = await fixture(true);
+  const workflowId = "scoped-bootstrap";
+  await deduplicateScanInternal(
+    f.first.scanId,
+    { workflowId, embedding: f.embedding },
+    { environment: f.environment, reviewer: f.reviewer },
+  );
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      "unrelated-target",
+      dirname(f.python),
+      "Unrelated synthetic target",
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:00:00Z",
     );
-    const db = new Database(
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-    );
-    try {
-      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
-        "unrelated-target",
-        dirname(f.python),
-        "Unrelated synthetic target",
-        "2026-01-01T00:00:00Z",
-        "2026-01-01T00:00:00Z",
-      );
-      db.query(
-        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
-      ).run(dirname(f.python), "unrelated-target", f.second.scanId);
-    } finally {
-      db.close();
-    }
-    const workbench = await savedScanWorkbench(
-      selector === "latest" ? "latest" : { workflowId },
-      {
-        environment: { ...f.environment, PYTHON: f.python },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.repository,
-      },
-    );
-    if (selector === "latest") {
-      expect(
-        (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId,
-      ).toBe(f.first.scanId);
-    } else {
-      const result = await workbench(
-        ["finding-workflow"],
-        JSON.stringify({ id: workflowId, action: "get" }),
-      );
-      expect((result["workflow"] as { scanId: string }).scanId).toBe(
-        f.first.scanId,
-      );
-    }
+    db.query(
+      "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+    ).run(dirname(f.python), "unrelated-target", f.second.scanId);
+  } finally {
+    db.close();
+  }
+  const options = {
+    environment: { ...f.environment, PYTHON: f.python },
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: f.repository,
+  };
+  const latest = await resolveCompletedScan("latest", {
+    currentDirectory: () => f.repository,
+    runWorkbench: await savedScanWorkbench("latest", options),
   });
-}
+  expect(latest.scanId).toBe(f.first.scanId);
+  const workbench = await savedScanWorkbench({ workflowId }, options);
+  const result = await workbench(
+    ["finding-workflow"],
+    JSON.stringify({ id: workflowId, action: "get" }),
+  );
+  expect((result["workflow"] as { scanId: string }).scanId).toBe(
+    f.first.scanId,
+  );
+});
 
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "workflow bootstrap ignores inaccessible unrelated history",
@@ -1018,7 +1006,8 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
   "legacy workflow state resolves its bound target before Python discovery",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
+    const scanId = "11111111-1111-4111-8111-111111111111";
     const state = join(f.root, "legacy-state");
     await mkdir(state);
     const db = new Database(join(state, "workbench.sqlite3"));
@@ -1026,24 +1015,17 @@ test.skipIf(process.platform === "win32")(
       db.exec(
         "CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT NOT NULL); CREATE TABLE finding_workflows (id TEXT PRIMARY KEY, state_json TEXT NOT NULL)",
       );
-      db.query("INSERT INTO scans VALUES (?, ?)").run(
-        f.first.scanId,
-        f.repository,
-      );
+      db.query("INSERT INTO scans VALUES (?, ?)").run(scanId, f.repository);
       db.query("INSERT INTO finding_workflows VALUES (?, ?)").run(
         "legacy-workflow",
-        JSON.stringify({ scanId: f.first.scanId }),
+        JSON.stringify({ scanId }),
       );
     } finally {
       db.close();
     }
     const executable = join(f.repository, "python3");
     const marker = join(f.root, "legacy-probed");
-    await writeFile(
-      executable,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(executable, 0o700);
+    await writePythonProbe(executable);
     const workbench = await savedScanWorkbench(
       { workflowId: "legacy-workflow" },
       {
@@ -1133,100 +1115,31 @@ connection.close()
   });
 }
 
-test.each([
-  ["offsets", "2026-08-01T03:00:00+02:00", "2026-08-01T01:30:00Z"],
-  ["fractional seconds", "2026-08-01T01:00:00Z", "2026-08-01T01:00:00.100000Z"],
-  [
-    "microseconds",
-    "2026-08-01T01:00:00.000001Z",
-    "2026-08-01T01:00:00.000002Z",
-  ],
-  [
-    "millisecond boundaries",
-    "2026-08-01T01:00:00.481998Z",
-    "2026-08-01T01:00:00.482012Z",
-  ],
-  [
-    "offset microseconds",
-    "2026-08-01T03:00:00.000001+02:00",
-    "2026-08-01T01:00:00.000002Z",
-  ],
-])(
-  "latest orders timestamps chronologically with %s",
-  async (_, older, newer) => {
-    const f = await fixture();
-    const db = new Database(
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-    );
-    try {
-      // The older scan wins an ID tie, so lost timestamp precision cannot pass.
-      const [olderScan, newerScan] =
-        f.first.scanId < f.second.scanId
-          ? ([f.first, f.second] as const)
-          : ([f.second, f.first] as const);
-      for (const [scan, timestamp] of [
-        [olderScan, older],
-        [newerScan, newer],
-      ] as const) {
-        db.query(
-          "UPDATE scans SET updated_at = ?, started_at = '2000-01-01T00:00:00Z' WHERE id = ?",
-        ).run(timestamp, scan.scanId);
-        db.query(
-          "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-        ).run(older, scan.scanId);
-      }
-      async function latest() {
-        const workbench = await savedScanWorkbench("latest", {
-          environment: { ...f.environment, PYTHON: f.python },
-          pluginRoot: PLUGIN_ROOT,
-          currentDirectory: f.repository,
-        });
-        return (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId;
-      }
-      expect(await latest()).toBe(newerScan.scanId);
-      // Either the scan or its progress may hold the latest update.
-      db.query("UPDATE scans SET updated_at = ?").run(older);
-      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
-        newer,
-        newerScan.scanId,
-      );
-      expect(await latest()).toBe(newerScan.scanId);
-      // Equal updates fall back to the scans' chronological start times.
-      db.query("UPDATE scans SET updated_at = '2099-01-01T00:00:00Z'").run();
-      db.query(
-        "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z'",
-      ).run();
-      db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
-        older,
-        olderScan.scanId,
-      );
-      db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
-        newer,
-        newerScan.scanId,
-      );
-      expect(await latest()).toBe(newerScan.scanId);
-      db.query("UPDATE scans SET started_at = ?").run(older);
-      expect(await latest()).toBe(olderScan.scanId);
-    } finally {
-      db.close();
-    }
-  },
-);
-
-test("latest follows progress timestamps and excludes canceled scans", async () => {
+test("latest orders uncanceled scans by update, start time, and ID", async () => {
+  const older = "2026-08-01T03:00:00.000001+02:00";
+  const newer = "2026-08-01T01:00:00.000002Z";
   const f = await fixture();
   const db = new Database(
     join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
   );
   try {
-    db.query(
-      "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z' WHERE scan_id = ?",
-    ).run(f.first.scanId);
+    // The older scan wins an ID tie, so lost timestamp precision cannot pass.
+    const [olderScan, newerScan] =
+      f.first.scanId < f.second.scanId
+        ? ([f.first, f.second] as const)
+        : ([f.second, f.first] as const);
+    for (const [scan, timestamp] of [
+      [olderScan, older],
+      [newerScan, newer],
+    ] as const) {
+      db.query(
+        "UPDATE scans SET updated_at = ?, started_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+      ).run(timestamp, scan.scanId);
+      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+        older,
+        scan.scanId,
+      );
+    }
     async function latest() {
       const workbench = await savedScanWorkbench("latest", {
         environment: { ...f.environment, PYTHON: f.python },
@@ -1240,11 +1153,45 @@ test("latest follows progress timestamps and excludes canceled scans", async () 
         })
       ).scanId;
     }
-    expect(await latest()).toBe(f.first.scanId);
+    expect(await latest()).toBe(newerScan.scanId);
+    // Either the scan or its progress may hold the latest update.
+    db.query("UPDATE scans SET updated_at = ?").run(older);
+    db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+      newer,
+      newerScan.scanId,
+    );
+    expect(await latest()).toBe(newerScan.scanId);
+    // Progress can outrank both the other scan's update and its later start.
+    db.query(
+      "UPDATE scans SET updated_at = ?, started_at = ? WHERE id = ?",
+    ).run(newer, newer, newerScan.scanId);
+    db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+      "2026-08-01T01:00:00.000003Z",
+      olderScan.scanId,
+    );
+    expect(await latest()).toBe(olderScan.scanId);
     db.query(
       "UPDATE scans SET canceled_at = '2099-01-02T00:00:00Z' WHERE id = ?",
-    ).run(f.first.scanId);
-    expect(await latest()).toBe(f.second.scanId);
+    ).run(olderScan.scanId);
+    expect(await latest()).toBe(newerScan.scanId);
+    // Equal updates fall back to the scans' chronological start times.
+    db.query(
+      "UPDATE scans SET canceled_at = NULL, updated_at = '2099-01-01T00:00:00Z'",
+    ).run();
+    db.query(
+      "UPDATE scan_progress SET updated_at = '2099-01-01T00:00:00Z'",
+    ).run();
+    db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
+      older,
+      olderScan.scanId,
+    );
+    db.query("UPDATE scans SET started_at = ? WHERE id = ?").run(
+      newer,
+      newerScan.scanId,
+    );
+    expect(await latest()).toBe(newerScan.scanId);
+    db.query("UPDATE scans SET started_at = ?").run(older);
+    expect(await latest()).toBe(olderScan.scanId);
   } finally {
     db.close();
   }
@@ -1314,16 +1261,13 @@ for (const kind of ["non-Git", "symlinked"] as const) {
 test.skipIf(process.platform === "win32")(
   "bootstrap protects a target committed only to the live WAL",
   async () => {
-    const f = await fixture();
+    const f = await workspace();
+    const scanId = await registerScan(f, join(f.root, "scan"));
     const target = join(f.root, "wal-target");
     await mkdir(target);
     const executable = join(target, "python3");
     const marker = join(f.root, "wal-target-probed");
-    await writeFile(
-      executable,
-      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-      { mode: 0o700 },
-    );
+    await writePythonProbe(executable);
     const db = new Database(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
@@ -1331,9 +1275,9 @@ test.skipIf(process.platform === "win32")(
       db.exec("PRAGMA wal_autocheckpoint = 0");
       db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
         target,
-        f.first.scanId,
+        scanId,
       );
-      const workbench = await savedScanWorkbench(f.first.scanId, {
+      const workbench = await savedScanWorkbench(scanId, {
         environment: {
           ...f.environment,
           PYTHON: executable,
@@ -1343,7 +1287,7 @@ test.skipIf(process.platform === "win32")(
         currentDirectory: f.root,
       });
       await expect(
-        workbench(["get-scan", "--scan-id", f.first.scanId]),
+        workbench(["get-scan", "--scan-id", scanId]),
       ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
       expect(existsSync(marker)).toBe(false);
     } finally {
@@ -1353,7 +1297,8 @@ test.skipIf(process.platform === "win32")(
 );
 
 test("saved-scan bootstrap waits for a concurrent database writer", async () => {
-  const f = await fixture();
+  const f = await workspace();
+  const scanId = await registerScan(f, join(f.root, "scan"));
   const writer = spawn(
     process.execPath,
     [
@@ -1379,13 +1324,13 @@ test("saved-scan bootstrap waits for a concurrent database writer", async () => 
         throw new Error("Writer exited before acquiring its lock");
       }),
     ]);
-    const workbench = await savedScanWorkbench(f.first.scanId, {
+    const workbench = await savedScanWorkbench(scanId, {
       environment: f.environment,
       currentDirectory: f.repository,
       pluginRoot: PLUGIN_ROOT,
     });
-    const result = await workbench(["get-scan", "--scan-id", f.first.scanId]);
-    expect((result["scan"] as { scanId: string }).scanId).toBe(f.first.scanId);
+    const result = await workbench(["get-scan", "--scan-id", scanId]);
+    expect((result["scan"] as { scanId: string }).scanId).toBe(scanId);
     expect((await closed)[0]).toBe(0);
   } finally {
     writer.kill();
@@ -1408,11 +1353,7 @@ for (const kind of ["missing", "symlinked"] as const) {
         }
         const python = join(f.repository, "python3");
         const marker = join(f.root, "missing-target-probed");
-        await writeFile(
-          python,
-          '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-          { mode: 0o700 },
-        );
+        await writePythonProbe(python);
         const db = new Database(
           join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
         );

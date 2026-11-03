@@ -33,6 +33,7 @@ const DOCUMENT_EXTENSIONS = new Set([
 export interface PreparedKnowledgeBase {
   path: string;
   sources: string[];
+  protectedRoots: string[];
   snapshot: KnowledgeBaseSnapshot;
   sha256: string;
   cleanup(): Promise<void>;
@@ -41,7 +42,21 @@ export interface PreparedKnowledgeBase {
 export interface KnowledgeBaseSnapshot {
   readonly sources: readonly string[];
   readonly documents: Readonly<Record<string, string>>;
-  readonly protectedRoots: readonly string[];
+  readonly protectedRoots?: readonly string[];
+}
+
+export async function knowledgeBaseProtectedRoots(
+  snapshot: KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return snapshot.protectedRoots === undefined
+    ? await Promise.all(
+        snapshot.sources.map(
+          async (source) =>
+            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        ),
+      )
+    : [...snapshot.protectedRoots];
 }
 
 /** @internal Extract once so campaign identity and workers use identical inputs. */
@@ -140,6 +155,7 @@ export async function prepareKnowledgeBase(
       "documents" in input
         ? input
         : await readKnowledgeBaseSnapshot(input, signal);
+    const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
     );
@@ -159,6 +175,7 @@ export async function prepareKnowledgeBase(
     return {
       path,
       sources: [...snapshot.sources],
+      protectedRoots,
       snapshot,
       // Keep the persisted document identity independent of execution metadata.
       sha256: snapshotDigest(snapshot),
@@ -233,6 +250,8 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -278,23 +297,33 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
         signal?.throwIfAborted();
-        pages.push(
-          content.items
-            .map((item) => ("str" in item ? item.str : ""))
-            .join(" "),
-        );
+        const content = await page.getTextContent();
+        signal?.throwIfAborted();
+        const parts: string[] = [];
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          // Separate runs when the PDF supplies no whitespace, including across forms.
+          if (/^\S/u.test(item.str) && /\S$/u.test(parts.at(-1) ?? "")) {
+            parts.push(" ");
+          }
+          if (item.str) parts.push(item.str);
+          if (item.hasEOL) parts.push("\n");
+        }
+        pages.push(parts.join(""));
       }
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });
@@ -345,7 +374,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth++;
       }
@@ -384,7 +414,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth--;
       }

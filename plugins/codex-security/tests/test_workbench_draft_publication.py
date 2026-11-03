@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from test_workbench_standard_deep_results import deep_scan_fixture
-from workbench_test_support import run_workbench, write_completed_contract
+from workbench_test_support import read_draft_documents, run_workbench, write_completed_contract
 
 
 @pytest.mark.parametrize("filename", ["findings.json", "coverage.json"])
@@ -174,3 +174,26 @@ def test_deep_setup_draft_does_not_complete_unfinished_composition(
         == "running"
     )
     assert (scan_dir / "threatmodel.md").read_text().startswith(model["content"])
+
+
+def stage_model_draft(tmp_path, scan_dir, scan_id, target, model, *, complete=True):
+    contract_dir = tmp_path / "contract"
+    contract_dir.mkdir()
+    write_completed_contract(
+        contract_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    documents = read_draft_documents(contract_dir)
+    documents["manifest"] = {
+        "scan": {
+            **{key: documents["manifest"]["scan"][key] for key in ("target", "scope")},
+            "threatModel": model,
+            **({} if complete else {"complete": False}),
+        }
+    }
+    documents["findings"]["findings"] = []
+    documents["coverage"].update(surfaces=[], deferred=[])
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    staged = drafts / f"{uuid.uuid4()}.json"
+    staged.write_text(json.dumps(documents))
+    return documents, staged

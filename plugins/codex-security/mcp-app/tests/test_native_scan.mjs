@@ -17,7 +17,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, sep, relative } from "node:path";
+import { basename, delimiter, dirname, join, sep, relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -62,7 +62,15 @@ await Promise.all([
     join(fixturePluginRoot, "scripts"),
     { recursive: true },
   ),
-  mkdir(join(fixturePluginRoot, "mcp")),
+  cp(
+    new URL("../../../../sdk/typescript/_bundled_plugin/mcp/", import.meta.url),
+    join(fixturePluginRoot, "mcp"),
+    {
+      recursive: true,
+      filter: (source) =>
+        basename(source) === "mcp" || basename(source).startsWith("helpers.mjs"),
+    },
+  ),
 ]);
 await symlink(
   fixtureNativeRoot,
@@ -380,6 +388,7 @@ else {
           {
             ...parseToml(config),
             model: "synthetic-saved-model",
+            service_tier: "saved-test-tier",
             features: { api_key_model_discovery: false },
           },
           true,
@@ -428,6 +437,7 @@ else {
                 : {}),
             },
             model: "synthetic-current-model",
+            serviceTier: "current-test-tier",
           });
           const ambient = prepared.client.dependencies.ambientExecution;
           const source = prepareExecutionSource({
@@ -510,6 +520,10 @@ else {
             assert.equal(
               effective.model,
               recipe ? "synthetic-saved-model" : "synthetic-current-model",
+            );
+            assert.equal(
+              effective.service_tier,
+              recipe ? "saved-test-tier" : "current-test-tier",
             );
             if (scenario === "provider") {
               assert.equal(row.openai, "synthetic-openai-selected");

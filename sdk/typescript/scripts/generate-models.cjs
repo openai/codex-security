@@ -127,11 +127,13 @@ async function generateSemanticModels() {
       ),
   );
   input.$defs.common = common;
-  const model = await compileModel(input, "SemanticScan");
+  const model = await compileModel(input, "ScanDraftInput");
   return format(
     [
       "/* Generated from the plugin semantic draft schema. Run `pnpm generate:models`. */",
       model.trim(),
+      // Persisted checkpoints and the internal composer use the original field name.
+      'export type SemanticScan = Omit<ScanDraftInput, "reviewState"> & { coverage: ScanDraftInput["reviewState"] };',
       'export type SemanticFinding = SemanticScan["findings"][number];',
       'export type SemanticCoverage = SemanticScan["coverage"];',
       'export type SemanticScope = NonNullable<SemanticScan["scope"]>;',
@@ -141,36 +143,38 @@ async function generateSemanticModels() {
   );
 }
 
-Promise.all([
-  generate().then((document) => ["models.ts", document]),
-  generateSemanticModels().then((document) => ["semantic-models.ts", document]),
-]).then((documents) => {
-  const shared = [
-    "finding-normalization",
-    "workbench-arguments",
-    "executable-path",
-  ].map((name) => [
-    `${name}.ts`,
-    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
-      readFileSync(
-        join(
-          packageRoot,
-          `../../plugins/codex-security/mcp-app/src/${name}.ts`,
-        ),
-        "utf8",
-      ),
-  ]);
-  for (const [filename, models] of [...documents, ...shared]) {
-    const output = join(packageRoot, "src", filename);
-    if (process.argv.includes("--check")) {
-      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
-        console.error(
-          `src/${filename} is out of date. Run \`pnpm generate:models\`.`,
-        );
-        process.exitCode = 1;
+Promise.all([generate(), generateSemanticModels()]).then(
+  ([models, semanticModels]) => {
+    const pluginSource = "../../plugins/codex-security/mcp-app/src";
+    const shared = [
+      "workbench-arguments",
+      "executable-path",
+      "contract-values",
+      "finding-normalization",
+      "windows-path",
+    ].map((name) => [
+      `src/${name}.ts`,
+      `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+        readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
+    ]);
+    const outputs = [
+      [`${pluginSource}/models.ts`, models],
+      ["src/models.ts", models],
+      ["src/semantic-models.ts", semanticModels],
+      ...shared,
+    ];
+    for (const [name, content] of outputs) {
+      const output = join(packageRoot, name);
+      if (process.argv.includes("--check")) {
+        if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
+          console.error(
+            `${name} is out of date. Run \`pnpm generate:models\`.`,
+          );
+          process.exitCode = 1;
+        }
+        continue;
       }
-      continue;
+      writeFileSync(output, content);
     }
-    writeFileSync(output, models);
-  }
-});
+  },
+);

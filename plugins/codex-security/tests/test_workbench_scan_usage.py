@@ -41,6 +41,23 @@ class ScanFixture:
     mode: str = "standard"
     diff_target: dict[str, Any] | None = None
 
+    def write_parent_rollout(
+        self, events: list[dict[str, Any]], *, originator: str | None = None
+    ) -> Path:
+        rollout = _rollout(self.target.parent, "scan-parent", events, originator=originator)
+        _state_graph(self.environment, {"scan-parent": rollout}, [])
+        return rollout
+
+    def command(self, name: str, *arguments: str, check: bool = True) -> dict[str, Any]:
+        return scan_command(
+            self.state_dir,
+            name,
+            self.scan_id,
+            *arguments,
+            check=check,
+            environment=self.environment,
+        )
+
 
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     state_dir = tmp_path / "workbench-state"
@@ -91,12 +108,11 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
 
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(tmp_path / "scans"),
         environment=environment,
-    )["results"]
+    )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         row = connection.execute(
             "SELECT started_at FROM scans WHERE id = ?", (started["scanId"],)
@@ -1625,9 +1641,7 @@ def test_optional_usage_failure_does_not_hide_invalid_scan_state(
     (target / "app.py").write_text("print('fixture')\n")
     environment = {"CODEX_HOME": str(tmp_path / "codex-home"), "CODEX_STATE_DB": ""}
     workspace = create_saved_workspace(state, target, thread_id="scan-parent", mode="deep")
-    scan = start_delivered_scan(
-        state, "--workspace-id", workspace["id"], "--scan-root", str(tmp_path / "scans")
-    )["results"]
+    scan = start_delivered_scan(state, workspace["id"], "--scan-root", str(tmp_path / "scans"))
     scan_id, scan_dir = scan["scanId"], Path(scan["scanDir"])
     run_workbench(
         state,
@@ -2136,7 +2150,7 @@ def test_completed_accounting_survives_migration_without_importing_sidecar_sessi
             "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
         ).fetchone()[0]
         connection.execute("DROP TABLE scan_execution_threads")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 63")
     migrated = run_workbench(
         fixture.state_dir,
         "get-scan",
@@ -3273,3 +3287,131 @@ def test_completion_marks_closed_turn_without_receipt_partial(tmp_path: Path) ->
             "warnings": ["token_record_missing"],
         }.items()
     )
+
+
+@pytest.fixture(scope="session")
+def scan_usage(workbench_api):
+    return workbench_api["scan_usage"]
+
+
+def _measure_rollout(
+    scan_usage,
+    path: Path,
+    started_at: datetime,
+    completed_at: datetime,
+    *,
+    thread_id: str = "scan-parent",
+    parent_id: str | None = None,
+    **options: str | None,
+):
+    return scan_usage._read_rollout_usage(
+        scan_usage.RolloutSession(thread_id, parent_id, path),
+        started_at=started_at,
+        completed_at=completed_at,
+        **options,
+    )
+
+
+@pytest.mark.parametrize("terminal_status", ["complete", "failed"])
+def test_large_usage_persists_with_terminal_scan_state(
+    tmp_path: Path, terminal_status: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    usage = {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        "threadCount": 1,
+        **_counts(120, 30, 15),
+        "accountRateLimits": [
+            {
+                "limitId": f"fixture-limit-{index}",
+                "observedAt": fixture.started_at.isoformat(),
+                "primary": {"usedPercent": 6, "windowMinutes": 10080, "resetsAt": 1800000000},
+                "secondary": None,
+            }
+            for index in range(60)
+        ],
+    }
+    cost_json = json.dumps({"usage": usage}, separators=(",", ":"))
+    assert len(cost_json.encode("utf-8")) > 8192
+
+    if terminal_status == "complete":
+        terminal = _complete_scan(fixture, "--cost-json", cost_json)["scan"]
+    else:
+        terminal = fail_scan(
+            fixture.state_dir,
+            fixture.scan_id,
+            "Fixture failure.",
+            "--cost-json",
+            cost_json,
+            environment=fixture.environment,
+        )["scan"]
+
+    assert terminal["progress"]["status"] == terminal_status
+    assert terminal["usage"] == usage
+    stored = fixture.command("get-scan")["scan"]
+    assert stored["progress"]["status"] == terminal_status
+    assert stored["usage"] == usage
+
+
+def test_completion_collects_large_usage_from_owned_rollouts(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    limit_ids = {f"fixture-limit-{index}" for index in range(60)}
+    fixture.write_parent_rollout(
+        [
+            _token_event(counted, 120, 15, cached_input_tokens=30),
+            *[_allowance_event(counted, 6, limit_id) for limit_id in sorted(limit_ids)],
+        ]
+    )
+
+    completed = _complete_scan(fixture)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    usage = completed["usage"]
+    assert len(json.dumps({"usage": usage}, separators=(",", ":")).encode("utf-8")) > 8192
+    assert usage["coverage"] == "complete"
+    assert usage["threadCount"] == 1
+    assert usage.items() >= _counts(120, 30, 15).items()
+    assert {limit["limitId"] for limit in usage["accountRateLimits"]} == limit_ids
+    assert fixture.command("get-scan")["scan"]["usage"] == usage
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("home_variable", ["CODEX_HOME", "CODEX_SQLITE_HOME"])
+@pytest.mark.parametrize("home_kind", ["absolute", "literal_tilde", "relative_home", "home"])
+def test_usage_finds_state_database_in_configured_home(
+    tmp_path: Path,
+    home_variable: str,
+    home_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    scan_usage,
+) -> None:
+    home = tmp_path / ("native home" if sys.platform == "win32" else "native home ")
+    if home_kind == "literal_tilde":
+        home = tmp_path / ("~ literal" if sys.platform == "win32" else "~ ")
+    home.mkdir()
+    database = home / "state_5.sqlite"
+    database.touch()
+    monkeypatch.setenv("CODEX_STATE_DB", "")
+    monkeypatch.setenv("CODEX_SQLITE_HOME", "")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "unused"))
+    configured_home = str(home)
+    if home_kind == "literal_tilde":
+        monkeypatch.chdir(tmp_path)
+        configured_home = home.name
+    elif home_kind in {"relative_home", "home"}:
+        monkeypatch.setenv("HOME", str(home if home_kind == "home" else tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(home if home_kind == "home" else tmp_path))
+        configured_home = "~" if home_kind == "home" else f"~/{home.name}"
+    monkeypatch.setenv(home_variable, configured_home)
+
+    assert scan_usage._codex_state_database() == database.resolve()
+
+
+def test_usage_has_no_separate_workbench_command(workbench_api, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", "get-scan-usage"])
+    with pytest.raises(SystemExit) as rejected:
+        workbench_api["parse_args"]("workbench")
+    assert rejected.value.code == 2
+    assert "invalid choice: 'get-scan-usage'" in capsys.readouterr().err

@@ -5,6 +5,8 @@ import { resolving } from "./support/promises.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import * as filesystem from "node:fs/promises";
 import { CodexSecurityError } from "../src/errors.js";
 import {
@@ -29,6 +31,7 @@ import { VERSION } from "../src/version.js";
 import {
   forceTerminatePublicationProcesses,
   publishScanInternal,
+  terminatePublicationProcessGroup,
   type PublicationCodexResult,
   type PublishScanDependencies,
   type PublishScanOptions,
@@ -412,6 +415,7 @@ function linearApiClient(
 
 interface PublicationPromptData {
   scanId: string;
+  destination: PreparedScanPublication["destination"];
   handoffFile: string;
   publicationFile: string;
   batches: Array<
@@ -916,6 +920,44 @@ describe("direct Linear API publication", () => {
   );
 
   test.each([
+    ["throws", throwing("The optional progress display failed.")],
+    ["rejects", rejecting("The optional progress display failed.")],
+    ["never settles", () => new Promise<void>(() => {})],
+  ] as const)(
+    "preserves direct publication when handoff progress %s",
+    async (_name, observer) => {
+      const publication = preparedPublication();
+      const handoffProgress = mock(observer);
+      const persisted = mock(copyPublishedIssues);
+      const receipts: PublishScanResult[] = [];
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          onProgress: (event) => {
+            if (event.type === "handoff_recorded") return handoffProgress();
+          },
+        },
+        dependencies(publication, {
+          linearClient: linearApiClient(publication),
+          recordPublishedIssues: persisted,
+          writeReceipt: recordReceipts(receipts),
+        }),
+      );
+
+      expect(handoffProgress).toHaveBeenCalledTimes(1);
+      expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+      expect(persisted).toHaveBeenCalledWith(
+        publication,
+        result.created,
+        expect.anything(),
+      );
+      expect(receipts.at(-1)).toEqual(result);
+    },
+  );
+
+  test.each([
     { label: "zero bytes", failedWrites: 1, partial: "" },
     { label: "a partial row", failedWrites: 1, partial: '{"scanId":' },
     {
@@ -1031,6 +1073,7 @@ describe("direct Linear API publication", () => {
     const updates: PublishScanProgress[] = [];
     let started = 0;
     let completed = 0;
+    let completedAtFirstHandoffProgress: number | undefined;
     let completedAtFirstIssueProgress: number | undefined;
     const firstBatchStarted = Promise.withResolvers<void>();
     const result = await publishScanInternal(
@@ -1041,7 +1084,7 @@ describe("direct Linear API publication", () => {
         onProgress: (event) => {
           updates.push(event);
           if (event.type === "handoff_recorded" && event.recorded === 1)
-            expect(completed).toBe(20);
+            completedAtFirstHandoffProgress = completed;
           if (
             event.type === "issue_completed" &&
             completedAtFirstIssueProgress === undefined
@@ -1072,6 +1115,7 @@ describe("direct Linear API publication", () => {
     expect(result.failed).toEqual([
       { findingId: "finding-22", error: "Linear rejected this finding." },
     ]);
+    expect(completedAtFirstHandoffProgress).toBe(20);
     expect(completedAtFirstIssueProgress).toBe(23);
     expect(
       updates.filter((event) => event.type === "handoff_recorded"),
@@ -1354,17 +1398,19 @@ describe("connected Linear publication", () => {
           const stored = JSON.parse(
             await readFile(data.publicationFile, "utf8"),
           ) as {
-            destination: Record<string, unknown>;
+            destination: PreparedScanPublication["destination"];
             batches: Array<Array<{ arguments: Record<string, unknown> }>>;
           };
-          expect(stored.destination).toEqual({
-            type: "linear",
-            teamId: "team-example",
-          });
-          expect(stored.destination).not.toHaveProperty("projectId");
-          for (const issue of stored.batches.flat()) {
-            expect(issue.arguments).not.toHaveProperty("project");
-          }
+          expect(data.destination).toEqual(publication.destination);
+          expect(stored.destination).toEqual(publication.destination);
+          expect(stored.batches.flat().map((issue) => issue.arguments)).toEqual(
+            publication.issues.map(({ title, description, priority }) => ({
+              team: OPTIONS.teamId,
+              title,
+              description,
+              priority,
+            })),
+          );
 
           await writeHandoff(input, [
             handoffRecord(publication, publication.issues[0]!, {
@@ -1561,67 +1607,6 @@ describe("connected Linear publication", () => {
       counts: { findings: 1, created: 1, failed: 0 },
     });
     expect(receiptScanId).toBe("scan-example");
-  });
-
-  test("publishes directly to a Linear team without project lookups or arguments", async () => {
-    const publication: PreparedScanPublication = {
-      ...preparedPublication(),
-      destination: { type: "linear", teamId: OPTIONS.teamId },
-    };
-    let input: string | undefined;
-    let issueArguments: Record<string, unknown> | undefined;
-
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      { destination: "linear", teamId: OPTIONS.teamId },
-      dependencies(publication, {
-        runCodex: async (_command, _arguments, prompt) => {
-          input = prompt;
-          const stored = JSON.parse(
-            await readFile(publicationData(prompt).publicationFile, "utf8"),
-          ) as {
-            batches: Array<Array<{ arguments: Record<string, unknown> }>>;
-          };
-          issueArguments = stored.batches[0]?.[0]?.arguments;
-          const event = JSON.parse(issueEvent(publication.issues[0]!)) as {
-            item: { arguments: Record<string, unknown> };
-          };
-          delete event.item.arguments["project"];
-          return {
-            exitCode: 0,
-            stdout: JSON.stringify(event),
-            stderr: "",
-          };
-        },
-      }),
-    );
-
-    expect(input).toContain("linear_get_team with the supplied team");
-    expect(input).not.toContain("linear_get_project");
-    expect(input).not.toContain("resolved project");
-    expect(input).toContain("Create issues only in the exact supplied team.");
-    const encoded = input!
-      .split("BEGIN UNTRUSTED PUBLICATION DATA\n")[1]!
-      .split("\nEND UNTRUSTED PUBLICATION DATA")[0]!;
-    const data = JSON.parse(encoded) as {
-      destination: Record<string, unknown>;
-    };
-    expect(data.destination).toEqual({
-      type: "linear",
-      teamId: "team-example",
-    });
-    expect(issueArguments).toEqual({
-      team: "team-example",
-      title: publication.issues[0]!.title,
-      description: publication.issues[0]!.description,
-      priority: 2,
-    });
-    expect(issueArguments).not.toHaveProperty("project");
-    expect(result.destination).toEqual({
-      type: "linear",
-      teamId: "team-example",
-    });
-    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
   });
 
   test("preserves complete finding descriptions without exposing them to model transcription", async () => {
@@ -3208,6 +3193,21 @@ describe("connected Linear publication", () => {
     expect(saved?.exitCode).toBe(1);
     expect(savedIssueIdentifiers).toEqual(["SEC-1"]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "signals the direct publication child when it has no process group of its own",
+    async () => {
+      const child = spawn(process.execPath, ["-e", "process.stdin.resume()"]);
+      const closed = once(child, "close");
+      try {
+        terminatePublicationProcessGroup(child, "SIGTERM");
+      } finally {
+        child.stdin.end();
+      }
+      const [, signal] = await closed;
+      expect(signal).toBe("SIGTERM");
+    },
+  );
 
   test.each([
     ["a promptly exiting parent", false, "SIGTERM", true],

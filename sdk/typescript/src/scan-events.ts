@@ -1,3 +1,4 @@
+import type { ParentProgressSource } from "./cost.js";
 import type {
   ScanAuthentication,
   ScanObserverName,
@@ -47,7 +48,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -116,8 +118,15 @@ export async function runScanTurn(
           }
         }
         reportScanActivities(event, repository, options);
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
+          notifyObserver(
+            {
+              onProgress: (update) => options.onProgress?.(update, { event }),
+              onObserverError: options.onObserverError,
+            },
+            "onProgress",
+          )(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
@@ -456,7 +465,7 @@ export function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   )
     throw signal.reason;
   const message = scanDir
-    ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
+    ? `Codex Security scan was interrupted; output directory: ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
 }

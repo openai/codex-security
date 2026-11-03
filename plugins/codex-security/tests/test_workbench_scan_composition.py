@@ -19,6 +19,8 @@ from workbench_test_support import (
     SCRIPT,
     checkpoint,
     composition_payload,
+    published_artifacts,
+    read_review_state,
     recipe,
     register,
     run_workbench,
@@ -103,8 +105,9 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     (report_dir / "proof.md").write_text("# Retained observation\n[Trace](trace.txt)\n")
     (report_dir / "trace.txt").write_text("Synthetic supporting evidence\n")
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    names = ("scan-manifest.json", "findings.json", "coverage.json")
-    child_bytes = {name: (child_dir / name).read_bytes() for name in names}
+    names = ("scan-manifest.json", "findings.json")
+    child_names = (*names, "coverage.json")
+    child_bytes = {name: (child_dir / name).read_bytes() for name in child_names}
     saved = checkpoint(
         state,
         parent,
@@ -119,7 +122,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
             child["scanId"],
             child_dir,
             parent_dir,
-            *(json.loads(child_bytes[name]) for name in names),
+            *(json.loads(child_bytes[name]) for name in child_names),
         )["draft"]
         run_workbench(
             state,
@@ -188,12 +191,12 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     assert recovered["findingCount"] == 1
     assert not recovered["resultsRecoveryNeeded"]
     assert recovered["findings"][0]["title"] == findings["findings"][0]["title"]
-    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
+    assert "completeness" not in read_review_state(state, parent_dir)
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"][0]
     report = parent_dir / retained["writeup"]["reportPath"]
     assert report.read_bytes() == (report_dir / "proof.md").read_bytes()
     assert (report.parent / "trace.txt").read_bytes() == (report_dir / "trace.txt").read_bytes()
-    assert {name: (child_dir / name).read_bytes() for name in names} == child_bytes
+    assert {name: (child_dir / name).read_bytes() for name in child_names} == child_bytes
     assert (parent_dir / CHECKPOINT).read_bytes() == composition_bytes
 
     published = {name: (parent_dir / name).read_bytes() for name in (*names, "report.md")}
@@ -203,7 +206,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     saved["aggregate"] = {
         "scanId": parent["scanId"],
         "findings": [retained],
-        "coverage": json.loads(published["coverage.json"]),
+        "coverage": read_review_state(state, parent_dir),
     }
     saved["aggregate"]["findings"][0]["title"] = (
         "Later composition must not replace frozen evidence"
@@ -396,10 +399,7 @@ def test_sealed_scoped_resume_retains_deleted_source(tmp_path: Path, scope: str)
     assert "revision or contents changed" in unavailable["stderr"]
     source.write_text("\n" * 50)
     run_workbench(state, "prepare-scan-completion", "--scan-id", scan["scanId"])
-    artifacts = {
-        name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    artifacts = published_artifacts(directory)
     source.unlink()
     if scope == "src":
         (target / "src").rmdir()
@@ -762,7 +762,9 @@ def test_native_completed_reuse_match_is_bound_to_candidate(
     assert {path: path.read_bytes() for path in artifacts} == artifacts
 
 
-@pytest.mark.parametrize("change", ["context", "snapshot", "owner", "explicit_start"])
+@pytest.mark.parametrize(
+    "change", ["context", "snapshot", "owner", "project_config", "explicit_start"]
+)
 def test_completed_native_result_does_not_prevent_new_scans(native_scan_completion, change):
     state, target, arguments, started, complete = native_scan_completion
     complete()
@@ -770,6 +772,10 @@ def test_completed_native_result_does_not_prevent_new_scans(native_scan_completi
         arguments = (*arguments[:-1], "Different optional context.")
     elif change == "snapshot":
         (target / "app.py").write_text("print('changed')\n")
+    elif change == "project_config":
+        project_config = target.parent / "alternate-project.json"
+        project_config.write_text("{}")
+        arguments = (*arguments, "--project-config-path", str(project_config))
     elif change == "owner":
         arguments = tuple(
             "another-owner" if value == "native-owner" else value for value in arguments
@@ -1148,7 +1154,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     saved["aggregate"] = {
         "scanId": parent["scanId"],
         "findings": json.loads((parent_dir / "findings.json").read_text())["findings"],
-        "coverage": json.loads((parent_dir / "coverage.json").read_text()),
+        "coverage": read_review_state(state, parent_dir),
     }
     run_workbench(
         state,
@@ -1170,7 +1176,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     assert context["scan"]["findingCount"] == 1
     # History reports terminal state; the CLI retains its display phase until delivery.
     assert context["scan"]["progress"]["independentReviews"]["consolidating"] is False
-    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
+    assert "completeness" not in read_review_state(state, parent_dir)
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == {
         key: value for key, value in saved.items() if key != "aggregate"
     }
@@ -1772,10 +1778,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
         json.dumps({"findings": [accepted] if has_aggregate else []})
     )
     run_workbench(state, "prepare-scan-completion", "--scan-id", parent["scanId"])
-    prepared = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    prepared = published_artifacts(parent_dir)
     for _ in range(2):
         run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
@@ -1783,7 +1786,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
     assert context["progress"]["status"] == "complete"
     assert context["progress"]["independentReviews"]["active"] == 0
     findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     manifest = json.loads((parent_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"] == manifest_before["scan"]["target"]
     assert manifest["scan"]["scope"] == manifest_before["scan"]["scope"]
@@ -1987,13 +1990,10 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
     assert retained_child["progress"]["status"] == "failed"
     assert retained_child["cost"] == child_cost
     assert retained_child["usage"] == usage
-    published = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    published = published_artifacts(parent_dir)
     frozen = json.loads(published["scan-manifest.json"])["scan"]["preservedSources"]
     assert frozen
-    child_published = {name: (child_dir / name).read_bytes() for name in published}
+    child_published = published_artifacts(child_dir)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         child_stopped = connection.execute(
             "SELECT status, completed_at, canceled_at, cost_json, retained_source_digests_json FROM scans WHERE id = ?",
@@ -2006,7 +2006,7 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
     run_workbench(state, *stop)
     assert run_workbench(state, *preserve)["scan"]["findingCount"] == 1
     assert {name: (parent_dir / name).read_bytes() for name in published} == published
-    assert {name: (child_dir / name).read_bytes() for name in published} == child_published
+    assert published_artifacts(child_dir) == child_published
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert (
             connection.execute("SELECT * FROM scans WHERE id = ?", (rerun["scanId"],)).fetchone()
@@ -2157,7 +2157,7 @@ def test_stop_before_first_merge_preserves_ordinary_children(
         parent["scanId"]
     ]
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     for child, directory, original, protected in children:
         child_status = run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"][
@@ -2364,13 +2364,13 @@ def test_membership_migration_backfills_stored_paths_once(
     marker = parent_dir / "saved-output.txt"
     marker.write_bytes(b"Saved outputs must not change during migration.")
     with sqlite3.connect(database) as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 65")
         if already_applied:
             connection.execute("UPDATE scans SET parent_scan_role = NULL")
         else:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 54")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 61")
         before = connection.execute(
             "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
         ).fetchall()
@@ -2391,7 +2391,7 @@ def test_membership_migration_backfills_stored_paths_once(
             rerun["scanId"]: None,
         }
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 54"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 61"
         ).fetchone() == (1,)
     saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
     assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
@@ -2675,7 +2675,7 @@ def test_artifact_thread_ids_do_not_become_execution_log_roots(
     if migrate:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("DROP TABLE scan_execution_threads")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 63")
     saved = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert saved["threadIds"] == ["owned-thread"]
     assert saved["executionThreadIds"] == ["owned-thread"]
@@ -2942,11 +2942,11 @@ def test_membership_migration_rebuilds_public_finding_projections(
         locations = connection.execute(
             "SELECT * FROM finding_locations ORDER BY occurrence_id"
         ).fetchall()
-        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 65")
         if not already_applied:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 54")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 61")
         connection.commit()
         assert (
             connection.execute(
@@ -3147,9 +3147,9 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         connection.execute(
             "UPDATE scans SET scan_dir = ? WHERE id = ?", (str(archived), parent["scanId"])
         )
-        connection.execute("DELETE FROM schema_migrations WHERE version = 59")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 66")
         if not already_applied:
-            connection.execute("DELETE FROM schema_migrations WHERE version IN (54, 58)")
+            connection.execute("DELETE FROM schema_migrations WHERE version IN (61, 65)")
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
     original = {
@@ -3176,7 +3176,7 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         assert artifacts
         assert all(Path(path).is_relative_to(archived / child_path) for (path,) in artifacts)
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 59"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 66"
         ).fetchone() == (1,)
     assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
         parent["scanId"],
@@ -3275,7 +3275,7 @@ def test_native_stop_retains_accepted_and_later_unmerged_findings(
         recovered["provenance"]["sourceFindings"][0]["finding"]
         == json.loads(later_bytes["findings.json"])["findings"][0]
     )
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     assert any(row["reason"].startswith("Accepted pass still") for row in coverage["deferred"])
     assert any("artifacts/deep-scan/passes/pass-2" in row["reason"] for row in coverage["deferred"])
@@ -3300,10 +3300,7 @@ def test_completed_child_rejects_failed_retirement_without_changing_results(tmp_
     child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
     write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    before = {
-        name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    before = published_artifacts(directory)
     response = run_workbench(
         state,
         "fail-scan",

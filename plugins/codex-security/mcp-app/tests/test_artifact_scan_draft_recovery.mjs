@@ -279,6 +279,24 @@ async function publicationFixture(t, mode = "standard") {
     execution.child.stdin.end(input);
     return JSON.parse((await execution).stdout);
   };
+  let target = { kind: "repository", paths: [] };
+  if (mode === "diff") {
+    const git = (...args) =>
+      exec("git", [
+        "-C",
+        repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        ...args,
+      ]);
+    await git("init", "-q");
+    await git("commit", "-qm", "Base", "--allow-empty");
+    await git("add", "src/render.js");
+    await git("commit", "-qm", "Add source");
+    target = { kind: "refs", paths: [], base: "HEAD~1", head: "HEAD" };
+  }
   const { scanId } = await workbench(
     [
       "register-cli-scan",
@@ -291,8 +309,8 @@ async function publicationFixture(t, mode = "standard") {
     JSON.stringify({
       recipe: {
         repository,
-        target: { kind: "repository", paths: [] },
-        mode,
+        target,
+        mode: mode === "diff" ? "standard" : mode,
         config: {},
       },
     }),
@@ -337,7 +355,7 @@ for (const timestamp of ["unchanged", "changed", "omitted"]) {
     await f.save({ complete: false, findings: [f.finding("initial")] });
     const manifest = await f.read("scan-manifest.json");
     const findings = await f.read("findings.json");
-    const coverage = await f.read("coverage.json");
+    const coverage = manifest.scan.reviewState;
     findings.findings.push(f.finding("later-canonical"));
     coverage.completeness = "partial";
     coverage.deferred.push({
@@ -350,7 +368,6 @@ for (const timestamp of ["unchanged", "changed", "omitted"]) {
     for (const [name, document] of [
       ["scan-manifest.json", manifest],
       ["findings.json", findings],
-      ["coverage.json", coverage],
     ])
       await writeFile(join(f.scanDir, name), JSON.stringify(document));
     await f.save({ complete: false });
@@ -361,7 +378,7 @@ for (const timestamp of ["unchanged", "changed", "omitted"]) {
       ["initial", "later-canonical"],
     );
     assert.deepEqual(
-      (await f.read("coverage.json")).deferred,
+      (await f.read("scan-manifest.json")).scan.reviewState.deferred,
       coverage.deferred,
     );
     await f.save({ complete: false });
@@ -369,11 +386,40 @@ for (const timestamp of ["unchanged", "changed", "omitted"]) {
   });
 }
 
-for (const interruptedAt of [
-  "findings.json",
-  "coverage.json",
-  "scan-manifest.json",
-]) {
+test("MCP drafts retain pending review from a legacy canonical coverage file", async (t) => {
+  const f = await publicationFixture(t);
+  const previous = await f.save({
+    complete: false,
+    findings: [f.finding("initial")],
+  });
+  const manifest = await f.read("scan-manifest.json");
+  delete manifest.scan.reviewState;
+  manifest.scan.coverageRef = "coverage.json";
+  const deferred = [{ id: "legacy-work", reason: "Finish the saved review." }];
+  await writeFile(
+    join(f.scanDir, "coverage.json"),
+    JSON.stringify({
+      ...previous.coverage,
+      scanId: f.scanId,
+      deferred,
+    }),
+  );
+  await writeFile(
+    join(f.scanDir, "scan-manifest.json"),
+    JSON.stringify(manifest),
+  );
+  await f.save({ complete: false });
+  assert.deepEqual(
+    (await f.read("scan-manifest.json")).scan.reviewState.deferred,
+    deferred,
+  );
+  assert.equal(
+    (await f.read("findings.json")).findings[0].identity.anchor,
+    "initial",
+  );
+});
+
+for (const interruptedAt of ["findings.json", "scan-manifest.json"]) {
   test(`MCP drafts retain committed rejection after export interrupts at ${interruptedAt}`, async (t) => {
     const f = await publicationFixture(t);
     const original = f.finding("candidate");
@@ -401,7 +447,7 @@ for (const interruptedAt of [
     );
     await f.save({ complete: false });
     assert.deepEqual((await f.read("findings.json")).findings, []);
-    const coverage = await f.read("coverage.json");
+    const coverage = (await f.read("scan-manifest.json")).scan.reviewState;
     assert.equal(coverage.surfaces[0].disposition, "rejected");
     assert.deepEqual(coverage.surfaces[0].finding, original);
     assert.deepEqual(coverage.deferred, []);
@@ -461,7 +507,9 @@ for (const pendingNewer of [true, false]) {
     const findings = (await f.read("findings.json")).findings;
     assert.equal(findings.length, pendingNewer ? 0 : 1);
     if (pendingNewer) {
-      const surface = (await f.read("coverage.json")).surfaces.find(
+      const surface = (
+        await f.read("scan-manifest.json")
+      ).scan.reviewState.surfaces.find(
         (row) => row.candidateId === "candidate",
       );
       assert.equal(surface.disposition, "rejected");
@@ -498,11 +546,7 @@ for (const mode of ["standard", "deep"]) {
             join(f.scanDir, "scan-manifest.json"),
             JSON.stringify(manifest),
           );
-          authoredPaths.push(
-            "scan-manifest.json",
-            "findings.json",
-            "coverage.json",
-          );
+          authoredPaths.push("scan-manifest.json", "findings.json");
         } else {
           await assert.rejects(
             f.save(
@@ -622,7 +666,7 @@ test("MCP surface resolution keeps earlier receipts in the final seal", async (t
       resolvedDeferred: [{ id: "task", reason: "Review complete." }],
     }),
   });
-  const coverage = await f.read("coverage.json");
+  const coverage = (await f.read("scan-manifest.json")).scan.reviewState;
   assert.deepEqual(new Set(coverage.surfaces[0].receiptRefs), new Set(refs));
   assert.deepEqual(coverage.deferred, []);
   await f.workbench(["prepare-scan-completion", "--scan-id", f.scanId]);
@@ -631,11 +675,9 @@ test("MCP surface resolution keeps earlier receipts in the final seal", async (t
 });
 
 for (const complete of [false, true]) {
-  for (const changed of [
-    "findings.json",
-    "coverage.json",
-    "scan-manifest.json",
-  ]) {
+  for (const changed of ["findings", "review state", "threat model"]) {
+    const file =
+      changed === "findings" ? "findings.json" : "scan-manifest.json";
     test(`MCP retries concurrent canonical ${changed} edits (complete: ${complete})`, async (t) => {
       const f = await publicationFixture(t);
       await f.save({
@@ -660,12 +702,12 @@ for (const complete of [false, true]) {
         async (args, input) => {
           attempts++;
           if (attempts === 1) {
-            const document = await f.read(changed);
-            if (changed === "findings.json")
+            const document = await f.read(file);
+            if (changed === "findings")
               document.findings.push(f.finding("concurrent"));
-            else if (changed === "coverage.json") {
-              document.completeness = "partial";
-              document.deferred.push({
+            else if (changed === "review state") {
+              document.scan.reviewState.completeness = "partial";
+              document.scan.reviewState.deferred.push({
                 id: "concurrent-work",
                 reason: "Retain concurrent evidence.",
               });
@@ -675,7 +717,7 @@ for (const complete of [false, true]) {
                 content: "# Concurrent model\n",
               };
             concurrent = JSON.stringify(document);
-            await writeFile(join(f.scanDir, changed), concurrent);
+            await writeFile(join(f.scanDir, file), concurrent);
           }
           try {
             return await f.workbench(args, input);
@@ -683,7 +725,7 @@ for (const complete of [false, true]) {
             assert.match(String(error), /scan_draft_conflict/);
             conflicts++;
             assert.equal(
-              await readFile(join(f.scanDir, changed), "utf8"),
+              await readFile(join(f.scanDir, file), "utf8"),
               concurrent,
             );
             assert.deepEqual(
@@ -696,20 +738,58 @@ for (const complete of [false, true]) {
       );
       assert.equal(conflicts, 1);
       assert.equal(attempts, 2);
-      if (changed === "findings.json")
+      if (changed === "findings")
         assert.deepEqual(
-          (await f.read(changed)).findings
+          (await f.read(file)).findings
             .map((row) => row.identity.anchor)
             .sort(),
           ["concurrent", "initial"],
         );
-      else if (changed === "coverage.json")
-        assert.equal((await f.read(changed)).deferred[0].id, "concurrent-work");
+      else if (changed === "review state")
+        assert.equal(
+          (await f.read(file)).scan.reviewState.deferred[0].id,
+          "concurrent-work",
+        );
       else
         assert.equal(
-          (await f.read(changed)).scan.threatModel.content,
+          (await f.read(file)).scan.threatModel.content,
           "# Concurrent model\n",
         );
     });
   }
+}
+
+for (const mode of ["standard", "diff"]) {
+  test(`${mode} report retains its identity when a later draft adds candidate metadata`, async (t) => {
+    const f = await publicationFixture(t, mode);
+    const report = semanticFinding({ extensions: { reportId: "report-1" } });
+    await f.save({ complete: false, findings: [report] });
+    assert.ok((await f.read("scan-manifest.json")).scan.reviewState);
+    await assert.rejects(f.read("coverage.json"), { code: "ENOENT" });
+    const enriched = {
+      ...report,
+      provenance: { ...report.provenance, candidateId: "candidate-1" },
+    };
+    await f.save({ findings: [enriched] });
+    const rows = (await f.read("findings.json")).findings;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].provenance.candidateId, "candidate-1");
+  });
+
+  test(`${mode} revised sibling findings retain two unique identities at completion`, async (t) => {
+    const f = await publicationFixture(t, mode);
+    const first = semanticFinding({
+      title: "First review",
+      provenance: { source: "local_plugin", candidateId: "candidate-1" },
+    });
+    const second = { ...first, title: "Second review" };
+    await f.save({ complete: false, findings: [first, second] });
+    await f.save({
+      complete: true,
+      findings: [{ ...first, summary: "Revised evidence." }, second],
+    });
+    const rows = (await f.read("findings.json")).findings;
+    assert.equal(rows.length, 2);
+    assert.equal(new Set(rows.map((row) => row.identity.anchor)).size, 2);
+  });
 }

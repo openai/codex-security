@@ -167,6 +167,7 @@ test.each(["standard", "deep"] as const)(
         const client = new TestClient(config, clientDependencies);
         return {
           run: client.run.bind(client),
+          validate: client.validate.bind(client),
           close: client.close.bind(client),
           preflight: async (repository, options) => {
             selected = options;

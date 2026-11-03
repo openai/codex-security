@@ -238,7 +238,12 @@ export async function publishScan(
           },
         );
         if (manifest !== null && manifest.scan?.sealedAt == null) {
-          for (const name of ["findings.json", "coverage.json"]) {
+          // Current drafts keep the review state in the manifest. Older
+          // writers can supply a separate coverage document.
+          const canonicalNames = ["scan-manifest.json", "findings.json"];
+          if (manifest.scan?.reviewState == null)
+            canonicalNames.push("coverage.json");
+          for (const name of canonicalNames.slice(1)) {
             try {
               contents.set(
                 name,
@@ -246,7 +251,8 @@ export async function publishScan(
               );
             } catch (error) {
               if (
-                committed !== null &&
+                (committed !== null ||
+                  (name === "coverage.json" && !manifest.scan?.coverageRef)) &&
                 error instanceof Error &&
                 isRecord(error.cause) &&
                 error.cause["code"] === "ENOENT"
@@ -260,26 +266,24 @@ export async function publishScan(
           // bytes are a later authored result, including a changed timestamp or
           // findings/coverage written without changing the manifest.
           const unchangedExport = exportState
-            ? ["scan-manifest.json", "findings.json", "coverage.json"].every(
-                (name) => {
-                  const bytes = contents.get(name);
-                  if (bytes === undefined) return true;
-                  const digest = createHash("sha256")
-                    .update(bytes)
-                    .digest("hex");
-                  return (
-                    digest === exportState.current?.[name] ||
-                    digest === exportState.previous?.[name]
-                  );
-                },
-              )
+            ? canonicalNames.every((name) => {
+                const bytes = contents.get(name);
+                if (bytes === undefined) return true;
+                const digest = createHash("sha256").update(bytes).digest("hex");
+                return (
+                  digest === exportState.current?.[name] ||
+                  digest === exportState.previous?.[name]
+                );
+              })
             : committed !== null &&
               manifest.scan?.completedAt !==
                 committed.manifest?.scan?.completedAt;
           if (
             !unchangedExport &&
             contents.has("findings.json") &&
-            contents.has("coverage.json")
+            (!manifest.scan?.coverageRef ||
+              contents.has("coverage.json") ||
+              manifest.scan.reviewState != null)
           )
             await writeStagedScanDraft(
               { scanDir, workbench, writer: context.writer! },
@@ -289,9 +293,13 @@ export async function publishScan(
                 findings: JSON.parse(
                   contents.get("findings.json")!.toString("utf8"),
                 ),
-                coverage: JSON.parse(
-                  contents.get("coverage.json")!.toString("utf8"),
-                ),
+                coverage:
+                  manifest.scan?.reviewState ??
+                  (contents.has("coverage.json")
+                    ? JSON.parse(
+                        contents.get("coverage.json")!.toString("utf8"),
+                      )
+                    : { surfaces: [], explicitExclusions: [], deferred: [] }),
               },
             );
         }
@@ -406,11 +414,11 @@ export async function admitCanonicalArtifacts(
   signal.throwIfAborted();
   await requireScanArtifacts(
     scanDir,
-    ["scan-manifest.json", "findings.json", "coverage.json"],
+    ["scan-manifest.json", "findings.json"],
     signal,
   );
-  const [manifest, findings, coverage] = await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json"].map(async (name) =>
+  const [manifest, findings] = await Promise.all(
+    ["scan-manifest.json", "findings.json"].map(async (name) =>
       JSON.parse(
         new TextDecoder("utf-8", { fatal: true }).decode(
           await readScanFile(scanDir, name, name, signal),
@@ -427,7 +435,20 @@ export async function admitCanonicalArtifacts(
     scanId: context.scanId ?? manifest.scan.id,
     manifest,
     findings,
-    coverage,
+    reviewState:
+      manifest.scan.reviewState ??
+      (manifest.scan.coverageRef
+        ? JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(
+              await readScanFile(
+                scanDir,
+                "coverage.json",
+                "legacy review state",
+                signal,
+              ),
+            ),
+          )
+        : { surfaces: [], explicitExclusions: [], deferred: [] }),
   });
   signal.throwIfAborted();
   if (draft.complete === false)
@@ -474,19 +495,19 @@ export async function collectResult(
   const { threadId, turnResult } = turn;
   await requireScanArtifacts(
     scanDir,
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    ["scan-manifest.json", "findings.json", "report.md"],
     signal,
   );
   await admitCanonicalArtifacts(context);
-  const { manifest, findings, coverage } = await loadContract(scanDir, {
+  const contract = await loadContract(scanDir, {
     pluginRoot,
     expectation,
     workbenchValidated,
     signal,
   });
-  if (manifest.scan.status !== "completed") {
+  if (contract.manifest.scan.status !== "completed") {
     throw new IncompleteScanError(
-      `Codex Security scan ${manifest.scan.status}; available results remain at ${scanDir}.`,
+      `Codex Security scan ${contract.manifest.scan.status}; available results remain at ${scanDir}.`,
     );
   }
   let sarifPath: string | null = null;
@@ -501,9 +522,7 @@ export async function collectResult(
     if (signal.aborted) throw signal.reason ?? error;
   }
   return new ScanResult({
-    manifest,
-    findings,
-    coverage,
+    ...contract,
     scanDir,
     threadId,
     turnResult:
@@ -576,7 +595,6 @@ export async function preservePublishedArtifacts(
       ...new Set([
         "scan-manifest.json",
         "findings.json",
-        "coverage.json",
         "report.md",
         ...(result.threatModelPath === null
           ? []

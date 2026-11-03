@@ -11,7 +11,7 @@ Follow `artifact-storage.md` for storage selection, file authoring and shared th
 - `scan_id=<scanId returned by the MCP scan context, or CODEX_SECURITY_SCAN_ID when provided>`
 - `scan_dir=<scanDir returned by the MCP scan context>`; when `CODEX_SECURITY_SCAN_DIR` is provided, use that existing SDK-owned directory. Never derive a scan directory from a repository name, revision, timestamp or temporary-directory formula.
 - For a standalone phase, use the `directory` returned by `save_codex_security_artifact` for the selected `targetPath` and `storage`, as described in `artifact-storage.md`.
-- `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans; reference it as `"$CODEX_SECURITY_TARGET_PATHS_FILE"` in POSIX shells or `"$env:CODEX_SECURITY_TARGET_PATHS_FILE"` in PowerShell. This read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-scope-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
+- `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans; reference it as `"$CODEX_SECURITY_TARGET_PATHS_FILE"` in POSIX shells or `"$env:CODEX_SECURITY_TARGET_PATHS_FILE"` in PowerShell. This read-only scope file lives outside the scan directory. Pass it unchanged as `--scopes-file` to the SDK's primary inventory command and to `bind-repo-scopes` before finalization. For `make-hosted-repo-scope-input`, review the inventory at the path it reports. Use the supplied scan-directory recovery command only if a later shell cannot read that file. Do not print, evaluate, modify, or treat the scope file as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
 - `discovery_dir=<artifacts_dir>/02_discovery`
@@ -32,9 +32,9 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 ### Deep And Workbench-Backed Diff Discovery
 
-Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
+Workbench-owned Standard scans submit findings and review state through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
 
-Deep children use ordinary SDK-owned Standard canonical findings and coverage. Pending work and its evidence remain in child coverage.
+Each Deep child saves its findings and review state in ordinary SDK-owned Standard artifacts. Its checkpoint retains pending work and the supporting evidence.
 
 The shared runner writes the parent scan's canonical artifacts from the accepted aggregate, configured include and exclude paths, and child coverage, then seals the parent and generates its report. If the discovery time limit expires before any source review completes, the parent retains the deadline reason and any saved findings or pending review. See [completion and recovery](scan-contract.md#completion-and-recovery) for parent finalization, retained child evidence, and checkpoint compatibility.
 
@@ -91,9 +91,9 @@ Standard scans and Deep Standard scan workers include attack-path analysis direc
 
 ## Final Report Paths
 
-- Workbench-owned Standard or workbench-backed diff draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`
+- Workbench-owned Standard or workbench-backed diff draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState, complete? })`
 - Deep child results: ordinary SDK-owned Standard canonical files, sealed by the SDK; the shared runner merges them and finalizes the parent artifacts
-- SDK-owned Standard draft: unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` under the SDK-provided scan directory
+- SDK-owned Standard draft: unsealed `scan-manifest.json` (including review state) and `findings.json` under the SDK-provided scan directory
 - Deep, workbench-backed diff, or explicitly requested Standard completed results: `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`
 - Final scan report: `<scan_dir>/report.md`
 - Detailed vulnerability write-up: `<scan_dir>/findings/<slug>/<slug>.md`

@@ -24,11 +24,14 @@ import {
   mcpProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
-  writeCodexConfigContents,
+  writePrivateConfig,
   hasCommandAuth,
   inlineToml,
   isExternalModelProvider,
   scanModelProvider,
+  scanProviderEnvKey,
+  MODEL_FILE_SETTINGS,
+  resolveNestedConfigPaths,
   resolveCodexProfile,
   scanCompositionOverrides,
   type JsonObject,
@@ -88,7 +91,10 @@ export interface ExecutionSource {
   readonly authentication: ScanAuthentication;
   readonly modelProvider: unknown;
   readonly externalProvider:
-    | (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS]
+    | (Omit<
+        (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS],
+        "env_key"
+      > & { env_key: string })
     | null;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
@@ -115,22 +121,27 @@ export function prepareExecutionSource(input: {
   const modelProvider = scanModelProvider(configuration);
   const preserveProviderEnvironment =
     input.preserveProviderEnvironment === true;
+  const providerEnvKey = scanProviderEnvKey(configuration);
   const externalProvider =
     !preserveProviderEnvironment &&
     !commandAuth &&
     isExternalModelProvider(modelProvider)
-      ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+      ? {
+          ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+          env_key:
+            providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key,
+        }
       : null;
   const authentication = scanAuthentication(
     environment,
     preserveProviderEnvironment ? "auto" : input.auth,
     modelProvider,
     commandAuth,
-    { preserveProviderEnvironment },
+    { preserveProviderEnvironment, providerEnvKey },
   );
   const apiKey =
     !preserveProviderEnvironment && authentication.method === "api_key"
-      ? environmentApiKey(environment, modelProvider)
+      ? environmentApiKey(environment, modelProvider, providerEnvKey)
       : null;
   if (externalProvider !== null && apiKey === null)
     throw new AuthenticationRequiredError(
@@ -150,6 +161,7 @@ export function prepareExecutionSource(input: {
           commandAuth ? withoutOpenAiApiKeys(environment) : environment,
           input.auth,
           modelProvider,
+          providerEnvKey,
         ),
   };
 }
@@ -232,7 +244,7 @@ export async function lockExecutionConfiguration(
       (restoration ??= (async () => {
         try {
           if (previous === null) await rm(path, { force: true });
-          else await writeCodexConfigContents(path, previous);
+          else await writePrivateConfig(path, previous);
         } finally {
           await release();
         }
@@ -352,7 +364,12 @@ export async function createExecutionCodex(
   let sdkEnvironment = definedEnvironment(
     preserveProviderEnvironment
       ? environment
-      : withoutOpenAiApiKeys(environment),
+      : {
+          ...withoutOpenAiApiKeys(environment),
+          ...(externalProvider === null || apiKey === null
+            ? {}
+            : { [externalProvider.env_key]: apiKey }),
+        },
   );
   if (checkPermissions || process.platform === "win32") {
     codexPathOverride ??= environment["CODEX_CLI_PATH"]!;
@@ -606,6 +623,7 @@ export async function nativeScanConfiguration(
     recipe?: { config?: JsonObject; providerProfile?: unknown };
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
   },
   subagents: number,
 ): Promise<JsonObject> {
@@ -632,6 +650,8 @@ export async function nativeScanConfiguration(
     subagents,
   );
   if (input.recipe?.["config"] === undefined) {
+    if (input.serviceTier !== undefined)
+      config["service_tier"] = input.serviceTier;
     if (input.model) config["model"] = input.model;
     if (input.reasoningEffort)
       config["model_reasoning_effort"] = input.reasoningEffort;
@@ -741,12 +761,8 @@ export function resolveExecutionPaths(
   environment: ProcessEnvironment,
 ): JsonObject {
   const resolved = resolveCodexProfile(config);
-  for (const key of [
-    "model_instructions_file",
-    "experimental_compact_prompt_file",
-    "model_catalog_json",
-    "sqlite_home",
-  ]) {
+  resolveNestedConfigPaths(resolved, workingDirectory);
+  for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const path = resolved[key];
     if (typeof path === "string")
       resolved[key] = resolve(workingDirectory, expandHome(path, environment));

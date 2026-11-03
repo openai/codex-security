@@ -1,16 +1,65 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sys
 from pathlib import Path
 
 import pytest
 from test_workbench_checkpoint_heads import select
-from workbench_test_support import saved_binding, saved_draft, write_checkpoint
+from workbench_test_support import (
+    saved_binding,
+    saved_discovery_worker,
+    saved_draft,
+    write_checkpoint,
+    write_result_draft,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_saved_results as saved
+
+
+def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: dict):
+    output = root / worker_id
+    checkpoints = output / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    for index, draft in enumerate(drafts, 1):
+        path = checkpoints / f"{module._digest(draft)}.json"
+        path.write_text(json.dumps(draft))
+        os.utime(path, ns=(index * 100, index * 100))
+    write_result_draft(output / "result.json", result, mtime_ns=1000)
+    return saved_discovery_worker(output, worker_id, 1)
+
+
+def recover(root: Path, module, workers, frozen=None, *, preserve_reduction=False):
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["git_revision"],
+        "target": {
+            "kind": "git_revision",
+            "targetId": "synthetic",
+            "displayName": "test",
+            "revision": "head",
+        },
+        "scope": {"includePaths": ["."], "excludePaths": []},
+        "coverageMode": "deep_repository",
+    }
+    result = module.merge_saved_results(
+        root,
+        "identity-scan",
+        binding,
+        workers,
+        [],
+        stopped=not preserve_reduction,
+        reason="interrupted",
+        frozen_source_digests=frozen,
+        preserve_canonical_parent=preserve_reduction,
+        current_contract=preserve_reduction,
+        scan_mode="deep" if preserve_reduction else None,
+    )
+    assert result is not None
+    return result
 
 
 @pytest.mark.parametrize("named_history", [False, True])

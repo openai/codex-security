@@ -13,21 +13,25 @@ import { sha256 } from "./support/finding-identity.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-const bundle = await build({
-  stdin: {
-    resolveDir: fileURLToPath(
-      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
-    ),
-    contents: `export * from "./src/artifact-scan-draft.ts";`,
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  loader: { ".md": "text" },
-  write: false,
-});
 const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
-await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
+try {
+  await build({
+    stdin: {
+      resolveDir: fileURLToPath(
+        new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+      ),
+      contents: 'export * from "./src/artifact-scan-draft.ts";',
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    loader: { ".md": "text" },
+    outfile: bundlePath,
+  });
+} catch (error) {
+  await cleanup().catch(() => undefined);
+  throw error;
+}
 const {
   recordCodexSecurityScanDraftViaWorkbench,
   parseCanonicalScanDraft,
@@ -168,6 +172,7 @@ describe.each(["standard", "deep"] as const)(
             const draft = JSON.parse(
               await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
             );
+            draft.manifest.scan.coverageRef = "coverage.json";
             await Promise.all(
               [
                 ["manifest", "scan-manifest.json"],
@@ -221,7 +226,7 @@ describe.each(["standard", "deep"] as const)(
               await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
             ),
             findings,
-            coverage,
+            reviewState: coverage,
           });
           expect(canonicalDraft.coverage).not.toHaveProperty("completeness");
           expect(canonicalDraft.coverage.deferred).toEqual(
@@ -305,7 +310,7 @@ describe.each(["standard", "deep"] as const)(
           scanId: manifest.scan.id,
           manifest,
           findings,
-          coverage,
+          reviewState: coverage,
         };
         const standard = await observeAdmission(repository, scanDir);
         if (id === "http-api") {
@@ -397,7 +402,7 @@ describe.each(["standard", "deep"] as const)(
           scanId: manifest.scan.id,
           manifest,
           findings,
-          coverage,
+          reviewState: coverage,
         };
         const standard = await observeAdmission(repository, scanDir);
         if (accepted) {
@@ -469,7 +474,7 @@ describe.each(["standard", "deep"] as const)(
           scanId: manifest.scan.id,
           manifest,
           findings,
-          coverage,
+          reviewState: coverage,
         }),
       ).toThrow();
       const observed = await observeAdmission(repository, scanDir);
@@ -523,7 +528,7 @@ describe.each(["standard", "deep"] as const)(
           scanId: manifest.scan.id,
           manifest,
           findings,
-          coverage,
+          reviewState: coverage,
         }),
       ).toThrow();
     });

@@ -194,7 +194,7 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -206,9 +206,9 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version in (54, 58, 59):
+                elif version in (61, 65, 66):
                     backfill_composition_children(connection)
-                elif version == 57:
+                elif version == 64:
                     backfill_unindexed_severity_assessments(connection)
             if version not in applied:
                 connection.execute(

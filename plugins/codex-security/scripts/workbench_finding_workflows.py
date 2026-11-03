@@ -6,12 +6,21 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_target import directory_content_digest, git_bytes, git_revision
+from workbench_scan_usage import stored_scan_cost_fields
+from workbench_target import (
+    UnreadableLocalFile,
+    UnsupportedLocalFileType,
+    directory_content_digest,
+    git_bytes,
+    git_revision,
+)
+from workbench_validation import _valid_legacy_scan_cost
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -24,13 +33,80 @@ WORKFLOW_BINDINGS = {
 WORKFLOW_STAGES = ("scan", "publish", "dedupe")
 
 
+def _usable_cost_range(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("context") != "unknown" or "max" not in value:
+        return False
+    minimum, maximum = value.get("min"), value["max"]
+    return (
+        type(minimum) in (int, float)
+        and 0 <= minimum <= sys.float_info.max
+        and (
+            maximum is None
+            or type(maximum) in (int, float)
+            and minimum <= maximum <= sys.float_info.max
+        )
+    )
+
+
+def _recorded_cost(value: str | None) -> dict[str, Any] | None:
+    """Recover the SDK cost fields that are usable from this historical receipt."""
+    try:
+        cost = stored_scan_cost_fields(value).get("cost")
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not _valid_legacy_scan_cost(cost):
+        return None
+
+    fields = (
+        "model",
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "estimatedUsd",
+    )
+    result = {field: cost[field] for field in fields}
+    if isinstance(cost.get("cacheWriteInputTokensReported"), bool):
+        result["cacheWriteInputTokensReported"] = cost["cacheWriteInputTokensReported"]
+    bounds = cost.get("estimatedUsdRange")
+    if _usable_cost_range(bounds):
+        result["estimatedUsdRange"] = {field: bounds[field] for field in ("min", "max", "context")}
+
+    pricing = cost.get("pricing")
+    if (
+        isinstance(pricing, dict)
+        and pricing.get("serviceTier") == "standard"
+        and pricing.get("context") == "short"
+        and isinstance(pricing.get("source"), str)
+        and isinstance(pricing.get("asOf"), str)
+    ):
+        details = {field: pricing[field] for field in ("source", "asOf", "serviceTier", "context")}
+        rate_keys = ("input", "cacheRead", "cacheWrite", "output")
+        for field in ("usdPerMillionTokens", "longContextUsdPerMillionTokens"):
+            rates = pricing.get(field)
+            if isinstance(rates, dict) and all(
+                type(rates.get(key)) in (int, float) and 0 <= rates[key] <= sys.float_info.max
+                for key in rate_keys
+            ):
+                details[field] = {key: rates[key] for key in rate_keys}
+        if "usdPerMillionTokens" in details:
+            result["pricing"] = details
+    return result
+
+
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM finding_workflows WHERE id = ?", (workflow_id,)
+        """SELECT w.*, s.cost_json FROM finding_workflows AS w
+           LEFT JOIN scans AS s ON s.id = w.scan_id AND s.scan_dir = w.scan_dir
+                               AND s.status = 'complete'
+           WHERE w.id = ?""",
+        (workflow_id,),
     ).fetchone()
     if row is None:
         return None
     state = {"id": row["id"], "stages": {}}
+    if (cost := _recorded_cost(row["cost_json"])) is not None:
+        state["recordedCost"] = cost
     for field, column in WORKFLOW_BINDINGS.items():
         if row[column] is not None:
             state[field] = row[column]
@@ -106,9 +182,22 @@ def register_workflow_scan(
         raise SystemExit("The workflow scan is already complete.")
     previous = state.get("scanId")
     if previous is not None:
-        row = connection.execute("SELECT status FROM scans WHERE id = ?", (previous,)).fetchone()
-        if row is not None and row["status"] == "complete":
-            raise SystemExit("Reuse the workflow's completed scan instead of registering another.")
+        row = connection.execute(
+            """SELECT saved.status, saved.recipe_json AS saved, attempt.recipe_json AS attempt
+               FROM scans AS saved JOIN scans AS attempt ON attempt.id = ? WHERE saved.id = ?""",
+            (scan_id, previous),
+        ).fetchone()
+        if row is not None:
+            if row["status"] == "complete":
+                raise SystemExit(
+                    "Reuse the workflow's completed scan instead of registering another."
+                )
+            saved = json.loads(row["saved"] or "{}")
+            attempt = json.loads(row["attempt"] or "{}")
+            if saved.get("severityRubric") != attempt.get("severityRubric"):
+                raise SystemExit(
+                    "Another attempt registered a different severity rubric. Retry this workflow to reuse its saved rubric."
+                )
     state["scanId"] = scan_id
     state["scanDir"] = scan_dir
     save_workflow(connection, state, timestamp)
@@ -123,7 +212,24 @@ def finding_workflow(
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
     if payload["action"] == "source":
-        target = Path(payload["repository"]).resolve(strict=True)
+        evidence = payload.get("evidence") is True
+        if evidence:
+            try:
+                target = Path(payload["repository"])
+                metadata = target.lstat()
+                if (
+                    not target.is_absolute()
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+                    or target.resolve(strict=True) != target
+                ):
+                    raise UnreadableLocalFile("The validation evidence directory was replaced.")
+            except (OSError, RuntimeError, UnreadableLocalFile):
+                if payload.get("optional") is True:
+                    return {"source": None}
+                raise
+        else:
+            target = Path(payload["repository"]).resolve(strict=True)
         private_paths = payload.get("privateStatePaths", [])
         if not isinstance(private_paths, list) or any(
             not isinstance(path, str) or not Path(path).is_absolute() for path in private_paths
@@ -133,18 +239,31 @@ def finding_workflow(
         excluded = tuple(path for path in excluded if path.is_relative_to(target))
         if target in excluded:
             raise SystemExit("Private runtime storage must not exclude the repository root.")
+        try:
+            content = directory_content_digest(
+                target,
+                excluded=excluded,
+                include_ignored=True,
+                include_git_metadata=evidence,
+            )
+        except (UnsupportedLocalFileType, UnreadableLocalFile, OSError):
+            if payload.get("optional") is True:
+                return {"source": None}
+            raise
         return {
             "source": {
                 "repository": str(target),
-                "revision": "unversioned" if payload.get("gitDisabled") else git_revision(target),
+                "revision": (
+                    "unversioned"
+                    if evidence or payload.get("gitDisabled")
+                    else git_revision(target)
+                ),
                 "refsDigest": hashlib.sha256(
                     b""
-                    if payload.get("gitDisabled")
+                    if evidence or payload.get("gitDisabled")
                     else (git_bytes(target, "show-ref") or b"").strip()
                 ).hexdigest(),
-                "content": directory_content_digest(
-                    target, excluded=excluded, include_ignored=True
-                ),
+                "content": content,
                 **({"privateStatePaths": [str(path) for path in excluded]} if excluded else {}),
             }
         }
@@ -158,15 +277,20 @@ def finding_workflow(
         binding = payload["binding"]
         source = binding["source"]
         scope = binding["scope"]
+        on_conflict = (
+            "DO UPDATE SET result_json = excluded.result_json, created_at = excluded.created_at"
+            if payload.get("replace") is True and binding.get("stage") == "scan-validation"
+            else "DO NOTHING"
+        )
         with connection:
             connection.execute(
-                """INSERT INTO finding_workflow_reviews
+                f"""INSERT INTO finding_workflow_reviews
                 (workflow_id, review_key, review_contract_version, codex_version,
                  source_repository_path, source_revision, source_refs_digest, source_content_digest,
                  scope_repository_id, scope_all_repositories, model, effort, settings_digest,
                  prompt_digest, contract_digest, result_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                ON CONFLICT(workflow_id, review_key) {on_conflict}""",
                 (
                     workflow_id,
                     payload["key"],

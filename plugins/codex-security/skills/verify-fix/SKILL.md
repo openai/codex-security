@@ -7,7 +7,7 @@ description: Use only when the user explicitly requests verification that a secu
 
 ## When to Use
 
-Invoke this skill only for an explicit request to verify a security fix, including a direct `$verify-fix` invocation. A request to implement a fix or run its tests does not by itself request this skill. For other tasks, follow the user's requested workflow and response format without applying this skill's JSON result contract.
+Invoke this skill only for an explicit request to verify a security fix, including a direct `$verify-fix` invocation. A request to implement a fix or run its tests does not by itself request this skill. For other tasks, follow the user's requested workflow and response format.
 
 ## Objective
 
@@ -29,7 +29,9 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 
 ## Result Contract
 
-Return exactly one JSON object:
+For interactive conversations, use readable Markdown unless the caller requests another format. Give a verdict for each finding, explain the supporting evidence with source references, and identify relevant checks and remaining proof gaps.
+
+When the caller requests JSON or supplies an automated result contract, return exactly one JSON object in this shape. CLI verification workflows explicitly request this contract. Use the same verdicts and evidence requirements in either format.
 
 ```json
 {

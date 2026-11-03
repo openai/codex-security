@@ -67,6 +67,8 @@ const selectedConfiguration = `model = "${model}"\nmodel_reasoning_effort = "${r
 for (const scenario of [
   "unchanged",
   "equivalent config",
+  "project file with changed model",
+  "changed project selection",
   "knowledge",
   "added knowledge",
   "missing knowledge",
@@ -122,6 +124,9 @@ for (const scenario of [
         : "knowledge.md",
     );
     const deepConfigPath = path.join(root, "deep.toml");
+    const projectConfigPath = scenario.includes("project")
+      ? path.join(root, "scan.json")
+      : undefined;
     const selectedConfigPath = path.join(root, "selected.toml");
     const originalInstructionFile = path.join(root, "instructions-a.md");
     const changedInstructionFile = path.join(root, "instructions-b.md");
@@ -288,6 +293,11 @@ for (const scenario of [
         ? await readKnowledgeBaseSnapshot([knowledgePath])
         : undefined;
       const deep = (await resolveDeepScanConfig({}, deepConfigPath)).settings;
+      if (projectConfigPath !== undefined)
+        await writeFile(
+          projectConfigPath,
+          JSON.stringify({ scan: { deep: { workers: 3 } } }),
+        );
       const begun = workbench([
         "begin-deep-scan",
         "--target-path",
@@ -296,6 +306,17 @@ for (const scenario of [
         owner,
         "--user-context",
         userContext,
+        ...(change === "project file with changed model" && projectConfigPath
+          ? [
+              "--project-config-path",
+              projectConfigPath,
+              "--deep-scan-project-json",
+              JSON.stringify({
+                path: projectConfigPath,
+                settings: { workers: 2 },
+              }),
+            ]
+          : []),
         "--model",
         model,
         "--reasoning-effort",
@@ -384,7 +405,7 @@ for (const scenario of [
           scanId,
           handoffClaimToken,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
             explicitExclusions: [],
@@ -399,12 +420,7 @@ for (const scenario of [
         "--claim-token",
         handoffClaimToken,
       ]);
-      const artifacts = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-        "report.md",
-      ];
+      const artifacts = ["scan-manifest.json", "findings.json", "report.md"];
       const original = await Promise.all(
         artifacts.map((name) => readFile(path.join(scanDir, name))),
       );
@@ -507,7 +523,11 @@ for (const scenario of [
         change === "selected config"
           ? {}
           : {
-              model: change === "model" ? "synthetic-changed-model" : model,
+              model:
+                change === "model" ||
+                change === "project file with changed model"
+                  ? "synthetic-changed-model"
+                  : model,
               reasoning_effort:
                 change === "reasoning effort"
                   ? "synthetic-future-effort"
@@ -529,7 +549,11 @@ for (const scenario of [
         "start_codex_security_deep_scan",
         change === "running scan ID" || change === "instruction file explicit"
           ? { scanId, handoffClaimToken }
-          : { targetPath: repository, userContext },
+          : {
+              targetPath: repository,
+              userContext,
+              ...(projectConfigPath ? { projectConfigPath } : {}),
+            },
         turn,
       );
       if (
@@ -560,7 +584,18 @@ for (const scenario of [
         assert.match(JSON.stringify(response.content), /Codex executable/i);
         const scans = workbench(["list-scans"]).scans;
         assert.equal(scans.length, 2, "Changed inputs register a fresh scan.");
-        assert.ok(scans.some((scan) => scan.scanId !== scanId));
+        const fresh = scans.find((scan) => scan.scanId !== scanId);
+        assert.ok(fresh);
+        if (projectConfigPath) {
+          const saved = workbench([
+            "get-scan",
+            "--scan-id",
+            fresh.scanId,
+          ]) as unknown as {
+            deepScanSettings: { workers: number };
+          };
+          assert.equal(saved.deepScanSettings.workers, 3);
+        }
       }
       assert.equal(
         workbench(["get-scan", "--scan-id", scanId]).scan.progress.status,

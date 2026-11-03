@@ -93,6 +93,7 @@ jobs:
             mkdir -p "$REPORT_DIRECTORY"
             args=(scan "$TARGET_DIRECTORY" --provider amazon-bedrock
               --model "$BEDROCK_MODEL_ID" --mode standard --effort high
+              --codex 'responses_api_metadata.codex_security_integration="azure_pipelines"'
               --output-dir "$SCAN_DIRECTORY" --json)
             if [[ "$SCAN_MODE" == diff ]]; then
               args+=(--diff "$BASE_REVISION")
@@ -146,7 +147,7 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            for report in report.md coverage.json findings.json; do
+            for report in report.md scan-manifest.json findings.json; do
               if [[ -f "$SCAN_DIRECTORY/$report" ]]; then
                 cp "$SCAN_DIRECTORY/$report" "$REPORT_DIRECTORY/$report"
               fi

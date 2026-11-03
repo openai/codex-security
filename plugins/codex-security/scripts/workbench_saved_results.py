@@ -43,8 +43,10 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from project_scan_artifacts import project_scan_artifacts
+from project_scan_artifacts import project_scan_artifacts, retained_review_state
 from report_projection import retained_findings
+from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from workbench import checkpoint_publication
 from workbench_composition import (
     COMPOSITION_CHECKPOINT,
     CompositionView,
@@ -203,9 +205,28 @@ def _read_saved_result(scan_dir: Path, relative: str, scan_id: str) -> tuple[dic
     draft, _ = _read_checkpoint_bytes(scan_dir, relative)
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
+    digest = _digest(draft)
+    if "reviewState" in draft and "coverage" not in draft:
+        draft["coverage"] = draft.pop("reviewState")
     if not isinstance(draft.get("findings"), list) or not isinstance(draft.get("coverage"), dict):
         raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft)
+    return draft, digest
+
+
+def _export_names(scan: dict[str, Any]) -> tuple[str, ...]:
+    names = ("scan-manifest.json", "findings.json")
+    return (*names, "coverage.json") if uses_legacy_review(scan) else names
+
+
+def _document_coverage(documents: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(documents.get("coverage"), dict):
+        return documents["coverage"]
+    if isinstance(documents.get("reviewState"), dict):
+        return documents["reviewState"]
+    scan = documents["manifest"].get("scan")
+    if not isinstance(scan, dict) or uses_legacy_review(scan):
+        raise ContractError("Committed scan draft has no review state")
+    return review_state(scan)
 
 
 def _read_saved_parent_result(
@@ -225,18 +246,25 @@ def _read_saved_parent_result(
         documents = _read_scan_local_json(
             scan_dir, "artifacts/scan-draft.json", "Committed scan draft"
         )
-        for name in ("manifest", "findings", "coverage"):
+        for name in ("manifest", "findings"):
             if not isinstance(documents.get(name), dict):
                 raise ContractError(f"Committed scan draft has no {name} object")
         manifest, findings, coverage = (
             documents["manifest"],
             documents["findings"],
-            documents["coverage"],
+            _document_coverage(documents),
         )
     else:
         manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
+        scan = manifest.get("scan")
+        if not isinstance(scan, dict):
+            raise ContractError("Saved parent manifest has no scan object")
         findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-        coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+        coverage = (
+            _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+            if uses_legacy_review(scan)
+            else review_state(scan)
+        )
     return _saved_parent_result(scan_id, manifest, findings, coverage)
 
 
@@ -302,6 +330,8 @@ def _unpublished_committed_draft(
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        if checkpoint_publication.uses_checkpoint_history(connection, scan, scan_dir):
+            return checkpoint_publication._saved_results_changed(db, connection, scan)
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
         paths = _saved_result_paths(scan_dir, scan["id"])
         frozen_sources = scan["retained_source_digests_json"]
@@ -343,6 +373,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                 _, current_sources[path] = _read_saved_result(scan_dir, path, scan["id"])
             except (ContractError, OSError, ValueError):
                 continue
+        composition = load_composition(connection, scan)
         return (
             current_sources != published_sources
             or _unpublished_committed_draft(scan_dir, scan["id"], published_sources) is not None
@@ -351,8 +382,8 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                 connection,
                 scan,
                 scan_dir,
-                load_composition(connection, scan),
-                retained_draft=_retained_composed_draft(db, scan, scan_dir),
+                composition,
+                retained_draft=_retained_composed_draft(db, scan, scan_dir, composition),
                 write=False,
             )
             is not None
@@ -405,7 +436,7 @@ def _recovery_source_digests(
             else:
                 include_parent = True
 
-    retained = _retained_composed_draft(db, scan, scan_dir)
+    retained = _retained_composed_draft(db, scan, scan_dir, composition)
     selected_committed = None
     committed_digest = None
     if frozen_sources is not None:
@@ -587,6 +618,7 @@ def merge_saved_results(
     frozen_model_source: str | None = None,
     selected_parent_checkpoint: str | None = None,
     write_snapshots: bool = True,
+    reuse_sealed_result: bool = True,
     composed_child_ids: tuple[str, ...] = (),
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
@@ -622,7 +654,11 @@ def merge_saved_results(
         if parent_manifest is not None and parent is not None:
             head_path = scan_dir / "artifacts/scan-draft.json"
             if not head_path.exists():
-                head_path = scan_dir / "coverage.json"
+                head_path = scan_dir / (
+                    "coverage.json"
+                    if uses_legacy_review(parent_manifest["scan"])
+                    else "scan-manifest.json"
+                )
             parent_observed = head_path.stat().st_mtime_ns
             if head_path.name == "scan-draft.json" and not parent_manifest["scan"].get("sealedAt"):
                 committed_digest = _digest(parent)
@@ -666,7 +702,7 @@ def merge_saved_results(
                         export_state.get("previous", {}).get(filename),
                         export_state.get("current", {}).get(filename),
                     )
-                    for filename in ("scan-manifest.json", "findings.json", "coverage.json")
+                    for filename in _export_names(current_manifest["scan"])
                 )
             else:
                 # Older snapshots have no export digests; retain their existing
@@ -686,7 +722,7 @@ def merge_saved_results(
                 current_checkpoint = f"checkpoints/{_digest(current)}.json"
                 current_observed = max(
                     (scan_dir / filename).stat().st_mtime_ns
-                    for filename in ("scan-manifest.json", "findings.json", "coverage.json")
+                    for filename in _export_names(current_manifest["scan"])
                 )
                 source_times[current_checkpoint] = current_observed
                 if write_snapshots:
@@ -788,6 +824,7 @@ def merge_saved_results(
     if parent is None and not sources:
         if not stopped or frozen_source_digests is not None:
             return None
+        coverage_name = "coverage.json"
         if (scan_dir / "scan-manifest.json").exists():
             try:
                 manifest = _read_scan_local_json(
@@ -799,8 +836,14 @@ def merge_saved_results(
                 # Loose coverage cannot replace an unreadable draft. Keep it
                 # intact until a valid committed draft or checkpoint is available.
                 return None
+            if not uses_legacy_review(manifest["scan"]):
+                coverage_name = "scan-manifest.json"
         try:
-            coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved scan coverage")
+            coverage = (
+                review_state(manifest["scan"])
+                if coverage_name == "scan-manifest.json"
+                else _read_scan_local_json(scan_dir, "coverage.json", "Saved scan coverage")
+            )
         except (ContractError, OSError, ValueError):
             return None
         if coverage.get("scanId", scan_id) != scan_id:
@@ -812,9 +855,10 @@ def merge_saved_results(
         if write_snapshots:
             write_scan_local_bytes(scan_dir, relative, payload)
         source_digests[relative] = digest
-        source_times[relative] = (scan_dir / "coverage.json").stat().st_mtime_ns
+        source_times[relative] = (scan_dir / coverage_name).stat().st_mtime_ns
     if (
-        parent_manifest
+        reuse_sealed_result
+        and parent_manifest
         and parent_manifest["scan"].get("sealedAt")
         and parent_manifest["scan"].get("status") == binding["status"]
         and parent_manifest["scan"].get("preservedSources") == source_digests
@@ -963,9 +1007,10 @@ def merge_saved_results(
         _recover_unsealed_findings(
             {"scan": {"id": scan_id, "target": binding["target"]}},
             document,
-            finding_schema,
+            schema_dir,
             scan_dir,
             [],
+            schema=finding_schema,
         )
         finding_validity[key] = bool(document["findings"])
         return finding_validity[key]
@@ -1563,9 +1608,21 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
 
 
 @contextmanager
-def preserve_prepared_sources_on_error(scan_dir: Path) -> Iterator[None]:
+def preserve_prepared_sources_on_error(
+    scan_dir: Path, *, accepted_heads: bool = False
+) -> Iterator[None]:
     """Rejected completion attempts must not become accepted observations."""
     directories = ("checkpoints", "checkpoints/pending", "source-order")
+    previous_head = None
+    head_path = scan_dir / "checkpoint-head.json"
+    if accepted_heads:
+        directories += ("checkpoint-heads",)
+        if head_path.exists():
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, "checkpoint-head.json", "Saved parent checkpoint head"
+            )
+            with os.fdopen(descriptor, "rb") as handle:
+                previous_head = (handle.read(), os.fstat(handle.fileno()))
 
     def files() -> set[str]:
         return {
@@ -1578,7 +1635,14 @@ def preserve_prepared_sources_on_error(scan_dir: Path) -> Iterator[None]:
     previous = files()
     try:
         yield
-    except ContractError:
+    except BaseException:
+        if accepted_heads:
+            if previous_head is None:
+                _remove_scan_local_file_if_exists(scan_dir, "checkpoint-head.json")
+            else:
+                contents, metadata = previous_head
+                write_scan_local_bytes(scan_dir, "checkpoint-head.json", contents)
+                os.utime(head_path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
         for relative in files() - previous:
             _remove_scan_local_file_if_exists(scan_dir, relative)
         raise
@@ -1655,7 +1719,9 @@ def _stopped_child_draft(
         )
     ):
         db.require_recorded_manifest_digest(child, child_dir)
-        _, _, manifest, findings, coverage, _, _, _ = _prepare_scan_finalization(child_dir)
+        prepared = _prepare_scan_finalization(child_dir)
+        manifest, findings = prepared.manifest, prepared.findings
+        coverage = retained_review_state(db, child, prepared)
     else:
         binding = {**db.workbench_completion_binding(child, db.now()), "status": "interrupted"}
         warnings: list[str] = []
@@ -1973,6 +2039,9 @@ def preserve_scan_results_locked(
     scan = db.require_scan(connection, scan_id)
     if scan["status"] != "failed":
         return False
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    if checkpoint_publication.uses_checkpoint_history(connection, scan, scan_dir):
+        return checkpoint_publication.preserve_scan_results_locked(db, connection, scan_id)
     composition = composition if composition is not None else load_composition(connection, scan)
     frozen_source_digests: dict[str, str] | None = None
     frozen_model_source: str | None = None
@@ -2181,6 +2250,9 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        if checkpoint_publication.uses_checkpoint_history(connection, scan, scan_dir):
+            return checkpoint_publication.recover_scan_results_locked(db, connection, scan)
         composition = load_composition(connection, scan)
         recovery_warnings: list[str] = []
         recovery_source_digests, include_parent, selected_parent = _recovery_source_digests(
@@ -2347,6 +2419,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 if args.checkpoint_path is not None
                 else (None, None)
             )
+        draft["coverage"] = _document_coverage(draft)
         acknowledged = set(_checkpoint_ids(reconciled))
         pending_decision = checkpoint is not None and (
             checkpoint.get("complete") is not False
@@ -2446,13 +2519,16 @@ def write_draft_documents(db: Any, scan: Any, scan_dir: Path, draft: dict[str, A
     draft["reconciledCheckpointIds"] = sorted(
         remaining | set(_checkpoint_ids(draft.get("reconciledCheckpointIds", [])))
     )
+    documents = {"findings.json": findings}
+    if uses_legacy_review(manifest["scan"]):
+        documents["coverage.json"] = coverage
+    else:
+        manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
+        manifest["scan"]["review"] = review_summary(coverage)
+    documents["scan-manifest.json"] = manifest
     canonical = {
         filename: (json.dumps(document, allow_nan=False, indent=2) + "\n").encode()
-        for filename, document in (
-            ("findings.json", findings),
-            ("coverage.json", coverage),
-            ("scan-manifest.json", manifest),
-        )
+        for filename, document in documents.items()
     }
     previous = {}
     for filename in canonical:
@@ -2501,7 +2577,19 @@ def advance_scan_phase(db: Any, connection: Any, scan_id: str, phase: str) -> No
 
 
 def _scan_draft_digest(scan_dir: Path) -> str:
-    filenames = ["scan-manifest.json", "findings.json", "coverage.json"]
+    filenames = ["scan-manifest.json", "findings.json"]
+    try:
+        manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved scan manifest")
+    except MissingScanLocalFileError:
+        try:
+            committed = _read_scan_local_json(
+                scan_dir, "artifacts/scan-draft.json", "Committed scan draft"
+            )
+            manifest = committed["manifest"]
+        except MissingScanLocalFileError:
+            manifest = None
+    if manifest is not None and uses_legacy_review(manifest["scan"]):
+        filenames.append("coverage.json")
     try:
         (scan_dir / "artifacts/scan-draft.json").lstat()
     except FileNotFoundError:
@@ -2727,7 +2815,11 @@ def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -
     return json.dumps(state, sort_keys=True)
 
 
-def _retained_composed_draft(db: Any, scan: Any, scan_dir: Path) -> dict[str, Any] | None:
+def _retained_composed_draft(
+    db: Any, scan: Any, scan_dir: Path, composition: CompositionView
+) -> dict[str, Any] | None:
+    if not composition.children:
+        return None
     retained_draft: dict[str, Any] | None = None
     frozen_sources: dict[str, str] | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
@@ -2760,9 +2852,17 @@ def _retained_composed_draft(db: Any, scan: Any, scan_dir: Path) -> dict[str, An
                 elif frozen_sources is None:
                     frozen_sources = {}
             db.require_recorded_manifest_digest(scan, scan_dir)
-            _, _, manifest, findings, coverage, _, _, _ = _prepare_scan_finalization(scan_dir)
-            db.verify_manifest_binding(scan, manifest)
-            retained_draft = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+            prepared = _prepare_scan_finalization(scan_dir)
+            db.verify_manifest_binding(scan, prepared.manifest)
+            coverage = retained_review_state(
+                db,
+                scan,
+                prepared,
+                composed_child_ids=tuple(child["id"] for child in composition.children),
+            )
+            retained_draft = _parent_scan_draft(
+                scan["id"], prepared.manifest["scan"], prepared.findings, coverage
+            )
     return retained_draft
 
 

@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadBinding } from "./binding.mjs";
+import { scanReadProof } from "./proof-scan-read.mjs";
 
 const native = loadBinding();
 class NativeError extends Error {
@@ -143,6 +144,7 @@ if (process.argv[2] === "environment-child") {
         accounts: accountProof(),
         locks: lockProof(),
         environment: environmentProof(),
+        scanReads: scanReadProof(),
       },
       null,
       2,

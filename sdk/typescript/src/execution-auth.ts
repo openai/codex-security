@@ -1,4 +1,4 @@
-import { withoutOpenAiApiKeys } from "./auth.js";
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 /** @internal */
 export { withoutOpenAiApiKeys } from "./auth.js";
 import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
@@ -48,6 +48,7 @@ export function scanAuthentication(
   commandAuth = false,
   options: {
     preflight?: boolean;
+    providerEnvKey?: string;
     preserveProviderEnvironment?: boolean;
   } = {},
 ): ScanAuthentication {
@@ -76,7 +77,11 @@ export function scanAuthentication(
   if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
     return { method: "stored_credentials", verified: false };
   }
-  const key = environmentApiKeyEntry(environment, modelProvider);
+  const key = environmentApiKeyEntry(
+    environment,
+    modelProvider,
+    options.providerEnvKey,
+  );
   if (
     key === null &&
     isExternalModelProvider(modelProvider) &&
@@ -84,9 +89,13 @@ export function scanAuthentication(
   ) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
     if (options.preflight && auth === "auto")
-      return { method: "api_key", source: provider.env_key, verified: false };
+      return {
+        method: "api_key",
+        source: options.providerEnvKey ?? provider.env_key,
+        verified: false,
+      };
     throw new AuthenticationRequiredError(
-      `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+      `Set ${options.providerEnvKey ?? provider.env_key} to run a scan through ${provider.name}.`,
     );
   }
   if (
@@ -110,7 +119,10 @@ export async function runtimeScanAuthentication(
   codexHome: string,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
-  options: { preserveProviderEnvironment?: boolean } = {},
+  options: {
+    preserveProviderEnvironment?: boolean;
+    providerEnvKey?: string;
+  } = {},
 ): Promise<ScanAuthentication> {
   const authentication = scanAuthentication(
     environment,
@@ -146,17 +158,28 @@ export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): ProcessEnvironment {
-  const selectedProviderKey = isExternalModelProvider(modelProvider)
+  const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
+  const selectedProviderKey =
+    standardProviderKey === null
+      ? null
+      : (providerEnvKey ?? standardProviderKey);
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
-  return Object.fromEntries(
-    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
+  const selected = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
+      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") {
+        return (
+          selectedProviderKey !== null &&
+          key === selectedProviderKey.toUpperCase()
+        );
+      }
       if (
         key === "OPENROUTER_API_KEY" ||
         key === "FIREWORKS_API_KEY" ||
@@ -164,35 +187,36 @@ export function selectedScanEnvironment(
       ) {
         return (
           !bedrockProvider &&
-          (selectedProviderKey === null || key === selectedProviderKey)
+          (selectedProviderKey === null ||
+            key === standardProviderKey ||
+            key === selectedProviderKey.toUpperCase())
         );
       }
       return true;
     }),
   );
+  forwardExternalImportSetting(environment, selected);
+  return selected;
 }
 
 export function environmentApiKey(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): string | null {
-  return environmentApiKeyEntry(environment, modelProvider)?.value ?? null;
+  return (
+    environmentApiKeyEntry(environment, modelProvider, providerEnvKey)?.value ??
+    null
+  );
 }
 
 function environmentApiKeyEntry(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
-): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY"
-    | "CHEAPER_INFERENCE_API_KEY";
-  value: string;
-} | null {
+  providerEnvKey?: string,
+): { source: string; value: string } | null {
   const keys = isExternalModelProvider(modelProvider)
-    ? [EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
+    ? [providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
     : (["OPENAI_API_KEY", "CODEX_API_KEY"] as const);
   for (const requested of keys) {
     const value = environmentValue(environment, requested)?.trim();
@@ -204,11 +228,13 @@ function environmentApiKeyEntry(
 export function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(environment).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 export function withoutCodexHome(

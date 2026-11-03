@@ -1,3 +1,4 @@
+import { readJson, snapshotScanDraft } from "./support/json.ts";
 import type { TextContent } from "@modelcontextprotocol/sdk/types.js";
 import type {
   SemanticFinding,
@@ -33,6 +34,7 @@ type CompletedResult = {
   manifest: {
     scan: {
       status: string;
+      mode: string;
       sealedAt: string;
       artifacts: unknown[];
       target: Record<string, unknown> & { snapshotDigest: string };
@@ -44,7 +46,7 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  coverage: Record<string, unknown> & { surfaces: { disposition: string }[] };
+  review: { excludedPaths: string[] };
 };
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -322,7 +324,7 @@ async function testCompactDiffScanCompletion() {
         scanId,
         handoffClaimToken,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [
             {
               label: "Changed handler and removed guard",
@@ -352,7 +354,7 @@ async function testCompactDiffScanCompletion() {
       completed.manifest.scan.target.snapshotDigest,
       /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
     );
-    assert.equal(completed.coverage.inventoryStrategy, "diff");
+    assert.ok(Array.isArray(completed.review.excludedPaths));
     assert.equal(completed.findings.findings.length, 0);
   } finally {
     await client.close();
@@ -620,7 +622,7 @@ async function testSemanticScanDraftCompletion() {
           codeEvidence: [{ ...codeEvidence, code: "" }],
         },
       ],
-      coverage: {
+      reviewState: {
         ...coverage,
         mode: "repository",
         inventoryStrategy: "repository",
@@ -714,7 +716,7 @@ async function testSemanticScanDraftCompletion() {
           scanId,
           handoffClaimToken,
           findings: [finding],
-          coverage: invalidCoverage,
+          reviewState: invalidCoverage,
         });
       } catch (error) {
         assert.equal(
@@ -759,7 +761,7 @@ async function testSemanticScanDraftCompletion() {
       handoffClaimToken,
       complete: false,
       findings: [finding],
-      coverage: { ...coverage },
+      reviewState: { ...coverage },
     };
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
@@ -769,9 +771,8 @@ async function testSemanticScanDraftCompletion() {
     );
     finding.identity = savedFindings.findings[0].identity;
     assert.ok(finding.identity!.anchor);
-    const savedCoverage = JSON.parse(
-      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
-    );
+    const savedCoverage = (await readJson(scanDirectory, "scan-manifest.json"))
+      .scan.reviewState;
     coverage.surfaces[0].id = savedCoverage.surfaces[0].id;
     assert.equal(
       new Set(savedCoverage.deferred.map((row: { id: string }) => row.id)).size,
@@ -813,18 +814,18 @@ async function testSemanticScanDraftCompletion() {
       unit: "candidate_findings",
     });
 
-    const drafted = requireSuccessfulTool<{ coverage: SemanticCoverage }>(
+    const drafted = requireSuccessfulTool<{ reviewState: SemanticCoverage }>(
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
         findings: [finding],
-        coverage,
+        reviewState: coverage,
       }),
       "correct the same scan and accept exactly one draft",
     );
-    assert.equal(drafted.coverage.mode, "repository");
-    assert.equal(drafted.coverage.surfaces.length, 1);
-    const { coverage: returnedCoverage, ...draftSummary } = drafted;
+    const { reviewState, ...draftSummary } = drafted;
+    assert.equal(reviewState.mode, "repository");
+    assert.equal(reviewState.surfaces.length, 1);
     assert.deepEqual(draftSummary, {
       scanId,
       findingCount: 1,
@@ -883,16 +884,8 @@ async function testSemanticScanDraftCompletion() {
     assert.ok(results.findings.findings[0].occurrenceId);
     assert.ok(results.findings.findings[0].fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
-    assert.equal(results.coverage.inventoryStrategy, "directory");
-    assert.equal(results.coverage.completeness, undefined);
-    assert.deepEqual(results.coverage.includePaths, ["."]);
-    assert.deepEqual(results.coverage.excludePaths, []);
-    assert.equal(results.coverage.surfaces[0].disposition, "reported");
-    assert.deepEqual(results.coverage.deferred, coverage.deferred);
-    assert.deepEqual(results.coverage.openQuestions, [
-      { question: "Can a neighboring query API bypass parameterization?" },
-      coverage.openQuestions![1],
-    ]);
+    assert.equal(results.manifest.scan.mode, "repository");
+    assert.deepEqual(results.review, { excludedPaths: [] });
     assert.ok(
       (await readFile(path.join(scanDirectory, "report.md"), "utf8")).length >
         0,
@@ -900,21 +893,6 @@ async function testSemanticScanDraftCompletion() {
   } finally {
     await client.close();
   }
-}
-
-async function snapshotScanDraft(scanDirectory: string) {
-  return Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json"].map(
-      async (artifact) => {
-        try {
-          return await readFile(path.join(scanDirectory, artifact), "utf8");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-          throw error;
-        }
-      },
-    ),
-  );
 }
 
 async function testClaimedParentArtifactOperations() {
@@ -1559,7 +1537,7 @@ process.exit(1);
         scanId,
         handoffClaimToken,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -1598,11 +1576,7 @@ process.exit(1);
     assert.ok((await readFile(expectedResult.reportPath, "utf8")).length > 0);
     assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
 
-    for (const artifact of [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-    ]) {
+    for (const artifact of ["scan-manifest.json", "findings.json"]) {
       const artifactPath = path.join(scanDir, artifact);
       const original = await readFile(artifactPath);
       for (const change of ["modified", "missing"]) {
@@ -2021,13 +1995,16 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     Record<string, unknown>
   >;
   const findingSchema = properties.findings.items as Record<string, unknown>;
-  if (properties.coverage) {
+  if (properties.reviewState) {
     assert.equal(
-      Object.hasOwn(properties.coverage.properties as object, "completeness"),
+      Object.hasOwn(
+        properties.reviewState.properties as object,
+        "completeness",
+      ),
       false,
     );
     assert.equal(
-      (properties.coverage.required as string[]).includes("completeness"),
+      (properties.reviewState.required as string[]).includes("completeness"),
       false,
     );
   }
@@ -2035,9 +2012,9 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     [properties.scope, ["includePaths", "excludePaths"]],
     [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],
   ];
-  if (properties.coverage)
+  if (properties.reviewState)
     groups.push([
-      properties.coverage,
+      properties.reviewState,
       [
         "documentType",
         "schemaVersion",

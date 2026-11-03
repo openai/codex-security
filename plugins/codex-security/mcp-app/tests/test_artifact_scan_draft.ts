@@ -103,11 +103,25 @@ async function fixture(
     const before = await readFile(snapshotPath, "utf8").catch(() => undefined);
     if (expected !== undefined) {
       const digest = createHash("sha256");
+      const manifest = await readFile(
+        join(root, "scan-manifest.json"),
+        "utf8",
+      ).catch(() => undefined);
+      const scan =
+        manifest === undefined
+          ? before === undefined
+            ? undefined
+            : JSON.parse(before).manifest.scan
+          : JSON.parse(manifest).scan;
+      const legacy =
+        scan !== undefined &&
+        (scan.coverageRef !== undefined ||
+          (scan.reviewState === undefined && scan.review === undefined));
       for (const name of [
         ...(before === undefined ? [] : ["artifacts/scan-draft.json"]),
         "scan-manifest.json",
         "findings.json",
-        "coverage.json",
+        ...(legacy ? ["coverage.json"] : []),
       ]) {
         const contents = await readFile(join(root, name)).catch(
           () => undefined,
@@ -1083,15 +1097,26 @@ test("completed results require a sealed, matching workbench result", async (t) 
       },
     },
     "findings.json": { scanId, findings: [] },
-    "coverage.json": { scanId, surfaces: [] },
+    "coverage.json": { scanId, surfaces: [], explicitExclusions: [] },
   };
   for (const [name, value] of Object.entries(documents))
     await writeFile(join(f.root, name), JSON.stringify(value));
   const input = { scanId, handoffClaimToken: claimToken };
   const context = { ...f.context, status: "complete" };
-  assert.equal(
-    (await getCodexSecurityCompletedScan(context, input)).scanId,
-    scanId,
+  const legacy = await getCodexSecurityCompletedScan(context, input);
+  assert.equal(legacy.scanId, scanId);
+  assert.deepEqual(legacy.review, { excludedPaths: [] });
+  const review = { excludedPaths: ["generated"] };
+  await writeFile(
+    join(f.root, "scan-manifest.json"),
+    JSON.stringify({
+      scan: { ...documents["scan-manifest.json"].scan, review },
+    }),
+  );
+  await rm(join(f.root, "coverage.json"));
+  assert.deepEqual(
+    (await getCodexSecurityCompletedScan(context, input)).review,
+    review,
   );
   await writeFile(
     join(f.root, "findings.json"),

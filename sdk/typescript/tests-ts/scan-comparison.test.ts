@@ -1,19 +1,15 @@
+import { fixtureSpawn } from "./support/codex-process.js";
+import { createPermissionCheckedCodex } from "../src/permission-profile.js";
+import { modelResponseText } from "./support/model-response-text.js";
+import { once } from "node:events";
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
-import * as runtimeCommands from "../src/runtime.js";
-import { executablePathForSpawn } from "../src/runtime.js";
-import { resolveCommandAuthConfig } from "../src/config.js";
-import * as providerProfiles from "../src/provider-profile.js";
-import { execFileSync } from "node:child_process";
-import * as childProcess from "node:child_process";
-import { fixtureSpawn } from "./support/codex-process.js";
-import { createPermissionCheckedCodex } from "../src/permission-profile.js";
-import { modelResponseText } from "./support/model-response-text.js";
-import { once } from "node:events";
 import {
   copyFile,
   mkdir,
@@ -33,13 +29,17 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
+import * as runtimeCommands from "../src/runtime.js";
+import { executablePathForSpawn } from "../src/runtime.js";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
+import { resolveCommandAuthConfig } from "../src/config.js";
 import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   type JsonObject,
 } from "../src/config.js";
+import * as providerProfiles from "../src/provider-profile.js";
 import { CodexSecurityError } from "../src/errors.js";
 import {
   comparisonForScan,
@@ -89,6 +89,161 @@ async function temporaryDirectory(prefix = "codex-security-comparison-") {
   const path = await createTemporaryDirectory(prefix, false);
   temporaryDirectories.push(path);
   return path;
+}
+
+function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
+  return { occurrenceId };
+}
+
+function fakeCodex(response: unknown) {
+  const calls: {
+    prompt?: string;
+    threadOptions?: ThreadOptions;
+    turnOptions?: TurnOptions;
+  } = {};
+  const codex: NonNullable<ScanComparisonOptions["codex"]> = {
+    startThread(options) {
+      calls.threadOptions = options;
+      return {
+        async run(prompt, turnOptions) {
+          calls.prompt = prompt;
+          calls.turnOptions = turnOptions;
+          return { finalResponse: modelResponseText(response) };
+        },
+      };
+    },
+  };
+  return { codex, calls };
+}
+
+describe("incoming native runtime integration", () => {
+  test.each([
+    ["default", {}, "elevated"],
+    ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
+    ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
+    ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
+    [
+      "profile",
+      {
+        profile: "selected",
+        profiles: { selected: { windows: { sandbox: "unelevated" } } },
+      },
+      "unelevated",
+    ],
+  ] as const)(
+    "keeps MCP servers disabled with %s Windows settings",
+    async (name, homeConfig, sandbox) => {
+      const home = await temporaryDirectory("codex-security-comparison-");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          ...(name === "profile" ? {} : homeConfig),
+          mcp_servers: { inherited: { command: "synthetic-inherited" } },
+        }),
+      );
+      const executable = join(
+        home,
+        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+      );
+      await copyFile(resolveCodexCommand({}).command, executable);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        TEMP: process.env["TEMP"],
+        TMP: process.env["TMP"],
+        CODEX_HOME: home,
+        CODEX_CLI_PATH: executable,
+        OPENAI_API_KEY: "synthetic-key",
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      let config: CodexOptions["config"];
+      let codexPath: string | undefined;
+      let codexEnvironment: CodexOptions["env"];
+      const startThread = observeCodexOptions(codex, (options) => {
+        config = deepMerge(
+          options.config ?? {},
+          launchConfig(options.configOverrides ?? []),
+        ) as CodexOptions["config"];
+        codexPath = options.codexPathOverride;
+        codexEnvironment = options.env;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                ...(name === "profile" ? homeConfig : {}),
+                mcp_servers: {
+                  synthetic: {
+                    command: "synthetic-integration",
+                    enabled: true,
+                  },
+                },
+              },
+            },
+          },
+        );
+        expect(config?.["mcp_servers"]).toEqual({
+          synthetic: { command: "synthetic-integration", enabled: false },
+          inherited: { enabled: false },
+        });
+        expect(config?.["windows"]).toEqual({ sandbox });
+        expect(codexPath).toBe(
+          process.platform === "win32"
+            ? win32.toNamespacedPath(executable)
+            : executable,
+        );
+        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+        const effective = await runCodexCommand(
+          resolveCodexCommand(environment),
+          [
+            "-C",
+            home,
+            "-c",
+            'mcp_servers.synthetic.command="synthetic-integration"',
+            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+              "-c",
+              `mcp_servers.${name}.enabled=false`,
+            ]),
+            "mcp",
+            "list",
+            "--json",
+          ],
+          environment,
+        );
+        expect(effective.success).toBe(true);
+        expect(
+          JSON.parse(effective.stdout).map(
+            (server: { name: string; enabled: boolean }) => ({
+              name: server.name,
+              enabled: server.enabled,
+            }),
+          ),
+        ).toEqual([
+          { name: "inherited", enabled: false },
+          { name: "synthetic", enabled: false },
+        ]);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+});
+
+function observeCodexOptions(
+  codex: NonNullable<ScanComparisonOptions["codex"]>,
+  observe: (options: CodexOptions) => void,
+) {
+  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
+    this: Codex,
+    options,
+  ) {
+    observe((this as unknown as { options: CodexOptions }).options);
+    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+  });
 }
 
 function launchConfig(overrides: readonly string[]): JsonObject {
@@ -177,31 +332,6 @@ async function captureProfileClient() {
     };
   });
   return { profiles, spy };
-}
-
-function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
-  return { occurrenceId };
-}
-
-function fakeCodex(response: unknown) {
-  const calls: {
-    prompt?: string;
-    threadOptions?: ThreadOptions;
-    turnOptions?: TurnOptions;
-  } = {};
-  const codex: NonNullable<ScanComparisonOptions["codex"]> = {
-    startThread(options) {
-      calls.threadOptions = options;
-      return {
-        async run(prompt, turnOptions) {
-          calls.prompt = prompt;
-          calls.turnOptions = turnOptions;
-          return { finalResponse: modelResponseText(response) };
-        },
-      };
-    },
-  };
-  return { codex, calls };
 }
 
 describe("semantic scan comparison", () => {
@@ -1661,10 +1791,7 @@ process.exit(0);
         workingDirectory: home,
       };
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const profileClient = spyOn(
-        executionProfiles,
-        "createExecutionProfileCodex",
-      ).mockImplementation((options) => new Codex(options));
+      const profileClient = await captureProfileClient();
       const startThread = spyOn(
         Codex.prototype,
         "startThread",
@@ -1700,35 +1827,53 @@ process.exit(0);
         expect(startThread).toHaveBeenCalledTimes(1);
         startThread.mockClear();
 
-        // An ambient profile must not replace that explicitly selected provider.
+        // An ambient profile must not replace the caller's selected profile.
         await writeFile(
           join(home, "config.toml"),
           stringify({
             profile: "ambient",
-            profiles: { ambient: { model_provider: "other" } },
+            profiles: {
+              ambient: { model_provider: "other" },
+              caller: { model_provider: "other" },
+            },
             model_providers: { other: provider },
           }),
         );
-        // The wrapper resolves legacy profile data; native enumeration no longer
-        // accepts that home format, so isolate this authentication control.
-        const mcpCommand = spyOn(runtime, "runCodexCommand").mockImplementation(
-          async (_command, args) => {
-            expect(args).toContain("mcp");
-            return { success: true, exitCode: 0, stdout: "[]", stderr: "" };
-          },
-        );
+        await writeFile(join(home, "caller.config.toml"), stringify(config));
+        const nativeCommand = spyOn(runtimeCommands, "runCodexCommand");
         try {
-          await matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            { ...options, config: { codexOverrides: config } },
-          );
-          expect(startThread).toHaveBeenCalledTimes(1);
+          for (const [selected, codexOverrides] of [
+            ["synthetic", { profile: "caller", profiles: { caller: config } }],
+            [
+              "openai",
+              {
+                profile: "caller",
+                profiles: { caller: { model_provider: "openai" } },
+              },
+            ],
+            ["synthetic", { profile: "caller" }],
+            ["synthetic", config],
+          ] as [string, JsonObject][]) {
+            nativeCommand.mockClear();
+            await expect(
+              matchScanFindings(
+                { before: [finding("before")], after: [finding("after")] },
+                { ...options, config: { codexOverrides } },
+              ),
+            ).rejects.toThrow("Could not read MCP configuration");
+            // Native Codex rejects the legacy home selector after caller selection.
+            expect(nativeCommand).toHaveBeenCalledTimes(1);
+            expect(nativeCommand.mock.calls[0]![0].args).toContain(
+              `model_provider="${selected}"`,
+            );
+            expect(startThread).not.toHaveBeenCalled();
+          }
         } finally {
-          mcpCommand.mockRestore();
+          nativeCommand.mockRestore();
         }
       } finally {
+        profileClient.spy.mockRestore();
         startThread.mockRestore();
-        profileClient.mockRestore();
       }
     },
   );
@@ -3327,6 +3472,7 @@ process.exit(0);
     confidence: "high" as const,
     reason: "Same root cause.",
   });
+
   const uncertain = (afterOccurrenceId = "after-1") => ({
     beforeOccurrenceId: "before-1",
     afterOccurrenceId,
@@ -3438,58 +3584,163 @@ process.exit(0);
       ),
     ).rejects.toThrow(error);
   });
-});
 
-describe("incoming native runtime integration", () => {
+  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
+    const home = await temporaryDirectory("codex-security-comparison-");
+    await writeFile(
+      join(home, "config.toml"),
+      '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
+    );
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      config = (this as unknown as { options: CodexOptions }).options.config;
+      codexPath = (this as unknown as { options: CodexOptions }).options
+        .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          environment,
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              mcp_servers: {
+                synthetic: { command: "synthetic-integration", enabled: true },
+              },
+            },
+          },
+        },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
+      });
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+      const effective = await runCodexCommand(
+        resolveCodexCommand(environment),
+        [
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
+    } finally {
+      startThread.mockRestore();
+    }
+  });
+
   test.each([
-    ["default", {}, "elevated"],
-    ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
-    ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
-    ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
-    [
-      "profile",
-      {
-        profile: "selected",
-        profiles: { selected: { windows: { sandbox: "unelevated" } } },
-      },
-      "unelevated",
-    ],
-  ] as const)(
-    "keeps MCP servers disabled with %s Windows settings",
-    async (name, homeConfig, sandbox) => {
-      const home = await temporaryDirectory("codex-security-comparison-");
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          ...(name === "profile" ? {} : homeConfig),
-          mcp_servers: { inherited: { command: "synthetic-inherited" } },
-        }),
+    "home",
+    "profile",
+    "profile-only",
+    "profile-partial",
+    "native",
+    "overrides",
+    "override-away",
+  ])(
+    "preserves selected file and partial command auth in private matcher profiles: %s",
+    async (selection) => {
+      const home = await temporaryDirectory(
+        "codex-security-command-comparison-",
       );
-      const executable = join(
-        home,
-        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        model_provider:
+          selection === "overrides" ||
+          selection.startsWith("profile") ||
+          selection === "native"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(
+        selection === "profile-only" ? { model_provider: "openai" } : config,
       );
-      await copyFile(resolveCodexCommand({}).command, executable);
+      await writeFile(join(home, "config.toml"), contents);
+      if (selection === "native") {
+        await writeFile(
+          join(home, "review.config.toml"),
+          'model_provider = "synthetic.provider"\n',
+        );
+      }
       const environment = {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
-        TEMP: process.env["TEMP"],
-        TMP: process.env["TMP"],
-        CODEX_HOME: home,
-        CODEX_CLI_PATH: executable,
-        OPENAI_API_KEY: "synthetic-key",
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
       };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const profileClient = await captureProfileClient();
       const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      let config: CodexOptions["config"];
-      let codexPath: string | undefined;
-      let codexEnvironment: CodexOptions["env"];
-      const startThread = observeCodexOptions(codex, (options) => {
-        config = deepMerge(
-          options.config ?? {},
-          launchConfig(options.configOverrides ?? []),
-        ) as CodexOptions["config"];
-        codexPath = options.codexPathOverride;
-        codexEnvironment = options.env;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
       });
       try {
         await matchScanFindings(
@@ -3497,78 +3748,110 @@ describe("incoming native runtime integration", () => {
           {
             environment,
             workingDirectory: home,
-            config: {
-              codexOverrides: {
-                ...(name === "profile" ? homeConfig : {}),
-                mcp_servers: {
-                  synthetic: {
-                    command: "synthetic-integration",
-                    enabled: true,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
                   },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection.startsWith("profile")
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: {
+                              model_provider: "synthetic.provider",
+                              ...(selection === "profile-only"
+                                ? {
+                                    model_providers: {
+                                      "synthetic.provider": provider,
+                                    },
+                                  }
+                                : selection === "profile-partial"
+                                  ? {
+                                      model_providers: {
+                                        "synthetic.provider": {
+                                          auth: { refresh_interval_ms: 4567 },
+                                        },
+                                      },
+                                    }
+                                  : {}),
+                            },
+                          },
+                        },
+                      },
+                    }
+                  : selection === "native"
+                    ? { config: { codexOverrides: { profile: "review" } } }
+                    : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection.startsWith("profile") || selection === "native") {
+          expect(captured?.config).not.toHaveProperty("profile");
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+        }
+        if (commandAuth) {
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.apiKey).toBeUndefined();
+          expect(profileClient.profiles[0]!.config).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                  refresh_interval_ms:
+                    selection === "profile-partial" ? 4567 : 1234,
                 },
               },
             },
-          },
-        );
-        expect(config?.["mcp_servers"]).toEqual({
-          synthetic: { command: "synthetic-integration", enabled: false },
-          inherited: { enabled: false },
+          });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+            responses_api_metadata: {
+              codex_security_surface: "sdk",
+              codex_security_command: "compare",
+              codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
+            },
+          });
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
         });
-        expect(config?.["windows"]).toEqual({ sandbox });
-        expect(codexPath).toBe(
-          process.platform === "win32"
-            ? win32.toNamespacedPath(executable)
-            : executable,
+        expect(threadOptions?.sandboxMode).toBe(
+          commandAuth ? undefined : "read-only",
         );
-        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
-        const effective = await runCodexCommand(
-          resolveCodexCommand(environment),
-          [
-            "-C",
-            home,
-            "-c",
-            'mcp_servers.synthetic.command="synthetic-integration"',
-            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
-              "-c",
-              `mcp_servers.${name}.enabled=false`,
-            ]),
-            "mcp",
-            "list",
-            "--json",
-          ],
-          environment,
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
         );
-        expect(effective.success).toBe(true);
-        expect(
-          JSON.parse(effective.stdout).map(
-            (server: { name: string; enabled: boolean }) => ({
-              name: server.name,
-              enabled: server.enabled,
-            }),
-          ),
-        ).toEqual([
-          { name: "inherited", enabled: false },
-          { name: "synthetic", enabled: false },
-        ]);
       } finally {
+        profileClient.spy.mockRestore();
         startThread.mockRestore();
       }
     },
   );
 });
-
-function observeCodexOptions(
-  codex: NonNullable<ScanComparisonOptions["codex"]>,
-  observe: (options: CodexOptions) => void,
-) {
-  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
-    this: Codex,
-    options,
-  ) {
-    observe((this as unknown as { options: CodexOptions }).options);
-    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-  });
-}
 
 test.each(["synthetic.gateway", "fireworks", "amazon-bedrock", "command"])(
   "automatic matching retains the per-scan %s provider",

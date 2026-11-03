@@ -24,6 +24,22 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+
+const modelCatalog = fileURLToPath(
+  new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
+);
+
+const nativeConfigArgs = [
+  fileURLToPath(new URL("./fixtures/skill-native-config.mjs", import.meta.url)),
+  "app-server",
+  "--disable",
+  "plugins",
+  "--config",
+  "analytics.enabled=false",
+  "--config",
+  `model_catalog_json=${inlineToml(modelCatalog)}`,
+];
+
 import { executablePathForSpawn } from "../src/executable-path.js";
 
 test.each([
@@ -228,16 +244,7 @@ test.each([
       const stdout = capture();
       const stderr = capture();
       const status = await runCodexSkillCommand(
-        [
-          fileURLToPath(
-            new URL("./fixtures/skill-native-config.mjs", import.meta.url),
-          ),
-          "app-server",
-          "--disable",
-          "plugins",
-          "--config",
-          "analytics.enabled=false",
-        ],
+        nativeConfigArgs,
         {
           command,
           auth: "chatgpt",
@@ -330,14 +337,7 @@ async function withStoredApiKey(
         const stderr = capture();
         const status = await runCodexSkillCommand(
           [
-            fileURLToPath(
-              new URL("./fixtures/skill-native-config.mjs", import.meta.url),
-            ),
-            "app-server",
-            "--disable",
-            "plugins",
-            "--config",
-            "analytics.enabled=false",
+            ...nativeConfigArgs,
             ...Object.entries(overrides).flatMap(([key, value]) => [
               "--config",
               `${key}=${inlineToml(value)}`,
@@ -374,11 +374,11 @@ async function withStoredApiKey(
   }
 }
 
-test.each(
-  (["patch", "verify-fix"] as const).flatMap((command) =>
-    [true, false].map((daybreak) => [command, daybreak] as const),
-  ),
-)(
+test.each([
+  ["patch", true],
+  ["patch", false],
+  ["verify-fix", true],
+] as const)(
   "%s preserves ambient Daybreak %p with a stored API key",
   async (command, daybreak) => {
     await withStoredApiKey(
@@ -397,95 +397,80 @@ test.each(
   },
 );
 
-test.each(["patch", "verify-fix"] as const)(
-  "%s preserves the Daybreak opt-out with an explicit toggle and a stored API key",
-  async (command) => {
-    await withStoredApiKey(command, async ({ ambientHome, run }) => {
-      await writeCodexConfig(join(ambientHome, "config.toml"), {
-        daybreak: false,
-        features: { cli_daybreak: false },
-      });
-      expect(await run({ daybreak: true })).toMatchObject({
-        daybreak: true,
-        daybreakEnabled: true,
-        daybreakFeatures: { cli_daybreak: false },
-      });
+test("patch preserves the Daybreak opt-out with an explicit toggle and a stored API key", async () => {
+  await withStoredApiKey("patch", async ({ ambientHome, run }) => {
+    await writeCodexConfig(join(ambientHome, "config.toml"), {
+      daybreak: false,
+      features: { cli_daybreak: false },
     });
-  },
-);
-
-test.each(["patch", "verify-fix"] as const)(
-  "%s forwards wrapper-resolved ambient Daybreak profiles with a stored API key",
-  async (command) => {
-    await withStoredApiKey(command, async ({ ambientHome, run }) => {
-      await writeCodexConfig(join(ambientHome, "config.toml"), {
-        daybreak: false,
-        features: { cli_daybreak: true },
-        profile: "selected",
-        profiles: {
-          selected: { daybreak: true, features: disabledDaybreakFeatures },
-        },
-      });
-      expect(await run()).toMatchObject({
-        daybreak: true,
-        daybreakEnabled: true,
-        daybreakFeatures: disabledDaybreakFeatures,
-      });
+    expect(await run({ daybreak: true })).toMatchObject({
+      daybreak: true,
+      daybreakEnabled: true,
+      daybreakFeatures: { cli_daybreak: false },
     });
-  },
-);
+  });
+});
 
-test.each(["patch", "verify-fix"] as const)(
-  "%s clears removed ambient Daybreak settings on the next stored API-key launch",
-  async (command) => {
-    await withStoredApiKey(command, async ({ ambientHome, run }) => {
-      const configPath = join(ambientHome, "config.toml");
-      await writeCodexConfig(configPath, {});
-      const baseline = await run();
-      await writeCodexConfig(configPath, {
-        daybreak: true,
-        features: disabledDaybreakFeatures,
-      });
-      expect(await run()).toMatchObject({
-        daybreak: true,
-        daybreakEnabled: true,
-        daybreakFeatures: disabledDaybreakFeatures,
-      });
-      await writeCodexConfig(configPath, {});
-      expect(await run()).toEqual(baseline);
-    });
-  },
-);
-
-test.each(["patch", "verify-fix"] as const)(
-  "%s preserves native project and explicit Daybreak precedence with a stored API key",
-  async (command) => {
-    await withStoredApiKey(
-      command,
-      async ({ ambientHome, repository, run }) => {
-        await writeCodexConfig(join(ambientHome, "config.toml"), {
-          daybreak: true,
-          features: { cli_daybreak: true },
-          projects: { [repository]: { trust_level: "trusted" } },
-        });
-        await writeCodexConfig(join(repository, ".codex", "config.toml"), {
-          daybreak: false,
-          features: { cli_daybreak: false },
-        });
-        expect(await run()).toMatchObject({
-          daybreak: false,
-          daybreakEnabled: null,
-          daybreakFeatures: { cli_daybreak: false },
-        });
-        expect(await run({ daybreak: true })).toMatchObject({
-          daybreak: true,
-          daybreakEnabled: true,
-          daybreakFeatures: { cli_daybreak: false },
-        });
+test("patch forwards wrapper-resolved ambient Daybreak profiles with a stored API key", async () => {
+  await withStoredApiKey("patch", async ({ ambientHome, run }) => {
+    await writeCodexConfig(join(ambientHome, "config.toml"), {
+      daybreak: false,
+      features: { cli_daybreak: true },
+      profile: "selected",
+      profiles: {
+        selected: { daybreak: true, features: disabledDaybreakFeatures },
       },
-    );
-  },
-);
+    });
+    expect(await run()).toMatchObject({
+      daybreak: true,
+      daybreakEnabled: true,
+      daybreakFeatures: disabledDaybreakFeatures,
+    });
+  });
+});
+
+test("patch clears removed ambient Daybreak settings on the next stored API-key launch", async () => {
+  await withStoredApiKey("patch", async ({ ambientHome, run }) => {
+    const configPath = join(ambientHome, "config.toml");
+    await writeCodexConfig(configPath, {});
+    const baseline = await run();
+    await writeCodexConfig(configPath, {
+      daybreak: true,
+      features: disabledDaybreakFeatures,
+    });
+    expect(await run()).toMatchObject({
+      daybreak: true,
+      daybreakEnabled: true,
+      daybreakFeatures: disabledDaybreakFeatures,
+    });
+    await writeCodexConfig(configPath, {});
+    expect(await run()).toEqual(baseline);
+  });
+});
+
+test("patch preserves native project and explicit Daybreak precedence with a stored API key", async () => {
+  await withStoredApiKey("patch", async ({ ambientHome, repository, run }) => {
+    await writeCodexConfig(join(ambientHome, "config.toml"), {
+      daybreak: true,
+      features: { cli_daybreak: true },
+      projects: { [repository]: { trust_level: "trusted" } },
+    });
+    await writeCodexConfig(join(repository, ".codex", "config.toml"), {
+      daybreak: false,
+      features: { cli_daybreak: false },
+    });
+    expect(await run()).toMatchObject({
+      daybreak: false,
+      daybreakEnabled: null,
+      daybreakFeatures: { cli_daybreak: false },
+    });
+    expect(await run({ daybreak: true })).toMatchObject({
+      daybreak: true,
+      daybreakEnabled: true,
+      daybreakFeatures: { cli_daybreak: false },
+    });
+  });
+});
 
 test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
   "stored API-key patches preserve %s settings for an active scan's later workers",

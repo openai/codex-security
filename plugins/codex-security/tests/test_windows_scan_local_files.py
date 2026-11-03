@@ -1,22 +1,128 @@
 from __future__ import annotations
 
+import argparse
 import ctypes
 import errno
 import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import Mock
 
 import pytest
+from test_workbench_archive import recipe, register
+from test_workbench_remediation_retry import pending_generation as pending_generation
 from workbench_test_support import load_script
 
 pytestmark = pytest.mark.native_windows
 
 WINDOWS_FILES = load_script("windows_scan_local_files")
+
+
+def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point=False):
+    """Run the real Windows atomic writer with emulated handles, not native Win32 I/O."""
+    backend = finalizer._windows_scan_local_files()
+    paths = {}
+    streams = {}
+    movable_directories = {}
+    pending_deletions = set()
+    next_directory_handle = -1
+
+    def create_file(path, **kwargs):
+        nonlocal next_directory_handle
+        if kwargs["disposition"] == backend._OPEN_EXISTING:
+            if kwargs.get("missing_ok") and not path.exists():
+                return None
+            descriptor = next_directory_handle
+            next_directory_handle -= 1
+        else:
+            stream = open(path, "xb", opener=lambda path, flags: os.open(path, flags, 0o600))
+            try:
+                descriptor = stream.fileno()
+                streams[descriptor] = files.enter_context(stream)
+            except BaseException:
+                stream.close()
+                raise
+        paths[descriptor] = path
+        if path.is_dir() and kwargs["share"] & backend._FILE_SHARE_DELETE:
+            movable_directories[descriptor] = path.stat()
+        return backend._OwnedHandle(descriptor)
+
+    def rename_handle(handle, destination, replace_existing):
+        if replace_existing:
+            os.replace(paths[handle], destination)
+        else:
+            os.link(paths[handle], destination)
+            paths[handle].unlink()
+        paths[handle] = destination
+
+    def close_handle(handle):
+        if handle in streams:
+            streams.pop(handle).close()
+        elif handle >= 0:
+            os.close(handle)
+        if handle in pending_deletions:
+            pending_deletions.remove(handle)
+            paths[handle].unlink()
+
+    def attributes(handle):
+        path = paths[handle]
+        flags = backend._FILE_ATTRIBUTE_DIRECTORY if path.is_dir() else 0
+        if path.is_symlink() or (reparse_point and not path.is_dir()):
+            flags |= backend._FILE_ATTRIBUTE_REPARSE_POINT
+        return SimpleNamespace(FileAttributes=flags)
+
+    monkeypatch.setattr(finalizer, "_descriptor_relative_writes_available", lambda: False)
+    monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "_validate_existing_output", lambda path: None)
+    monkeypatch.setattr(backend, "_create_file", create_file)
+
+    def reopen_file(handle, *_):
+        fd = os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+        paths[fd] = paths[handle]
+        return fd
+
+    monkeypatch.setattr(backend, "_ReOpenFile", reopen_file, raising=False)
+    monkeypatch.setattr(backend, "file_change_time", lambda fd: os.fstat(fd).st_ctime_ns)
+    monkeypatch.setattr(
+        backend,
+        "_msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda handle, flags: (
+                os.open(paths[handle], flags) if handle < 0 else handle
+            )
+        ),
+    )
+    monkeypatch.setattr(os, "O_BINARY", getattr(os, "O_BINARY", 0), raising=False)
+    monkeypatch.setattr(backend, "_close_handle", close_handle)
+    monkeypatch.setattr(backend, "_attributes", attributes)
+    monkeypatch.setattr(
+        backend, "_GetFileType", lambda handle: backend._FILE_TYPE_DISK, raising=False
+    )
+
+    def final_path(handle, **kwargs):
+        path = paths[handle]
+        if handle in movable_directories:
+            for sibling in path.parent.iterdir():
+                if os.path.samestat(movable_directories[handle], sibling.lstat()):
+                    return str(sibling)
+        return str(path)
+
+    monkeypatch.setattr(backend, "_final_path", final_path)
+    monkeypatch.setattr(backend, "_write_all", os.write)
+    monkeypatch.setattr(backend, "_rename_handle", rename_handle)
+    monkeypatch.setattr(backend, "_mark_handle_for_deletion", pending_deletions.add)
+    return backend
 
 
 @pytest.mark.parametrize("error_code", [2, 3, 5, errno.EINVAL])
@@ -378,6 +484,216 @@ def test_native_windows_replacement_failure_preserves_destination_and_cleans_tem
     assert sorted(p.name for p in scan_dir.iterdir()) == [path.name]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
+def test_create_only_write_reports_existing_patch_when_disk_is_full(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "reviewed.patch"
+    patch = b"previously saved patch"
+    destination.write_bytes(patch)
+
+    def disk_full(*args):
+        raise OSError(errno.ENOSPC, "synthetic disk full")
+
+    monkeypatch.setattr(WINDOWS_FILES, "_write_all", disk_full)
+    with pytest.raises(FileExistsError):
+        WINDOWS_FILES.atomic_write(tmp_path, destination.name, patch, replace_existing=False)
+    assert destination.read_bytes() == patch
+
+
+@pytest.mark.parametrize("outcome", ["publish", "archive", "abandon", "collision", "substitution"])
+def test_staged_patch_is_visible_only_after_publication(tmp_path, monkeypatch, outcome):
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    destination = scan_dir / "reviewed.patch"
+    patch = b"generated patch\n"
+    with ExitStack() as files:
+        backend = WINDOWS_FILES
+        if os.name != "nt":
+            backend = emulate_windows_atomic_write(
+                monkeypatch, load_script("finalize_scan_contract"), files
+            )
+        with backend.stage_write(scan_dir, destination.name, patch) as publish:
+            assert not destination.exists()
+            if outcome in {"publish", "archive"}:
+                if outcome == "archive":
+                    archived = tmp_path / "archived-scan"
+                    scan_dir.rename(archived)
+                    scan_dir.mkdir()
+                    destination = archived / destination.name
+                saved, change = publish(destination.parent)
+                assert destination.read_bytes() == patch
+                with destination.open("rb") as current:
+                    metadata = os.fstat(current.fileno())
+                    assert os.path.samestat(saved, metadata)
+                    assert (saved.st_size, saved.st_mtime_ns) == (
+                        metadata.st_size,
+                        metadata.st_mtime_ns,
+                    )
+                    assert change == backend.file_change_time(current.fileno())
+            elif outcome == "collision":
+                destination.write_bytes(b"competing patch\n")
+                with pytest.raises(FileExistsError):
+                    publish()
+            elif outcome == "substitution":
+                (temp,) = scan_dir.glob(".*.tmp")
+                # Keep the original inode alive. Match the temp size and timestamp.
+                original = temp.rename(scan_dir / "original")
+                temp.write_bytes(b"different bytes\n")
+                original_stat = original.stat()
+                os.utime(temp, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                with pytest.raises(backend.WindowsScanLocalPathError, match="staged patch changed"):
+                    publish()
+        if outcome == "substitution":
+            assert temp.read_bytes() == b"different bytes\n"
+            assert not destination.exists()
+        else:
+            assert not list(destination.parent.glob(".*.tmp"))
+        if outcome == "abandon":
+            assert not destination.exists()
+        elif outcome == "collision":
+            assert destination.read_bytes() == b"competing patch\n"
+        elif outcome == "archive":
+            assert not list(scan_dir.iterdir())
+
+
+@pytest.mark.parametrize("other_state", [False, True])
+def test_canceled_generation_removes_its_staged_patch_after_archive(
+    pending_generation, workbench_api, tmp_path, monkeypatch, other_state
+):
+    database, scan_dir, _, args, _ = pending_generation
+    remediation = workbench_api["remediation_state"]
+    stage = remediation.stage_scan_local_bytes
+    archived = None
+    replacement = None
+
+    @contextmanager
+    def archive_and_cancel(*stage_args, **options):
+        nonlocal archived, replacement
+        with ExitStack() as files:
+            if os.name != "nt":
+                emulation = files.enter_context(monkeypatch.context())
+                backend = emulate_windows_atomic_write(
+                    emulation, sys.modules[stage.__module__], files
+                )
+                emulation.setattr(backend, "_create_directory", Path.mkdir)
+            with stage(*stage_args, **options) as publish:
+                registered = register(
+                    tmp_path / "other-state" if other_state else database.parent,
+                    tmp_path / "target",
+                    scan_dir,
+                    "--archive-existing",
+                )
+                archived = Path(registered["archivedScanDir"])
+                (temp,) = archived.rglob("*.tmp")
+                replacement = scan_dir / temp.relative_to(archived)
+                replacement.parent.mkdir(parents=True)
+                replacement.write_bytes(b"new scan's file")
+                with sqlite3.connect(database) as other:
+                    other.row_factory = sqlite3.Row
+                    remediation.cancel_finding_remediation_request(other, args)
+                yield publish
+
+    monkeypatch.setattr(remediation, "stage_scan_local_bytes", archive_and_cancel)
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(SystemExit, match="remediation request changed"):
+            workbench_api["set_finding_remediation"](connection, args)
+    assert not list(archived.rglob("*.tmp"))
+    assert not list(archived.rglob("*.patch"))
+    assert replacement.read_bytes() == b"new scan's file"
+
+
+def test_staging_metadata_failure_removes_the_flushed_file(tmp_path, monkeypatch):
+    with ExitStack() as files:
+        backend = WINDOWS_FILES
+        if os.name != "nt":
+            backend = emulate_windows_atomic_write(
+                monkeypatch, load_script("finalize_scan_contract"), files
+            )
+
+        def fail_metadata(_):
+            raise OSError(errno.EIO, "metadata unavailable")
+
+        monkeypatch.setattr(backend, "file_change_time", fail_metadata)
+        with pytest.raises(OSError, match="metadata unavailable"):
+            with backend.stage_write(tmp_path, "reviewed.patch", b"reviewed bytes"):
+                pytest.fail("staging should have failed")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 archive sharing semantics")
+@pytest.mark.parametrize("timeout", [5, 0], ids=["retry", "no-wait"])
+def test_archive_contention_during_windows_patch_write(
+    pending_generation, workbench_api, tmp_path, monkeypatch, timeout
+):
+    database, scan_dir, _, args, patch = pending_generation
+    backend = sys.modules["windows_scan_local_files"]
+    write_all = backend._write_all
+    rename = Path.rename
+    writing, rename_denied = Event(), Event()
+    before_archive = Mock()
+
+    def write_while_archiving(handle, data):
+        if data == patch:
+            writing.set()
+            assert rename_denied.wait(10)
+            # A different writer can commit before the patch releases its open handles.
+            with sqlite3.connect(database) as other:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("CREATE TABLE unrelated_write (value INTEGER)")
+        return write_all(handle, data)
+
+    def observe_rename(source, destination):
+        try:
+            return rename(source, destination)
+        except PermissionError as exc:
+            if source == scan_dir and exc.winerror in {5, 32}:
+                rename_denied.set()
+            raise
+
+    def archive():
+        assert writing.wait(10)
+        target = tmp_path / "target"
+        registration = argparse.Namespace(
+            repository=str(target),
+            scan_dir=str(scan_dir),
+            archive_existing=True,
+            archived_scan_dir=None,
+            recipe_json=recipe(target),
+            recipe_json_stdin=False,
+            registration_json_stdin=False,
+            parent_scan_id=None,
+        )
+        with sqlite3.connect(database, timeout=timeout) as connection:
+            connection.row_factory = sqlite3.Row
+            return Path(
+                workbench_api["register_cli_scan"](
+                    connection, registration, before_archive=before_archive
+                )["archivedScanDir"]
+            )
+
+    monkeypatch.setattr(backend, "_write_all", write_while_archiving)
+    monkeypatch.setattr(Path, "rename", observe_rename)
+    with ThreadPoolExecutor(max_workers=1) as pool, sqlite3.connect(database) as connection:
+        future = pool.submit(archive)
+        connection.row_factory = sqlite3.Row
+        result = workbench_api["set_finding_remediation"](connection, args)
+        if timeout:
+            archived = future.result(timeout=10)
+        else:
+            with pytest.raises(PermissionError) as denied:
+                future.result(timeout=10)
+            assert denied.value.winerror in {5, 32}
+            assert not list(scan_dir.parent.glob(f"{scan_dir.name}.previous-*"))
+            archived = scan_dir
+    before_archive.assert_called_once_with()
+    recorded = result["scan"]["findings"][0]["remediationState"]["patchPath"]
+    assert (archived / recorded).read_bytes() == patch
+    if timeout:
+        assert not (scan_dir / recorded).exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 reparse-point behavior")
 def test_native_windows_backend_rejects_symlink_ancestor(tmp_path: Path) -> None:
     scan_dir = tmp_path / "scan"
@@ -434,3 +750,44 @@ def test_native_copy_junction_rejects_nonempty_destination(tmp_path: Path) -> No
         WINDOWS_FILES.copy_directory_junction(source, destination)
     assert (destination / "keep.txt").read_text() == "placeholder contents\n"
     assert not (target / "keep.txt").exists()
+
+
+@pytest.mark.parametrize("changed", ["root", "ancestor"])
+@pytest.mark.parametrize("replacement", ["missing", "file"])
+def test_native_directory_change_after_probe_remains_a_path_error(
+    tmp_path: Path, monkeypatch, changed: str, replacement: str
+) -> None:
+    finalizer = load_script("finalize_scan_contract")
+    ancestor = tmp_path / "ancestor"
+    scan_dir = ancestor / "scan"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "keep.txt").write_bytes(b"Accepted content")
+    finalizer.write_scan_local_bytes(scan_dir, "new-parent/receipt.json", b"Ordinary creation")
+    assert (scan_dir / "new-parent/receipt.json").read_bytes() == b"Ordinary creation"
+    moved = tmp_path / "retained"
+    target = scan_dir if changed == "root" else ancestor
+    retained_scan = moved if changed == "root" else moved / "scan"
+    mutated = False
+    # Windows exercises the actual CreateFileW boundary; POSIX is a native
+    # control at its existing directory-validation boundary.
+    owner = finalizer._windows_scan_local_files() if os.name == "nt" else finalizer
+    name = "_canonical_scan_directory" if os.name == "nt" else "_require_scan_directory"
+    original = getattr(owner, name)
+
+    def replace_after_probe(path):
+        nonlocal mutated
+        result = original(path)
+        if path == scan_dir and not mutated:
+            mutated = True
+            target.rename(moved)
+            if replacement == "file":
+                target.write_bytes(b"Replacement file")
+        return result
+
+    monkeypatch.setattr(owner, name, replace_after_probe)
+    with pytest.raises(finalizer.ContractError) as rejected:
+        finalizer.write_scan_local_bytes(scan_dir, "drafts/receipt.json", b"receipt")
+    assert not isinstance(rejected.value, finalizer.ScanLocalIOError)
+    assert mutated
+    assert (retained_scan / "keep.txt").read_bytes() == b"Accepted content"
+    assert not (retained_scan / "drafts/receipt.json").exists()

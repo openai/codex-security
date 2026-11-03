@@ -35,6 +35,7 @@ import {
   ScanCostTrackingError,
 } from "../src/deep-scan.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
+import { readReviewState } from "./support/review-state.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 
 import { DeepScanProgressTracker } from "../src/deep-progress.js";
@@ -86,9 +87,7 @@ test.each(["active", "completed"] as const)(
     const findings = JSON.parse(
       await readFile(join(h.outputDir, "findings.json"), "utf8"),
     );
-    const coverage = JSON.parse(
-      await readFile(join(h.outputDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readReviewState(h.outputDir);
     expect(findings.findings).toHaveLength(1);
     expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.deferred).toContainEqual(
@@ -696,14 +695,7 @@ test.each([
       : JSON.parse(await readFile(join(h.outputDir, "findings.json"), "utf8"));
     const artifactNames = [
       "artifacts/deep-scan/checkpoint.json",
-      ...(unsealed
-        ? []
-        : [
-            "scan-manifest.json",
-            "findings.json",
-            "coverage.json",
-            "report.md",
-          ]),
+      ...(unsealed ? [] : ["scan-manifest.json", "findings.json", "report.md"]),
     ];
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(h.outputDir, name))),
@@ -918,10 +910,12 @@ test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", 
   });
   expect(result.cost).toEqual(zeroCost);
   expect(result.findings.findings).toEqual([]);
-  expect(result.coverage).not.toHaveProperty("completeness");
+  expect(result.review).not.toHaveProperty("completeness");
   const deferredReason =
     "The configured discovery time limit elapsed before any source review completed.";
-  expect(result.coverage.deferred).toEqual([
+  const savedAggregate = (await loadDeepScanCheckpoint(result.scanDir))!
+    .aggregate!;
+  expect(savedAggregate.coverage.deferred).toEqual([
     expect.objectContaining({
       reason: deferredReason,
     }),
@@ -1074,7 +1068,7 @@ test.each([
     expect(h.launches).toHaveLength(3);
     if (budget) {
       expect(result.cost!.estimatedUsd).toBeGreaterThan(options.maxCostUsd!);
-      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(result.review).not.toHaveProperty("completeness");
       expect(h.commands).toContain("complete-budget-exhausted-scan");
     }
     const completed = await runWorkbench(
@@ -1240,12 +1234,7 @@ test.each([
 
 test("lost final completion response preserves the completed Deep result", async () => {
   const h = await fixture();
-  const artifacts = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+  const artifacts = ["scan-manifest.json", "findings.json", "report.md"];
   const readArtifacts = () =>
     Promise.all(artifacts.map((name) => readFile(join(h.outputDir, name))));
   let sealedArtifacts: Awaited<ReturnType<typeof readArtifacts>> | undefined;
@@ -1524,7 +1513,7 @@ test("budget exhaustion seals accepted findings without a reducer session", asyn
   expect(h.commands).toContain("complete-budget-exhausted-scan");
   expect(result.threadId).toBeNull();
   expect(result.findings.findings).toHaveLength(2);
-  expect(result.coverage).not.toHaveProperty("completeness");
+  expect(result.review).not.toHaveProperty("completeness");
   expect(result.cost).not.toBeNull();
   const checkpoint = JSON.parse(
     await readFile(
@@ -1639,7 +1628,7 @@ test.each(["direct", "resumed"])(
       ),
     ).toBe(true);
     expect(result.threadId).toBeNull();
-    expect(result.coverage).not.toHaveProperty("completeness");
+    expect(result.review).not.toHaveProperty("completeness");
     expect(result.findings.findings).toContainEqual(
       expect.objectContaining({ title: "First completed discovery" }),
     );
@@ -1739,7 +1728,7 @@ test("resumed reducer budget recovery includes completed child receipts before e
   });
   expect(h.launches).toHaveLength(3);
   expect(result.findings.findings).toHaveLength(2);
-  expect(result.coverage).not.toHaveProperty("completeness");
+  expect(result.review).not.toHaveProperty("completeness");
   const expectedCost = {
     ...estimateScanCost("gpt-6-astra", {
       input_tokens: usage.input_tokens * 6,
@@ -1824,7 +1813,7 @@ test("budget exhaustion resumes from its final receipt after sealing before data
   });
   expect(restored.cost).toEqual(expectedCost);
   expect(restored.findings.findings).toHaveLength(2);
-  expect(restored.coverage).not.toHaveProperty("completeness");
+  expect(restored.review).not.toHaveProperty("completeness");
   expect(await readFile(manifestPath, "utf8")).toBe(sealedManifest);
   expect(h.launches).toHaveLength(2);
   const completed = await runWorkbench(
@@ -2558,7 +2547,6 @@ test("accepted patches restore ambient providers from a produced native-preserva
   const names = [
     "scan-manifest.json",
     "findings.json",
-    "coverage.json",
     "report.md",
     "artifacts/deep-scan/checkpoint.json",
   ];

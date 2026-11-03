@@ -59,7 +59,7 @@ export interface CompletedScanResult {
   scanId: string;
   manifest: JsonObject;
   findings: JsonObject;
-  coverage: JsonObject;
+  review: JsonObject;
 }
 
 type SavedDraftRecord = {
@@ -84,7 +84,12 @@ export const scanDraftInputSchema = projectArtifactToolSchema(
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 
 // File-authored scan IDs are host-owned; findings use the current tool contract.
-const fileScanDraftInputSchema = scanDraftInputSchema.extend({
+const semanticScanDraftSchema = scanDraftInputSchema
+  .omit({ reviewState: true })
+  .extend({
+    coverage: scanDraftInputSchema.shape.reviewState,
+  });
+const fileScanDraftInputSchema = semanticScanDraftSchema.extend({
   scanId: z.string().min(1),
 });
 
@@ -250,10 +255,7 @@ async function preserveScanDraft(
     .map((entry) => entry.input);
   validateDeferredClosures(input, previous);
   // Parsed input belongs to this operation. Assign once so retries keep the same IDs.
-  assignDraftIds(
-    input,
-    previous.flatMap((draft) => draft.coverage.deferred),
-  );
+  assignDraftIds(input, previous);
   let result = semanticDraft(context, prepareSemanticScanDraft(context, input));
   requireDraftIdentities(result);
   for (const draft of previous) {
@@ -613,15 +615,20 @@ function preserveCandidateEvidence(
   }
 }
 
-function findingCandidateId(finding: SemanticFinding): string | undefined {
+function explicitCandidateId(finding: SemanticFinding): string | undefined {
   return [
     finding.provenance.candidateId,
     finding.extensions?.["candidateId"],
-    finding.extensions?.["reportId"],
-    finding.extensions?.["ledgerRowId"],
-  ].find(
-    (value): value is string =>
-      typeof value === "string" && Boolean(value.trim()),
+  ].find(isNonEmptyString);
+}
+
+function findingCandidateId(finding: SemanticFinding): string | undefined {
+  return (
+    explicitCandidateId(finding) ??
+    [
+      finding.extensions?.["reportId"],
+      finding.extensions?.["ledgerRowId"],
+    ].find(isNonEmptyString)
   );
 }
 
@@ -637,12 +644,92 @@ function semanticDraft(
   );
 }
 
+function candidateGroup(finding: SemanticFinding): string | undefined {
+  const candidate = explicitCandidateId(finding);
+  return (
+    candidate &&
+    JSON.stringify([
+      finding.ruleId,
+      finding.provenance.source,
+      finding.provenance.sourceScanId,
+      finding.provenance.workerId,
+      candidate,
+    ])
+  );
+}
+
+function findingRevisionKey(
+  finding: SemanticFinding,
+  siblingTitles: Map<string, Set<string>>,
+): string | undefined {
+  const report = finding.extensions?.["reportId"];
+  const row = finding.extensions?.["ledgerRowId"];
+  const group = candidateGroup(finding);
+  const namedReport = isNonEmptyString(report) || isNonEmptyString(row);
+  if (!namedReport && (!group || (siblingTitles.get(group)?.size ?? 0) < 2))
+    return undefined;
+  return JSON.stringify([
+    scanFindingIdentity({ ...finding, identity: undefined }),
+    finding.provenance.source,
+    finding.provenance.sourceScanId,
+    finding.provenance.workerId,
+    namedReport ? ["report", report, row] : ["candidate", group, finding.title],
+  ]);
+}
+
 function assignDraftIds(
   input: ScanDraftInput,
-  previousDeferred: ScanDraftInput["coverage"]["deferred"],
+  previous: ScanDraftInput[],
 ): void {
-  for (const finding of input.findings)
+  // Named reports and batches of distinct siblings can be revised before the
+  // caller learns their assigned IDs. A candidate alone can have many findings.
+  const siblingTitles = new Map<string, Set<string>>();
+  for (const finding of input.findings) {
+    const group = candidateGroup(finding);
+    if (!group) continue;
+    const titles = siblingTitles.get(group) ?? new Set<string>();
+    titles.add(finding.title);
+    siblingTitles.set(group, titles);
+  }
+  const savedFindings = new Map<string, SemanticFinding | null>();
+  for (const draft of previous) {
+    for (const finding of draft.findings) {
+      const key = findingRevisionKey(finding, siblingTitles);
+      if (key === undefined || !finding.identity) continue;
+      const saved = savedFindings.get(key);
+      if (saved === undefined) savedFindings.set(key, finding);
+      else if (
+        saved &&
+        scanFindingIdentity(saved) !== scanFindingIdentity(finding)
+      )
+        savedFindings.set(key, null);
+    }
+  }
+  const keys = input.findings.map((finding) =>
+    findingRevisionKey(finding, siblingTitles),
+  );
+  const claimed = new Set(
+    input.findings.filter((row) => row.identity).map(scanFindingIdentity),
+  );
+  for (const [index, finding] of input.findings.entries()) {
+    if (finding.identity) continue;
+    const key = keys[index];
+    const saved = key !== undefined ? savedFindings.get(key) : undefined;
+    if (saved && keys.indexOf(key) === keys.lastIndexOf(key)) {
+      const id = scanFindingIdentity(saved);
+      const previousCandidate = explicitCandidateId(saved);
+      const candidate = explicitCandidateId(finding);
+      if (
+        !claimed.has(id) &&
+        !(previousCandidate && candidate && previousCandidate !== candidate)
+      ) {
+        finding.identity = saved.identity!;
+        claimed.add(id);
+      }
+    }
     finding.identity ??= { anchor: randomUUID() };
+  }
+  const previousDeferred = previous.flatMap((draft) => draft.coverage.deferred);
   for (const surface of input.coverage.surfaces) surface.id ??= randomUUID();
   for (const row of input.coverage.deferred) {
     if (row.id !== undefined) continue;
@@ -712,6 +799,18 @@ async function readPreviousScanDraft(context: ArtifactContext): Promise<{
     names.map((name) => readOptionalArtifact(context, [name])),
   );
   const contents = files.map((file) => file?.contents);
+  const manifest =
+    contents[0] === undefined
+      ? undefined
+      : parseJsonObject(contents[0], "previous scan draft manifest");
+  const scan = manifest
+    ? requireObject(manifest.scan, "previous scan draft manifest.scan")
+    : (draft?.manifest.scan as JsonObject | undefined);
+  const legacy =
+    scan !== undefined &&
+    (scan.coverageRef !== undefined ||
+      (scan.reviewState === undefined && scan.review === undefined));
+  const manifestFiles = names.slice(0, legacy ? 3 : 2);
   const state = {
     input,
     drafts,
@@ -724,17 +823,21 @@ async function readPreviousScanDraft(context: ArtifactContext): Promise<{
       ...(snapshot === undefined
         ? []
         : [["artifacts/scan-draft.json", snapshot.contents] as const]),
-      ...names.map((name, index) => [name, contents[index]] as const),
+      ...manifestFiles.map((name, index) => [name, contents[index]] as const),
     ]),
   };
   if (contents.every((value) => value === undefined)) return state;
-  if (contents.some((value) => value === undefined)) {
+  if (!manifest || !scan || contents[1] === undefined) {
+    if (snapshot !== undefined) return state;
+    throw new Error("previous scan draft: canonical documents are incomplete.");
+  }
+  if (legacy && contents[2] === undefined) {
     if (snapshot !== undefined) return state;
     throw new Error("previous scan draft: canonical documents are incomplete.");
   }
   if (
     draft?.canonicalExport &&
-    names.every((name, index) => {
+    manifestFiles.every((name, index) => {
       const digest = createHash("sha256")
         .update(contents[index]!)
         .digest("hex");
@@ -745,10 +848,6 @@ async function readPreviousScanDraft(context: ArtifactContext): Promise<{
     })
   )
     return state;
-  const manifest = parseJsonObject(
-    contents[0]!,
-    "previous scan draft manifest",
-  );
   // Older snapshots lack export digests. Preserve their matching-envelope
   // fallback; current snapshots admit authored changes without timestamp rules.
   if (
@@ -760,15 +859,24 @@ async function readPreviousScanDraft(context: ArtifactContext): Promise<{
         (draft.manifest.scan as JsonObject)["completedAt"])
   )
     return state;
-  const canonical = savedDraft(context, {
+  const canonical = parseCanonicalScanDraft({
+    scanId: context.scanId,
     manifest,
-    findings: parseJsonObject(contents[1]!, "previous scan draft findings"),
-    coverage: parseJsonObject(contents[2]!, "previous scan draft coverage"),
-  } as unknown as PreparedScanDraft);
+    findings: parseJsonObject(contents[1], "previous scan draft findings"),
+    reviewState: legacy
+      ? parseJsonObject(contents[2]!, "previous scan draft review state")
+      : requireObject(
+          scan.reviewState ?? reviewStateFromSummary(scan),
+          "previous scan review state",
+        ),
+  });
+  requireDraftIdentities(canonical);
   drafts.push({
     input: canonical,
     name: "scan-manifest.json",
-    modifiedMs: Math.max(...files.map((file) => file!.modifiedMs)),
+    modifiedMs: Math.max(
+      ...files.slice(0, manifestFiles.length).map((file) => file!.modifiedMs),
+    ),
   });
   state.input ??= canonical;
   return state;
@@ -862,7 +970,17 @@ function savedDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  const input = parsePersistedScanDraft(semanticDraft(context, draft));
+  const input =
+    isObject(scan.reviewState) || isObject(scan.review)
+      ? parseCanonicalScanDraft({
+          scanId: context.scanId,
+          manifest: draft.manifest,
+          findings: draft.findings,
+          reviewState: isObject(scan.reviewState)
+            ? scan.reviewState
+            : reviewStateFromSummary(scan),
+        })
+      : parsePersistedScanDraft(semanticDraft(context, draft));
   requireDraftIdentities(input);
   return input;
 }
@@ -967,7 +1085,7 @@ export async function getCodexSecurityCompletedScan(
     );
   }
 
-  const [manifest, findings, coverage] = await Promise.all([
+  const [manifest, findings] = await Promise.all([
     readArtifactJsonObject(
       context,
       ["scan-manifest.json"],
@@ -978,14 +1096,16 @@ export async function getCodexSecurityCompletedScan(
       ["findings.json"],
       "completed scan findings",
     ),
-    readArtifactJsonObject(
-      context,
-      ["coverage.json"],
-      "completed scan coverage",
-    ),
   ]);
-
   const scan = requireObject(manifest.scan, "completed scan manifest.scan");
+  const reviewState =
+    scan.coverageRef === undefined && scan.review !== undefined
+      ? reviewStateFromSummary(scan)
+      : await readArtifactJsonObject(
+          context,
+          ["coverage.json"],
+          "legacy scan review state",
+        );
   if (
     scan.id !== parsed.scanId ||
     scan.status !== "completed" ||
@@ -993,14 +1113,40 @@ export async function getCodexSecurityCompletedScan(
     !scan.sealedAt ||
     !Array.isArray(scan.artifacts) ||
     findings.scanId !== parsed.scanId ||
-    coverage.scanId !== parsed.scanId
+    reviewState.scanId !== parsed.scanId
   ) {
     throw new Error(
       "completed scan: canonical documents do not match the sealed workbench scan.",
     );
   }
 
-  return { scanId: parsed.scanId, manifest, findings, coverage };
+  const review =
+    scan.coverageRef === undefined && scan.review !== undefined
+      ? scan.review
+      : {
+          excludedPaths: (reviewState.explicitExclusions as JsonObject[]).map(
+            (item) => item.pattern,
+          ),
+        };
+  return {
+    scanId: parsed.scanId,
+    manifest,
+    findings,
+    review: review as JsonObject,
+  };
+}
+
+function reviewStateFromSummary(scan: JsonObject): JsonObject {
+  const review = requireObject(scan.review, "scan review summary");
+  return {
+    scanId: scan.id,
+    surfaces: [],
+    deferred: [],
+    explicitExclusions: (review.excludedPaths as string[]).map((pattern) => ({
+      pattern,
+      reason: "Excluded from review",
+    })),
+  };
 }
 
 function safeRelativePath(value: string, context: string): string {
@@ -1033,13 +1179,13 @@ export function parseCanonicalScanDraft(input: {
   scanId?: string;
   manifest: JsonObject;
   findings: JsonObject;
-  coverage: JsonObject;
+  reviewState: JsonObject;
 }): ScanDraftInput {
   const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
   for (const scanId of [
     scan.id,
     input.findings.scanId,
-    input.coverage.scanId,
+    input.reviewState.scanId,
   ]) {
     if (scanId !== undefined && scanId !== input.scanId) {
       throw new Error(
@@ -1055,7 +1201,7 @@ export function parseCanonicalScanDraft(input: {
       ? {}
       : { threatModel: scan.threatModel }),
     findings: input.findings.findings,
-    coverage: input.coverage,
+    coverage: input.reviewState,
   });
 }
 
@@ -1098,7 +1244,7 @@ export function parseCurrentFindings(
 /** Validate current draft fields without assigning workbench-owned identities. */
 export function parsePersistedScanDraft(
   input: unknown,
-  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
+  schema: z.ZodType<ScanDraftInput> = semanticScanDraftSchema,
 ): ScanDraftInput {
   const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings);
@@ -1110,6 +1256,13 @@ function parsePersistedCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
+  if (
+    compatible.coverage === undefined &&
+    compatible.reviewState !== undefined
+  ) {
+    compatible.coverage = compatible.reviewState;
+    delete compatible.reviewState;
+  }
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;

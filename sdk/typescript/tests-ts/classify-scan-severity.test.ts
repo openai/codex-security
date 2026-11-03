@@ -20,7 +20,10 @@ import {
   classifySeverity,
   type ClassifySeverityOptions,
 } from "../src/classify-severity.js";
+import { Database } from "bun:sqlite";
 import { loadContract } from "../src/contract.js";
+
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { SeverityStore } from "../src/severity-store.js";
 import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
@@ -34,7 +37,9 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "classify-scan-",
   false,
 );
+
 const destination = { destination: "linear", teamId: "team-example" } as const;
+
 afterEach(cleanup);
 
 async function fixture(scanId?: string, savedRoot?: string) {
@@ -151,55 +156,25 @@ function classifier(finding: Finding, excluded = false) {
   }));
 }
 
-async function query(environment: NodeJS.ProcessEnv, sql: string) {
-  const result = spawnSync(
-    Bun.which("node")!,
-    [
-      "--input-type=module",
-      "--eval",
-      `import { DatabaseSync } from "node:sqlite";
-const database = new DatabaseSync(process.argv[1]);
-try { console.log(JSON.stringify(database.prepare(process.argv[2]).all())); }
-finally { database.close(); }`,
-      join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
-      sql,
-    ],
-    { encoding: "utf8", env: environment },
+function query(environment: NodeJS.ProcessEnv, sql: string) {
+  using database = new Database(
+    join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
   );
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as Record<string, unknown>[];
+  database.run("PRAGMA foreign_keys = ON");
+  return database.query<Record<string, unknown>, []>(sql).all();
 }
 
-test("classification and saved assessments run with Node and no Python", async () => {
+test("classifies and reads a saved scan with an embedded NUL in its ID without Python", async () => {
   const { environment, root, scanDirectory, scanId, findings } =
-    await fixture();
+    await fixture("imported\0scan");
   const withoutPython = {
     ...environment,
     PATH: dirname(Bun.which("node")!),
     PYTHON: join(root, "missing-python"),
   };
-  const { scanId: _scanId, ...classification } =
-    await classifyScanDirectorySeverity(scanDirectory, {
-      environment: withoutPython,
-      codex: recordingClassifier().codex,
-    });
-  expect(
-    await readScanSeverityClassification(
-      scanDirectory,
-      scanId,
-      findings,
-      undefined,
-      withoutPython,
-    ),
-  ).toEqual(classification);
-});
-
-test("saved assessments retain embedded NULs in imported scan IDs", async () => {
-  const { environment, scanDirectory, scanId, findings } =
-    await fixture("imported\0scan");
   const { scanId: classifiedScanId, ...classification } =
     await classifyScanDirectorySeverity(scanDirectory, {
-      environment,
+      environment: withoutPython,
       codex: recordingClassifier().codex,
     });
   expect(classifiedScanId).toBe(scanId);
@@ -209,7 +184,7 @@ test("saved assessments retain embedded NULs in imported scan IDs", async () => 
       scanId,
       findings,
       undefined,
-      environment,
+      withoutPython,
     ),
   ).toEqual(classification);
 });
@@ -411,12 +386,9 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     classifyScanDirectorySeverity(scanDirectory, options),
   ).rejects.toThrow("Interrupted model call");
   expect(
-    (
-      await query(
-        environment,
-        "SELECT finding_id FROM scan_severity_assessments",
-      )
-    ).map((row) => row["finding_id"]),
+    query(environment, "SELECT finding_id FROM scan_severity_assessments").map(
+      (row) => row["finding_id"],
+    ),
   ).toEqual([findings[0]!.findingId]);
   await expect(
     prepareScanPublication(scanDirectory, { ...destination, environment }),
@@ -436,7 +408,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
       environment,
     ),
   ).toEqual(assessment);
-  const rows = await query(
+  const rows = query(
     environment,
     "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
@@ -459,7 +431,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     workbench.mockRestore();
   }
   expect(
-    await query(
+    query(
       environment,
       "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
@@ -474,7 +446,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   const revised = await classifyScanDirectorySeverity(scanDirectory, selected);
   expect(calls).toEqual(Array(3).fill(findings[0]!.findingId));
   expect(revised.assessments[0]!.decision).toBe("excluded");
-  const revisedRows = await query(
+  const revisedRows = query(
     environment,
     "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
@@ -503,7 +475,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     classifyScanDirectorySeverity(scanDirectory, selected),
   ).rejects.toThrow("Interrupted model call");
   expect(
-    await query(
+    query(
       environment,
       "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
@@ -592,7 +564,7 @@ test("classifies identical findings independently in each scan", async () => {
     first.scanDirectory,
     firstOptions,
   );
-  const originalRows = await query(
+  const originalRows = query(
     environment,
     "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
@@ -618,7 +590,7 @@ test("classifies identical findings independently in each scan", async () => {
   expect(firstModel.calls).toEqual([]);
   expect(resumed.assessments).toEqual(original.assessments);
   expect(
-    await query(
+    query(
       environment,
       `SELECT * FROM scan_severity_assessments WHERE scan_id = '${first.scanId}' ORDER BY finding_id`,
     ),
@@ -633,21 +605,18 @@ test("migration preserves assessments for unindexed scan directories", async () 
     first.scanDirectory,
     { environment, codex: recordingClassifier().codex },
   );
-  await query(
+  query(
     environment,
     "INSERT INTO finding_severity_assessments (finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger) SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
-  await query(environment, "DROP TABLE scan_severity_assessments");
+  query(environment, "DROP TABLE scan_severity_assessments");
   for (const table of [
     "finding_severity_assessments",
     "scan_severity_classifications",
   ]) {
-    await query(
-      environment,
-      `ALTER TABLE ${table} DROP COLUMN classification_runs`,
-    );
+    query(environment, `ALTER TABLE ${table} DROP COLUMN classification_runs`);
   }
-  await query(
+  query(
     environment,
     "DELETE FROM schema_migrations WHERE version IN (43, 52, 55, 57)",
   );
@@ -661,7 +630,7 @@ test("migration preserves assessments for unindexed scan directories", async () 
     ),
   ).toEqual({ ...classification, classificationRuns: undefined });
   expect(
-    await query(
+    query(
       environment,
       "SELECT version FROM schema_migrations WHERE version = 43",
     ),
@@ -688,13 +657,13 @@ test("migration preserves assessments for unindexed scan directories", async () 
     ).assessments,
   ).toEqual(classification.assessments);
   expect(
-    await query(
+    query(
       environment,
       "SELECT version FROM schema_migrations WHERE version = 43",
     ),
   ).toEqual([{ version: 43 }]);
   expect(
-    await query(
+    query(
       environment,
       "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'scan_severity_reuse'",
     ),
@@ -707,7 +676,7 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
   const { codex, calls } = recordingClassifier();
   const options = { environment, rubricPath, codex };
   await classifyScanDirectorySeverity(scanDirectory, options);
-  const originalFindings = await query(
+  const originalFindings = query(
     environment,
     "SELECT * FROM findings ORDER BY id",
   );
@@ -747,9 +716,9 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
   calls.length = 0;
   await classifyScanDirectorySeverity(scanDirectory, withContext);
   expect(calls).toEqual(Array(3).fill(findings[0]!.findingId));
-  expect(
-    await query(environment, "SELECT * FROM findings ORDER BY id"),
-  ).toEqual(originalFindings);
+  expect(query(environment, "SELECT * FROM findings ORDER BY id")).toEqual(
+    originalFindings,
+  );
 });
 
 test("classification refuses to store workflow state inside sealed scan artifacts", async () => {
@@ -1067,20 +1036,17 @@ test("migrates existing databases without changing findings and reads older stat
     environment,
     codex: recordingClassifier().codex,
   });
-  const original = await query(
-    environment,
-    "SELECT * FROM findings ORDER BY id",
-  );
-  await query(
+  const original = query(environment, "SELECT * FROM findings ORDER BY id");
+  query(
     environment,
     "INSERT INTO finding_severity_assessments (finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger) SELECT finding_id, occurrence_id, input_sha256, rubric_sha256, knowledge_base_sha256, assessed_at, source, decision, level, rubric_label, rationale, confidence, review_trigger FROM scan_severity_assessments",
   );
-  await query(environment, "DROP TABLE scan_severity_assessments");
-  await query(environment, "DROP TABLE finding_severity_assessments");
-  await query(environment, "DROP TABLE scan_severity_classifications");
-  await query(
+  query(environment, "DROP TABLE scan_severity_assessments");
+  query(environment, "DROP TABLE finding_severity_assessments");
+  query(environment, "DROP TABLE scan_severity_classifications");
+  query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 55, 57)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 60) OR name = 'reuse scan severity assessments'",
   );
   expect(
     (
@@ -1091,7 +1057,7 @@ test("migrates existing databases without changing findings and reads older stat
     ).issues,
   ).toHaveLength(2);
   expect(
-    await query(
+    query(
       environment,
       "SELECT version FROM schema_migrations WHERE version = 41",
     ),
@@ -1101,14 +1067,14 @@ test("migrates existing databases without changing findings and reads older stat
     codex: recordingClassifier().codex,
   });
   expect(
-    await query(
+    query(
       environment,
       "SELECT version FROM schema_migrations WHERE version = 41",
     ),
   ).toEqual([{ version: 41 }]);
-  expect(
-    await query(environment, "SELECT * FROM findings ORDER BY id"),
-  ).toEqual(original);
+  expect(query(environment, "SELECT * FROM findings ORDER BY id")).toEqual(
+    original,
+  );
 });
 
 test("classifying another scan preserves both recurring-finding assessments", async () => {
@@ -1170,14 +1136,14 @@ test("default rubric replaces legacy inherited assessments and respects custom p
     "scan_severity_assessments",
     "finding_severity_assessments",
   ]) {
-    await query(
+    query(
       environment,
       `UPDATE ${table} SET rubric_sha256 = NULL, source = 'existing-severity', level = 'high', rubric_label = NULL, confidence = NULL`,
     );
   }
-  await query(
+  query(
     environment,
-    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL",
+    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL, rubric_binding_json = NULL",
   );
   const legacy = await readScanSeverityClassification(
     scanDirectory,
@@ -1192,13 +1158,30 @@ test("default rubric replaces legacy inherited assessments and respects custom p
   calls.length = 0;
   const result = await classifyScanDirectorySeverity(scanDirectory, options);
   expect(calls).toHaveLength(6);
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(result.rubricSha256).toBe(sha256(defaultSeverityRubric));
+  expect(result.rubricRevision).toBe(1);
   expect(
     result.assessments.every(
       (a) => a.source === "rubric" && a.level === "medium",
     ),
   ).toBe(true);
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    ),
+  ).toMatchObject({
+    rubricSha256: result.rubricSha256,
+    rubricRevision: result.rubricRevision,
+  });
   calls.length = 0;
+  query(
+    environment,
+    "UPDATE scan_severity_classifications SET rubric_binding_json = NULL",
+  );
   expect(
     (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
   ).toEqual(result.assessments);
@@ -1249,7 +1232,7 @@ test("saved assessments bind their run count and invalidate changed or unrecorde
     "scan_severity_assessments",
     "finding_severity_assessments",
   ]) {
-    await query(environment, `UPDATE ${table} SET classification_runs = NULL`);
+    query(environment, `UPDATE ${table} SET classification_runs = NULL`);
   }
   expect(
     (
@@ -1266,7 +1249,7 @@ test("saved assessments bind their run count and invalidate changed or unrecorde
   await classifyScanDirectorySeverity(scanDirectory, { environment, codex });
   expect(calls).toHaveLength(6);
   expect(
-    await query(
+    query(
       environment,
       `SELECT classification_runs FROM scan_severity_classifications WHERE scan_id = '${scanId}'`,
     ),

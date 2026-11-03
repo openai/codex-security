@@ -158,6 +158,12 @@ export function selectedVariants(
   return variants;
 }
 
+export function readCalibrationDataset(filename: string): {
+  cases: CalibrationCase[];
+} {
+  return JSON.parse(fs.readFileSync(filename, "utf8").replace(/^\uFEFF/u, ""));
+}
+
 export function generateTests(
   options: {
     datasetPath?: string;
@@ -166,8 +172,8 @@ export function generateTests(
     variantId?: string | null;
   } = {},
 ) {
-  const dataset = JSON.parse(
-    fs.readFileSync(options.datasetPath ?? DEFAULT_DATASET, "utf8"),
+  const dataset = readCalibrationDataset(
+    options.datasetPath ?? DEFAULT_DATASET,
   );
   return selectedVariants(dataset, options).map(({ testCase, variant }) =>
     buildPromptfooTest(
