@@ -127,7 +127,10 @@ def finish_after_crashes(workbench_api, workbench_db, deadline_scan, tmp_path):
             completed = scan.complete(connection)
         coverage = read_review_state(workbench_db, scan.scan_dir)
         assert completed["progress"]["status"] == "complete"
-        assert all(publication == coverage for publication in publications)
+        # Crashes leave a provisional review. Completion versions its receipt rules when sealing.
+        first, *retries = publications
+        assert all(retry == first for retry in retries)
+        assert coverage == {**first, "receiptSealVersion": 1}
         return completed, coverage
 
     return run
@@ -450,7 +453,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
             if finding["provenance"].get("previousFindings") == []:
                 finding["provenance"].pop("previousFindings")
     assert findings_after == findings_before
-    assert after == before
+    assert after == {**before, "receiptSealVersion": 1}
 
 
 @pytest.mark.parametrize("earlier_checkpoint_first", [False, True])

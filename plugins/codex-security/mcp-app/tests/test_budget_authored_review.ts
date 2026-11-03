@@ -572,9 +572,12 @@ for (const disposition of ["rejected", "not_applicable"]) {
           saved.progress.candidates.unresolved,
           kind === "valid" ? 0 : 1,
         );
-        const { scan: sealed } = JSON.parse(await readFile(manifestPath, "utf8"));
+        const { scan: sealed } = JSON.parse(
+          await readFile(manifestPath, "utf8"),
+        );
         const retained = (sealed.review?.unresolvedCandidates ?? []).filter(
-          (row: { candidateId?: string }) => row.candidateId === candidate.candidate_id,
+          (row: { candidateId?: string }) =>
+            row.candidateId === candidate.candidate_id,
         );
         assert.equal(retained.length, kind === "valid" ? 0 : 1);
         if (retained.length) {
