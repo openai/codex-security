@@ -106,6 +106,8 @@
 - prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
 - share the host adapter for records commands ([#2259](https://github.com/openai/codex-security/pull/2259))
 - preserve the severity rubric across standalone scan attempts ([#2258](https://github.com/openai/codex-security/pull/2258))
+- share bundled severity grading with the SDK ([#2260](https://github.com/openai/codex-security/pull/2260))
+- report the exact rubric used for severity classification ([#2262](https://github.com/openai/codex-security/pull/2262))
 
 <!-- release-section: highlights:end -->
 

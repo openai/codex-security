@@ -36,6 +36,7 @@
     "references/access-advisory.md",
     "references/artifact-storage.md",
     "references/core-scan.md",
+    "references/default-severity-rubric.md",
     "references/final-report.md",
     "references/finding-detail-fields.md",
     "references/investigation-time-budget.md",
