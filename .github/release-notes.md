@@ -116,6 +116,7 @@
 - bump ruff from 0.17.2 to 0.17.3 in /plugins/codex-security ([#2267](https://github.com/openai/codex-security/pull/2267))
 - preserve caller tool settings across scan turns ([#2012](https://github.com/openai/codex-security/pull/2012))
 - count changed files when registering diff scans ([#1916](https://github.com/openai/codex-security/pull/1916))
+- run local scans without connecting an app ([#2100](https://github.com/openai/codex-security/pull/2100))
 
 <!-- release-section: highlights:end -->
 

@@ -11,6 +11,7 @@ Codex Security is a thin wrapper around Codex and its security plugin.
 - Keep credential access, storage, and configuration protections, unsafe-path
   checks, and settings the user explicitly requests.
 - Prefer straightforward code and tests for real behavior.
+- Declare plugin app connections with `required: false` so local scans work without them.
 - Pass Codex-owned settings through existing SDK configuration interfaces.
   Accept reasoning-effort values as strings and pass them through unchanged.
   Do not maintain wrapper-owned model or reasoning-effort enums or allowlists;
