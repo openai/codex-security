@@ -2646,6 +2646,9 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 ### Create or resume a draft pull request
 
+For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
+Publication checks the source of `core.sshCommand` before it runs SSH.
+
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.

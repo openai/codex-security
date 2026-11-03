@@ -21,6 +21,48 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
+  test("publication preflight refuses a checkout-selected SSH command", async () => {
+    const { directory, git } = await publicationRepository();
+    const external = await fixtures.create("patch-ssh-config-");
+    const marker = join(external, "marker");
+    const script = join(external, "ssh.cjs");
+    await writeFile(
+      script,
+      "require('node:fs').writeFileSync(process.argv[2], 'ran'); process.exit(1);\n",
+    );
+    const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
+    git(
+      "config",
+      "core.sshCommand",
+      [process.execPath, script, marker].map(commandPath).join(" "),
+    );
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "git@github.example.test:example/repository.git",
+    );
+    const model = mock(async () => 0);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: model,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : "[]",
+      },
+      { localHosting: false },
+    );
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(outcome.stderr).toContain("core.sshCommand");
+    expect(model).not.toHaveBeenCalled();
+  });
+
   test.each(
     [false, true].flatMap((resume) =>
       ["github.com", "gitlab.com"].flatMap((host) =>
@@ -904,11 +946,13 @@ describe("patch change tracking", () => {
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args.join(" ") === "config --get core.sshCommand") {
-                if (coreCommand !== undefined) return coreCommand;
-                throw Object.assign(new Error("Synthetic missing Git config"), {
-                  code: 1,
-                });
+              if (
+                args.includes("--show-scope") &&
+                args.at(-1) === "core.sshCommand"
+              ) {
+                if (coreCommand !== undefined)
+                  return `global\0${coreCommand}\0`;
+                return `command\0${args[args.indexOf("--default") + 1]}\0`;
               }
               if (args[0] === "-c" && args[2] === "codex-security-ssh-config") {
                 sshLookups++;

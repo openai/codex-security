@@ -8949,6 +8949,7 @@ async function patchPublicationDestination(
         remote,
         apiHost,
         apiEndpoint,
+        repository,
         dependencies,
         run,
       );
@@ -8981,17 +8982,62 @@ function isNetworkPatchRemote(remote: string) {
   );
 }
 
+function isSshPatchRemote(remote: string): boolean {
+  return (
+    Boolean(isNetworkPatchRemote(remote)) &&
+    (!remote.includes("://") ||
+      ["ssh:", "git+ssh:", "ssh+git:"].includes(new URL(remote).protocol))
+  );
+}
+
+async function publicationSshCommand(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const environmentCommand = environmentEntry(
+    dependencies.environment,
+    "GIT_SSH_COMMAND",
+  );
+  if (environmentCommand !== undefined) return environmentCommand;
+  const fallback =
+    environmentEntry(dependencies.environment, "GIT_SSH") === undefined
+      ? "ssh"
+      : '"$GIT_SSH"';
+  // Git transport ignores the legacy config-file selector used by git config.
+  const value = await dependencies.runRepositoryCommand(
+    "git",
+    [
+      "config",
+      "--null",
+      "--show-scope",
+      "--default",
+      fallback,
+      "--get",
+      "core.sshCommand",
+    ],
+    repository,
+    { trim: false, environment: { GIT_CONFIG: undefined } },
+  );
+  const [scope, command] = value.split("\0");
+  if (scope !== "system" && scope !== "global" && scope !== "command")
+    throw new CodexSecurityError(
+      "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
+    );
+  return command!;
+}
+
 async function githubPatchRepository(
   remote: string,
   apiHost: string,
   apiEndpoint: string,
+  repository: string,
   dependencies: CliDependencies,
   run: (command: "git" | "gh" | "glab", args: string[]) => Promise<string>,
 ): Promise<string | undefined> {
   const uri = remote.includes("://");
   const url = uri ? new URL(remote) : patchScpRemote(remote)!;
   let hostname = url.hostname;
-  const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+  const ssh = isSshPatchRemote(remote);
   if (hostname.toLowerCase() === "ssh.github.com")
     hostname = patchApiHostname(hostname);
   if (patchApiHostname(hostname) !== apiHost && ssh) {
@@ -9001,17 +9047,10 @@ async function githubPatchRepository(
       ...(url.port ? ["-p", url.port] : []),
       username ? `${username}@${sshHost}` : sshHost,
     ];
-    const sshCommand =
-      dependencies.environment["GIT_SSH_COMMAND"] ??
-      (await run("git", ["config", "--get", "core.sshCommand"]).catch(
-        (error: unknown) => {
-          if (isJsonObject(error) && error["code"] === 1) return undefined;
-          throw error;
-        },
-      ));
+    const sshCommand = await publicationSshCommand(repository, dependencies);
     const settings = await run("git", [
       "-c",
-      `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
+      `alias.codex-security-ssh-config=!${sshCommand} -G`,
       "codex-security-ssh-config",
       ...sshArguments,
     ]).catch((error: unknown) => {
@@ -9220,6 +9259,7 @@ async function preparePatchPublication(
         environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
       );
       for (const remote of destination.pushRemotes) {
+        const ssh = isSshPatchRemote(remote);
         const refs = await dependencies.runRepositoryCommand(
           "git",
           [
@@ -9235,6 +9275,14 @@ async function preparePatchPublication(
           {
             maxBuffer: Infinity,
             environment: {
+              ...(ssh
+                ? {
+                    GIT_SSH_COMMAND: await publicationSshCommand(
+                      repository,
+                      dependencies,
+                    ),
+                  }
+                : {}),
               GIT_CONFIG_COUNT: String(configurationCount + 1),
               [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
               [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
@@ -9491,6 +9539,7 @@ async function publishPatchBranch(
             pushRemote,
             base.hostname,
             base.host,
+            repository,
             dependencies,
             run,
           );
