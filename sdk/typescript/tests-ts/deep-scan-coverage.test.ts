@@ -30,6 +30,7 @@ test.each([
       const child = Bun.spawn(
         [
           Bun.which("node")!,
+          "--experimental-strip-types",
           fileURLToPath(fixtureUrl),
           join(root, "fixture"),
           completeness,
