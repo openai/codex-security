@@ -47,11 +47,10 @@ def test_scan_failure_keeps_complete_diagnostic_and_existing_terminal_value(
     workspace = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         str(workspace["id"]),
         "--scan-root",
         str(tmp_path / "scans"),
-    )["results"]
+    )
     scan_id = str(started["scanId"])
 
     failed = fail_scan(state_dir, scan_id, message)["scan"]

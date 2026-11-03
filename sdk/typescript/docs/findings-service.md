@@ -310,7 +310,10 @@ Use `--scan` for a saved scan, `--scan-dir` for an external scan directory, or
 the interactive picker. Custom publication accepts one scan; CSV input and
 Linear options do not apply. Add `--dry-run` to preview the payload without an
 HTTP request. Upload failures and incomplete receipts fail the command. Uploads
-are not automatically retried because a lost response may have been committed.
+are not automatically retried because the receiver may have committed a request
+whose response was lost. Resuming publication or remote dedupe in a workflow
+without its receipt resends the entire sealed batch. Before resuming, ask the
+receiver to confirm that replaying that exact request is safe.
 
 ```typescript
 import { publishScanToCustom } from "@openai/codex-security";
