@@ -1,28 +1,31 @@
 # Import external scanner findings
 
 Bring an existing scanner report into Codex Security to investigate it against
-your checkout. You can preview a saved file locally without a Cloud login,
-network connection, or model call.
+your checkout.
 
 ## Preview a report
 
-Enable imports in the shell that runs the CLI or launches Codex.
+[Install the CLI](../../README.md#quick-start) and enable imports in the shell
+that runs it or launches Codex.
 
 ```sh
 export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 ```
 
 In PowerShell, use `$env:CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS = '1'`.
-With the Codex Security plugin enabled, try this prompt.
+
+In the terminal, follow your scanner's example. Previewing a saved report with
+`publish findings` and `--to local --dry-run` needs no Cloud login, network
+connection, or model call. Add `--format json` to see all findings and exclusions.
+Reuse the checkout and **source key** (the name for this stream of findings) on
+later imports.
+
+With the Codex Security plugin enabled, you can ask Codex to review the preview
+with your configured model.
 
 > Preview my saved Endor Labs report at `../reports/endor-findings.json` against
 > this checkout. Show me which findings would be imported and which were excluded.
 > Stop after the preview.
-
-From the terminal, follow your scanner’s guide to collect or select a report
-and preview it with `--dry-run --format json`. The **source key** names
-the stream of findings you want to update on later imports. Reuse the key and
-checkout from your first import.
 
 Check your CLI version with `codex-security --version`. AWS Continuum, Black Duck,
 SonarQube Cloud, Veracode, the Semgrep Platform SDK example, and Cloud private
@@ -52,17 +55,19 @@ Set `TMPDIR` there if needed.
 
 ## Save or publish and verify
 
-**Save locally.** For `publish findings`, rerun the reviewed command without
-`--dry-run` and confirm. In automation, use `--yes` after reviewing the preview.
-For `import sonar`, [confirm the capture from the preview](sonar.md#import-and-verify).
-Read back the stored findings using the checkout path from the preview.
+These steps apply to `publish findings FILE`. For an `import sonar` capture,
+[use the local or Cloud capture returned by the corresponding preview](sonar.md#import-and-verify).
+
+**Save locally.** Rerun the reviewed command without `--dry-run` and confirm.
+In automation, use `--yes` after reviewing the preview. Read back the stored
+findings using the checkout path from the preview.
 
 ```sh
 codex-security findings imported /path/to/project --format json
 ```
 
-**Send to Cloud.** For a saved report, keep the same file, provider, source key,
-and scanner options. Switch to `--to cloud`, set `--repository` to the connected
+**Send to Cloud.** Keep the same file, provider, source key, and scanner
+options. Switch to `--to cloud`, set `--repository` to the connected
 repository URL or Cloud repository ID, and run with `--dry-run`. Review the
 account, endpoint, destination, findings, and exclusions. Remove `--dry-run`
 and confirm to send the report. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)

@@ -1380,10 +1380,11 @@ the deployment determines which destination appears in the preview.
 - **Private findings inbox.** When the deployment advertises private import for
   the scanner, `privateImport` shows the report format, byte count and SHA-256.
   The signed-in account receives the report. The selected repository and
-  connector are suggested targets for assessment. For complete Endor findings
-  and Wiz vulnerability JSON exports, the CLI sends the original bytes when
-  Cloud accepts the format and every record matches the reviewed selection.
-  Other selections and in-memory collectors use `security.findings.v1`.
+  connector identify the suggested assessment target. The digest covers the
+  bytes sent to Cloud. Eligible native Endor reports (a Finding or a
+  `list.objects` response) and Wiz vulnerability JSON exports can retain their
+  original bytes. Other inputs, including arrays of selected Endor Findings,
+  use `security.findings.v1`.
 - **Repository publisher.** Review the environments in `requests`. The
   publisher reads the current source versions. Existing source records keep
   their environment, and new records use the repository's authorized default
@@ -1442,7 +1443,9 @@ Check `excluded` for skipped input and `error` before retrying.
   To share a finding, open it in the inbox, assess it against a pinned
   repository revision, and publish the reportable assessment.
 - **Repository publisher.** `verified` counts records read back with matching
-  identity and evidence. `unacknowledged` counts records still awaiting a receipt.
+  identities. At the version in the receipt, the CLI also checks the evidence.
+  A newer version can contain updated evidence and still count as verified.
+  `unacknowledged` counts records still awaiting a receipt.
   A lost response can leave accepted records unacknowledged. Each receipt item
   identifies the request item by `client_id`. Each entry in `failures` identifies
   the vendor record by `source_finding_id`. Counts include earlier acknowledged
