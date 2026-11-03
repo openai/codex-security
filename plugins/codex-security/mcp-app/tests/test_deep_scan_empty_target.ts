@@ -3,7 +3,17 @@ import { execFile as nodeExecFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, mock, test } from "node:test";
-import { promises as filesystem, type Dir } from "node:fs";
+import {
+  promises as filesystem,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+  type Dir,
+} from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
@@ -11,6 +21,7 @@ import {
   DeepScanCoordinatorRegistry,
   FakeExecutor,
   FakeStore,
+  coordinatorFixture,
   createCoordinator,
   fixtureRun,
   immediateClock,
@@ -24,21 +35,7 @@ import { writeJson } from "./support/json.ts";
 
 const execFile = promisify(nodeExecFile);
 const { decodePosixBytes } = await importSource("src/helpers/posix-path.ts");
-const { windowsFiles } = await importSource(
-  "src/helpers/resolve-security-md.ts",
-  {
-    define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
-  },
-);
-const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
-  loader: { ".md": "text" },
+const helperOptions = {
   define: {
     "import.meta.url": JSON.stringify(
       new URL(
@@ -47,6 +44,18 @@ const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
       ).href,
     ),
   },
+};
+const { windowsFiles } = await importSource(
+  "src/helpers/resolve-security-md.ts",
+  helperOptions,
+);
+const { checkSelectedTargets } = await importSource(
+  "src/deep-scan/target-admission.ts",
+  helperOptions,
+);
+const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
+  ...helperOptions,
+  loader: { ".md": "text" },
 });
 after(() => temporaryDirectories.cleanup());
 
@@ -67,19 +76,6 @@ for (const cancel of [false, true]) {
         closes++;
       },
     };
-    const { checkSelectedTargets } = await importSource(
-      "src/deep-scan/target-admission.ts",
-      {
-        define: {
-          "import.meta.url": JSON.stringify(
-            new URL(
-              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-              import.meta.url,
-            ).href,
-          ),
-        },
-      },
-    );
     const opener = mock.method(
       filesystem,
       "opendir",
@@ -104,6 +100,137 @@ for (const cancel of [false, true]) {
     }
   });
 }
+
+test("cancellation interrupts validation between registered files", async () => {
+  const { run } = await fixtureRun();
+  await mkdir(run.targetPath);
+  run.includePaths = ["first.py", "second.py"];
+  run.filePaths = run.includePaths;
+  await writeFile(path.join(run.targetPath, "first.py"), "");
+  await mkdir(path.join(run.targetPath, "second.py"));
+  const controller = new AbortController();
+  const checking = checkSelectedTargets(run, controller.signal);
+  setImmediate(() => controller.abort(new Error("canceled")));
+  await assert.rejects(checking, /canceled/u);
+});
+
+test("a registered file replaced by a directory while yielding fails admission", async () => {
+  const { run } = await fixtureRun();
+  await mkdir(path.join(run.targetPath, "empty"), { recursive: true });
+  const file = path.join(run.targetPath, "source.py");
+  await writeFile(file, "pass");
+  run.includePaths = ["source.py", "empty"];
+  run.filePaths = ["source.py"];
+  const checking = checkSelectedTargets(run, new AbortController().signal);
+  setImmediate(() => {
+    unlinkSync(file);
+    mkdirSync(file);
+  });
+  await assert.rejects(checking, /Selected file is no longer a regular file/u);
+});
+
+for (const fileSibling of [false, true]) {
+  test(`a selected directory replaced by an external link is rejected, file sibling=${fileSibling}`, async () => {
+    const { run } = await fixtureRun();
+    run.includePaths = ["left", "right"];
+    run.filePaths = fileSibling ? ["right"] : [];
+    const left = path.join(run.targetPath, "left");
+    const right = path.join(run.targetPath, "right");
+    const outside = path.join(path.dirname(run.targetPath), "outside");
+    await mkdir(left, { recursive: true });
+    await mkdir(right);
+    await mkdir(outside);
+    await writeFile(path.join(outside, "source.py"), "pass");
+    const checking = checkSelectedTargets(run, new AbortController().signal);
+    setImmediate(() => {
+      rmdirSync(left);
+      symlinkSync(
+        outside,
+        left,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      if (fileSibling) {
+        rmdirSync(right);
+        writeFileSync(right, "pass");
+      }
+    });
+    await assert.rejects(checking, /symbolic links|inside repo/u);
+  });
+}
+
+test("an absent selection fails validation despite a usable sibling", async () => {
+  const { run } = await fixtureRun();
+  await mkdir(run.targetPath);
+  await writeFile(path.join(run.targetPath, "live.py"), "pass");
+  run.includePaths = ["live.py", "gone"];
+  await assert.rejects(
+    checkSelectedTargets(run, new AbortController().signal),
+    /ENOENT|not found|Windows filesystem error/iu,
+  );
+});
+
+for (const unavailable of ["missing", "fifo", "inaccessible"]) {
+  test(
+    `a validated directory becoming ${unavailable} leaves a viable sibling`,
+    {
+      skip:
+        (unavailable !== "missing" && process.platform === "win32") ||
+        (unavailable === "inaccessible" && process.getuid?.() === 0),
+    },
+    async () => {
+      const { run } = await fixtureRun();
+      run.includePaths = ["empty", "parent/gone", "live"];
+      for (const name of run.includePaths)
+        await mkdir(path.join(run.targetPath, name), { recursive: true });
+      await writeFile(path.join(run.targetPath, "live/source.py"), "pass");
+      const parent = path.join(run.targetPath, "parent");
+      const gone = path.join(parent, "gone");
+      const open = filesystem.opendir;
+      const opener = mock.method(
+        filesystem,
+        "opendir",
+        async (...args: Parameters<typeof open>) => {
+          if (path.basename(String(args[0])) === "empty") {
+            if (unavailable === "inaccessible") chmodSync(parent, 0);
+            else {
+              rmdirSync(gone);
+              if (unavailable === "fifo") await execFile("mkfifo", [gone]);
+            }
+          }
+          return open(...args);
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        await checkSelectedTargets(run, new AbortController().signal);
+        assert.equal(opener.mock.calls.length, 2);
+      } finally {
+        if (unavailable === "inaccessible") chmodSync(parent, 0o700);
+        opener.mock.restore();
+        syncBuiltinESMExports();
+      }
+    },
+  );
+}
+
+test("a repository replaced with a regular file while yielding fails admission", async () => {
+  const { run } = await fixtureRun();
+  await mkdir(run.targetPath);
+  const checking = checkSelectedTargets(run, new AbortController().signal);
+  setImmediate(() => {
+    const alternateCase = path.join(
+      path.dirname(run.targetPath),
+      path.basename(run.targetPath).toUpperCase(),
+    );
+    const replacement =
+      process.platform === "win32" && existsSync(alternateCase)
+        ? alternateCase
+        : run.targetPath;
+    rmdirSync(run.targetPath);
+    writeFileSync(replacement, "replaced");
+  });
+  await assert.rejects(checking, /not a directory|no longer a directory/iu);
+});
 
 for (const nonempty of [false, true]) {
   test(
@@ -218,7 +345,7 @@ for (const selection of [
       if (selection !== "joining empty directory")
         await writeFile(path.join(selected, "source.ts"), "export {};\n");
     }
-    const { coordinator, executor, claims } = await startFixture(
+    const { coordinator, executor, claim } = await startFixture(
       fixture,
       selection === "joining empty directory",
     );
@@ -234,7 +361,7 @@ for (const selection of [
           ? /selected file.*regular file/iu
           : /target is empty/iu,
       );
-      assert.equal(claims(), 1);
+      assert.equal(claim.mock.callCount(), 1);
       assert.equal(executor.discoveryCalls, 0);
     } else await assertDiscoveryThenCancel(coordinator, executor);
   });
@@ -264,15 +391,12 @@ for (const selected of [undefined, "left", "right"]) {
         path.join(fixture.run.targetPath, selected, "source.ts"),
         "export {};\n",
       );
-    const { coordinator, executor } = await startFixture(fixture);
-    if (selected) await assertDiscoveryThenCancel(coordinator, executor);
-    else {
-      assert.equal(
-        (await coordinator.wait(undefined, 5_000))?.status,
-        "failed",
-      );
-      assert.equal(executor.discoveryCalls, 0);
-    }
+    const checking = checkSelectedTargets(
+      fixture.run,
+      new AbortController().signal,
+    );
+    if (selected) await checking;
+    else await assert.rejects(checking, /target is empty/iu);
   });
 }
 
@@ -288,9 +412,8 @@ test("an escaping authoritative selection is rejected before dispatch", async ()
 });
 
 test("a discovery preparation error retains its diagnostic", async () => {
-  const fixture = await fixtureRun(),
-    store = new FakeStore(fixture.run),
-    executor = new FakeExecutor();
+  const { fixture, store } = await coordinatorFixture();
+  const executor = new FakeExecutor();
   const terminal = await runCoordinator(fixture, store, executor, {
     checkTarget: async () => {
       throw new Error("Synthetic directory read failure");
@@ -302,9 +425,8 @@ test("a discovery preparation error retains its diagnostic", async () => {
 });
 
 test("cancellation before preparation launches no check", async () => {
-  const fixture = await fixtureRun(),
-    store = new FakeStore(fixture.run),
-    executor = new FakeExecutor();
+  const { fixture, store } = await coordinatorFixture();
+  const executor = new FakeExecutor();
   let calls = 0;
   const coordinator = createCoordinator(fixture, store, executor, {
     checkTarget: async () => {
@@ -319,9 +441,8 @@ test("cancellation before preparation launches no check", async () => {
 });
 
 test("cancellation reaches pending preparation", async () => {
-  const fixture = await fixtureRun(),
-    store = new FakeStore(fixture.run),
-    executor = new FakeExecutor();
+  const { fixture, store } = await coordinatorFixture();
+  const executor = new FakeExecutor();
   const entered = Promise.withResolvers<void>();
   let received: AbortSignal | undefined;
   const coordinator = createCoordinator(fixture, store, executor, {
@@ -342,37 +463,35 @@ test("cancellation reaches pending preparation", async () => {
   assert.equal(executor.discoveryCalls, 0);
 });
 
-for (const empty of [false, true]) {
-  test(`an already expired run preserves its capped result, empty=${empty}`, async () => {
-    const fixture = await fixtureRun({ maxTimeHours: 1 });
-    fixture.run.createdAt = new Date(
-      immediateClock.now() - 7_200_000,
-    ).toISOString();
-    const store = new FakeStore(fixture.run),
-      executor = new FakeExecutor();
-    let calls = 0,
-      published = false;
-    const terminal = await runCoordinator(fixture, store, executor, {
-      checkTarget: async () => {
-        calls++;
-        if (empty) throw new Error("empty");
-      },
-      onComplete: async (draft) => {
-        assert.match(JSON.stringify(draft.reviewState), /time limit elapsed/iu);
-        published = true;
-      },
-    });
-    assert.equal(terminal?.status, "succeeded");
-    assert.equal(terminal?.terminalReason, "capped");
-    assert.equal(calls, 0);
-    assert.equal(executor.discoveryCalls, 0);
-    assert.equal(executor.dedupCalls, 0);
-    assert.equal(published, true);
+test("an already expired run preserves its capped result", async () => {
+  const fixture = await fixtureRun({ maxTimeHours: 1 });
+  fixture.run.createdAt = new Date(
+    immediateClock.now() - 7_200_000,
+  ).toISOString();
+  const store = new FakeStore(fixture.run),
+    executor = new FakeExecutor();
+  let calls = 0,
+    published = false;
+  const terminal = await runCoordinator(fixture, store, executor, {
+    checkTarget: async () => {
+      calls++;
+    },
+    onComplete: async (draft) => {
+      assert.match(JSON.stringify(draft.reviewState), /time limit elapsed/iu);
+      published = true;
+    },
   });
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.terminalReason, "capped");
+  assert.equal(calls, 0);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(executor.dedupCalls, 0);
+  assert.equal(published, true);
+});
+for (const empty of [false, true]) {
   test(`a deadline stops outstanding preparation and preserves its capped result, empty=${empty}`, async () => {
-    const fixture = await fixtureRun(),
-      store = new FakeStore(fixture.run),
-      executor = new FakeExecutor();
+    const { fixture, store } = await coordinatorFixture();
+    const executor = new FakeExecutor();
     const release = Promise.withResolvers<void>(),
       finished = Promise.withResolvers<void>();
     let calls = 0,
@@ -411,16 +530,13 @@ for (const empty of [false, true]) {
 
 test("resume preserves accepted work without replacing the source inventory", async () => {
   const fixture = await fixtureRun();
-  const resultPath = path.join(
+  const workerDir = path.join(
     fixture.run.scanDir,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-    "discovery-0001",
-    "output",
-    "result.json",
+    "artifacts/deep_discovery/workers/discovery-0001",
   );
-  await mkdir(path.dirname(resultPath), { recursive: true });
+  const artifactDir = path.join(workerDir, "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
   await writeJson(
     resultPath,
     standardScanDraft(fixture.run.scanId, undefined, "discovery-0001"),
@@ -430,15 +546,8 @@ test("resume preserves accepted work without replacing the source inventory", as
     kind: "discovery",
     status: "succeeded",
     mergeState: "buffered",
-    promptPath: path.join(
-      fixture.run.scanDir,
-      "artifacts",
-      "deep_discovery",
-      "workers",
-      "discovery-0001",
-      "prompt.md",
-    ),
-    artifactDir: path.dirname(resultPath),
+    promptPath: path.join(workerDir, "prompt.md"),
+    artifactDir,
     attempt: 1,
     resultManifestPath: resultPath,
     completionSequence: 1,
@@ -471,12 +580,7 @@ async function startFixture(
 ) {
   const store = new FakeStore(fixture.run),
     executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
-  let claims = 0;
-  const claim = store.claimCoordinator.bind(store);
-  store.claimCoordinator = async () => {
-    claims++;
-    return claim();
-  };
+  const claim = mock.method(store, "claimCoordinator");
   const registry = new DeepScanCoordinatorRegistry(),
     start = registry.start.bind(registry);
   registry.start = (options: CoordinatorOptions) =>
@@ -494,7 +598,7 @@ async function startFixture(
     parentSandbox: { filesystemDenies: [] },
     threadId: "fixture-owner",
   });
-  return { ...started, executor, store, claims: () => claims };
+  return { ...started, executor, claim };
 }
 
 async function assertDiscoveryThenCancel(
