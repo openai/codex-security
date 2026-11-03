@@ -3189,7 +3189,6 @@ export class CodexSecurity {
         feedback["scanId"] !== scanId ||
         feedback["targetId"] !== targetId ||
         !Array.isArray(falsePositiveExamples) ||
-        falsePositiveExamples.length > 50 ||
         falsePositiveExamples.some(
           (finding: unknown) =>
             !isRecord(finding) ||

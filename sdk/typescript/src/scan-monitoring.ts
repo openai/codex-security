@@ -227,15 +227,6 @@ export class ScanProgressReporter {
     tracker: ScanCostTracker,
     source?: ParentProgressSource,
   ): void {
-    if (
-      progress.phase === "discovery" &&
-      progress.filesCompleted === 0 &&
-      this.reviewedFileCount === 0 &&
-      progress.filesTotal !== this.scopeFileCount
-    ) {
-      this.scopeFileCount = progress.filesTotal;
-      tracker.setExpectedFilesTotal(this.scopeFileCount);
-    }
     this.report(
       {
         ...progress,

@@ -2550,7 +2550,13 @@ test("accepted patches restore ambient providers from a produced native-preserva
     parent.recipe["providerProfile"],
     { CODEX_HOME: h.home },
   );
-  expect(replay).toEqual({ analytics: { enabled: false } });
+  expect(replay).toEqual({
+    analytics: configuration.analytics,
+    mcp_servers: {
+      "codex-security": { command: "synthetic-workbench", enabled: true },
+      "synthetic.server": { command: "synthetic-command" },
+    },
+  });
   expect(parent.recipe["config"]).not.toHaveProperty("model_providers");
   const environment: NodeJS.ProcessEnv = {
     ...parent.options.environment,

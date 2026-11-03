@@ -176,7 +176,7 @@ describe("CodexSecurity finding validation", () => {
           permissions: {
             codex_security_policy: {
               filesystem: {
-                ":minimal": "read",
+                [process.platform === "win32" ? ":root" : ":minimal"]: "read",
                 ":workspace_roots": "read",
                 [credentialHome]: { ".": "deny" },
               },
