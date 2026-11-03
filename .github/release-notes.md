@@ -112,6 +112,7 @@
 - recognize Windows drive and UNC host casing ([#545](https://github.com/openai/codex-security/pull/545))
 - verify large saved scans in bounded requests ([#2251](https://github.com/openai/codex-security/pull/2251))
 - save generated patches for completed scans ([#2033](https://github.com/openai/codex-security/pull/2033))
+- prepare local deduplication in Node ([#1840](https://github.com/openai/codex-security/pull/1840))
 
 <!-- release-section: highlights:end -->
 
@@ -124,5 +125,6 @@ Review migration steps for these breaking changes:
 - remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
 - share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
 - prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
+- prepare local deduplication in Node ([#1840](https://github.com/openai/codex-security/pull/1840))
 
 <!-- release-section: upgrades:end -->
