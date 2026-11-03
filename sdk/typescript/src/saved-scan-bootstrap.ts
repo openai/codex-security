@@ -32,7 +32,6 @@ interface ScanTarget {
 interface SavedCheckout {
   target_path: string;
   checkout_root: string | null;
-  git_evidence: number;
 }
 
 interface SavedBoundaries {
@@ -263,10 +262,7 @@ async function readTargets(
         const targets = latest
           ? completedScans(database)
           : exactTargets(database, requestedId);
-        const checkouts = savedCheckouts(
-          database,
-          latest ? undefined : targets.map((row) => row.target_path),
-        );
+        const checkouts = savedCheckouts(database);
         return { targets, checkouts };
       },
     );
@@ -418,39 +414,33 @@ function tableColumns(database: BootstrapDatabase, table: string): Set<string> {
   );
 }
 
-/** Read registered boundaries and legacy Git evidence without executing repository tools. */
-function savedCheckouts(
-  database: BootstrapDatabase,
-  selectedPaths?: string[],
-): SavedBoundaries {
+/** Read registered boundaries without assuming an unversioned scan was outside Git. */
+function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
   const scan = tableColumns(database, "scans");
   const registry = tableColumns(database, "security_targets");
-  const filter = (column: string) =>
-    selectedPaths === undefined
-      ? ""
-      : ` WHERE ${column} IN (${selectedPaths.map(() => "?").join(", ")})`;
+  const workspace = tableColumns(database, "workspaces");
   const sources = [];
   if (scan.has("target_path"))
-    sources.push(
-      `SELECT target_path, NULL AS checkout_root,
-      (${scan.has("repository_generation") ? "repository_generation IS NOT NULL" : "0"} OR
-       ${scan.has("target_revision") ? "target_revision <> 'unversioned'" : "0"}) AS git_evidence
-    FROM scans${filter("target_path")}`,
-    );
+    sources.push("SELECT target_path, NULL AS checkout_root FROM scans");
+  if (workspace.has("target_path")) {
+    const validated = workspace.has("target_path_unvalidated")
+      ? " AND (target_path_unvalidated = 0 OR target_id IS NOT NULL)"
+      : "";
+    sources.push(`SELECT target_path, NULL AS checkout_root FROM workspaces
+      WHERE target_path IS NOT NULL${validated}`);
+  }
   if (registry.has("current_path")) {
     sources.push(`SELECT current_path AS target_path,
-      ${registry.has("git_checkout_root") ? "git_checkout_root" : "NULL"} AS checkout_root,
-      ${registry.has("repository_identity") ? "repository_identity IS NOT NULL" : "0"} AS git_evidence
-      FROM security_targets${filter("current_path")}`);
+      ${registry.has("git_checkout_root") ? "git_checkout_root" : "NULL"} AS checkout_root
+      FROM security_targets`);
   }
   const rows =
     sources.length === 0
       ? []
       : readRows<SavedCheckout>(
           database,
-          `SELECT target_path, MAX(checkout_root) AS checkout_root, MAX(git_evidence) AS git_evidence
+          `SELECT target_path, MAX(checkout_root) AS checkout_root
      FROM (${sources.join(" UNION ALL ")}) GROUP BY target_path`,
-          ...sources.flatMap(() => selectedPaths ?? []),
         );
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
@@ -459,9 +449,7 @@ function savedCheckouts(
         rows.flatMap((row) => (row.checkout_root ? [row.checkout_root] : [])),
       ),
     ],
-    complete: rows.every(
-      (row) => !row.git_evidence || row.checkout_root !== null,
-    ),
+    complete: rows.every((row) => row.checkout_root !== null),
   };
 }
 

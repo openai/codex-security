@@ -2061,7 +2061,7 @@ filters recorded artifact paths; it does not import another directory's scans.
 
 The workbench records the outer checkout directory when it registers a target.
 A later nested checkout cannot make tools from that directory eligible for
-automatic discovery. For older Git history that lacks a recorded checkout
+automatic discovery. When an older saved target lacks a recorded checkout
 directory, set `CODEX_SECURITY_GIT` to the absolute path of a trusted Git
 executable outside the checkouts. If you use a system Python instead of the
 Codex managed runtime, set `PYTHON` to the absolute path of your interpreter.
