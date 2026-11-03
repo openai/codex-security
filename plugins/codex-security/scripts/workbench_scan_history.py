@@ -225,7 +225,7 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_git: Callable[..., str | None] | None = None,
+    read_git: Callable[..., str | None] | None = None,
 ) -> bool:
     same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
     if all(
@@ -257,18 +257,18 @@ def _same_repository(
     if before_target.resolve() == after_target.resolve():
         return True
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    after_git = after_git or git_output
-    before_git_dir = git_output(before_target, *common_dir)
+    read_git = read_git or git_output
+    before_git_dir = read_git(before_target, *common_dir)
     if (
         before_git_dir is not None
-        and (after_git_dir := after_git(after_target, *common_dir)) is not None
+        and (after_git_dir := read_git(after_target, *common_dir)) is not None
         and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
     ):
         return True
     origin = ("remote", "get-url", "origin")
-    before_origin = repository_origin(git_output(before_target, *origin))
+    before_origin = repository_origin(read_git(before_target, *origin))
     return before_origin is not None and before_origin == repository_origin(
-        after_git(after_target, *origin)
+        read_git(after_target, *origin)
     )
 
 
@@ -348,13 +348,13 @@ def list_scans(
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         requested_repository = _requested_repository(connection, repository)
-        requested_git = cache(git_output)
+        cached_git = cache(git_output)
         related_target_ids = [
             target["target_id"]
             for target in connection.execute(
                 "SELECT id AS target_id, current_path AS target_path FROM security_targets"
             )
-            if _same_repository(target, requested_repository, after_git=requested_git)
+            if _same_repository(target, requested_repository, read_git=cached_git)
         ]
         repository_clauses = ["scans.target_path = ?"]
         values.append(str(repository))
@@ -440,12 +440,12 @@ def list_unmatched_scan_pairs(
     repository = Path(args.repository).expanduser().resolve()
     requested = _requested_repository(connection, repository)
     selected = []
-    requested_git = cache(git_output)
+    cached_git = cache(git_output)
     membership: dict[tuple[str | None, str], bool] = {}
     for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
         target = (scan["target_id"], scan["target_path"])
         if target not in membership:
-            membership[target] = _same_repository(scan, requested, after_git=requested_git)
+            membership[target] = _same_repository(scan, requested, read_git=cached_git)
         if membership[target]:
             selected.append(scan)
 
@@ -468,7 +468,11 @@ def list_unmatched_scan_pairs(
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
     for index, (selected_index, after) in enumerate(available):
-        comparable = [before for _, before in available[:index] if _same_repository(before, after)]
+        comparable = [
+            before
+            for _, before in available[:index]
+            if _same_repository(before, after, read_git=cached_git)
+        ]
         previous = [
             before
             for before in comparable
