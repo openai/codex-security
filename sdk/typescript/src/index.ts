@@ -112,6 +112,7 @@ export type {
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
+  ScanLifecycle,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
