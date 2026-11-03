@@ -2751,12 +2751,15 @@ describe("CLI", () => {
   ] as const)(
     "shows the resolved directory name in the scan title for %p",
     async (repository, name) => {
+      await using temp = await scopedTemporaryDirectory("scan-title-");
+      const currentDirectory = join(temp.path, "workspace", "repository");
+      await mkdir(join(currentDirectory, "child"), { recursive: true });
       const { stderr, runCli } = createCliTest(main, { stderr: true });
       expect(
         await runCli(
           ["scan", ...(repository === undefined ? [] : [repository])],
           dependencies({
-            currentDirectory: resolve("/workspace/repository"),
+            currentDirectory,
             environment: { NO_COLOR: "1" },
           }),
         ),
