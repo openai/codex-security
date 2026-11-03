@@ -350,7 +350,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth++;
       }
@@ -389,7 +390,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth--;
       }

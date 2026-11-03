@@ -87,24 +87,28 @@ async function generate() {
 }
 
 generate().then((models) => {
-  const shared = ["workbench-arguments", "executable-path"].map((name) => [
-    `${name}.ts`,
+  const pluginSource = "../../plugins/codex-security/mcp-app/src";
+  const shared = [
+    "workbench-arguments",
+    "executable-path",
+    "contract-values",
+    "finding-normalization",
+    "windows-path",
+  ].map((name) => [
+    `src/${name}.ts`,
     `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
-      readFileSync(
-        join(
-          packageRoot,
-          `../../plugins/codex-security/mcp-app/src/${name}.ts`,
-        ),
-        "utf8",
-      ),
+      readFileSync(join(packageRoot, pluginSource, `${name}.ts`), "utf8"),
   ]);
-  for (const [name, content] of [["models.ts", models], ...shared]) {
-    const output = join(packageRoot, "src", name);
+  const outputs = [
+    [`${pluginSource}/models.ts`, models],
+    ["src/models.ts", models],
+    ...shared,
+  ];
+  for (const [name, content] of outputs) {
+    const output = join(packageRoot, name);
     if (process.argv.includes("--check")) {
       if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== content) {
-        console.error(
-          `src/${name} is out of date. Run \`pnpm generate:models\`.`,
-        );
+        console.error(`${name} is out of date. Run \`pnpm generate:models\`.`);
         process.exitCode = 1;
       }
     } else writeFileSync(output, content);
