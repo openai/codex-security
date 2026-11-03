@@ -7,7 +7,8 @@ For selected findings from the Semgrep Platform API, use the
 
 ## Quick start
 
-For local import of selected existing Code findings, see [Existing Platform findings](#existing-platform-findings).
+In Codex, [import selected Guardian findings](#import-selected-guardian-findings) with your existing Semgrep sign-in.
+For a whole project and ref, use the [Web API collector](#collect-a-platform-project-and-branch).
 
 [Enable external imports](README.md#preview-a-report). From the scanned checkout root,
 preview a saved SAST report using the repository's credential-free HTTP(S) URL
@@ -35,11 +36,69 @@ or wholly excluded report, the preview alone does not establish a repository mat
 [Save or publish and verify](README.md#save-or-publish-and-verify) using the
 same source URL and key. Cloud uses the `semgrep` provider.
 
+## Import selected Guardian findings
+
+Enable [external imports](README.md#preview-a-report) and sign in to
+[Semgrep Guardian for Codex](https://docs.semgrep.dev/semgrep-guardian/quickstart).
+Ask Codex to import the selected Code or Supply Chain findings from Guardian
+into the local workbench. Specify the deployment, repository and full Git ref.
+Guardian handles authentication through its existing connection.
+
+Codex calls `get_semgrep_sast_findings` or `get_semgrep_supply_chain_findings`
+with that scope. If you already selected rows from that tool, Codex can reuse
+the successful response. It saves the exact string IDs and original selected
+rows from `structuredContent.findings`. Guardian returns only the repository
+name, so confirm its SCM URL against the checkout before saving the capture.
+A missing or ambiguous selected ID stops the import. Guardian defaults to 20
+open or reviewing results and returns at most 1,000 per call.
+
+For SDK callers, `guardianClient` below is your connected Guardian MCP client.
+Pass the filters used for your selection, including states for any closed or
+ignored findings. Save the capture in a private directory outside the checkout.
+
+```js
+import { writeFile } from "node:fs/promises";
+import { collectSelectedSemgrepGuardianFindings } from "@openai/codex-security";
+
+const capture = await collectSelectedSemgrepGuardianFindings(
+  {
+    request: {
+      name: "get_semgrep_sast_findings",
+      arguments: {
+        deployment_name: "example",
+        repository_name: "example/project",
+        ref: "refs/heads/topic",
+      },
+    },
+    findingIds: ["123"],
+    sourceRepositoryUrl: "https://github.com/example/project",
+  },
+  { callTool: (request) => guardianClient.callTool(request) },
+);
+await writeFile("guardian.json", JSON.stringify(capture), {
+  flag: "wx",
+  mode: 0o600,
+});
+```
+
+Preview before confirming the import. Use the same file and source key on replay.
+
+```sh
+codex-security publish findings /path/to/private/guardian.json --provider semgrep \
+  --to local --repository /path/to/project --source-key example/project/topic --dry-run --format json
+```
+
+Guardian records retain the original MCP fields. The summary omits end lines,
+CWEs, package versions and fix versions. Guardian and Web API records keep
+separate identities even when their IDs look identical. To verify a pair,
+identify the same occurrence independently by deployment, mapped project,
+product, full ref, rule and location. Then compare the complete ID strings,
+preserving every digit.
+
 ## Existing Platform findings
 
-Use the SDK to select exact IDs from **Semgrep Code (SAST)**. The official
-[Guardian Codex plugin](https://docs.semgrep.dev/semgrep-guardian/ide-setup/codex)
-can help identify them. For import, save the native
+Use the SDK to select exact Web API IDs from **Semgrep Code (SAST)** when you
+have original Web API responses. For this format, save the native
 [project response](https://docs.semgrep.dev/api-reference/v1/projectsservice/get-project-details)
 and the [Findings API pages](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
 for that deployment, project ID and fully qualified Git ref (for example,
@@ -258,14 +317,10 @@ every row on pages that contain a selected ID for conflicting product evidence.
 When a page contains only fields shared by several products, the original
 request filter identifies the product.
 
-To find existing Code findings in Codex, sign in to Guardian and ask for the
-deployment, project and full ref you want to inspect. Guardian returns a
-selection for review. For this SDK import, confirm the candidate findings in
-the original Web API results and use the IDs from those records. The SDK also
-accepts saved responses from an authorized operator. Fetching new responses
-directly requires Web API read access.
-[Guardian sign-in](https://docs.semgrep.dev/semgrep-guardian/quickstart) ·
-[Query existing findings](https://semgrep.dev/products/product-updates/query-your-semgrep-findings-by-asking-guardian/) ·
+Use the IDs from the original Web API results for this SDK import. The SDK
+accepts saved responses from an authorized operator. Fetching new Web API
+responses requires read access. For selections made in Codex, use the
+[Guardian workflow](#import-selected-guardian-findings).
 [Findings Web API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
 
 Use the full ref from the findings, such as `refs/heads/main` or
