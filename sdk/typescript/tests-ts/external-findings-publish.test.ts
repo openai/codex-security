@@ -1495,6 +1495,41 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   return { f, input, project, map, prepare, loseResponse };
 }
 
+test("Checkmarx publishes a native SAST finding only to its declared Cloud repository", async () => {
+  const row = {
+    type: "sast",
+    similarityId: "17",
+    severity: "MEDIUM",
+    data: { resultHash: "c97c", queryName: "Example_Query" },
+  };
+  const f = await fixture({ scanID: "scan-a", totalCount: 1, results: [row] });
+  const selected = {
+    ...options,
+    provider: "checkmarx" as const,
+    sourceRepositoryUrl: f.state.repositoryUrl,
+  };
+  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]).toMatchObject({
+    source: { provider: "checkmarx", source_key: selected.sourceKey },
+    items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
+  });
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(0);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  f.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  const replay = await prepare();
+  expect(replay.preview.resumed).toBe(true);
+  expect((await replay.publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]!);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);

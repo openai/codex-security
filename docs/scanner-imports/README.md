@@ -17,6 +17,7 @@ guide. Otherwise, ask for a supported report. A fresh scan produces new results.
 | [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
 | [AWS Continuum](continuum.md)                               | Code finding summaries or a detailed finding verified for one repository        |
 | [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
+| [Checkmarx SAST](checkmarx.md)                              | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
 | [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
 | [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                  |
 | [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |

@@ -349,6 +349,7 @@ export {
   normalizeContinuumFindings,
   readContinuumFindings,
 } from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,

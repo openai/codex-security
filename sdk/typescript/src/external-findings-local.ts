@@ -37,6 +37,7 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
+import { checkmarxReportRepositories } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -527,6 +528,7 @@ async function requireMatchingRepository(
     ));
   const boundProvider =
     provider === "sonar" ||
+    provider === "checkmarx" ||
     provider === "continuum" ||
     provider === "inspector" ||
     provider === "blackduck" ||
@@ -756,6 +758,7 @@ export async function prepareLocalImport(
   );
   for (const repositories of [
     veracodeReportRepositories,
+    checkmarxReportRepositories,
     continuumReportRepositories,
   ]) {
     for (const source of repositories(

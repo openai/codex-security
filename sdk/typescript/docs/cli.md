@@ -1348,6 +1348,9 @@ exits with status 1. Local imports can retain evidence that exceeds Cloud's per-
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
 
+For Checkmarx One CLI JSON or CxSAST XML, use `--provider checkmarx` and pass the
+verified Git URL with `--source-repository-url`. See the [Checkmarx SAST guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md).
+
 ## Import Endor Labs findings
 
 Use `--provider endor` for one Endor project and context. The

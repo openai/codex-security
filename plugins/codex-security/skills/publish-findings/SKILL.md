@@ -43,6 +43,27 @@ Use `--provider continuum` and `--source-repository-url` for an AWS Continuum fo
 
 Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.
 
+## Checkmarx SAST
+
+If the user supplies a Checkmarx One CLI JSON or CxSAST XML report, use that file directly. To retrieve existing results, require an explicitly selected completed scan ID and product. Verify the project, repository URL and branch or ref with the operator. An installation may host several tenants or teams. Ask for missing scope before fetching.
+
+Use `scripts/collect_checkmarx.py` beside this installed `SKILL.md`. Resolve its absolute path as `collector`. Use the user's trusted vendor installation and existing signed-in session or CxFlow configuration. Identify the Checkmarx One binary from the configured tool path or ask for its absolute path if several tools are named `cx`. If `CX_CONFIG_FILE_PATH` is set, it must point to the trusted configuration by absolute path. For CxSAST, use the operator's CxFlow JAR and trusted SAST-only configuration with `CxXml` enabled. Ask for the paths, full Checkmarx team path and project name if necessary. Keep credentials in the vendor configuration.
+
+Run the helper once for the selected product with the import opt-in set. It uses Checkmarx One's `results show` or CxFlow's project retrieval mode with the named scan ID and the `CxXml` file writer. Use only that writer during collection. [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow CxXml output](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
+
+```sh
+# Checkmarx One
+report=$(python "$collector" one "$scan_id" --cx "$cx_path")
+```
+
+```sh
+# Self-managed CxSAST
+report=$(python "$collector" cxsast "$scan_id" --jar "$jar_path" \
+  --config "$config_path" --team "$cx_team" --project "$cx_project")
+```
+
+Continue only after the helper succeeds. Its stdout is the absolute path to the report whose scan ID it checked. Use that exact path in `codex-security publish findings "$report" --provider checkmarx` with the requested destination, `--source-repository-url`, a stable product/tenant/project/ref `--source-key`, and `--dry-run --format json`. Review the source, destination, SAST results and exclusions with the user. After confirmation, reuse the same file and options for the import, following the [local](#import-locally) or [Cloud](#publish-to-cloud) workflow. Keep the capture until readback and any retries finish, then remove the helper-created temporary directory unless the user wants to retain it. Preserve any report the user originally supplied. [Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+
 ## Veracode Static Analysis policy findings
 
 Use `--provider veracode` with all Findings API pages for one application’s STATIC policy findings. Verify that the application maps to the repository named by `--source-repository-url`. Keep the source key stable for that application and preview the import before writing.
