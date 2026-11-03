@@ -1183,6 +1183,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
+  if (original) rejectGuardianSelection(original.parsed);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -1195,6 +1196,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
+  rejectGuardianSelection(current);
   const identity = publicationIdentity(current);
   return {
     current,
@@ -1940,6 +1942,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
+    rejectGuardianSelection({ ...parsed, findings: saved });
     const approvedScope = content.inputProjection?.semgrepPartialScopeDigest;
     if (
       approvedScope !== undefined &&
@@ -1960,7 +1963,8 @@ async function preparePublicationInput(
   ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
-    const savedWire = wireJson(submissionFindings(content.requests));
+    const saved = submissionFindings(content.requests);
+    const savedWire = wireJson(saved);
     const wireDigest = hash("sha256", savedWire);
     if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
@@ -1982,6 +1986,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
+    rejectGuardianSelection({ ...parsed, findings: saved });
     content.legacyApproval = true;
     content.inputProjection = {
       ...content.inputProjection,
