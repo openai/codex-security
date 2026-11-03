@@ -1,13 +1,17 @@
-<!-- release-version: 0.8.0 -->
+<!-- release-version: 0.8.2 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.8.0 adds OpenGrep report imports and changes how scan results record scope and review details.
+Codex Security 0.8.2 adds threat-model explorers and Amazon Inspector imports, and improves scan progress and finding review.
 
-- **OpenGrep imports.** Import a native JSON or gzip-compressed report into the local workbench or publish it to Cloud with `publish findings --provider opengrep`. Supply `--source-repository-url` and enable external imports with `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`. Imported findings retain their scanner evidence and start as unassessed. See the [OpenGrep guide](https://github.com/openai/codex-security/blob/npm-v0.8.0/docs/scanner-imports/opengrep.md).
-- **Scan recovery.** Resume an interrupted Deep Scan after clearing its additional instructions. Read a completed Workbench scan’s saved artifacts even after moving or removing the original checkout.
+- **Threat-model explorers.** Turn an existing threat model into a shareable HTML explorer with interactive architecture, scenarios, controls, and source evidence. Export HTML or SVG from the bundled skill.
+- **Amazon Inspector imports.** With external imports enabled, import a complete Inspector Code Security repository findings export while retaining each finding's identity across imports. See the [Inspector import guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docs/scanner-imports/inspector.md).
+- **Dedupe corrections.** Hosted reviewers can correct rejected decisions in the original open review when the host supports pending-call validation.
+- **Interactive scans.** Finding review shows critical findings first, followed by high, medium, and low severity. Component tables show saved review progress, and scan titles resolve relative directory names.
+- **Output directories.** Existing scan output directories keep their permissions across scans, saved-result reads, and resume. Newly created directories remain private by default.
+- **Container releases.** The release workflow builds Debian and Wolfi images from the same verified scanner package and frozen runtime dependency lock. See the [container guide](https://github.com/openai/codex-security/blob/npm-v0.8.2/docker/README.md).
 
 <!-- release-section: highlights:end -->
 
@@ -15,7 +19,8 @@ Codex Security 0.8.0 adds OpenGrep report imports and changes how scan results r
 
 ## Upgrade notes
 
-- **SDK and JSON consumers.** Replace reads of `ScanResult.coverage` or the serialized `coverage` field with `review` for comparison exclusions. Read scan mode and scope from `manifest.scan`. Integrations that write drafts should put reviewed surfaces, unfinished work, and open questions in `reviewState`.
-- **Saved files and GitHub Actions.** New scans no longer write `coverage.json`. Replace `ScanResult.coveragePath` with `manifestPath` and read `scan.review` in `scan-manifest.json`. Workflows that read the Action’s `coverage-path` output should switch to `manifest-path`. The legacy output is empty for current scans. Existing saved scans remain readable. See [Action outputs](https://github.com/openai/codex-security/blob/npm-v0.8.0/github-action/README.md#outputs).
+No migration is required for existing CLI workflows. Hosted integrations that opt into pending-call validation must keep the original review session open until they handle the CLI's feedback; existing hosts can continue returning final results.
+
+Inspector imports remain opt-in. Cloud publication requires a connected GitHub repository and a deployment that accepts the Inspector provider. The import guide describes repository matching and complete-export requirements.
 
 <!-- release-section: upgrades:end -->

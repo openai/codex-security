@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
@@ -23,7 +24,6 @@ from filesystem_identity import stored_filesystem_identity_matches
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
-LOCAL_GIT_OBJECTS = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
 
@@ -65,8 +65,11 @@ def git_output(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> str | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     output = os.fsdecode(completed.stdout)
     if sys.platform == "win32" and output.endswith("\r\n"):
         output = output[:-2]
@@ -124,7 +127,7 @@ def git_blob_binary_flags(
                 git_dir=git_dir,
                 work_tree=work_tree,
                 stdout_file=sink,
-                environment_overrides=LOCAL_GIT_OBJECTS,
+                offline=True,
             )
         finally:
             # Git may fail before producing all requested records.
@@ -266,7 +269,8 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
-    environment_overrides: dict[str, str] | None = None,
+    pathspec_environment: dict[str, str] | None = None,
+    offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -274,8 +278,11 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
-    if environment_overrides is not None:
-        environment.update(environment_overrides)
+    if pathspec_environment is not None:
+        environment.update(pathspec_environment)
+    if offline:
+        # Deny transports even on Git versions that do not honor GIT_NO_LAZY_FETCH.
+        environment.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="", GIT_NO_REPLACE_OBJECTS="1")
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -328,7 +335,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         *diff_args,
         "--",
         text=False,
-        environment_overrides=LOCAL_GIT_OBJECTS,
+        offline=True,
     )
     result.check_returncode()
     fields = result.stdout.split(b"\0")
@@ -364,7 +371,7 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             "--exclude-standard",
             "-z",
             text=False,
-            environment_overrides=LOCAL_GIT_OBJECTS,
+            offline=True,
         )
         untracked.check_returncode()
         combined = dict(staged)
@@ -491,7 +498,7 @@ def candidate_source_lines(
                     "blob",
                     f"{revision}:{name}",
                     text=False,
-                    environment_overrides=LOCAL_GIT_OBJECTS,
+                    offline=True,
                 )
                 blob.check_returncode()
                 data = blob.stdout
@@ -514,6 +521,14 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _visible_git_character(char: str) -> str:
+    if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
+        return char
+    if ord(char) <= 0xFF:
+        return f"\\x{ord(char):02x}"
+    return ascii(char)[1:-1]
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -521,7 +536,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> bool:
+) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
             target,
@@ -532,14 +547,19 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            return False
+            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
+                "\r\n", "\n"
+            )
+            detail = "".join(map(_visible_git_character, detail))
+            raise SystemExit(
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
+            )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
         for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
-    return True
 
 
 def worktree_content_digest(target: Path) -> str:
@@ -621,7 +641,7 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    tracked_ok = _update_digest_field_from_git(
+    _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
@@ -650,7 +670,7 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if not tracked_ok or untracked is None:
+    if untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
@@ -967,7 +987,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,
-                environment_overrides={
+                pathspec_environment={
                     "GIT_NOGLOB_PATHSPECS": "0",
                 },
             )
@@ -1176,7 +1196,7 @@ def copy_git_worktree_files(
             source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
             relative = source_path.relative_to(repository)
             metadata = source_path.lstat()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         if relative in copied:
             continue
