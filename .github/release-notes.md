@@ -8,6 +8,7 @@
 - use the singular for one additional finding in the job summary ([#2252](https://github.com/openai/codex-security/pull/2252))
 - keep scrolled history in place at the history cap ([#2266](https://github.com/openai/codex-security/pull/2266))
 - skip macOS metadata files in knowledge-base folders ([#2270](https://github.com/openai/codex-security/pull/2270))
+- keep non-breaking hyphens in DOCX text ([#2272](https://github.com/openai/codex-security/pull/2272))
 
 <!-- release-section: highlights:end -->
 
