@@ -472,6 +472,8 @@ test("stock Codex resolves ordered profile overrides and inherited transport pol
         config: {
           "features.code_mode.enabled": true,
           features: {
+            // Marketplace Git helpers can keep the fixture open on Windows.
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],

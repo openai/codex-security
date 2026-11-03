@@ -403,6 +403,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   const postScanPrompt = "Explain the completed synthetic scan.";
   const prompts = [];
   let threadCount = 0;
+  const warnings = [];
   let manifestBeforeFollowUp;
   let scanId;
   const client = new sdk.CodexSecurity(
@@ -427,62 +428,22 @@ async function runInstalledSdk(pluginRoot, executable) {
       // Replace only the parent model's tool choice. The installed SDK registers
       // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
       createCodex({ env, apiKey }) {
-        return {
-          startThread() {
-            threadCount += 1;
-            return {
-              id: owner,
-              async runStreamed(prompt) {
-                prompts.push(prompt);
-                return {
-                  events: (async function* () {
-                    yield { type: "thread.started", thread_id: owner };
-                    scanId = env.CODEX_SECURITY_SCAN_ID;
-                    // The pinned SDK maps its apiKey option to this child variable.
-                    const rpc = await server(f, {
-                      ...env,
-                      ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
-                    });
-                    try {
-                      const result = await rpc.call(
-                        "start_codex_security_deep_scan",
-                        { scanId },
-                        metadata(f, owner),
-                      );
-                      await assertDraft(result.manifestPath);
-                    } finally {
-                      await rpc.close();
-                    }
-                    yield {
-                      type: "turn.completed",
-                      usage: {
-                        input_tokens: 1,
-                        cached_input_tokens: 0,
-                        output_tokens: 1,
-                      },
-                    };
-                  })(),
-                };
-              },
-            };
-          },
-          resumeThread(threadId) {
-            assert.equal(threadId, owner);
-            return {
-              id: threadId,
-              async runStreamed(prompt) {
-                prompts.push(prompt);
-                assert.equal(prompt, postScanPrompt);
-                manifestBeforeFollowUp = await readFile(
-                  join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
-                  "utf8",
-                );
-                const completed = JSON.parse(manifestBeforeFollowUp);
-                assert.equal(completed.scan.status, "completed");
-                assert.ok(completed.scan.sealedAt);
-                return {
-                  events: (async function* () {
-                    yield { type: "thread.started", thread_id: threadId };
+        function thread({ workingDirectory }) {
+          return {
+            id: owner,
+            async runStreamed(prompt) {
+              prompts.push(prompt);
+              return {
+                events: (async function* () {
+                  yield { type: "thread.started", thread_id: owner };
+                  if (prompt === postScanPrompt) {
+                    manifestBeforeFollowUp = await readFile(
+                      join(workingDirectory, "scan-manifest.json"),
+                      "utf8",
+                    );
+                    const completed = JSON.parse(manifestBeforeFollowUp);
+                    assert.equal(completed.scan.status, "completed");
+                    assert.ok(completed.scan.sealedAt);
                     yield {
                       type: "turn.completed",
                       usage: {
@@ -491,10 +452,45 @@ async function runInstalledSdk(pluginRoot, executable) {
                         output_tokens: 100_000,
                       },
                     };
-                  })(),
-                };
-              },
-            };
+                    return;
+                  }
+                  scanId = env.CODEX_SECURITY_SCAN_ID;
+                  // The pinned SDK maps its apiKey option to this child variable.
+                  const rpc = await server(f, {
+                    ...env,
+                    ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
+                  });
+                  try {
+                    const result = await rpc.call(
+                      "start_codex_security_deep_scan",
+                      { scanId },
+                      metadata(f, owner),
+                    );
+                    await assertDraft(result.manifestPath);
+                  } finally {
+                    await rpc.close();
+                  }
+                  yield {
+                    type: "turn.completed",
+                    usage: {
+                      input_tokens: 1,
+                      cached_input_tokens: 0,
+                      output_tokens: 1,
+                    },
+                  };
+                })(),
+              };
+            },
+          };
+        }
+        return {
+          startThread(options) {
+            threadCount += 1;
+            return thread(options);
+          },
+          resumeThread(threadId, options) {
+            assert.equal(threadId, owner);
+            return thread(options);
           },
         };
       },
@@ -509,10 +505,11 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       postScanPrompt,
+      onWarning: (warning) => warnings.push(warning),
       outputDir: join(f.directory, "output"),
     });
     assert.equal(threadCount, 1);
-    assert.equal(prompts.length, 2);
+    assert.equal(prompts.length, 2, warnings.join("\n"));
     assert.equal(prompts[1], postScanPrompt);
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
@@ -522,6 +519,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     assert.equal(
       await readFile(result.manifestPath, "utf8"),
       manifestBeforeFollowUp,
+      warnings.join("\n"),
     );
     assert.ok(result.cost === null || result.cost.inputTokens < 100_000);
     assert.equal(result.toJSON().threadId, owner);
@@ -533,7 +531,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId);
+  await assertExecutions(f, scanId, 3);
 }
 
 async function assertSavedState(f, scanId, owner) {
@@ -627,7 +625,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId) {
+async function assertExecutions(f, scanId, preflightsWithoutRetry = 4) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -643,8 +641,10 @@ async function assertExecutions(f, scanId) {
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
   assert.equal(reducers.length, 1);
   assert.equal(
-    executions.filter((entry) => entry.phase === "preflight").length,
-    4 + incomplete,
+    executions.filter(
+      (entry) => entry.phase === "preflight" && entry.args.includes("--stdio"),
+    ).length,
+    preflightsWithoutRetry + incomplete,
   );
   for (const execution of [...workers, ...reducers]) {
     assert.equal(execution.scanId, scanId);
