@@ -132,6 +132,52 @@ async function registerEightFileScan(
     : mockWorkbench(args, input);
 }
 
+const RESUMED_SCAN_TIME = "2026-06-01T12:00:00.000Z";
+
+function resumedRolloutRecord(event: Record<string, unknown>): string {
+  return JSON.stringify({ timestamp: RESUMED_SCAN_TIME, ...event });
+}
+
+function resumeEightFileScan(repository: string, scanDir: string) {
+  const threadId = "thread-1";
+  const recipe = {
+    repository,
+    target: { kind: "repository", paths: [] },
+    repositoryRevision: "deadbeef",
+  };
+  return async (
+    _options: unknown,
+    args: readonly string[],
+    input?: string,
+  ): Promise<JsonObject> => {
+    if (args[0] === "get-cli-scan-resume") {
+      return {
+        ...mockScanRegistration(
+          ["--registration-json-stdin", "--scan-dir", scanDir],
+          JSON.stringify({ recipe }),
+        ),
+        threadId,
+        recipe,
+        scopeFileCount: 8,
+      };
+    }
+    if (args[0] === "get-scan") {
+      return {
+        scan: {
+          executionAttribution: {
+            formatVersion: 1,
+            executionThreadIds: [threadId],
+            owner: { threadId, turnId: null, startedAt: RESUMED_SCAN_TIME },
+            startedAt: RESUMED_SCAN_TIME,
+            completedAt: null,
+          },
+        },
+      };
+    }
+    return mockWorkbench(args, input);
+  };
+}
+
 // Exact ASCII fixture for the pinned native 64 KiB persistence representation.
 const commandHead = "h".repeat(32_743);
 const commandTail = "t".repeat(32_743);
@@ -8413,7 +8459,7 @@ if __name__ == "__main__":
         parent,
         [0, 4]
           .map((count) =>
-            JSON.stringify({
+            resumedRolloutRecord({
               type: "response_item",
               payload: {
                 type: "custom_tool_call_output",
@@ -8425,7 +8471,7 @@ if __name__ == "__main__":
       );
       await appendFile(
         worker,
-        JSON.stringify({
+        resumedRolloutRecord({
           type: "event_msg",
           payload: {
             type: "agent_message",
@@ -8455,29 +8501,9 @@ if __name__ == "__main__":
         }
         return entries;
       }) as typeof originalReaddir);
-      const recipe = {
-        repository,
-        target: { kind: "repository", paths: [] },
-        repositoryRevision: "deadbeef",
-      };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "get-cli-scan-resume"
-            ? {
-                ...mockScanRegistration(
-                  ["--registration-json-stdin", "--scan-dir", scanDir],
-                  JSON.stringify({ recipe }),
-                ),
-                threadId: "thread-1",
-                recipe,
-                scopeFileCount: 8,
-              }
-            : mockWorkbench(args, input),
+        runWorkbench: resumeEightFileScan(repository, scanDir),
         createCodex: () => ({
           startThread: () => {
             throw new Error("Expected a resumed thread");
@@ -8489,7 +8515,7 @@ if __name__ == "__main__":
               async function* events(): AsyncGenerator<ThreadEvent> {
                 await appendFile(
                   parent,
-                  JSON.stringify({
+                  resumedRolloutRecord({
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",
@@ -13749,32 +13775,12 @@ if __name__ == "__main__":
           },
         },
       ]
-        .map((event) => JSON.stringify(event))
+        .map(resumedRolloutRecord)
         .join("\n") + "\n",
     );
-    const recipe = {
-      repository,
-      target: { kind: "repository", paths: [] },
-      repositoryRevision: "deadbeef",
-    };
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "get-cli-scan-resume"
-          ? {
-              ...mockScanRegistration(
-                ["--registration-json-stdin", "--scan-dir", scanDir],
-                JSON.stringify({ recipe }),
-              ),
-              threadId: "thread-1",
-              recipe,
-              scopeFileCount: 8,
-            }
-          : mockWorkbench(args, input),
+      runWorkbench: resumeEightFileScan(repository, scanDir),
       createCodex: () => ({
         startThread: () => {
           throw new Error("Expected a resumed thread");
@@ -13791,9 +13797,9 @@ if __name__ == "__main__":
               );
               await appendFile(
                 rollout,
-                JSON.stringify(native("current")) +
+                resumedRolloutRecord(native("current")) +
                   "\n" +
-                  JSON.stringify({
+                  resumedRolloutRecord({
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",

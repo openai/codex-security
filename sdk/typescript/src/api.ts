@@ -2829,24 +2829,7 @@ export class CodexSecurity {
             "The workbench returned mismatched scan resume context.",
           );
         }
-        const savedDeep =
-          mode === "deep"
-            ? (
-                await workbench(workbenchOptions, [
-                  "get-deep-scan",
-                  "--scan-id",
-                  scanId,
-                  "--thread-id",
-                  resumeThreadId,
-                ])
-              )["deepScan"]
-            : undefined;
-        const selectedCompletion =
-          isRecord(savedDeep) &&
-          isRecord(savedDeep["finalizationInput"]) &&
-          (savedDeep["status"] === "running" ||
-            savedDeep["status"] === "succeeded");
-        if (!selectedCompletion) {
+        if (registration["finalizationSelected"] !== true) {
           const savedSession = await findScanSession(
             runtime.codexHome,
             resumeThreadId,

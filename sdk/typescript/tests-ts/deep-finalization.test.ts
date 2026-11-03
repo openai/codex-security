@@ -278,7 +278,7 @@ for (const {
     let budgetTriggered = false;
     let cancellationReadLost = false;
     let lostCancellationDeepState: unknown;
-    let originalFinalizationInput: unknown;
+    let originalFinalizationInput!: { resultPath: string };
     let selectedPath = "";
     let selectedBytes: Buffer<ArrayBuffer>;
     let originalResumeSignal: AbortSignal | undefined;
@@ -655,8 +655,7 @@ for (const {
                     JSON.parse(selectionOutput).deepScan.finalizationInput;
                   selectedPath = join(
                     scanDir,
-                    (originalFinalizationInput as { resultPath: string })
-                      .resultPath,
+                    originalFinalizationInput.resultPath,
                   );
                   selectedBytes = await readFile(selectedPath);
                   const sessions = join(
@@ -1169,9 +1168,13 @@ for (const {
           findingCount: 1,
           reportAvailable: true,
         });
-        expect(await readReviewState(scanDir)).not.toHaveProperty(
-          "completeness",
+        const { scan: published } = JSON.parse(
+          await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
         );
+        expect(published.review).toEqual({ excludedPaths: [] });
+        expect(
+          published.preservedSources[originalFinalizationInput.resultPath],
+        ).toMatch(/^[a-f0-9]{64}$/);
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );

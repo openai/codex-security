@@ -66,10 +66,8 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
     ) as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
-        workers = connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-            (summary["id"],),
-        ).fetchall()
+        workers = saved._saved_workers(connection, summary["id"])
+        accepted_digests = saved._accepted_source_digests(connection, summary["id"])
     if summary["status"] == "completed" and scan["mode"] == "deep":
         # Deep completion saves the accepted parent aggregate before sealing,
         # including deadline recovery's validated records and pending tasks.
@@ -90,6 +88,7 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
             f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=summary["preservedSources"],
+        accepted_source_digests=accepted_digests,
         checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
         scan_mode=scan["mode"],
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,

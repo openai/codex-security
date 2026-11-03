@@ -3355,6 +3355,23 @@ def _seal_warnings(
     )
 
 
+def _write_prepared_review_checkpoint(prepared: PreparedScanFinalization) -> None:
+    scan_dir = prepared.scan_dir
+    scan = prepared.manifest["scan"]
+    checkpoint = {
+        "scanId": scan["id"],
+        "complete": scan["status"] == "completed",
+        "scope": scan["scope"],
+        "findings": prepared.findings["findings"],
+        "reviewState": checkpoint_review_state(prepared.coverage),
+        **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+    }
+    contents = _json_bytes(checkpoint)
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
+    _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+
+
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
@@ -3376,18 +3393,7 @@ def _write_prepared_scan_finalization(
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
         elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
-            checkpoint = {
-                "scanId": scan["id"],
-                "complete": scan["status"] == "completed",
-                "scope": scan["scope"],
-                "findings": prepared.findings["findings"],
-                "reviewState": checkpoint_review_state(prepared.coverage),
-                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
-            }
-            contents = _json_bytes(checkpoint)
-            name = hashlib.sha256(contents).hexdigest() + ".json"
-            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
-            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+            _write_prepared_review_checkpoint(prepared)
     if not prepared.was_sealed and "coverageRef" not in scan:
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     sealed_paths = (

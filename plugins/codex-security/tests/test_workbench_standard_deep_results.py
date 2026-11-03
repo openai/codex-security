@@ -2191,17 +2191,16 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     assert completed["warnings"] == [warning]
     coverage = read_review_state(state_dir, scan_dir)
 
-    assert coverage["deferred"] == [
-        {
-            "id": "scan-cost-limit",
-            "reason": "Validation was deferred because the scan reached its cost limit.",
-        }
-    ]
+    deferred_reason = "Validation was deferred because the scan reached its cost limit."
+    assert coverage["deferred"] == [{"id": "scan-cost-limit", "reason": deferred_reason}]
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["invocations"] == [
         {
             "executionSuccessful": True,
-            "toolExecutionNotifications": [{"level": "warning", "message": {"text": warning}}],
+            "toolExecutionNotifications": [
+                {"level": "warning", "message": {"text": deferred_reason}},
+                {"level": "warning", "message": {"text": warning}},
+            ],
         }
     ]
     assert not (scan_dir / "artifacts" / "02_discovery").exists()

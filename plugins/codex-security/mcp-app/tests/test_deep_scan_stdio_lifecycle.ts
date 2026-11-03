@@ -1483,8 +1483,16 @@ async function testCliDeepScanEngine({
   assert.ok(helperLaunches.length > 0);
   for (const launch of helperLaunches) {
     assert.deepEqual(launch.args.slice(0, 5), ["-I", "-X", "utf8", "-B", "-c"]);
-    assert.equal(launch.args.at(-1), workbenchPath);
-    assert.equal(launch.args.length, 7);
+    const [script, ...options] = launch.args.slice(6);
+    assert.equal(script, workbenchPath);
+    const command = launch.workbenchArgs[0];
+    if (command === "claim-deep-scan-coordinator") {
+      assert.deepEqual(options, ["with_execution_settings"]);
+    } else if (command === "finish-deep-scan" && options.length > 0) {
+      assert.deepEqual(options, ["select_finalization"]);
+    } else {
+      assert.deepEqual(options, []);
+    }
     assert.equal(launch.cwd, pluginRoot);
   }
   assert.deepEqual(JSON.parse(result.stdout), {

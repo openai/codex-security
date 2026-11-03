@@ -2002,7 +2002,8 @@ def finish_deep_scan_locked(
             )
             deferred = coverage.get("deferred")
             failure_capped = (
-                isinstance(deferred, list)
+                coverage.get("completeness") == "partial"
+                and isinstance(deferred, list)
                 and any(
                     isinstance(item, dict)
                     and isinstance(item.get("reason"), str)

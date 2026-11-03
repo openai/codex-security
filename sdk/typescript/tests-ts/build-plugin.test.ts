@@ -102,6 +102,7 @@ describe("bundled plugin build", () => {
       "windows-binding",
       "windows-flags",
       "windows-files",
+      "windows-process",
       "proof-policy-windows",
     ]) {
       const compiled = await transform(
@@ -161,22 +162,22 @@ describe("bundled plugin build", () => {
         scanId: "synthetic-scan",
         manifest: { scan: {} },
         findings: { findings: [] },
-        coverage: {
-          completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [],
+        reviewState: {
+          surfaces: [], explicitExclusions: [], deferred: [],
         },
       };
       assert.equal(helper.parseCanonicalScanDraft(input).scanId, input.scanId);
       assert.throws(() => helper.parseCanonicalScanDraft({
-        ...input, coverage: { ...input.coverage, surfaces: "invalid" },
+        ...input, reviewState: { ...input.reviewState, surfaces: "invalid" },
       }));
-      console.log("Bundled parser accepted valid input and rejected invalid coverage.");
+      console.log("Bundled parser accepted valid input and rejected invalid review state.");
     `,
         helper,
       ],
       { cwd: root, env: { ...process.env, NODE_PATH: "" } },
     );
     expect(result.stdout).toBe(
-      "Bundled parser accepted valid input and rejected invalid coverage.\n",
+      "Bundled parser accepted valid input and rejected invalid review state.\n",
     );
     expect(result.stderr).toBe("");
   });

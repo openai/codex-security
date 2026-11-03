@@ -1591,7 +1591,7 @@ export async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() 
         "result.json",
       );
       const result = await readJson(resultPath);
-      result.coverage.deferred = [
+      result.reviewState.deferred = [
         { id: "remaining-review", reason: "Source review remains pending." },
       ];
       await writeJson(resultPath, result);

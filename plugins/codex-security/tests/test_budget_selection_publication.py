@@ -10,6 +10,7 @@ from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state
 
 
 @pytest.mark.parametrize("selected", [False, True], ids=["legacy-v1", "selected-v2"])
@@ -69,7 +70,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         assert run["terminal_reason"] == reason
         assert json.loads(run["finalization_input_json"] or "null") == selection
         assert accepted.read_bytes() == accepted_bytes
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(connection, scan.scan_dir)
         assert "completeness" not in coverage
         assert any(item["id"] == "accepted-follow-up" for item in coverage["deferred"])
         if not cancel_first:
@@ -84,7 +85,10 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         assert published_bytes(scan) == frozen
 
 
-@pytest.mark.parametrize("cut", ["findings.json", "coverage.json", "scan-manifest.json", "commit"])
+@pytest.mark.parametrize(
+    "cut",
+    ["findings.json", "coverage.json", "scan-manifest.json", "checkpoint-head.json", "commit"],
+)
 @pytest.mark.parametrize("tamper", [None, "saved-projection", "accepted-result"])
 def test_selected_budget_publication_can_retry_an_interrupted_write(
     workbench_api, workbench_db, publication_scan, tmp_path, monkeypatch, cut, tamper
@@ -116,26 +120,38 @@ def test_selected_budget_publication_can_retry_an_interrupted_write(
         context = workbench_api["_WORKBENCH_DB_CONTEXT"]
         saved.write_scan_draft(context, connection, staged)
         row = connection.execute("SELECT * FROM scans").fetchone()
-        documents = tuple(
-            json.loads((scan.scan_dir / name).read_text())
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        )
+        if cut == "coverage.json":
+            # Older publications kept review state in a separate file.
+            manifest_path = scan.scan_dir / "scan-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            coverage = read_review_state(connection, scan.scan_dir)
+            manifest["scan"].pop("reviewState")
+            manifest["scan"]["coverageRef"] = "coverage.json"
+            manifest_path.write_text(json.dumps(manifest))
+            (scan.scan_dir / "coverage.json").write_text(json.dumps(coverage))
+        documents = saved._read_budget_documents(scan.scan_dir)
         saved.record_selected_publication(context, connection, row, documents)
         accepted_bytes = accepted.read_bytes()
         write = saved.write_scan_local_bytes
 
-        def interrupted_write(directory, name, contents):
-            result = write(directory, name, contents)
+        def interrupted_write(directory, name, contents, **options):
+            result = write(directory, name, contents, **options)
             if interrupt and name == cut:
                 raise OSError("Synthetic interrupted canonical budget write")
             return result
 
         monkeypatch.setattr(saved, "write_scan_local_bytes", interrupted_write)
+        if cut == "checkpoint-head.json":
+            monkeypatch.setitem(
+                saved._write_prepared_review_checkpoint.__globals__,
+                "write_scan_local_bytes",
+                interrupted_write,
+            )
         args = Namespace(
             scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message="Synthetic cost limit"
         )
         interrupt = True
-        with pytest.raises((SystemExit, sqlite3.OperationalError), match="Synthetic"):
+        with pytest.raises((SystemExit, OSError, sqlite3.OperationalError), match="Synthetic"):
             workbench_api["complete_budget_exhausted_scan"](connection, args)
         interrupt = False
         if tamper is not None:
@@ -170,5 +186,5 @@ def test_selected_budget_publication_can_retry_an_interrupted_write(
         assert accepted.read_bytes() == accepted_bytes
         assert any(
             item["id"] == "scan-cost-limit"
-            for item in json.loads((scan.scan_dir / "coverage.json").read_text())["deferred"]
+            for item in read_review_state(connection, scan.scan_dir)["deferred"]
         )

@@ -130,6 +130,8 @@ def cli_scan_resume(
         "threadId": thread_id,
         "userContext": scan["user_context"],
     }
+    if owner == thread_id and run is not None and run["finalization_input_json"] is not None:
+        result["finalizationSelected"] = True
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":

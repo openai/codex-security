@@ -32,6 +32,7 @@ from finalize_scan_contract import (
     _remove_scan_local_file_if_exists,
     _seal_warnings,
     _validate_completion_binding,
+    _write_prepared_review_checkpoint,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
@@ -1380,6 +1381,9 @@ def prepare_budget_draft(db: Any, connection: Any, scan: Any, warning: str) -> N
         }
         db.verify_manifest_binding(scan, manifest)
         _write_budget_documents(scan_dir, documents)
+        if not uses_legacy_review(documents[0]["scan"]):
+            # Sealing retains only a summary. Save the budget-adjusted review beforehand.
+            _write_prepared_review_checkpoint(prepared)
         if has_publication:
             documents = _read_budget_documents(scan_dir)
             record_selected_publication(db, connection, scan, documents)

@@ -13,6 +13,7 @@ from test_accepted_publication_references import accept_reducer
 from test_checkpoint_publication_authority import save_disposition
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import read_review_state
 
 
 def saved_selection(connection, scan, accepted, omitted=None, *, reason="saturated"):
@@ -205,7 +206,7 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
             for finding in findings
         )
         if cut != "sealed":
-            published_coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+            published_coverage = read_review_state(connection, scan.scan_dir)
             assert coverage["deferred"][0] in published_coverage["deferred"]
             assert "completeness" not in published_coverage
 
