@@ -1,117 +1,93 @@
-# Import SonarQube Cloud security issues
+# Import SonarQube Cloud findings
 
-Import the open security issues for a SonarQube Cloud project or the issues
-you selected in the SonarQube plugin for Codex. The live import uses the
-authenticated `sonar` CLI to read findings from the project's Issues view.
-Keep the same Sonar server and organization selected until the fetch finishes.
-A live fetch saves a capture so you can review and publish the same records later.
+Collect security issues for one project and branch or pull request. The
+collector uses the authenticated Sonar CLI and saves the selection in a
+capture you can import locally or publish to Cloud.
 
-## Start in Codex
+## Quick start
 
-In the checkout, ask the SonarQube plugin to show security issues on a branch
-or pull request. Then ask Codex Security to “import those two findings locally”
-or “import those two findings locally and publish them to Codex Security Cloud.”
-The [publish-findings skill](../../plugins/codex-security/skills/publish-findings/SKILL.md#sonarqube-cloud-issues)
-uses the project's key, the selected ref, and the original Sonar issue keys to
-retrieve the full records and preview the destination. You can also start in
-the terminal with those same identifiers. If you installed only the Codex
-Security plugin, install a version of `@openai/codex-security` that includes
-the Sonar importer from a trusted directory, then run that CLI in the checkout.
-
-## Preview a local import
-
-Run the command from the matching checkout. Enable external imports for the
-session. If you already use the Sonar plugin's issue list, the collector uses
-the same `sonar` login. For first-time setup, sign in with `sonar auth login`
-using an account that can browse the selected project.
+[Enable external imports](README.md#preview-a-report). From the matching
+checkout, sign in to the project's Sonar organization with browse access
+(`sonar auth login`). Preview a selection using project and issue keys from
+Sonar's Issues view or the SonarQube plugin for Codex.
+[Sonar CLI authentication](https://docs.sonarsource.com/sonarqube-cli/quickstart-guide#step-2-authenticate)
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 codex-security import sonar --sonar-project example_project --sonar-branch main \
   --sonar-issue ISSUE_A --sonar-issue ISSUE_B --dry-run --format json
 ```
 
-For a pull request, replace `--sonar-branch main` with, for example,
-`--sonar-pull-request 42`. With neither ref option, the collector reads the
-project's main branch. Omit the issue options to collect open security
-issues for the selected project and ref. If the search exceeds Sonar's
-10,000-result window, pass the keys of the issues you want to import.
-You can omit `--sonar-project` when
-Sonar binds the checkout's Git origin to exactly one project in the signed-in
-organization. For a monorepo with several Sonar projects, pass the project key
-you want to import. If Sonar cannot supply the project's
-repository binding, verify its Git URL in Sonar and retry the preview with
-`import sonar CAPTURE --source-repository-url GIT_URL --dry-run --format json`
-using the reported capture path. Check the target and selection before importing.
+A selection by key includes the requested security issues regardless of
+status. Omit `--sonar-issue` to preview open and confirmed security issues
+for the selected ref. For a pull request, replace `--sonar-branch main` with
+`--sonar-pull-request 42`. Omit both to use the project's main branch.
 
-If the checkout uses an SSH host alias, supply the project's verified HTTPS URL
-with `--source-repository-url` so the importer can compare the repository path.
-The saved preview remembers that mapping for this checkout and its configured
-fetch URLs, including when you preview the capture for Cloud. If the fetch URLs
-change, verify the new mapping and preview again. SDK callers can pass the same
-URL as `sourceRepositoryUrl` when preparing a local import.
+## Import and verify
 
-The preview saves a private copy even when the input is a file. Use the path
-it returns in `capture` to import the reviewed evidence into the local
-workbench. Use the preview's `repository` path to read the findings back:
+Review the repository, ref, issues and exclusions in the `import sonar`
+preview. Confirm using the private `capture` path it returned.
 
 ```sh
-codex-security import sonar "/path/from/capture.json" --yes
-codex-security findings imported "/checkout/from/preview" --format json
+codex-security import sonar "/path/from/local-preview.json" --yes
 ```
 
-For a portable capture, or if you change the checkout or Codex Security state
-directory, run `--dry-run` there first and pass the returned path to `--yes`.
-
-Codex Security keeps each Sonar issue key and its native evidence, including
-reported file ranges and available data-flow traces. For monorepos, Codex
-Security maps paths relative to the Sonar project when it can verify the
-project's base directory in the checkout. When the base is unknown, the
-native components, ranges and flows remain available in the evidence.
-Reimporting the same issue in the same source and repository updates its
-record. Imported records start as unassessed findings.
-
-## Publish the same capture to Cloud
-
-From the same checkout, preview the capture with your Codex Security Cloud
-login. Your Cloud account must be enabled for external imports, and the
-deployment must accept the `sonar` source provider. Review the Cloud account,
-repository, environments, counts, and exclusions before confirming. Use
-the `capture` path from this Cloud preview to confirm. If the destination
-changes, preview again and confirm using the new path. Replaying the capture
-works without a Sonar login. For a checkout without a usable Git remote,
-verify the Sonar project's repository and pass `--source-repository-url` to
-the Cloud preview. If the configured remotes point to another repository,
-use the matching checkout or add its verified upstream remote before previewing.
+To import locally **and** publish to Cloud, start from the same checkout.
+Replay needs no Sonar login. Use a separate file-backed ChatGPT login with
+access to the connected Cloud repository and an authorized environment on a
+deployment that accepts the `sonar` provider. Review the Cloud account,
+repository and environment, then confirm with the **new Cloud capture**.
 
 ```sh
 codex-security import sonar "/path/from/local-preview.json" --to cloud --dry-run --format json
 codex-security import sonar "/path/from/cloud-preview.json" --to cloud --yes
 ```
 
-For a single local-and-Cloud workflow, add `--to cloud` to the first live
-preview and confirm using its saved capture. If Cloud authentication or
-repository selection fails, you can finish the local import, then rerun the
-Cloud preview with the saved capture. If an approved upload is interrupted,
-retry with the same file and destination.
+Read back the local records in the preview's `repository` and check the Cloud
+verification result if you published. Preview again if the checkout, state
+directory or destination changes. To resume an interrupted upload, reuse the
+approved capture and destination. [Readback and verification](README.md#save-or-publish-and-verify)
 
-## Use a native JSON export
+## Reference
 
-If you already have the complete response from `GET /api/issues/search` for
-one project and ref, save the page object or an array containing every page.
-The file reader uses the repository URL you verified for that Sonar project:
+### Project and repository selection
+
+Omit `--sonar-project` only when the checkout's Git origin maps to exactly
+one project in the active organization. For monorepos, supply the project
+key. When a search exceeds 10,000 results, select issue keys.
+[SonarQube plugin](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/)
+and [Codex Security import workflow](../../plugins/codex-security/skills/publish-findings/SKILL.md#sonarqube-cloud-issues)
+
+If Sonar lacks a repository binding, the checkout uses an SSH host alias or
+Cloud preview finds no usable remote, verify the project's Git URL in Sonar.
+Pass it as `--source-repository-url` when previewing the capture. At least
+one comparable remote must match if the checkout has any. A changed fetch
+URL requires a new preview.
+
+Each Sonar issue key identifies one record within its source and repository.
+Reimport updates its evidence, including file ranges and available data flows.
+In a monorepo, repository-relative locations require a verified Sonar project
+base directory.
+
+### Use a native JSON export
+
+For a saved `GET /api/issues/search` response, use a single page if it
+contains the complete result. Otherwise supply an array of all pages in
+order for the same project and ref. Pages can omit repository and ref context.
+Run the example from the checkout root and supply its verified repository URL.
+The example source key is for a new stream.
+
+To update issues from an earlier capture, use its preview's `repository` path
+for `--repository` and its exact `sourceKey` (`sonar:<hash>`) for `--source-key`.
+The local `publish findings` preview shows `source.source_key`, and each stored
+record has a `sourceKey`. Updating a matching issue replaces its evidence.
+Native pages can omit the issue URL and repository-relative locations. Replay
+the capture to preserve those fields, or use another key to store both versions.
 
 ```sh
-codex-security publish findings "/path/to/sonar-pages.json" --provider sonar \
+codex-security publish findings ../reports/sonar-pages.json --provider sonar \
   --to local --repository . --source-repository-url https://github.com/example/project \
   --source-key sonarcloud.io/example/example_project/branch/main --dry-run --format json
 ```
 
-Keep the source key stable for the same Sonar instance, organization, project,
-and ref. For updates to a previous import, use its exact source key. The
-native page can omit the branch, project repository URL, and Sonar instance.
-Only a Codex Security capture carries the collector's context for offline replay.
-
-See [Sonar's Codex plugin](https://www.sonarsource.com/blog/now-available-sonarqube-plugin-for-codex/),
-[Sonar CLI authentication](https://docs.sonarsource.com/sonarqube-cli/quickstart-guide#step-2-authenticate),
-and the [Codex Security Cloud publication guide](../../sdk/typescript/docs/cli.md#publish-findings-to-cloud).
+[Save and verify the native file](README.md#save-or-publish-and-verify) with the
+same `publish findings` command.

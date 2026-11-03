@@ -109,17 +109,19 @@ export function workerPermissionProfileOverride(args: readonly string[]) {
 export function assertWorkerSubagentPolicy(
   args: readonly string[],
   subagents: number,
+  codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
 ) {
   assertConfigOverrides(args, {
     "features.multi_agent_v2.enabled": false,
     "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
     "features.multi_agent": undefined,
-    "features.code_mode.excluded_tool_namespaces": undefined,
+    "features.code_mode.excluded_tool_namespaces":
+      codeMode?.excluded_tool_namespaces,
     ...(subagents === 0
       ? {
           "agents.max_threads": undefined,
           "features.enable_fanout": false,
-          "features.code_mode.enabled": undefined,
+          "features.code_mode.enabled": codeMode?.enabled,
         }
       : {
           "agents.max_threads": subagents,

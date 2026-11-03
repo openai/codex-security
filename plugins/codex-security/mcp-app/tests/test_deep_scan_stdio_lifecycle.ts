@@ -1,13 +1,17 @@
 import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
-import { assertNoError, assertFlagPair } from "./assertions.ts";
+import {
+  assertConfigOverrides,
+  assertNoError,
+  assertFlagPair,
+} from "./assertions.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -155,6 +159,7 @@ max_discovery_runs = 2
 profile = "selected"
 [profiles.selected]
 model_reasoning_summary = "none"
+service_tier = "ultrafast"
 `,
   );
   await writePythonWrapper(`${pythonWrapperPath}.mjs`);
@@ -261,10 +266,13 @@ model_reasoning_summary = "none"
       10,
       "tools/call",
       toolCall("start_codex_security_deep_scan", targetRequest, threadId, {
-        model: "gpt-5.5",
-        reasoning_effort: "xhigh",
-        thread_id: threadId,
-        turn_id: "active-parent-turn",
+        "x-codex-turn-metadata": {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+          service_tier: "default",
+        },
       }),
     );
 
@@ -311,6 +319,7 @@ model_reasoning_summary = "none"
       { code: "ENOENT" },
     );
     assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
+    assertConfigOverrides(startedWorker.argv, { service_tier: "ultrafast" });
     assertFlagPair(
       startedWorker.argv,
       "--cyber-access-program",
@@ -514,7 +523,12 @@ model_reasoning_summary = "none"
           userContext: "stdio failure fixture",
         },
         failureThreadId,
-        { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        {
+          "x-codex-turn-metadata": {
+            model: "gpt-5.6-sol",
+            reasoning_effort: "high",
+          },
+        },
       ),
     );
     const failedScanId = await waitForScanId({
@@ -727,7 +741,13 @@ model_reasoning_summary = "none"
         "start_codex_security_deep_scan",
         { scanId: resumedScanId, handoffClaimToken },
         resumedThreadId,
-        { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        {
+          "x-codex-turn-metadata": {
+            model: "gpt-5.6-sol",
+            reasoning_effort: "high",
+          },
+          "codex/turn-service-tier": "default",
+        },
       ),
     );
     let partial;
@@ -812,7 +832,13 @@ model_reasoning_summary = "none"
           "start_codex_security_deep_scan",
           { scanId: resumedScanId, handoffClaimToken },
           resumedThreadId,
-          { model: "gpt-6.1-sol", reasoning_effort: "max" },
+          {
+            "x-codex-turn-metadata": {
+              model: "gpt-6.1-sol",
+              reasoning_effort: "max",
+            },
+            "codex/turn-service-tier": "fast",
+          },
         ),
       );
       await waitFor(
@@ -854,7 +880,12 @@ model_reasoning_summary = "none"
           "start_codex_security_deep_scan",
           { scanId: resumedScanId, handoffClaimToken },
           resumedThreadId,
-          { model: "gpt-6.1-sol", reasoning_effort: "max" },
+          {
+            "x-codex-turn-metadata": {
+              model: "gpt-6.1-sol",
+              reasoning_effort: "max",
+            },
+          },
         ),
       );
       const modelRows = await execFileAsync(
@@ -959,6 +990,7 @@ model_reasoning_summary = "none"
       );
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
+        assertConfigOverrides(execution.argv, { service_tier: "default" });
         assertReadOnlyWorkerInvocation(execution.argv, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
@@ -1162,6 +1194,13 @@ async function testCliDeepScanEngine({
       "# scoped fixture\n",
     );
   }
+  const severityRubric = {
+    markdown: "# Severity\nUse the supplied evidence.\n",
+    revision: 7,
+    sha256: createHash("sha256")
+      .update("# Severity\nUse the supplied evidence.\n")
+      .digest("hex"),
+  };
   const userContext =
     "  Review café authentication.\r\nPreserve exact context.\t";
   const knowledgeBase = path.join(canonicalRoot, "knowledge-base");
@@ -1190,6 +1229,7 @@ async function testCliDeepScanEngine({
           repository,
           mode: "deep",
           maxCostUsd: 0.004,
+          severityRubric,
           target: scoped
             ? { kind: "paths", paths }
             : { kind: "repository", paths: [] },
@@ -1273,6 +1313,7 @@ async function testCliDeepScanEngine({
     assert.equal(entry.hasExpectedApiKey, true);
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
+    assert.deepEqual(context.severityRubric, severityRubric);
     if (context.workerLabel) {
       assert.deepEqual(context.includePaths, paths);
       assert.equal(context.userContext, userContext);
@@ -1437,12 +1478,7 @@ function toolCall(
   name: string,
   args: Record<string, unknown>,
   threadId: string,
-  turnMetadata?: {
-    model: string;
-    reasoning_effort: string;
-    thread_id?: string;
-    turn_id?: string;
-  },
+  metadata: Record<string, unknown> = {},
   sandboxState: unknown = parentSandboxState,
 ) {
   return {
@@ -1451,7 +1487,7 @@ function toolCall(
     _meta: {
       "openai/threadId": threadId,
       ...(sandboxState ? { "codex/sandbox-state-meta": sandboxState } : {}),
-      ...(turnMetadata ? { "x-codex-turn-metadata": turnMetadata } : {}),
+      ...metadata,
     },
   };
 }

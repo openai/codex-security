@@ -171,8 +171,35 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+for (const previewVersion of [58, 59]) {
+  test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
+    const database = memory(t, previewVersion - 1);
+    const rubricMigration = migrations.find((item) => item.version === 60)!;
+    applyMigrations(database, [
+      { ...rubricMigration, version: previewVersion },
+    ]);
+    const rubric = JSON.stringify({ sha256: "a".repeat(64), revision: 2 });
+    database
+      .prepare(
+        "INSERT INTO scan_severity_classifications (scan_id, finding_ids_json, assessed_at, rubric_binding_json) VALUES ('scan', '[]', 'assessed', ?)",
+      )
+      .run(rubric);
+
+    applyMigrations(database);
+    assertMigrationNames(database, 58, 59, 60);
+    assert.equal(
+      database
+        .prepare(
+          "SELECT rubric_binding_json FROM scan_severity_classifications WHERE scan_id = 'scan'",
+        )
+        .get()?.rubric_binding_json,
+      rubric,
+    );
+  });
+}
+
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [57, 58], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [57, 58, 59, 60], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
@@ -857,11 +884,22 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58])
+  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  assert.ok(
+    database
+      .prepare("PRAGMA table_info(scan_severity_classifications)")
+      .all()
+      .some((column) => column.name === "rubric_binding_json"),
+  );
+  assert.equal(
+    database.prepare("SELECT service_tier FROM deep_scan_runs").get()
+      ?.service_tier,
+    null,
+  );
   assert.equal(
     storedValue(database, "deep_scan_runs", "terminal_reviewed_surface_count"),
     null,
