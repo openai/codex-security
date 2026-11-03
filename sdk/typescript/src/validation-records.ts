@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { Readable } from "node:stream";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "zod";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "./config.js";
-import { runHostProtocol } from "./host-protocol.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { standaloneValidationPrompt } from "./standalone-validation-prompt.js";
 import { abortable } from "./targets.js";
@@ -93,29 +91,4 @@ export async function validateRecords(
       `Validation result does not match the output schema: ${JSON.stringify(validate.errors)}`,
     );
   return result;
-}
-
-export function runValidationRecordsProtocol(
-  input: Readable,
-  output: Parameters<typeof runHostProtocol>[1],
-  signal?: AbortSignal,
-): Promise<number> {
-  return runHostProtocol(
-    input,
-    output,
-    {
-      label: "Validation",
-      requestMethod: "review.run",
-      run: async (params, execute, signal) => ({
-        status: "completed",
-        result: await validateRecords(params as ValidateRecordsInput, {
-          signal,
-          reviewRunner: {
-            run: (request) => execute(request.requestId, request),
-          },
-        }),
-      }),
-    },
-    signal,
-  );
 }

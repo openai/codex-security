@@ -4,7 +4,6 @@ import argparse
 import os
 import sqlite3
 import sys
-from collections import Counter
 from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
@@ -204,8 +203,7 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    scan_count_by_target = Counter()
-    latest_by_target: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
+    by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
         f"""
         SELECT targets.id AS repository_id, targets.display_name, targets.current_path,
@@ -219,26 +217,24 @@ def list_repositories(
     ).fetchall():
         scan = scan_history.scan_summary(row) if row["id"] is not None else None
         target_id = row["repository_id"]
+        if target_id not in by_target:
+            by_target[target_id] = {
+                "displayName": row["display_name"],
+                "latestScan": scan,
+                "openFindingsCount": 0,
+                "scanCount": 0,
+                "targetId": target_id,
+                "targetPath": row["current_path"],
+            }
         if scan is not None:
-            scan_count_by_target[target_id] += 1
-        latest_by_target.setdefault(target_id, (row, scan))
+            by_target[target_id]["scanCount"] += 1
 
-    open_findings_by_target = Counter(
-        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
-    )
-    repositories = [
-        {
-            "displayName": target["display_name"],
-            "latestScan": latest_scan,
-            "openFindingsCount": open_findings_by_target[target_id]
-            if latest_scan is not None
-            else 0,
-            "scanCount": scan_count_by_target[target_id],
-            "targetId": target_id,
-            "targetPath": target["current_path"],
-        }
-        for target_id, (target, latest_scan) in latest_by_target.items()
-    ]
+    # A writer can publish a target or its first scan after the repository query.
+    for finding in _indexed_findings(connection):
+        repository = by_target.get(finding["target_id"])
+        if finding["status"] == "open" and repository is not None and repository["scanCount"]:
+            repository["openFindingsCount"] += 1
+    repositories = list(by_target.values())
     pagination = {}
     if args is not None:
         query = args.query.strip().casefold() if args.query else ""
