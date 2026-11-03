@@ -1580,6 +1580,14 @@ export async function capturePatchGitControls(
         for (const candidate of [path, ...children])
           if (!(await canPrepareStorage(candidate))) prepare = false;
         if (!prepare) {
+          // A non-directory ancestor makes both cache children unavailable.
+          let ancestor = canonical;
+          let metadata = await stat(ancestor).catch(missing);
+          while (metadata === undefined && dirname(ancestor) !== ancestor) {
+            ancestor = dirname(ancestor);
+            metadata = await stat(ancestor).catch(missing);
+          }
+          if (!metadata?.isDirectory()) continue;
           // Keep model write restrictions and let snapshots inherit host access.
           for (const child of children) {
             await rememberControl(child, true, false, true);
