@@ -803,7 +803,7 @@ function safeRelativePath(
   return normalized;
 }
 
-function portableRelativePath(value: string, context: string): string {
+export function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
   if (
     value.trim().length === 0 ||

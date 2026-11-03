@@ -43,6 +43,22 @@ const affected = [
       ],
     },
   },
+  {
+    package: { ecosystem: "crates.io", name: "fixture-parser" },
+    ranges: [
+      { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "1.2.0" }] },
+    ],
+    ecosystem_specific: {
+      affects: {
+        functions: [
+          "fixture_parser::Parser::read",
+          "fixture_parser::Parser::read_mut",
+        ],
+        arch: ["x86_64"],
+        os: ["linux"],
+      },
+    },
+  },
 ];
 
 test("normalizes the CVE and preserves OSV package versions and ranges", async () => {
@@ -161,6 +177,40 @@ test("omits code blocks and oversized paragraphs from advisory overviews", async
     );
     expect(advisories[0]?.overview).toBeUndefined();
   }
+});
+
+test("includes later applicability conditions and omits examples", async () => {
+  const conditions = [
+    "Both settings must be enabled:",
+    "",
+    "- `auth.identity_required`",
+    "- `dedupe.enabled`",
+    "",
+    "Both default to `false`. A runtime override takes precedence over `dedupe.enabled = true` in the file.",
+  ].join("\n");
+  const details = [
+    "### Summary",
+    "Configuration matters.",
+    "### Am I affected?",
+    conditions,
+    "",
+    "```text",
+    "Example command",
+    "### Nested heading in example",
+    "```",
+    "",
+    "#### Reproduction",
+    "Excluded reproduction details",
+    "",
+    "~~~text",
+    "### Prerequisites",
+    "Excluded example text",
+    "~~~",
+  ].join("\r\n");
+  const result = await lookupDependencyAdvisory(cve, undefined, async () =>
+    Response.json({ id: cve, details }),
+  );
+  expect(result.advisories[0]?.applicability).toBe(conditions);
 });
 
 test("rejects invalid IDs and cancellation before sending a request", async () => {

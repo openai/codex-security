@@ -111,6 +111,7 @@ import { lookupDependencyAdvisory } from "./dependency-advisory.js";
 import {
   dependencyAssessmentSchema,
   dependencyReachabilityReportSchema,
+  validateDependencyAssessment,
 } from "./dependency-reachability.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -1177,6 +1178,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly readOnlySkillRoot?: string;
   readonly directory?: string;
@@ -1212,6 +1214,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
+  signal?: AbortSignal;
   onUsage?: (usage: ScanTokenUsage) => void;
   context?: string;
   contextFile?: string;
@@ -1535,8 +1538,15 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
+  const controller = new AbortController();
+  const signal = output?.signal ?? controller.signal;
+  const removeSignals =
+    output?.signal === undefined
+      ? listenForAbort(DEFAULT_DEPENDENCIES, controller)
+      : undefined;
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   try {
+    signal.throwIfAborted();
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
     let modelProvider: string | undefined;
@@ -1545,7 +1555,9 @@ export async function runCodexSkillCommand(
       const ambientConfig =
         output.appServer === undefined
           ? {}
-          : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
+          : resolveCodexProfile(
+              await readCodexHomeConfig(processEnvironment, signal),
+            );
       const resolved = resolveSkillAuthentication(
         { ...output, auth: output.auth },
         processEnvironment,
@@ -1574,21 +1586,23 @@ export async function runCodexSkillCommand(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory)),
+          ...(await enclosingGitWorktreeRoots(directory, signal)),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
-        releaseCredentialHome =
-          await acquireCodexSecurityCredentialHomeLock(codexHome);
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          codexHome,
+          signal,
+        );
         let credentialsAvailable: boolean;
-        const ambientAuthConfig = await readCodexHomeConfig(selected);
-        credentialConfig = await readCodexHomeConfig({
-          ...selected,
-          CODEX_HOME: codexHome,
-        });
+        const ambientAuthConfig = await readCodexHomeConfig(selected, signal);
+        credentialConfig = await readCodexHomeConfig(
+          { ...selected, CODEX_HOME: codexHome },
+          signal,
+        );
         // Let native Codex apply the ambient home's project-trust decisions.
         for (const key of [
           ...CODEX_AUTH_CONFIG_KEYS,
@@ -1625,7 +1639,7 @@ export async function runCodexSkillCommand(
         };
         if (
           !credentialsAvailable &&
-          !(await accountStatus(command, selected)).authenticated
+          !(await accountStatus(command, selected, signal)).authenticated
         ) {
           throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
         }
@@ -1636,30 +1650,17 @@ export async function runCodexSkillCommand(
           provider,
         );
         if (output.appServer !== undefined) {
-          const controller = new AbortController();
-          const removeSignals = listenForAbort(
-            DEFAULT_DEPENDENCIES,
-            controller,
-          );
-          try {
-            args = [
-              ...args,
-              ...(await skillDaybreakConfigOverrides(
-                args,
-                command,
-                selected,
-                directory,
-                ambientConfig,
-                controller.signal,
-              )),
-            ];
-          } catch (error) {
-            if (controller.signal.aborted)
-              return controller.signal.reason === "SIGINT" ? 130 : 143;
-            throw error;
-          } finally {
-            removeSignals();
-          }
+          args = [
+            ...args,
+            ...(await skillDaybreakConfigOverrides(
+              args,
+              command,
+              selected,
+              directory,
+              ambientConfig,
+              signal,
+            )),
+          ];
         }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
@@ -1687,7 +1688,7 @@ export async function runCodexSkillCommand(
       }
       if (output.appServer === undefined) {
         const authConfig =
-          credentialConfig ?? (await readCodexHomeConfig(selected));
+          credentialConfig ?? (await readCodexHomeConfig(selected, signal));
         args = [
           ...args,
           ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
@@ -1737,38 +1738,29 @@ export async function runCodexSkillCommand(
       const configOverrides = args.flatMap((arg, index) =>
         arg === "--config" ? [args[index + 1]!] : [],
       );
-      const controller = new AbortController();
-      const removeSignals = listenForAbort(DEFAULT_DEPENDENCIES, controller);
-      try {
-        const permissions = await preflightReadOnlyProfileCodex(
-          {
-            codexPathOverride: command.command,
-            configOverrides,
-            env: Object.fromEntries(
-              Object.entries(environment).filter(
-                (pair): pair is [string, string] => pair[1] !== undefined,
-              ),
+      const permissions = await preflightReadOnlyProfileCodex(
+        {
+          codexPathOverride: command.command,
+          configOverrides,
+          env: Object.fromEntries(
+            Object.entries(environment).filter(
+              (pair): pair is [string, string] => pair[1] !== undefined,
             ),
-          },
-          profile,
-          output.codexOverrides ?? {},
-          output.directory,
-          controller.signal,
-        );
-        args = [
-          ...args,
-          ...permissions.configOverrides
-            .slice(configOverrides.length)
-            .flatMap((value) => ["--config", value]),
-        ];
-      } catch (error) {
-        if (controller.signal.aborted)
-          return controller.signal.reason === "SIGINT" ? 130 : 143;
-        throw error;
-      } finally {
-        removeSignals();
-      }
+          ),
+        },
+        profile,
+        output.codexOverrides ?? {},
+        output.directory,
+        signal,
+      );
+      args = [
+        ...args,
+        ...permissions.configOverrides
+          .slice(configOverrides.length)
+          .flatMap((value) => ["--config", value]),
+      ];
     }
+    signal.throwIfAborted();
     const invocation = spawn(
       executablePathForSpawn(command.command),
       [...args],
@@ -1814,14 +1806,9 @@ export async function runCodexSkillCommand(
         forceStatusCompletion?.();
       }, CHILD_TERMINATION_GRACE_MS);
     };
-    const onInterrupt = (): void => {
-      requestTermination("SIGINT");
-    };
-    const onTerminate = (): void => {
-      requestTermination("SIGTERM");
-    };
-    process.on("SIGINT", onInterrupt);
-    process.on("SIGTERM", onTerminate);
+    const onAbort = (): void =>
+      requestTermination(signal.reason === "SIGINT" ? "SIGINT" : "SIGTERM");
+    signal.addEventListener("abort", onAbort, { once: true });
     try {
       let diagnostic = "";
       invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
@@ -1923,10 +1910,14 @@ export async function runCodexSkillCommand(
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       forceStatusCompletion = null;
       forceCaptureCompletion = null;
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
+      signal.removeEventListener("abort", onAbort);
     }
+  } catch (error) {
+    const status = interruptedExitCode(signal);
+    if (status !== undefined) return status;
+    throw error;
   } finally {
+    removeSignals?.();
     await releaseCredentialHome?.();
   }
 }
@@ -2557,6 +2548,7 @@ export async function main(
           dependencies,
           {
             directory: repository,
+            signal: controller.signal,
             context: JSON.stringify(advisory),
             outputSchema,
             onUsage: (observed) => {
@@ -2569,7 +2561,11 @@ export async function main(
             `Attack path analysis exited with status ${exitCode}.`,
           );
         return dependencyReachabilityReportSchema.parse({
-          ...dependencyAssessmentSchema.parse(JSON.parse(report.text())),
+          ...(await validateDependencyAssessment(
+            JSON.parse(report.text()),
+            repository,
+            controller.signal,
+          )),
           cve: advisory.cve,
           advisories: advisory.advisories.map((entry) => entry.url),
           usage,
@@ -9053,6 +9049,7 @@ async function runSkill(
       providerResolved: provider !== undefined || validate,
     },
   );
+  options.signal?.throwIfAborted();
   return dependencies.runCodex(
     [
       ...(appServer
@@ -9146,6 +9143,7 @@ async function runSkill(
         ? { readOnlySkillRoot: join(plugin, "skills", skill) }
         : {}),
       ...(options.onUsage ? { onUsage: options.onUsage } : {}),
+      signal: options.signal,
       auth: options.auth ?? "auto",
       directory,
       modelProvider: provider,

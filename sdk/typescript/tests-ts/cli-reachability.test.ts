@@ -38,8 +38,18 @@ test("runs the bundled attack-path-analysis skill from the checkout root with th
     'import "sample-decoder"; // checkout-only marker\n',
   );
   const assessment = {
-    status: "unknown",
-    uses: [],
+    status: "ruled_out",
+    uses: [
+      {
+        location: "app",
+        component: "sample-decoder",
+        version: null,
+        verdict: "unknown",
+        deployment: "unknown",
+        reason: "The import does not identify a resolved version.",
+        evidence: [{ path: "app/index.ts", startLine: 1, endLine: 1 }],
+      },
+    ],
     limitations: ["No resolved version."],
   };
   const usage = {
@@ -98,6 +108,7 @@ test("runs the bundled attack-path-analysis skill from the checkout root with th
   expect(await runCli(args, deps), stderr.text()).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual({
     ...assessment,
+    status: "unknown",
     cve: advisory.cve,
     advisories: [advisory.advisories[0]!.url],
     usage,

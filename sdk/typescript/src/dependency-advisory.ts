@@ -12,6 +12,14 @@ const goImports = z.object({
   ),
 });
 
+const rustAffects = z.object({
+  affects: z.object({
+    functions: z.array(z.string()).optional(),
+    arch: z.array(z.string()).optional(),
+    os: z.array(z.string()).optional(),
+  }),
+});
+
 // Keep OSV's ordered events and explicit versions. A single package may have
 // several affected intervals, and a GIT range may have no package coordinates.
 const affected = z
@@ -37,11 +45,15 @@ const affected = z
     ecosystem_specific: z.unknown().optional(),
   })
   .transform(({ ecosystem_specific, ...entry }) => {
-    if (entry.package?.ecosystem === "Go") {
-      const metadata = goImports.safeParse(ecosystem_specific);
-      if (metadata.success)
-        return { ...entry, ecosystem_specific: metadata.data };
-    }
+    const schema =
+      entry.package?.ecosystem === "crates.io"
+        ? rustAffects
+        : entry.package?.ecosystem === "Go"
+          ? goImports
+          : undefined;
+    const metadata = schema?.safeParse(ecosystem_specific);
+    if (metadata?.success)
+      return { ...entry, ecosystem_specific: metadata.data };
     return entry;
   });
 
@@ -63,6 +75,7 @@ const osvRecord = z.object({
 type Advisory = Pick<z.infer<typeof osvRecord>, "summary" | "affected"> & {
   url: string;
   overview?: string;
+  applicability?: string;
 };
 
 /** Keep opening prose, excluding code blocks and later sections. */
@@ -82,6 +95,51 @@ function openingOverview(details: string | undefined): string | undefined {
     return;
   if (paragraph.replace(/`[\w.:-]+(?:\(\))?`/gu, "").includes("`")) return;
   return paragraph.trim().replaceAll(/\r?\n/gu, " ");
+}
+
+/** Include prose and lists under the advisory's applicability headings. */
+function applicabilityText(details: string | undefined): string | undefined {
+  const lines: string[] = [];
+  let collecting = false;
+  let fence = "";
+  for (const line of (details ?? "").split(/\r?\n/u)) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
+    if (fence) {
+      if (marker?.[1]?.startsWith(fence) && !marker[2]?.trim()) fence = "";
+      continue;
+    }
+    if (marker) {
+      fence = marker[1]!;
+      continue;
+    }
+    const heading = line.match(/^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u);
+    if (heading) {
+      collecting =
+        /^(?:am i affected\??|who is affected\??|affected (?:configurations|environments|deployments)|applicability|prerequisites)$/iu.test(
+          heading[1]!,
+        );
+      if (collecting) lines.push("");
+    } else if (collecting) {
+      lines.push(line);
+    }
+  }
+
+  const prose = lines
+    .join("\n")
+    .split(/\n[ \t]*\n/u)
+    .filter(
+      (block) =>
+        // Omit indented code, HTML/media, and inline code other than symbols
+        // or configuration settings (e.g. `enabled = true`).
+        block.trim() &&
+        !/^(?: {4}|\t| {0,3}[<>]| {0,3}!\[)/mu.test(block) &&
+        !block
+          .replace(/`[\w.:\[\]-]+(?:\(\))?(?:[ \t]*=[ \t]*[\w.-]+)?`/gu, "")
+          .includes("`"),
+    )
+    .join("\n\n")
+    .trim();
+  return prose || undefined;
 }
 
 // GetVulnById returns gRPC NOT_FOUND with space-separated IDs when only an
@@ -146,10 +204,12 @@ export async function lookupDependencyAdvisory(
       continue;
 
     const overview = openingOverview(record.details);
+    const applicability = applicabilityText(record.details);
     advisories.push({
       url: `https://osv.dev/vulnerability/${key}`,
       ...(record.summary && { summary: record.summary }),
       ...(overview && { overview }),
+      ...(applicability && { applicability }),
       affected: record.affected,
     });
   }
