@@ -1,4 +1,9 @@
+import { cp } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { admitCanonicalArtifacts } from "../src/scan-publication.js";
 import { writeSemanticScanDraft } from "../src/scan-draft-publication.js";
 
 test.each([false, true])(
@@ -38,7 +43,7 @@ test.each([false, true])(
         scanId: "synthetic-scan",
         handoffClaimToken: "synthetic-claim",
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [],
@@ -57,7 +62,12 @@ test.each([false, true])(
     const checkpoint = [...staged].find(([name]) =>
       name.endsWith(".checkpoint.json"),
     )![1];
+    expect(checkpoint).toHaveProperty("reviewState.surfaces", []);
     expect(checkpoint).not.toHaveProperty("handoffClaimToken");
+    const documents = [...staged].find(
+      ([name]) => !name.endsWith(".checkpoint.json"),
+    )![1];
+    expect(documents).toHaveProperty("reviewState.mode", "repository");
   },
 );
 
@@ -72,7 +82,7 @@ test.each([Infinity, -Infinity, NaN])(
         summary: "Synthetic boundary review.",
         audit: { measurement },
       },
-      coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+      reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     };
     const original = structuredClone(input);
     await expect(
@@ -94,5 +104,20 @@ test.each([Infinity, -Infinity, NaN])(
     ).rejects.toThrow("Stored finding JSON cannot contain non-finite numbers.");
     expect(writes).toEqual([]);
     expect(input).toEqual(original);
+  },
+);
+
+test.each(["completed-scan", "legacy-completed-scan"])(
+  "admits the canonical artifacts for the %s contract",
+  async (fixture) => {
+    await using temp = await scopedTemporaryDirectory("scan-publication-");
+    const scanDir = join(temp.path, "scan");
+    await cp(join(PLUGIN_ROOT, "examples", fixture), scanDir, {
+      recursive: true,
+    });
+    await admitCanonicalArtifacts({
+      scanDir,
+      signal: new AbortController().signal,
+    });
   },
 );

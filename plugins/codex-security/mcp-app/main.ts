@@ -1,9 +1,14 @@
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCodexSecurityServer } from "./server.js";
+import { CodexSecurityStdioTransport } from "./src/stdio-transport.js";
 
 async function main(): Promise<void> {
   const server = createCodexSecurityServer();
-  await server.connect(new StdioServerTransport());
+  await server.connect(
+    new CodexSecurityStdioTransport(process.stdin, process.stdout, {
+      // Local scan checkpoints can exceed the SDK's default 10 MiB buffer.
+      maxBufferSize: Infinity,
+    }),
+  );
   let closing = false;
   const close = async (exitCode?: number): Promise<void> => {
     if (closing) return;

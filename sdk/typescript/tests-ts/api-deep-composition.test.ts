@@ -1431,7 +1431,7 @@ process.exit(0);
                         scanId: id,
                         ...(partialCheckpoint ? { complete: false } : {}),
                         findings: childFindings as SemanticFinding[],
-                        coverage: {
+                        reviewState: {
                           surfaces: [],
                           explicitExclusions: [],
                           deferred: partialCheckpoint
@@ -1463,20 +1463,17 @@ process.exit(0);
                           writeFile(
                             join(directory, "scan-manifest.json"),
                             JSON.stringify({
-                              scan: { ...documents.manifest.scan, id },
+                              scan: {
+                                ...documents.manifest.scan,
+                                id,
+                                reviewState: documents.reviewState,
+                              },
                             }),
                           ),
                           writeFile(
                             join(directory, "findings.json"),
                             JSON.stringify({
                               ...documents.findings,
-                              scanId: id,
-                            }),
-                          ),
-                          writeFile(
-                            join(directory, "coverage.json"),
-                            JSON.stringify({
-                              ...documents.coverage,
                               scanId: id,
                             }),
                           ),
@@ -1606,7 +1603,7 @@ process.exit(0);
     const ownerSpy = ownerOutcome
       ? spyOn(ownerArtifacts, "writeScanOwnerSuggestions").mockImplementation(
           async (_repository, result, writer, options) => {
-            expect(result.coverage.mode).toBe("deep_repository");
+            expect(result.mode).toBe("deep_repository");
             expect(result.findings.findings).toHaveLength(1);
             expect(
               options.config?.codexOverrides?.["responses_api_metadata"],
@@ -1741,10 +1738,10 @@ process.exit(0);
         ).findings;
         expect(findings).toHaveLength(1);
         expect(findings[0]).toMatchObject(childFindings[0]!);
-        const coverage = JSON.parse(
-          await readFile(join(scanDir, "coverage.json"), "utf8"),
+        const manifest = JSON.parse(
+          await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
         );
-        expect(coverage).not.toHaveProperty("completeness");
+        expect(manifest.scan.review).toEqual({ excludedPaths: [] });
         if (partialCheckpoint) {
           expect(controller.signal.aborted).toBe(true);
           expect(checkpointSignal!.aborted).toBe(!completedCleanup);
@@ -1760,22 +1757,12 @@ process.exit(0);
             id: `${child["scanId"]}:0`,
             finding: childFindings[0],
           });
-          expect(coverage.deferred).toContainEqual(
-            expect.objectContaining({
-              id: `${child["scanId"]}/pending-candidate`,
-              candidateId: expect.stringMatching(
-                new RegExp(`^${child["scanId"]}:`),
-              ),
-              sourceCandidateId: "pending-candidate",
-              reason: "Independent source validation is pending.",
-              candidate: pendingCandidate,
-            }),
-          );
-          // Check the model-facing file contract, not exact instruction wording.
+          expect(manifest.scan.preservedSources).toBeDefined();
           for (const field of [
-            "scan.complete",
-            "coverage.deferred",
-            "candidateId",
+            "record_codex_security_scan_draft",
+            "complete:false",
+            "scan.reviewState",
+            "findings.json",
           ])
             expect(turns[0]!.prompt).toContain(field);
         }
@@ -2625,7 +2612,7 @@ process.exit(0);
           expect.objectContaining({ phase: "reporting" }),
         );
       expect(result.findings.findings).toHaveLength(budget ? 2 : 1);
-      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(result.review).not.toHaveProperty("completeness");
       const checkpoint = JSON.parse(
         await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
       );
@@ -2871,7 +2858,9 @@ process.exit(0);
       }
       if (budget) {
         expect(result.cost!.estimatedUsd).toBeGreaterThan(0.001);
-        expect(result.coverage.deferred.length).toBeGreaterThan(0);
+        expect(
+          checkpoint.aggregate.reviewState.deferred.length,
+        ).toBeGreaterThan(0);
         const stopped = await runWorkbench(
           { ...workbenches.get(children[1]!.id)!, signal: undefined },
           ["get-scan", "--scan-id", children[1]!.id],

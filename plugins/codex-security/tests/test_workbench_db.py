@@ -17,23 +17,21 @@ import pytest
 from workbench_test_support import (
     BUDGET_COST,
     SCRIPT,
-    claim_remediation_resend,
+    RemediationRequest,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
     initialize_git_repository,
     load_script,
     mark_deep_aggregate_ready,
-    mark_remediation_delivered,
-    request_remediation,
-    request_remediation_action,
+    read_review_state,
     run_workbench,
     save_workspace,
     scan_command,
-    set_remediation,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -128,9 +126,7 @@ EXPECTED_TABLES = {
 def budget_scan_fixture(
     tmp_path: Path, *, mode: str = "deep"
 ) -> tuple[Path, Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "app.py").write_text("value = request.args['value']\n")
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
@@ -166,7 +162,9 @@ def budget_scan_fixture(
     return state_dir, target, scan_dir, scan_id, checkpoint
 
 
-def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -> dict[str, object]:
+def complete_budget_scan(
+    state_dir: Path, scan_id: str, *, warning: str = BUDGET_WARNING, check: bool = True
+) -> dict[str, object]:
     return scan_command(
         state_dir,
         "complete-budget-exhausted-scan",
@@ -174,7 +172,7 @@ def complete_budget_scan(state_dir: Path, scan_id: str, *, check: bool = True) -
         "--cost-json",
         json.dumps(BUDGET_COST),
         "--message",
-        BUDGET_WARNING,
+        warning,
         check=check,
     )
 
@@ -285,9 +283,7 @@ def test_cost_limit_rejects_invalid_or_nonincreasing_totals(tmp_path: Path, limi
 
 
 def test_workbench_reopens_workspace_only_from_owning_thread(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-a")
 
     reopened = workspace_command(
@@ -353,29 +349,26 @@ def test_completion_normalizes_unsealed_deep_inventory_strategy_alias(
     completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
     assert completed["scan"]["progress"]["status"] == "complete"
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
     assert coverage["inventoryStrategy"] == "repository"
 
 
 def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "app.py"
     source.write_text("version = 1\n")
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         str(saved["id"]),
         "--scan-root",
         str(tmp_path / "scans"),
     )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
-    original_digest = started["results"]["contract"]["target"]["requiredSnapshotDigest"]
+    original_digest = started["contract"]["target"]["requiredSnapshotDigest"]
     source.write_text("version = 2\n")
 
     completed = scan_command(state_dir, "complete-scan", scan_id)
@@ -389,9 +382,7 @@ def test_completion_warns_after_plain_directory_changes(tmp_path: Path) -> None:
 
 
 def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "app.py").write_text("version = 1\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
@@ -411,9 +402,7 @@ def test_completion_warns_when_scanned_directory_becomes_unavailable(tmp_path: P
 
 
 def test_scan_start_rejects_artifact_root_inside_target(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
 
     failed = start_scan_command(
@@ -449,20 +438,17 @@ def test_workbench_serializes_concurrent_scan_completion(tmp_path: Path) -> None
 
 
 def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         str(saved["id"]),
         "--model",
         "gpt-5.6-sol",
         "--reasoning-effort",
         "high",
     )
-    scan = started["results"]
+    scan = started
     scan_id = str(scan["scanId"])
     assert scan["model"] == "gpt-5.6-sol"
     assert scan["reasoningEffort"] == "high"
@@ -490,9 +476,7 @@ def test_workbench_persists_scan_model_and_updates_it_from_progress(tmp_path: Pa
 
 
 def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     workspace_id = str(saved["id"])
     assert saved["userContext"] == "Pay attention to uploaded archives."
@@ -729,19 +713,54 @@ def test_completed_findings_are_summarized_and_sorted_by_severity(tmp_path: Path
     ]
 
 
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize("patch_name", ["remediation.patch", " remediation.patch"])
-def test_completed_finding_triage_and_remediation_persist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str, patch_name: str
-) -> None:
+@pytest.fixture
+def git_autocrlf(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
-    state_dir = tmp_path / "state"
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "patch_name", ["remediation.patch", " remediation.patch"], ids=["plain", "leading-space"]
+)
+def test_reviewed_patch_matches_unversioned_checkout_bytes(
+    workbench_api, tmp_path: Path, git_autocrlf, line_ending: bytes, patch_name: str
+) -> None:
     target = tmp_path / "target"
     target.mkdir()
     source = target / "source.txt"
-    source.write_bytes(f"vulnerable{line_ending}".encode())
+    source.write_bytes(b"vulnerable" + line_ending)
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    revision, original, _device, inode = workbench_api["scan_target_identity"](target, None)
+    assert revision == "unversioned"
+    scan = {
+        "target_path": str(target),
+        "target_inode": inode,
+        "target_revision": revision,
+        "scan_dir": str(scan_dir),
+    }
+    patch = scan_dir / patch_name
+    write_remediation_patch(patch, newline="\n")
+    if patch_name.startswith(" "):
+        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
+    remediation = {
+        "base_revision": revision,
+        "base_content_digest": original,
+        "patch_digest": f"sha256:{hashlib.sha256(patch.read_bytes()).hexdigest()}",
+    }
+    assert workbench_api["require_scan_relative_file"](scan, patch_name) == patch_name
+    subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=target, check=True)
+    _, applied = workbench_api["remediation_checkout_snapshot"](scan)
+    assert applied != original
+    assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
+
+
+def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    source = target / "source.txt"
+    source.write_bytes(b"vulnerable\r\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -775,11 +794,9 @@ def test_completed_finding_triage_and_remediation_persist(
         "Patched before this scan completed.",
     )
 
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
-    closed_request = request_remediation(
-        state_dir, occurrence_id, request_id, generation_token, check=False
-    )
+    closed_request = request.start(generation_token, check=False)
     assert "Reopen this finding" in str(closed_request["stderr"])
     set_triage(state_dir, occurrence_id, "open")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -795,7 +812,7 @@ def test_completed_finding_triage_and_remediation_persist(
             ("closed", "already_fixed", "Patched before this scan completed."),
             ("open", None, None),
         ]
-    requested = request_remediation(state_dir, occurrence_id, request_id, generation_token)["scan"]
+    requested = request.start(generation_token)["scan"]
     assert requested["findings"][0]["remediationState"]["state"] == "requested"
     assert requested["findings"][0]["remediationState"]["pendingAction"] == "generate"
     assert requested["findings"][0]["remediationState"]["actionClaimToken"] == generation_token
@@ -803,21 +820,13 @@ def test_completed_finding_triage_and_remediation_persist(
         state_dir, occurrence_id, "closed", "--close-reason", "already_fixed", check=False
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
+    patch_name = " remediation.patch"
     patch_path = scan_dir / patch_name
     write_remediation_patch(patch_path, newline="\n")
-    if patch_name.startswith(" "):
-        (scan_dir / patch_name.strip()).write_text("different patch contents\n")
-    generated = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    (scan_dir / patch_name.strip()).write_text("different patch contents\n")
+    generated = request.generate(
         generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
+        patch_path,
         "--summary",
         "Contained archive extraction under the selected output directory.",
     )["scan"]
@@ -834,24 +843,20 @@ def test_completed_finding_triage_and_remediation_persist(
     assert generated["findings"][0]["remediationState"]["summary"] == (
         "Contained archive extraction under the selected output directory."
     )
+    selected = get_scan(state_dir, scan_id, "--occurrence-id", f" {occurrence_id}\t")
+    for result in (selected["scan"], selected["workspace"]["results"]):
+        assert result["findingCount"] == 1
+        assert result["findings"] == generated["findings"]
     apply_token = str(uuid.uuid4())
-    apply_requested = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", apply_token
-    )["scan"]
+    apply_requested = request.request_action("2", "apply", apply_token)["scan"]
     assert apply_requested["findings"][0]["remediationState"]["pendingAction"] == "apply"
     assert apply_requested["findings"][0]["remediationState"]["actionClaimToken"] == apply_token
     assert apply_requested["findings"][0]["remediationState"]["version"] == 3
-    apply_retried = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", apply_token
-    )["scan"]
+    apply_retried = request.request_action("2", "apply", apply_token)["scan"]
     assert apply_retried["findings"][0]["remediationState"]["version"] == 3
-    wrong_apply = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", generation_token, check=False
-    )
+    wrong_apply = request.request_action("2", "apply", generation_token, check=False)
     assert "operation is already pending" in str(wrong_apply["stderr"])
-    live_resend = claim_remediation_resend(
-        state_dir, occurrence_id, request_id, str(uuid.uuid4()), check=False
-    )
+    live_resend = request.claim_resend(str(uuid.uuid4()), check=False)
     assert "still owned by another panel" in str(live_resend["stderr"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -860,53 +865,23 @@ def test_completed_finding_triage_and_remediation_persist(
             SET pending_action_claimed_at = ?
             WHERE request_id = ?
             """,
-            ("2000-01-01T00:00:00Z", request_id),
+            ("2000-01-01T00:00:00Z", request.id),
         )
     resend_token = str(uuid.uuid4())
-    stale_resend = claim_remediation_resend(state_dir, occurrence_id, request_id, resend_token)[
-        "scan"
-    ]
+    stale_resend = request.claim_resend(resend_token)["scan"]
     assert stale_resend["findings"][0]["remediationState"]["actionClaimToken"] == resend_token
-    wrong_release = run_workbench(
-        state_dir,
-        "release-finding-remediation-claim",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        str(uuid.uuid4()),
-    )["scan"]
+    wrong_release = request.release_claim(str(uuid.uuid4()))["scan"]
     assert wrong_release["findings"][0]["remediationState"]["actionClaimToken"] == resend_token
-    released = run_workbench(
-        state_dir,
-        "release-finding-remediation-claim",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        resend_token,
-    )["scan"]
+    released = request.release_claim(resend_token)["scan"]
     assert released["findings"][0]["remediationState"]["actionClaimToken"] is None
-    unowned_apply = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        resend_token,
-        "3",
-        "applied",
-        "--base-revision",
-        "unversioned",
-        check=False,
+    unowned_apply = request.update(
+        resend_token, "3", "applied", "--base-revision", "unversioned", check=False
     )
     assert "does not have an owned pending host request" in str(unowned_apply["stderr"])
     retry_token = str(uuid.uuid4())
-    reclaimed = claim_remediation_resend(state_dir, occurrence_id, request_id, retry_token)["scan"]
+    reclaimed = request.claim_resend(retry_token)["scan"]
     assert reclaimed["findings"][0]["remediationState"]["actionClaimToken"] == retry_token
-    delivered = mark_remediation_delivered(state_dir, occurrence_id, request_id, retry_token)[
-        "scan"
-    ]
+    delivered = request.mark_delivered(retry_token)["scan"]
     assert delivered["findings"][0]["remediationState"]["actionDeliveredAt"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -915,23 +890,18 @@ def test_completed_finding_triage_and_remediation_persist(
             SET pending_action_claimed_at = ?, pending_action_delivered_at = ?
             WHERE request_id = ?
             """,
-            ("2000-01-01T00:00:00Z", "2000-01-01T00:00:00Z", request_id),
+            ("2000-01-01T00:00:00Z", "2000-01-01T00:00:00Z", request.id),
         )
     recovery_token = str(uuid.uuid4())
-    recovered_delivery = claim_remediation_resend(
-        state_dir, occurrence_id, request_id, recovery_token
-    )["scan"]
+    recovered_delivery = request.claim_resend(recovery_token)["scan"]
     assert (
         recovered_delivery["findings"][0]["remediationState"]["actionClaimToken"] == recovery_token
     )
     assert recovered_delivery["findings"][0]["remediationState"]["actionDeliveredAt"] is None
-    mark_remediation_delivered(state_dir, occurrence_id, request_id, recovery_token)
+    request.mark_delivered(recovery_token)
     replacement_path = scan_dir / "replacement.patch"
     replacement_path.write_text("diff --git a/src/other.py b/src/other.py\n")
-    replaced_patch = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    replaced_patch = request.update(
         recovery_token,
         "3",
         "applied",
@@ -944,16 +914,8 @@ def test_completed_finding_triage_and_remediation_persist(
         check=False,
     )
     assert "cannot replace its reviewed patch path" in str(replaced_patch["stderr"])
-    unchanged_apply = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        recovery_token,
-        "3",
-        "applied",
-        "--base-revision",
-        "unversioned",
-        check=False,
+    unchanged_apply = request.update(
+        recovery_token, "3", "applied", "--base-revision", "unversioned", check=False
     )
     assert "checkout is unchanged" in str(unchanged_apply["stderr"])
     subprocess.run(
@@ -964,23 +926,12 @@ def test_completed_finding_triage_and_remediation_persist(
     applied_source = source.read_bytes()
     unrelated = target / "unrelated.txt"
     unrelated.write_text("not part of the reviewed patch\n")
-    extra_changes = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        recovery_token,
-        "3",
-        "applied",
-        "--base-revision",
-        "unversioned",
-        check=False,
+    extra_changes = request.update(
+        recovery_token, "3", "applied", "--base-revision", "unversioned", check=False
     )
     assert "changes outside the reviewed patch" in str(extra_changes["stderr"])
     unrelated.unlink()
-    applied = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    applied = request.update(
         recovery_token,
         "3",
         "applied",
@@ -991,20 +942,11 @@ def test_completed_finding_triage_and_remediation_persist(
     )["scan"]
     assert applied["findings"][0]["remediationState"]["state"] == "applied"
     verify_token = str(uuid.uuid4())
-    verify_requested = request_remediation_action(
-        state_dir, occurrence_id, request_id, "4", "verify", verify_token
-    )["scan"]
+    verify_requested = request.request_action("4", "verify", verify_token)["scan"]
     assert verify_requested["findings"][0]["remediationState"]["pendingAction"] == "verify"
-    verifying = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        verify_token,
-        "5",
-        "verifying",
-        "--base-revision",
-        "unversioned",
-    )["scan"]
+    verifying = request.update(verify_token, "5", "verifying", "--base-revision", "unversioned")[
+        "scan"
+    ]
     assert verifying["findings"][0]["remediationState"]["state"] == "verifying"
     assert verifying["findings"][0]["remediationState"]["pendingAction"] == "verify"
     assert verifying["findings"][0]["remediationState"]["actionClaimToken"] == verify_token
@@ -1015,28 +957,16 @@ def test_completed_finding_triage_and_remediation_persist(
             SET pending_action_claimed_at = ?
             WHERE request_id = ?
             """,
-            ("2000-01-01T00:00:00Z", request_id),
+            ("2000-01-01T00:00:00Z", request.id),
         )
     recovery_token = str(uuid.uuid4())
-    recovered = claim_remediation_resend(state_dir, occurrence_id, request_id, recovery_token)[
-        "scan"
-    ]
+    recovered = request.claim_resend(recovery_token)["scan"]
     assert recovered["findings"][0]["remediationState"]["actionClaimToken"] == recovery_token
-    verifying_again = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        recovery_token,
-        "6",
-        "verifying",
-        "--base-revision",
-        "unversioned",
+    verifying_again = request.update(
+        recovery_token, "6", "verifying", "--base-revision", "unversioned"
     )["scan"]
     assert verifying_again["findings"][0]["remediationState"]["pendingAction"] == "verify"
-    verified = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    verified = request.update(
         recovery_token,
         "7",
         "verified",
@@ -1125,9 +1055,7 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
 def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     tmp_path: Path, *, replacement_kind: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.txt").write_text("vulnerable\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
@@ -1154,9 +1082,7 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
     assert refreshed["remediationAvailable"] is False
     assert "checkout path was replaced" in refreshed["remediationUnavailableReason"]
     assert "absolutePath" not in refreshed["findings"][0]["locations"][0]
-    rejected = request_remediation(
-        state_dir, occurrence_id, str(uuid.uuid4()), str(uuid.uuid4()), check=False
-    )
+    rejected = RemediationRequest(state_dir, occurrence_id).start(str(uuid.uuid4()), check=False)
     assert "checkout path was replaced" in str(rejected["stderr"])
 
 
@@ -1193,24 +1119,21 @@ def test_finding_management_rejects_invalid_state_transitions(tmp_path: Path) ->
         missing_wont_fix_rationale["stderr"]
     )
 
-    invalid_transition = set_remediation(
-        state_dir, occurrence_id, str(uuid.uuid4()), str(uuid.uuid4()), "1", "verified", check=False
+    invalid_transition = RemediationRequest(state_dir, occurrence_id).update(
+        str(uuid.uuid4()), "1", "verified", check=False
     )
     assert "remediation request not found" in str(invalid_transition["stderr"])
 
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, generation_token)
-    overlapping_request = request_remediation(
-        state_dir, occurrence_id, str(uuid.uuid4()), str(uuid.uuid4()), check=False
+    request.start(generation_token)
+    overlapping_request = RemediationRequest(state_dir, occurrence_id).start(
+        str(uuid.uuid4()), check=False
     )
     assert "active remediation operation" in str(overlapping_request["stderr"])
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/src/extract.py b/src/extract.py\n")
-    digest_mismatch = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
+    digest_mismatch = request.update(
         generation_token,
         "1",
         "generated",
@@ -1225,36 +1148,19 @@ def test_finding_management_rejects_invalid_state_transitions(tmp_path: Path) ->
     patch_path.write_bytes(
         b"diff --git a/src/extract.py b/src/extract.py\n+" + b"x" * (2 * 1024 * 1024)
     )
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-    )
+    request.generate(generation_token, patch_path)
     generated = get_scan(state_dir, scan_id)["scan"]
     remediation = generated["findings"][0]["remediationState"]
     assert remediation["patch"].endswith("... patch preview truncated ...")
     assert remediation["patchStats"]["previewTruncated"] is True
-    replayed_generation = set_remediation(
-        state_dir, occurrence_id, request_id, generation_token, "2", "generated", check=False
-    )
+    replayed_generation = request.update(generation_token, "2", "generated", check=False)
     assert "does not have an owned pending host request" in str(replayed_generation["stderr"])
     patch_path.write_text("tampered after review\n")
     refreshed = get_scan(state_dir, scan_id)["scan"]
     assert refreshed["findings"][0]["remediationState"]["patch"] is None
-    tampered_apply = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
-    )
+    tampered_apply = request.request_action("2", "apply", str(uuid.uuid4()), check=False)
     assert "Patch digest does not match" in str(tampered_apply["stderr"])
-    stale_replay = set_remediation(
-        state_dir, occurrence_id, request_id, generation_token, "1", "failed", check=False
-    )
+    stale_replay = request.update(generation_token, "1", "failed", check=False)
     assert "changed. Refresh it" in str(stale_replay["stderr"])
 
 
@@ -1280,13 +1186,12 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(tmp_path / "scans"),
     )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -1294,14 +1199,14 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
         relative_path="README.md",
         target_kind="git_worktree",
         target_revision=revision,
-        snapshot_digest=str(started["results"]["contract"]["target"]["requiredSnapshotDigest"]),
+        snapshot_digest=str(started["contract"]["target"]["requiredSnapshotDigest"]),
     )
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, generation_token)
+    request.start(generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text(
         "diff --git a/README.md b/README.md\n"
@@ -1312,42 +1217,17 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
         "+fixed\n"
     )
     (target / "README.md").write_text("changed while generating\n")
-    stale_generation = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-        check=False,
-    )
+    stale_generation = request.generate(generation_token, patch_path, check=False)
     assert "Working-tree contents changed" in str(stale_generation["stderr"])
     (target / "README.md").write_text("fixture\n")
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-    )
+    request.generate(generation_token, patch_path)
     (target / "README.md").write_text("changed after patch generation\n")
-    stale_checkout = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
-    )
+    stale_checkout = request.request_action("2", "apply", str(uuid.uuid4()), check=False)
     assert stale_checkout["returncode"] != 0
     assert "Working-tree contents changed" in str(stale_checkout["stderr"])
     (target / "README.md").write_text("fixture\n")
     apply_token = str(uuid.uuid4())
-    request_remediation_action(state_dir, occurrence_id, request_id, "2", "apply", apply_token)
+    request.request_action("2", "apply", apply_token)
     subprocess.run(
         ["git", "apply", "--directory=nested-target", str(patch_path)],
         cwd=repository,
@@ -1364,29 +1244,12 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
         ignored_entry.write_text("ignored runtime data\n")
     unrelated = target / "unrelated.txt"
     unrelated.write_text("not reviewed\n")
-    extra_changes = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        apply_token,
-        "3",
-        "applied",
-        "--base-revision",
-        revision,
-        check=False,
+    extra_changes = request.update(
+        apply_token, "3", "applied", "--base-revision", revision, check=False
     )
     assert "changes outside the reviewed patch" in str(extra_changes["stderr"])
     unrelated.unlink()
-    applied = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        apply_token,
-        "3",
-        "applied",
-        "--base-revision",
-        revision,
-    )
+    applied = request.update(apply_token, "3", "applied", "--base-revision", revision)
     assert applied["scan"]["findings"][0]["remediationState"]["state"] == "applied"
 
 
@@ -1396,47 +1259,26 @@ def test_finding_remediation_rejects_delayed_update_after_superseding_patch(tmp_
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
-    first_request_id = str(uuid.uuid4())
+    first_request = RemediationRequest(state_dir, occurrence_id)
     first_generation_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, first_request_id, first_generation_token)
+    first_request.start(first_generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/src/extract.py b/src/extract.py\n")
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        first_request_id,
-        first_generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-    )
-    request_remediation(state_dir, occurrence_id, str(uuid.uuid4()), str(uuid.uuid4()))
-    delayed = set_remediation(
-        state_dir,
-        occurrence_id,
-        first_request_id,
-        first_generation_token,
-        "2",
-        "applied",
-        "--base-revision",
-        "unversioned",
-        check=False,
+    first_request.generate(first_generation_token, patch_path)
+    RemediationRequest(state_dir, occurrence_id).start(str(uuid.uuid4()))
+    delayed = first_request.update(
+        first_generation_token, "2", "applied", "--base-revision", "unversioned", check=False
     )
     assert "changed. Refresh it" in str(delayed["stderr"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
             "SELECT state, version FROM finding_remediation_attempts WHERE request_id = ?",
-            (first_request_id,),
+            (first_request.id,),
         ).fetchone() == ("superseded", 3)
 
 
 def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_text("original\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
@@ -1444,50 +1286,23 @@ def test_finding_remediation_rejects_unversioned_directory_changes(tmp_path: Pat
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     scan_dir = Path(str(completed["scanDir"]))
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, generation_token)
+    request.start(generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/source.txt b/source.txt\n")
     source.write_text("changed while generating\n")
-    stale_generation = set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-        check=False,
-    )
+    stale_generation = request.generate(generation_token, patch_path, check=False)
     assert "Working-tree contents changed" in str(stale_generation["stderr"])
     source.write_text("original\n")
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-    )
+    request.generate(generation_token, patch_path)
     source.write_text("changed before apply\n")
-    stale_apply = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
-    )
+    stale_apply = request.request_action("2", "apply", str(uuid.uuid4()), check=False)
     assert "Working-tree contents changed" in str(stale_apply["stderr"])
 
 
 def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_dir = Path(str(started["results"]["scanDir"]))
@@ -1495,9 +1310,7 @@ def test_workbench_defaults_scan_artifacts_to_persistent_state_dir(tmp_path: Pat
 
 
 def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     workspace_id = str(saved["id"])
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1517,9 +1330,7 @@ def test_workbench_serializes_concurrent_scan_starts(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     start_scan_command(state_dir, str(saved["id"]))
 
@@ -1530,9 +1341,7 @@ def test_workbench_rejects_setup_changes_after_scan_starts(tmp_path: Path) -> No
 
 
 def test_workbench_rejects_scoped_deep_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(state_dir, workspace_id, str(target), "src", "deep", check=False)
@@ -1541,9 +1350,7 @@ def test_workbench_rejects_scoped_deep_scan(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_diff_scan_for_non_git_target(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(state_dir, workspace_id, str(target), ".", "diff", check=False)
@@ -1753,6 +1560,76 @@ def test_workbench_marks_nested_git_paths_as_review_changes_unsupported(tmp_path
     assert inspected["targetMetadata"]["reviewChangesSupported"] is False
 
 
+@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
+def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
+    if os.name == "nt" and scope.endswith(" "):
+        pytest.skip("Windows removes trailing spaces from directory names.")
+    state_dir = tmp_path / "state"
+    target = tmp_path / ("target" if os.name == "nt" else "target ")
+    target.mkdir()
+    if target.name.endswith(" "):
+        (tmp_path / "target").mkdir()
+    (target / scope).mkdir()
+    if scope != scope.strip() and scope.strip() != "./":
+        (target / scope.strip()).mkdir()
+    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(
+        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
+    )
+    assert created["targetPath"] == str(target)
+    assert created["scope"] == scope
+    saved = save_workspace(
+        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
+    )
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == scope
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
+    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
+    assert scan["targetPath"] == str(target)
+    assert scan["scope"] == scope
+    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
+
+
+@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000], ids=["empty", "mixed", "long"])
+def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
+    state_dir = tmp_path / "state"
+    workspace_id = str(uuid.uuid4())
+    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
+    assert created["targetPath"] is None
+    assert created["scope"] == "."
+    target = tmp_path / "target"
+    target.mkdir()
+    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
+    assert saved["targetPath"] == str(target)
+    assert saved["scope"] == "."
+
+
+@pytest.mark.parametrize("field", ["scope", "target-path"])
+@pytest.mark.parametrize("leading", [False, True])
+def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
+    state_dir = tmp_path / "state"
+    value = " " * 5000 + "src" if leading else "src" + " " * 5000
+    result = run_workbench(
+        state_dir,
+        "create-workspace",
+        "--workspace-id",
+        str(uuid.uuid4()),
+        f"--{field}={value}",
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+
+
+def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
+    scope = " " * 4093 + "src"
+    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
+    assert created["scope"] == scope
+
+
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
@@ -1790,9 +1667,7 @@ def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
 
 
 def test_workbench_preserves_url_user_context_on_workspace_creation(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     user_context = (
         "Repository: https://github.com/example/security-review\n"
         "OAuth callback: https://accounts.example.test/oauth/callback"
@@ -1808,12 +1683,10 @@ def test_workbench_preserves_url_user_context_on_workspace_creation(tmp_path: Pa
 
 
 def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
+    started = start_delivered_scan(state_dir, str(workspace["id"]))
+    scan_id = str(started["scanId"])
 
     updated = scan_command(
         state_dir,
@@ -1869,9 +1742,7 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
 
 
 def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_workspace(
         state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", "missing"
     )
@@ -1972,6 +1843,14 @@ def create_saved_working_tree_workspace(
     )
 
 
+def start_working_tree_scan(
+    state_dir: Path, target: Path, revision: str, scan_root: Path
+) -> dict[str, object]:
+    workspace_id = str(uuid.uuid4())
+    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
+    return start_delivered_scan(state_dir, workspace_id, "--scan-root", str(scan_root))
+
+
 def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
@@ -2019,18 +1898,10 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     ).stdout.strip()
     (target / "README.md").write_text("scanned working-tree source\n" * 50)
     (target / "new-file.txt").write_text("selected content\n")
-    workspace_id = str(uuid.uuid4())
-    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
-    snapshot_digest = str(started["results"]["diffTarget"]["contentDigest"])
+    started = start_working_tree_scan(state_dir, target, revision, tmp_path / "scans")
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
+    snapshot_digest = str(started["diffTarget"]["contentDigest"])
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -2059,18 +1930,10 @@ def test_workbench_warns_after_working_tree_head_changes(
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
-    workspace_id = str(uuid.uuid4())
-    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
-    snapshot_digest = str(started["results"]["diffTarget"]["contentDigest"])
+    started = start_working_tree_scan(state_dir, target, revision, tmp_path / "scans")
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
+    snapshot_digest = str(started["diffTarget"]["contentDigest"])
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -2101,16 +1964,8 @@ def test_workbench_can_validate_legacy_nested_working_tree_scan(tmp_path: Path) 
     revision = initialize_git_repository(target)
     nested_target = target / "nested"
     nested_target.mkdir()
-    workspace_id = str(uuid.uuid4())
-    create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
+    started = start_working_tree_scan(state_dir, target, revision, tmp_path / "scans")
+    scan_id = str(started["scanId"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET target_path = ? WHERE id = ?",
@@ -2170,7 +2025,7 @@ def test_workbench_populates_manifest_with_working_tree_digest(tmp_path: Path) -
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert manifest["scan"]["target"]["snapshotDigest"] == diff_target["contentDigest"]
     assert manifest["scan"]["scope"] == {"includePaths": ["."], "excludePaths": []}
     assert coverage["mode"] == "working_tree"
@@ -2271,9 +2126,7 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
 def test_workbench_preserves_invalid_requested_initial_deep_scope(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "src").mkdir()
     workspace = create_workspace(
         state_dir,
@@ -2298,9 +2151,7 @@ def test_workbench_preserves_invalid_requested_initial_deep_scope(
 
 
 def test_workbench_discards_diff_target_for_non_diff_mode(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_workspace(
         state_dir,
         str(uuid.uuid4()),
@@ -2329,9 +2180,7 @@ def test_workbench_discards_diff_target_for_non_diff_mode(tmp_path: Path) -> Non
 
 
 def test_workbench_rejects_diff_target_when_saving_non_diff_mode(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
 
@@ -2462,9 +2311,7 @@ def test_review_changes_rejects_unborn_and_bare_git_repositories(tmp_path: Path)
 
 
 def test_workbench_rejects_missing_or_file_scope(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "file.py").write_text("print('fixture')\n")
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
@@ -2493,9 +2340,7 @@ def test_workbench_normalizes_absolute_scope_inside_target(tmp_path: Path) -> No
 
 
 def test_workbench_rejects_scope_escape(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
     failed = save_workspace(
@@ -2520,14 +2365,12 @@ def test_workbench_rejects_symlinked_scope_escape(tmp_path: Path) -> None:
 
 
 def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
+    started = start_delivered_scan(state_dir, str(saved["id"]))
     failed = update_progress(
         state_dir,
-        str(started["results"]["scanId"]),
+        str(started["scanId"]),
         "--review-items-total",
         "2",
         "--review-items-completed",
@@ -2539,12 +2382,10 @@ def test_workbench_rejects_progress_completed_above_total(tmp_path: Path) -> Non
 
 
 def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
     update_progress(
         state_dir,
         scan_id,
@@ -2568,15 +2409,13 @@ def test_workbench_rejects_regressive_progress(tmp_path: Path) -> None:
 
 
 def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id, "--target-path", str(target), "--mode", "deep")
     saved = save_workspace(state_dir, workspace_id, str(target), ".", "deep")
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    assert started["results"]["progress"]["reviewPass"] is None
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    assert started["progress"]["reviewPass"] is None
 
     update_progress(
         state_dir,
@@ -2603,24 +2442,21 @@ def test_workbench_tracks_review_pass_for_deep_scan_only(tmp_path: Path) -> None
     standard = create_saved_workspace(state_dir, standard_target)
     standard_scan = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         str(standard["id"]),
     )
     failed = update_progress(
-        state_dir, str(standard_scan["results"]["scanId"]), "--deep-review-pass", "1", check=False
+        state_dir, str(standard_scan["scanId"]), "--deep-review-pass", "1", check=False
     )
     assert failed["returncode"] != 0
     assert "Only Deep Scan" in str(failed["stderr"])
 
 
 def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    started_at = str(started["results"]["progress"]["updatedAt"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    started_at = str(started["progress"]["updatedAt"])
     time.sleep(0.001)
     updated = update_progress(state_dir, scan_id, "--phase", "validation")
     updated_at = str(updated["scan"]["progress"]["updatedAt"])
@@ -2631,16 +2467,14 @@ def test_workbench_updates_progress_timestamp_for_phase_and_failure(tmp_path: Pa
 
 
 def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("UPDATE scans SET target_revision = 'deadbeef' WHERE id = ?", (scan_id,))
         connection.commit()
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -2671,13 +2505,11 @@ def test_workbench_preserves_scan_when_git_revision_cannot_be_rechecked(tmp_path
 def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     tmp_path: Path, non_utf8_artifact: bool
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
 
     slug = "unsafe-archive-extraction"
@@ -2759,12 +2591,12 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         text=True,
     ).stdout.strip()
     saved = create_saved_git_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    assert started["results"]["contract"]["target"]["allowedKinds"] == ["git_revision"]
-    assert "requiredSnapshotDigest" not in started["results"]["contract"]["target"]
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    assert started["contract"]["target"]["allowedKinds"] == ["git_revision"]
+    assert "requiredSnapshotDigest" not in started["contract"]["target"]
     write_completed_contract(
-        Path(str(started["results"]["scanDir"])),
+        Path(str(started["scanDir"])),
         scan_id,
         target,
         relative_path=relative_path,
@@ -2773,15 +2605,11 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     )
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
-    manifest = json.loads(
-        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
-    )
+    manifest = json.loads((Path(str(started["scanDir"])) / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["revision"] == revision
     assert "snapshotDigest" not in manifest["scan"]["target"]
     finding = completed["scan"]["findings"][0]
-    saved_findings = json.loads(
-        (Path(str(started["results"]["scanDir"])) / "findings.json").read_text()
-    )
+    saved_findings = json.loads((Path(str(started["scanDir"])) / "findings.json").read_text())
     assert saved_findings["findings"][0]["locations"][0]["path"] == relative_path
     if long_path:
         assert len(relative_path.encode()) > 2048
@@ -2821,54 +2649,20 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.parametrize(
-    "separator", ["\f", "\v", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
-)
-def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, workbench_api) -> None:
+    separators = "\f\v\x1c\x1d\x1e\x85\u2028\u2029"
+    source = f"one\r\ntwo{separators}\rthree\nfour\r\nfive\rsix\nseven\r\neight\rnine\n"
     target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(
-            f"source line {line_number}{separator if line_number == 2 else ''}\n"
-            for line_number in range(1, 11)
-        ).encode(),
-    )
+    revision = commit_source_fixture(target, source.encode())
 
-    excerpt = finding_source_excerpt(
+    excerpt = workbench_api["finding_source_excerpt"](
         {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
         ["."],
     )
 
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
-        for line_number in range(2, 9)
-    )
-
-
-@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
-def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_ending: str) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
-    target = tmp_path / "target"
-    revision = commit_source_fixture(
-        target,
-        "".join(f"source line {line_number}{line_ending}" for line_number in range(1, 11)).encode(),
-    )
-
-    excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
-        target,
-        [{"path": "README.md", "startLine": 5, "endLine": 5}],
-        ["."],
-    )
-
-    assert excerpt == "\n".join(
-        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
-    )
+    assert excerpt == f"2  two{separators}\n3  three\n4  four\n5  five\n6  six\n7  seven\n8  eight"
 
 
 @pytest.mark.parametrize(
@@ -2885,10 +2679,9 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     ],
 )
 def test_source_excerpt_preserves_final_lines(
-    tmp_path: Path, source: bytes, expected_lines: list[str]
+    tmp_path: Path, source: bytes, expected_lines: list[str], workbench_api
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    finding_source_excerpt = namespace["finding_source_excerpt"]
+    finding_source_excerpt = workbench_api["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
     scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}
@@ -2921,9 +2714,9 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     saved = create_saved_git_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    allowed_kinds = started["results"]["contract"]["target"]["allowedKinds"]
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    allowed_kinds = started["contract"]["target"]["allowedKinds"]
     database = state_dir / "workbench.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("DELETE FROM schema_migrations WHERE version = 2")
@@ -2943,7 +2736,7 @@ def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
     migrated = get_scan(state_dir, scan_id)
     assert migrated["scan"]["contract"]["target"]["allowedKinds"] == allowed_kinds
     write_completed_contract(
-        Path(str(started["results"]["scanDir"])),
+        Path(str(started["scanDir"])),
         scan_id,
         target,
         target_kind="git_revision",
@@ -2960,12 +2753,12 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     dirty_content = "fixture\nlocal change\n"
     (target / "README.md").write_text(dirty_content)
     saved = create_saved_git_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    contract = started["results"]["contract"]["target"]
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    contract = started["contract"]["target"]
     assert contract["allowedKinds"] == ["git_worktree"]
     write_completed_contract(
-        Path(str(started["results"]["scanDir"])),
+        Path(str(started["scanDir"])),
         scan_id,
         target,
         target_kind="git_revision",
@@ -2975,18 +2768,16 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     # registered worktree kind and digest instead of discarding the scan.
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
-    manifest = json.loads(
-        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
-    )
+    manifest = json.loads((Path(str(started["scanDir"])) / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["kind"] == "git_worktree"
     assert manifest["scan"]["target"]["snapshotDigest"] == contract["requiredSnapshotDigest"]
 
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    snapshot_digest = str(started["results"]["contract"]["target"]["requiredSnapshotDigest"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    snapshot_digest = str(started["contract"]["target"]["requiredSnapshotDigest"])
 
     write_completed_contract(
-        Path(str(started["results"]["scanDir"])),
+        Path(str(started["scanDir"])),
         scan_id,
         target,
         target_kind="git_worktree",
@@ -2997,21 +2788,17 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [WORKTREE_CHANGED_WARNING]
-    manifest = json.loads(
-        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
-    )
+    manifest = json.loads((Path(str(started["scanDir"])) / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["revision"] == revision
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
 
 
 def test_workbench_generates_reports_during_completion(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
     (scan_dir / "report.html").write_text("<p>Stale HTML report</p>")
     (scan_dir / "report.md").write_text("# Untrusted report\n")
@@ -3031,9 +2818,9 @@ def test_workbench_omits_unsafe_symlink_source_path_without_hiding_finding(tmp_p
     outside.mkdir()
     (target / "src").symlink_to(outside, target_is_directory=True)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    write_completed_contract(Path(str(started["results"]["scanDir"])), scan_id, target)
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    write_completed_contract(Path(str(started["scanDir"])), scan_id, target)
     completed = scan_command(state_dir, "complete-scan", scan_id)
     location = completed["scan"]["findings"][0]["locations"][0]
     assert location["path"] == "src/extract.py"
@@ -3041,13 +2828,11 @@ def test_workbench_omits_unsafe_symlink_source_path_without_hiding_finding(tmp_p
 
 
 def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(scan_dir, scan_id, target)
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["reportAvailable"] is True
@@ -3057,74 +2842,27 @@ def test_workbench_hides_missing_artifact_on_reopen(tmp_path: Path) -> None:
     assert "markdownReport" not in reopened["scan"]["artifacts"]
 
 
-@pytest.mark.parametrize("scope", ["src", " component", "component ", "./ "])
-def test_workbench_roundtrips_literal_target_and_scope(tmp_path: Path, scope: str) -> None:
-    if os.name == "nt" and scope.endswith(" "):
-        pytest.skip("Windows removes trailing spaces from directory names.")
-    state_dir = tmp_path / "state"
-    target = tmp_path / ("target" if os.name == "nt" else "target ")
-    target.mkdir()
-    if target.name.endswith(" "):
-        (tmp_path / "target").mkdir()
-    (target / scope).mkdir()
-    if scope != scope.strip() and scope.strip() != "./":
-        (target / scope.strip()).mkdir()
-    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(target))
-    workspace_id = str(uuid.uuid4())
-    created = create_workspace(
-        state_dir, workspace_id, "--target-path", inspected["targetPath"], "--scope", scope
-    )
-    assert created["targetPath"] == str(target)
-    assert created["scope"] == scope
-    saved = save_workspace(
-        state_dir, workspace_id, created["targetPath"], created["scope"], "standard"
-    )
-    assert saved["targetPath"] == str(target)
-    assert saved["scope"] == scope
-    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
-    scan = get_scan(state_dir, started["results"]["scanId"])["scan"]
-    assert scan["targetPath"] == str(target)
-    assert scan["scope"] == scope
-    assert scan["contract"]["scope"]["requiredIncludePaths"] == [scope]
+@pytest.mark.skipif(os.name != "posix", reason="changes permissions on an open patch")
+def test_patch_digest_accepts_file_becoming_read_only(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "reviewed.patch"
+    patch = b"reviewed content\n"
+    path.write_bytes(patch)
+    path.chmod(0o600)
+    db = load_script("workbench_db")
+    with db.open_scan_local_file(tmp_path, path.name) as source:
+        read = source.read
 
+        def read_and_protect(size):
+            chunk = read(size)
+            os.fchmod(source.fileno(), 0o400)
+            return chunk
 
-@pytest.mark.parametrize("blank", ["", " \t\n", " " * 5000])
-def test_workbench_keeps_blank_workspace_path_defaults(tmp_path: Path, blank: str) -> None:
-    state_dir = tmp_path / "state"
-    workspace_id = str(uuid.uuid4())
-    created = create_workspace(state_dir, workspace_id, "--target-path", blank, "--scope", blank)
-    assert created["targetPath"] is None
-    assert created["scope"] == "."
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = save_workspace(state_dir, workspace_id, str(target), blank, "standard")
-    assert saved["targetPath"] == str(target)
-    assert saved["scope"] == "."
-
-
-@pytest.mark.parametrize("field", ["scope", "target-path"])
-@pytest.mark.parametrize("leading", [False, True])
-def test_workspace_checks_retained_literal_path_length(tmp_path: Path, field: str, leading: bool):
-    state_dir = tmp_path / "state"
-    value = " " * 5000 + "src" if leading else "src" + " " * 5000
-    result = run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        str(uuid.uuid4()),
-        f"--{field}={value}",
-        check=False,
-    )
-    assert result["returncode"] != 0
-    assert result["stderr"] == "Text value must be no longer than 4096 characters.\n"
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
-
-
-def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
-    scope = " " * 4093 + "src"
-    created = create_workspace(tmp_path / "state", str(uuid.uuid4()), "--scope", scope)
-    assert created["scope"] == scope
+        monkeypatch.setattr(source, "read", read_and_protect)
+        monkeypatch.setattr(db, "open_scan_local_file", lambda *_: source)
+        db.require_matching_patch_digest(
+            {"scan_dir": str(tmp_path)}, path.name, "sha256:" + hashlib.sha256(patch).hexdigest()
+        )
+    assert path.stat().st_mode & 0o777 == 0o400
 
 
 @pytest.mark.cross_platform

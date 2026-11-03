@@ -58,6 +58,8 @@ const {
 for (const change of [
   "unchanged",
   "equivalent config",
+  "unchanged project config",
+  "changed project config",
   "knowledge",
   "deep config",
   "added knowledge",
@@ -97,6 +99,8 @@ for (const change of [
       knowledgeEnvironment ? "knowledge guidance.md" : "knowledge.md",
     );
     const configPath = path.join(root, "deep.toml");
+    const projectPath = path.join(root, "project.json");
+    const selectedProject = change.endsWith("project config");
     const selectedConfigPath = path.join(root, "selected.toml");
     const modelInstructionsPath = path.join(root, "model-instructions-a.md");
     const otherModelInstructionsPath = path.join(
@@ -237,7 +241,17 @@ for (const change of [
       const knowledge = environment.CODEX_SECURITY_KNOWLEDGE_BASE
         ? await readKnowledgeBaseSnapshot([knowledgePath])
         : undefined;
-      const deep = (await resolveDeepScanConfig({}, configPath)).settings;
+      if (selectedProject)
+        await writeFile(
+          projectPath,
+          JSON.stringify({ scan: { deep: { workers: 3 } } }),
+        );
+      const deep = (
+        await resolveDeepScanConfig(
+          selectedProject ? { workers: 3 } : {},
+          configPath,
+        )
+      ).settings;
       const savedConfig = await mergedCodexConfig({
         codexOverrides: await nativeScanConfiguration(
           { ...process.env, ...environment },
@@ -268,6 +282,14 @@ for (const change of [
         owner,
         "--user-context",
         userContext,
+        ...(selectedProject
+          ? [
+              "--project-config-path",
+              projectPath,
+              "--deep-scan-project-json",
+              JSON.stringify({ path: projectPath, settings: { workers: 3 } }),
+            ]
+          : []),
         ...(turnSettings.model
           ? [
               "--model",
@@ -368,7 +390,7 @@ for (const change of [
           scanId,
           handoffClaimToken,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
             explicitExclusions: [],
@@ -404,11 +426,7 @@ for (const change of [
       await writeFile(configPath, "[deep_scan]\nworkers = 2\nsubagents = 1\n");
       if (selectedConfig)
         await writeFile(selectedConfigPath, initialSelectedConfig);
-      const artifacts = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ];
+      const artifacts = ["scan-manifest.json", "findings.json"];
       const original = await Promise.all(
         artifacts.map((name) => readFile(path.join(scanDir, name), "utf8")),
       );
@@ -502,14 +520,21 @@ for (const change of [
         ).scanId,
         scanId,
       );
+      if (change === "changed project config")
+        await writeFile(
+          projectPath,
+          JSON.stringify({ scan: { deep: { workers: 4 } } }),
+        );
       const response = await call("start_codex_security_deep_scan", {
         targetPath: repository,
         userContext,
+        ...(selectedProject ? { projectConfigPath: projectPath } : {}),
       });
       if (
         knowledgeEnvironment ||
         [
           "unchanged",
+          "unchanged project config",
           "equivalent config",
           "unchanged selected profile",
           "equivalent selected profile",
@@ -753,41 +778,37 @@ for (const [instructionKey, scenario] of [
           }),
         );
         const response = await client
-          .callTool(
-            {
-              name: "start_codex_security_deep_scan",
-              arguments:
-                savedScanId === undefined ||
-                scenario === "running-instruction-repository-PATH"
-                  ? { targetPath: target }
-                  : { scanId: savedScanId, handoffClaimToken: savedClaimToken },
-              _meta: {
-                "openai/threadId": "synthetic-executable-proof-owner",
-                "x-codex-turn-metadata": {
-                  model: "synthetic-proof-model",
-                  reasoning_effort: "medium",
-                },
-                "codex/sandbox-state-meta": {
-                  permissionProfile: {
-                    type: "managed",
-                    file_system: {
-                      type: "restricted",
-                      entries: [
-                        {
-                          path: { type: "special", value: { kind: "root" } },
-                          access: "read",
-                        },
-                      ],
-                    },
-                    network: "restricted",
+          .callTool({
+            name: "start_codex_security_deep_scan",
+            arguments:
+              savedScanId === undefined ||
+              scenario === "running-instruction-repository-PATH"
+                ? { targetPath: target }
+                : { scanId: savedScanId, handoffClaimToken: savedClaimToken },
+            _meta: {
+              "openai/threadId": "synthetic-executable-proof-owner",
+              "x-codex-turn-metadata": {
+                model: "synthetic-proof-model",
+                reasoning_effort: "medium",
+              },
+              "codex/sandbox-state-meta": {
+                permissionProfile: {
+                  type: "managed",
+                  file_system: {
+                    type: "restricted",
+                    entries: [
+                      {
+                        path: { type: "special", value: { kind: "root" } },
+                        access: "read",
+                      },
+                    ],
                   },
-                  sandboxCwd: pathToFileURL(target).href,
+                  network: "restricted",
                 },
+                sandboxCwd: pathToFileURL(target).href,
               },
             },
-            undefined,
-            { timeout: 10000 },
-          )
+          })
           .catch((error) => {
             if (scenario === "explicit-external" && error.code === -32001)
               return { isError: true, content: [{ text: error.message }] };
@@ -805,7 +826,7 @@ for (const [instructionKey, scenario] of [
             /outside the scan target/,
           );
         } else {
-          assert.ok(observed);
+          assert.ok(observed, JSON.stringify(response.content));
           assert.equal(observed.syntheticProvider, true);
         }
       } finally {

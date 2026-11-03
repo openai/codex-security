@@ -12,10 +12,22 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 from unittest import TestCase, mock
+
+BUDGET_COST = {
+    "model": "gpt-5.6-sol",
+    "inputTokens": 1250,
+    "cachedInputTokens": 200,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 30,
+    "estimatedUsd": 0.00625,
+}
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 
@@ -36,6 +48,75 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     return module
 
 
+def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
+    """Reconstruct internal review state from the retained publication inputs."""
+    review = load_script("review_state")
+
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    summary = manifest["scan"]
+    if review.uses_legacy_review(summary):
+        return json.loads((scan_dir / "coverage.json").read_text())
+    if "reviewState" in summary:
+        return review.review_state(summary)
+    if "preservedSources" not in summary:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    db = load_script("workbench_db")
+    saved = load_script("workbench_saved_results")
+    with (
+        nullcontext(state_dir)
+        if isinstance(state_dir, sqlite3.Connection)
+        else sqlite3.connect(state_dir / "workbench.sqlite3")
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
+        workers = connection.execute(
+            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+            (summary["id"],),
+        ).fetchall()
+    if summary["status"] == "completed" and scan["mode"] == "deep":
+        # Deep completion saves the accepted parent aggregate before sealing,
+        # including deadline recovery's validated records and pending tasks.
+        head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+        return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
+    binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
+    # This read-only helper reconstructs bookkeeping rather than reusing a sealed publication.
+    binding["status"] = "inspect-retained-review"
+    documents = saved.merge_saved_results(
+        scan_dir,
+        summary["id"],
+        binding,
+        workers,
+        [],
+        stopped=summary["status"] != "completed",
+        reason=(
+            f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
+        ).strip(),
+        frozen_source_digests=summary["preservedSources"],
+        checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
+        scan_mode=scan["mode"],
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        project_worker_coverage=scan["mode"] == "deep",
+    )
+    assert documents is not None
+    binding["status"] = summary["status"]
+    return (
+        load_script("finalize_scan_contract")
+        ._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            draft_documents=documents,
+            recover_unsealed=True,
+            allow_missing_writeups=summary["status"] == "completed",
+            finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+        )
+        .coverage
+    )
+
+
 def source_plugin_version() -> str:
     manifest = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
     version = manifest.get("version")
@@ -43,7 +124,7 @@ def source_plugin_version() -> str:
     return version
 
 
-def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
+def write_checkpoint(checkpoint_dir: Path, payload: Any, *, mtime_ns: int | None = None) -> Path:
     encoded = json.dumps(payload).encode()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_dir / f"{hashlib.sha256(encoded).hexdigest()}.json"
@@ -51,7 +132,45 @@ def write_checkpoint(checkpoint_dir: Path, payload: Any) -> Path:
         (checkpoint_dir / "pending").mkdir(exist_ok=True)
         (checkpoint_dir / "pending" / checkpoint_path.name).write_bytes(b"")
     checkpoint_path.write_bytes(encoded)
+    if mtime_ns is not None:
+        os.utime(checkpoint_path, ns=(mtime_ns, mtime_ns))
     return checkpoint_path
+
+
+def select_checkpoint(output: Path, checkpoint: Path, *, mtime_ns: int | None = None) -> Path:
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    if mtime_ns is not None:
+        os.utime(head, ns=(mtime_ns, mtime_ns))
+    return head
+
+
+def write_result_draft(path: Path, draft: dict, *, mtime_ns: int) -> None:
+    path.write_text(json.dumps(draft))
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def sort_checkpoint_entries(monkeypatch, *, key=None, reverse=False):
+    from workbench import saved_sources
+
+    children = saved_sources._children
+    monkeypatch.setattr(
+        saved_sources,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), key=key, reverse=reverse),
+    )
+
+
+def interrupt_publication(*args, **kwargs):
+    raise OSError("Synthetic publication interruption")
+
+
+def saved_coverage(*, deferred=(), surfaces=()):
+    return {
+        "surfaces": list(surfaces),
+        "explicitExclusions": [],
+        "deferred": list(deferred),
+    }
 
 
 def saved_draft(
@@ -88,6 +207,8 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     return {
         "id": worker_id,
         "kind": "discovery",
+        "status": "running",
+        "merge_state": "buffered",
         "artifact_dir": str(output),
         "result_manifest_path": None,
         "attempt": attempt,
@@ -183,6 +304,302 @@ def run_workbench(
     return json.loads(completed.stdout)
 
 
+def begin_deep_scan(
+    state_dir: Path, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, "begin-deep-scan", "--thread-id", thread_id, *extra, **options)
+
+
+def resume_deep_scan(
+    state_dir: Path, scan_id: str, thread_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "begin-deep-scan", scan_id, "--thread-id", thread_id, *extra, **options
+    )
+
+
+def commit_deep_dedup(
+    state_dir: Path,
+    scan_id: str,
+    worker_id: str,
+    result_manifest_path: str,
+    new_findings_count: str,
+    *extra: str,
+    **options: Any,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "commit-deep-scan-dedup",
+        scan_id,
+        "--worker-id",
+        worker_id,
+        "--result-manifest-path",
+        result_manifest_path,
+        "--new-findings-count",
+        new_findings_count,
+        *extra,
+        **options,
+    )
+
+
+def finish_deep_scan(
+    state_dir: Path,
+    scan_id: str,
+    terminal_reason: str,
+    manifest_path: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir,
+        "finish-deep-scan",
+        scan_id,
+        "--terminal-reason",
+        terminal_reason,
+        "--manifest-path",
+        manifest_path,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def set_triage(
+    state_dir: Path, occurrence_id: str, status: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence_id,
+        "--status",
+        status,
+        *extra,
+        **options,
+    )
+
+
+def mark_handoff_delivered(
+    state_dir: Path, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir, "mark-handoff-delivered", scan_id, claim_token, *extra, **options
+    )
+
+
+def attach_continuation(
+    state_dir: Path, scan_id: str, claim_token: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_claim_command(
+        state_dir,
+        "attach-scan-continuation-thread",
+        scan_id,
+        claim_token,
+        "--thread-id",
+        thread_id,
+        **options,
+    )
+
+
+def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
+
+
+def preserve_scan_results(
+    state_dir: Path, scan_id: str, thread_id: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "preserve-scan-results", scan_id, "--thread-id", thread_id, **options
+    )
+
+
+def start_scan_command(
+    state_dir: Path, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return workspace_command(state_dir, "start-scan", workspace_id, *extra, **options)
+
+
+def get_scan(state_dir: Path, scan_id: str, *extra: str, **options: Any) -> dict[str, object]:
+    return scan_command(state_dir, "get-scan", scan_id, *extra, **options)
+
+
+def fail_scan(
+    state_dir: Path, scan_id: str, message: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return scan_command(state_dir, "fail-scan", scan_id, "--message", message, *extra, **options)
+
+
+def scan_command(
+    state_dir: Path, command: str, scan_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--scan-id", scan_id, *extra, **options)
+
+
+def scan_claim_command(
+    state_dir: Path, command: str, scan_id: str, claim_token: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir, command, "--scan-id", scan_id, "--claim-token", claim_token, *extra, **options
+    )
+
+
+def workspace_command(
+    state_dir: Path, command: str, workspace_id: str, *extra: str, **options: Any
+) -> dict[str, object]:
+    return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
+
+
+def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
+    patch_path.write_text(
+        "diff --git a/source.txt b/source.txt\n"
+        "--- a/source.txt\n"
+        "+++ b/source.txt\n"
+        "@@ -1 +1 @@\n"
+        "-vulnerable\n"
+        "+fixed\n",
+        **text_options,
+    )
+
+
+@dataclass(frozen=True)
+class RemediationRequest:
+    state_dir: Path
+    occurrence_id: str
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def _run(
+        self, command: str, *args: str, check: bool = True, input_text: str | None = None
+    ) -> dict[str, object]:
+        return run_workbench(
+            self.state_dir,
+            command,
+            "--occurrence-id",
+            self.occurrence_id,
+            "--request-id",
+            self.id,
+            *args,
+            check=check,
+            input_text=input_text,
+        )
+
+    def start(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("request-finding-remediation", "--action-token", token, check=check)
+
+    def update(
+        self,
+        token: str,
+        version: str,
+        state: str,
+        *args: str,
+        check: bool = True,
+        input_text: str | None = None,
+    ) -> dict[str, object]:
+        return self._run(
+            "set-finding-remediation",
+            "--action-token",
+            token,
+            "--expected-version",
+            version,
+            "--state",
+            state,
+            *args,
+            check=check,
+            input_text=input_text,
+        )
+
+    def generate(
+        self, token: str, patch: Path, *args: str, check: bool = True
+    ) -> dict[str, object]:
+        digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+        return self.update(
+            token,
+            "1",
+            "generated",
+            "--patch-path",
+            patch.name,
+            "--patch-digest",
+            f"sha256:{digest}",
+            *args,
+            check=check,
+        )
+
+    def request_action(
+        self, version: str, action: str, token: str, *, check: bool = True
+    ) -> dict[str, object]:
+        return self._run(
+            "request-finding-remediation-action",
+            "--expected-version",
+            version,
+            "--action",
+            action,
+            "--action-token",
+            token,
+            check=check,
+        )
+
+    def claim_resend(self, token: str, *, check: bool = True) -> dict[str, object]:
+        return self._run("claim-finding-remediation-resend", "--action-token", token, check=check)
+
+    def cancel(self, token: str) -> dict[str, object]:
+        return self._run("cancel-finding-remediation-request", "--action-token", token)
+
+    def mark_delivered(self, token: str) -> dict[str, object]:
+        return self._run("mark-finding-remediation-delivered", "--action-token", token)
+
+    def release_claim(self, token: str) -> dict[str, object]:
+        return self._run("release-finding-remediation-claim", "--action-token", token)
+
+
+def save_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    target_path: str,
+    scope: str,
+    mode: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir,
+        "save-workspace",
+        workspace_id,
+        "--target-path",
+        target_path,
+        "--scope",
+        scope,
+        "--mode",
+        mode,
+        *extra,
+        check=check,
+        environment=environment,
+    )
+
+
+def create_workspace(
+    state_dir: Path,
+    workspace_id: str,
+    *extra: str,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return workspace_command(
+        state_dir, "create-workspace", workspace_id, *extra, environment=environment
+    )
+
+
+def update_progress(
+    state_dir: Path,
+    scan_id: str,
+    *extra: str,
+    check: bool = True,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return scan_command(
+        state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
+    )
+
+
 def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.", deep_status=None):
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
@@ -203,28 +620,27 @@ def fail_deep_scan(state_dir, codex_home, scan_id, *, message="Worker stopped.",
 
 def start_delivered_scan(
     state_dir: Path,
+    workspace_id: str,
     *args: str,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
-    started = run_workbench(state_dir, "start-scan", *args, environment=environment)
-    scan = started["results"]
+    scan = start_scan_command(state_dir, workspace_id, *args, environment=environment)["results"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
         )
     scan["handoffStatus"] = "delivered"
-    return started
+    return scan
 
 
 def start_workspace_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> tuple[str, Path]:
     started = start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(scan_root),
-    )["results"]
+    )
     return str(started["scanId"]), Path(str(started["scanDir"]))
 
 
@@ -233,10 +649,14 @@ def start_saved_scan(state_dir: Path, target: Path, scan_root: Path) -> tuple[st
     return start_workspace_scan(state_dir, str(saved["id"]), scan_root)
 
 
-def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
-    state_dir = tmp_path / "state"
+def empty_target_paths(tmp_path: Path) -> tuple[Path, Path]:
     target = tmp_path / "target"
     target.mkdir()
+    return tmp_path / "state", target
+
+
+def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
+    state_dir, target = empty_target_paths(tmp_path)
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     return state_dir, target, scan_id, scan_dir
 
@@ -425,6 +845,23 @@ def finding_fixture(
     }
 
 
+def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
+    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
+    artifact_dir.mkdir(parents=True)
+    prompt_path = artifact_dir / "prompt.md"
+    prompt_path.write_text(f"Prompt for {name}\n")
+    result_path = artifact_dir / "result.json"
+    return prompt_path, artifact_dir, result_path
+
+
+def read_draft_documents(scan_dir: Path) -> dict:
+    return {
+        "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
+        "findings": json.loads((scan_dir / "findings.json").read_text()),
+        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+    }
+
+
 def write_completed_contract(
     scan_dir: Path,
     scan_id: str,
@@ -572,15 +1009,6 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
     return value
 
 
-def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
-    artifact_dir = scan_dir / "artifacts" / "deep_discovery" / name
-    artifact_dir.mkdir(parents=True)
-    prompt_path = artifact_dir / "prompt.md"
-    prompt_path.write_text(f"Prompt for {name}\n")
-    result_path = artifact_dir / "result.json"
-    return prompt_path, artifact_dir, result_path
-
-
 def windows_file_backend() -> mock.Mock:
     backend = mock.Mock()
 
@@ -593,10 +1021,12 @@ def windows_file_backend() -> mock.Mock:
         payload: bytes,
         *,
         expected_root_identity: tuple[int, int] | None = None,
+        replace_existing: bool = True,
     ) -> None:
         path = scan_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        with path.open("wb" if replace_existing else "xb") as handle:
+            handle.write(payload)
 
     def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
@@ -629,425 +1059,16 @@ class ScanFixtureTestCase(TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    def rewrite_sealed_artifact(self, relative_path: str, payload: object) -> None:
+        self.write_json(relative_path, payload)
+        manifest = self.read_json("scan-manifest.json")
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == relative_path:
+                artifact["sha256"] = self.sha256_file(relative_path)
+                break
+        else:
+            raise AssertionError(f"missing sealed artifact: {relative_path}")
+        self.write_json("scan-manifest.json", manifest)
+
     def sha256_file(self, name: str) -> str:
         return hashlib.sha256((self.scan_dir / name).read_bytes()).hexdigest()
-
-
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
-
-
-def saved_coverage(*, deferred=(), surfaces=()):
-    return {
-        "surfaces": list(surfaces),
-        "explicitExclusions": [],
-        "deferred": list(deferred),
-    }
-
-
-def begin_deep_scan(
-    state_dir: Path, thread_id: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return run_workbench(state_dir, "begin-deep-scan", "--thread-id", thread_id, *extra, **options)
-
-
-def resume_deep_scan(
-    state_dir: Path, scan_id: str, thread_id: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return scan_command(
-        state_dir, "begin-deep-scan", scan_id, "--thread-id", thread_id, *extra, **options
-    )
-
-
-def get_deep_scan(
-    state_dir: Path, scan_id: str, thread_id: str, **options: Any
-) -> dict[str, object]:
-    return scan_command(state_dir, "get-deep-scan", scan_id, "--thread-id", thread_id, **options)
-
-
-def upsert_deep_worker(
-    state_dir: Path,
-    scan_id: str,
-    worker_id: str,
-    kind: str,
-    status: str,
-    prompt_path: str,
-    artifact_dir: str,
-    *extra: str,
-    **options: Any,
-) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "upsert-deep-scan-worker",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--kind",
-        kind,
-        "--status",
-        status,
-        "--prompt-path",
-        prompt_path,
-        "--artifact-dir",
-        artifact_dir,
-        *extra,
-        **options,
-    )
-
-
-def claim_deep_scan_dedup(
-    state_dir: Path,
-    scan_id: str,
-    worker_id: str,
-    prompt_path: str,
-    artifact_dir: str,
-    *extra: str,
-    check: bool = True,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "claim-deep-scan-dedup",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--prompt-path",
-        prompt_path,
-        "--artifact-dir",
-        artifact_dir,
-        *extra,
-        check=check,
-        environment=environment,
-    )
-
-
-def commit_deep_dedup(
-    state_dir: Path,
-    scan_id: str,
-    worker_id: str,
-    result_manifest_path: str,
-    new_findings_count: str,
-    *extra: str,
-    **options: Any,
-) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "commit-deep-scan-dedup",
-        scan_id,
-        "--worker-id",
-        worker_id,
-        "--result-manifest-path",
-        result_manifest_path,
-        "--new-findings-count",
-        new_findings_count,
-        *extra,
-        **options,
-    )
-
-
-def finish_deep_scan(
-    state_dir: Path,
-    scan_id: str,
-    terminal_reason: str,
-    manifest_path: str,
-    *extra: str,
-    check: bool = True,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return scan_command(
-        state_dir,
-        "finish-deep-scan",
-        scan_id,
-        "--terminal-reason",
-        terminal_reason,
-        "--manifest-path",
-        manifest_path,
-        *extra,
-        check=check,
-        environment=environment,
-    )
-
-
-def set_triage(
-    state_dir: Path, occurrence_id: str, status: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence_id,
-        "--status",
-        status,
-        *extra,
-        **options,
-    )
-
-
-def mark_handoff_delivered(
-    state_dir: Path, scan_id: str, claim_token: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return scan_claim_command(
-        state_dir, "mark-handoff-delivered", scan_id, claim_token, *extra, **options
-    )
-
-
-def attach_continuation(
-    state_dir: Path, scan_id: str, claim_token: str, thread_id: str, **options: Any
-) -> dict[str, object]:
-    return scan_claim_command(
-        state_dir,
-        "attach-scan-continuation-thread",
-        scan_id,
-        claim_token,
-        "--thread-id",
-        thread_id,
-        **options,
-    )
-
-
-def cancel_scan(state_dir: Path, scan_id: str, thread_id: str, **options: Any) -> dict[str, object]:
-    return scan_command(state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, **options)
-
-
-def preserve_scan_results(
-    state_dir: Path, scan_id: str, thread_id: str, **options: Any
-) -> dict[str, object]:
-    return scan_command(
-        state_dir, "preserve-scan-results", scan_id, "--thread-id", thread_id, **options
-    )
-
-
-def start_scan_command(
-    state_dir: Path, workspace_id: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return workspace_command(state_dir, "start-scan", workspace_id, *extra, **options)
-
-
-def get_scan(state_dir: Path, scan_id: str, *extra: str, **options: Any) -> dict[str, object]:
-    return scan_command(state_dir, "get-scan", scan_id, *extra, **options)
-
-
-def fail_scan(
-    state_dir: Path, scan_id: str, message: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return scan_command(state_dir, "fail-scan", scan_id, "--message", message, *extra, **options)
-
-
-def scan_command(
-    state_dir: Path, command: str, scan_id: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return run_workbench(state_dir, command, "--scan-id", scan_id, *extra, **options)
-
-
-def scan_claim_command(
-    state_dir: Path, command: str, scan_id: str, claim_token: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir, command, "--scan-id", scan_id, "--claim-token", claim_token, *extra, **options
-    )
-
-
-def workspace_command(
-    state_dir: Path, command: str, workspace_id: str, *extra: str, **options: Any
-) -> dict[str, object]:
-    return run_workbench(state_dir, command, "--workspace-id", workspace_id, *extra, **options)
-
-
-def write_remediation_patch(patch_path: Path, **text_options: Any) -> None:
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n",
-        **text_options,
-    )
-
-
-def request_remediation(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "request-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        check=check,
-    )
-
-
-def set_remediation(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    expected_version: str,
-    state: str,
-    *extra: str,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "set-finding-remediation",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        "--expected-version",
-        expected_version,
-        "--state",
-        state,
-        *extra,
-        check=check,
-    )
-
-
-def request_remediation_action(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    expected_version: str,
-    action: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "request-finding-remediation-action",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--expected-version",
-        expected_version,
-        "--action",
-        action,
-        "--action-token",
-        action_token,
-        check=check,
-    )
-
-
-def save_workspace(
-    state_dir: Path,
-    workspace_id: str,
-    target_path: str,
-    scope: str,
-    mode: str,
-    *extra: str,
-    check: bool = True,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return workspace_command(
-        state_dir,
-        "save-workspace",
-        workspace_id,
-        "--target-path",
-        target_path,
-        "--scope",
-        scope,
-        "--mode",
-        mode,
-        *extra,
-        check=check,
-        environment=environment,
-    )
-
-
-def create_workspace(
-    state_dir: Path,
-    workspace_id: str,
-    *extra: str,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return workspace_command(
-        state_dir, "create-workspace", workspace_id, *extra, environment=environment
-    )
-
-
-def update_progress(
-    state_dir: Path,
-    scan_id: str,
-    *extra: str,
-    check: bool = True,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
-    return scan_command(
-        state_dir, "update-progress", scan_id, *extra, check=check, environment=environment
-    )
-
-
-def claim_remediation_resend(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-    *,
-    check: bool = True,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "claim-finding-remediation-resend",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-        check=check,
-    )
-
-
-def cancel_remediation_request(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "cancel-finding-remediation-request",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )
-
-
-def mark_remediation_delivered(
-    state_dir: Path,
-    occurrence_id: str,
-    request_id: str,
-    action_token: str,
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "mark-finding-remediation-delivered",
-        "--occurrence-id",
-        occurrence_id,
-        "--request-id",
-        request_id,
-        "--action-token",
-        action_token,
-    )

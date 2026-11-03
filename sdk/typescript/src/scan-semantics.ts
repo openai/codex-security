@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import type {
@@ -28,7 +29,7 @@ export function semanticScanDraft(
   scanId: string,
   scan: JsonObject,
   findings: JsonObject[],
-  coverage: JsonObject,
+  reviewState: JsonObject,
 ): SemanticScan {
   const scope = isObject(scan["scope"])
     ? structuredClone(scan["scope"])
@@ -37,7 +38,7 @@ export function semanticScanDraft(
     delete scope["includePaths"];
     delete scope["excludePaths"];
   }
-  const semanticCoverage = structuredClone(coverage);
+  const semanticCoverage = structuredClone(reviewState);
   for (const field of [
     "documentType",
     "schemaVersion",
@@ -63,7 +64,7 @@ export function semanticScanDraft(
         delete semantic[field];
       return semantic;
     }),
-    coverage: semanticCoverage,
+    reviewState: semanticCoverage,
   } as SemanticScan;
 }
 
@@ -108,7 +109,13 @@ export function preserveFindingDetails(
   }
   if (!containsSavedFinding(current, previous)) {
     const original = withoutPreviousFindings(previous);
-    if (isObject(original["provenance"]))
+    if (
+      isObject(original["provenance"]) &&
+      containsSavedValue(
+        provenance["sourceFindings"],
+        original["provenance"]["sourceFindings"],
+      )
+    )
       delete original["provenance"]["sourceFindings"];
     provenance["previousFindings"] = exactUnion(
       Array.isArray(provenance["previousFindings"])
@@ -160,6 +167,13 @@ export function containsSavedFinding(
   current: JsonObject,
   previous: JsonObject,
 ): boolean {
+  const currentOwner = (current["provenance"] as JsonObject | undefined)?.[
+    "workerId"
+  ];
+  const previousOwner = (previous["provenance"] as JsonObject | undefined)?.[
+    "workerId"
+  ];
+  if (!isDeepStrictEqual(currentOwner, previousOwner)) return false;
   const original = withoutPreviousFindings(previous);
   if (current["identity"] === undefined) delete original["identity"];
   return containsSavedValue(current, original);
@@ -199,6 +213,18 @@ export function exactUnion<Value>(...groups: Value[][]): Value[] {
     seen.add(key);
     return true;
   });
+}
+
+export function findingIdentityCandidate(
+  finding: JsonObject,
+): string | undefined {
+  return [
+    (finding["extensions"] as JsonObject | undefined)?.["candidateId"],
+    (finding["provenance"] as JsonObject | undefined)?.["candidateId"],
+  ].find(
+    (value): value is string =>
+      typeof value === "string" && Boolean(value.trim()),
+  );
 }
 
 export function scanFindingIdentity(source: JsonObject): string {
@@ -353,7 +379,7 @@ export interface PreparedScanDraft {
     };
   };
   findings: { findings: PreparedFinding[] };
-  coverage: PreparedCoverage;
+  reviewState: PreparedCoverage;
 }
 
 /** Build ordinary canonical documents from host-bound target metadata and validated semantics. */
@@ -389,7 +415,13 @@ export function prepareSemanticScanDraft(
         context.mode,
       ),
     },
-    coverage: buildCoverage(context, contract, input.coverage, scope, target),
+    reviewState: buildCoverage(
+      context,
+      contract,
+      input.reviewState,
+      scope,
+      target,
+    ),
     manifest: {
       scan: {
         ...(input.complete === false ? { complete: false } : {}),
@@ -533,71 +565,57 @@ export function prepareScanFindings(
   findings: SemanticFinding[],
   mode?: string,
 ): PreparedFinding[] {
-  const generatedIdentities = findings.map((finding, index) => {
-    if (finding["identity"] !== undefined) return undefined;
-    const candidateId = finding.extensions?.["candidateId"];
-    const identitySource =
-      typeof candidateId === "string" && candidateId.trim()
-        ? candidateId
-        : finding.title;
-    const extensions = finding.extensions;
+  const anchorCounts = new Map<string, number>();
+  const anchors = findings.map((finding, index) => {
+    const anchor =
+      finding.identity?.anchor ??
+      semanticIdentifier(
+        findingIdentityCandidate(finding) ?? finding.title,
+        `finding-${index + 1}`,
+      );
+    const key = `${finding.ruleId}\0${anchor}`;
+    anchorCounts.set(key, (anchorCounts.get(key) ?? 0) + 1);
+    return anchor;
+  });
+
+  const identified = findings.map((finding, index) => {
+    if (finding.identity !== undefined)
+      return { ...finding, identity: finding.identity };
+    const identity: NonNullable<SemanticFinding["identity"]> = {
+      anchor: anchors[index]!,
+    };
     const siblingSource = [
-      extensions?.["reportId"],
-      extensions?.["ledgerRowId"],
+      finding.extensions?.["reportId"],
+      finding.extensions?.["ledgerRowId"],
     ].find(
       (value): value is string =>
         typeof value === "string" && Boolean(value.trim()),
     );
-    return {
-      anchor: semanticIdentifier(identitySource, `finding-${index + 1}`),
-      stableInstanceSource: siblingSource,
-      siblingSource: siblingSource ?? finding.title,
-    };
-  });
-  const anchorCounts = new Map<string, number>();
-  for (const [index, finding] of findings.entries()) {
-    const generatedIdentity = generatedIdentities[index];
-    const authoredIdentity = finding.identity;
-    const anchor = generatedIdentity?.anchor ?? authoredIdentity!.anchor;
-    const ruleScopedAnchor = `${finding["ruleId"]}\0${anchor}`;
-    anchorCounts.set(
-      ruleScopedAnchor,
-      (anchorCounts.get(ruleScopedAnchor) ?? 0) + 1,
-    );
-  }
-
-  const identified = findings.map((finding, index) => {
-    const generatedIdentity = generatedIdentities[index];
-    if (generatedIdentity === undefined)
-      return { ...finding, identity: finding.identity! };
-    const identity: NonNullable<SemanticFinding["identity"]> = {
-      anchor: generatedIdentity.anchor,
-    };
-    const ruleScopedAnchor = `${finding["ruleId"]}\0${generatedIdentity.anchor}`;
     if (
-      generatedIdentity.stableInstanceSource !== undefined ||
-      (anchorCounts.get(ruleScopedAnchor) ?? 0) > 1
-    ) {
-      const baseInstance = semanticIdentifier(
-        generatedIdentity.siblingSource,
+      siblingSource !== undefined ||
+      (anchorCounts.get(`${finding.ruleId}\0${identity.anchor}`) ?? 0) > 1
+    )
+      identity.instance = semanticIdentifier(
+        siblingSource ?? finding.title,
         `finding-${index + 1}`,
       );
-      identity["instance"] = baseInstance;
-    }
-    return {
-      ...finding,
-      identity,
-    };
+    return { ...finding, identity };
   });
-  if (mode !== "deep") return identified;
+  const authored = new Set(
+    findings
+      .filter((finding) => finding.identity !== undefined)
+      .map(scanFindingIdentity),
+  );
 
-  // Keep distinct findings when independent scans reuse an ID.
+  // Keep generated identities distinct without replacing an authored identity.
   // Add a numeric suffix to make each ID unique.
   const reserved = new Set(identified.map(scanFindingIdentity));
   const used = new Set<string>();
-  return identified.map((finding) => {
+  return identified.map((finding, index) => {
+    const explicit = findings[index]!.identity !== undefined;
+    if (mode !== "deep" && explicit) return finding;
     const key = scanFindingIdentity(finding);
-    if (!used.has(key)) {
+    if (!used.has(key) && (explicit || !authored.has(key))) {
       used.add(key);
       return finding;
     }
@@ -615,12 +633,14 @@ export function prepareScanFindings(
       reserved.has(scanFindingIdentity(distinct)) ||
       used.has(scanFindingIdentity(distinct))
     );
-    const provenance = finding.provenance;
-    distinct["provenance"] = {
-      ...provenance,
-      preservedIdentity:
-        provenance["preservedIdentity"] ?? structuredClone(identity),
-    };
+    if (explicit) {
+      const provenance = finding.provenance;
+      distinct["provenance"] = {
+        ...provenance,
+        preservedIdentity:
+          provenance["preservedIdentity"] ?? structuredClone(identity),
+      };
+    }
     used.add(scanFindingIdentity(distinct));
     return distinct;
   });

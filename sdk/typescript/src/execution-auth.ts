@@ -2,6 +2,7 @@ import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { forwardExternalImportSetting } from "./external-imports-feature.js";
 import { EXTERNAL_CODEX_PROVIDERS, isExternalModelProvider } from "./config.js";
 import { AuthenticationRequiredError } from "./errors.js";
 import {
@@ -42,11 +43,17 @@ export function scanAuthentication(
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
   commandAuth = false,
-  options: {
-    preflight?: boolean;
-    preserveProviderEnvironment?: boolean;
-  } = {},
+  options:
+    | boolean
+    | {
+        preflight?: boolean;
+        preserveProviderEnvironment?: boolean;
+        providerEnvKey?: string;
+      } = false,
+  providerEnvKey?: string,
 ): ScanAuthentication {
+  const preflight = typeof options === "boolean" ? options : options.preflight;
+  if (typeof options !== "boolean") providerEnvKey ??= options.providerEnvKey;
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
@@ -72,17 +79,26 @@ export function scanAuthentication(
   if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
     return { method: "stored_credentials", verified: false };
   }
-  const key = environmentApiKeyEntry(environment, modelProvider);
+  const key = environmentApiKeyEntry(
+    environment,
+    modelProvider,
+    providerEnvKey,
+  );
   if (
     key === null &&
     isExternalModelProvider(modelProvider) &&
-    !options.preserveProviderEnvironment
+    !(typeof options !== "boolean" && options.preserveProviderEnvironment)
   ) {
     const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
-    if (options.preflight && auth === "auto")
-      return { method: "api_key", source: provider.env_key, verified: false };
+    if (preflight && auth === "auto") {
+      return {
+        method: "api_key",
+        source: providerEnvKey ?? provider.env_key,
+        verified: false,
+      };
+    }
     throw new AuthenticationRequiredError(
-      `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+      `Set ${providerEnvKey ?? provider.env_key} to run a scan through ${provider.name}.`,
     );
   }
   if (
@@ -106,14 +122,16 @@ export async function runtimeScanAuthentication(
   codexHome: string,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
-  options: { preserveProviderEnvironment?: boolean } = {},
+  options?:
+    string | { preserveProviderEnvironment?: boolean; providerEnvKey?: string },
 ): Promise<ScanAuthentication> {
   const authentication = scanAuthentication(
     environment,
     auth,
     modelProvider,
     false,
-    options,
+    typeof options === "string" ? false : options,
+    typeof options === "string" ? options : options?.providerEnvKey,
   );
   if (authentication.method !== "stored_credentials") return authentication;
 
@@ -142,17 +160,28 @@ export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): ProcessEnvironment {
-  const selectedProviderKey = isExternalModelProvider(modelProvider)
+  const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
+  const selectedProviderKey =
+    standardProviderKey === null
+      ? null
+      : (providerEnvKey ?? standardProviderKey);
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
-  return Object.fromEntries(
-    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
+  const selected = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
+      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") {
+        return (
+          selectedProviderKey !== null &&
+          key === selectedProviderKey.toUpperCase()
+        );
+      }
       if (
         key === "OPENROUTER_API_KEY" ||
         key === "FIREWORKS_API_KEY" ||
@@ -160,46 +189,49 @@ export function selectedScanEnvironment(
       ) {
         return (
           !bedrockProvider &&
-          (selectedProviderKey === null || key === selectedProviderKey)
+          (selectedProviderKey === null ||
+            key === standardProviderKey ||
+            key === selectedProviderKey.toUpperCase())
         );
       }
       return true;
     }),
   );
+  forwardExternalImportSetting(environment, selected);
+  return selected;
 }
 
 export function withoutOpenAiApiKeys(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) =>
         !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 export function environmentApiKey(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
+  providerEnvKey?: string,
 ): string | null {
-  return environmentApiKeyEntry(environment, modelProvider)?.value ?? null;
+  return (
+    environmentApiKeyEntry(environment, modelProvider, providerEnvKey)?.value ??
+    null
+  );
 }
 
 function environmentApiKeyEntry(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
-): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY"
-    | "CHEAPER_INFERENCE_API_KEY";
-  value: string;
-} | null {
+  providerEnvKey?: string,
+): { source: string; value: string } | null {
   const keys = isExternalModelProvider(modelProvider)
-    ? [EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
+    ? [providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
     : (["OPENAI_API_KEY", "CODEX_API_KEY"] as const);
   for (const requested of keys) {
     const value = environmentValue(environment, requested)?.trim();
@@ -221,11 +253,13 @@ export function definedEnvironment(
 export function withoutCodexHome(
   environment: ProcessEnvironment,
 ): Record<string, string> {
-  return Object.fromEntries(
+  const child = Object.fromEntries(
     Object.entries(definedEnvironment(environment)).filter(
       ([name]) => name.toUpperCase() !== "CODEX_HOME",
     ),
   );
+  forwardExternalImportSetting(environment, child);
+  return child;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -42,7 +42,7 @@ function child(scanId: string, findings = [finding()]): ScanMergeInput {
           sourceFindingIds: [`${scanId}:${index}`],
         },
       })),
-      coverage: semanticCoverage(),
+      reviewState: semanticCoverage(),
     },
   };
 }
@@ -227,7 +227,7 @@ test("host preserves different child contexts without a model rewrite", () => {
 
 test("combines coverage without namespacing twice or mutating completed inputs", () => {
   const one = child("one", []);
-  one.draft.coverage = semanticCoverage({
+  one.draft.reviewState = semanticCoverage({
     completeness: "partial",
     surfaces: [
       {
@@ -241,14 +241,14 @@ test("combines coverage without namespacing twice or mutating completed inputs",
     openQuestions: ["Question?"],
   });
   const two = child("two", []);
-  two.draft.coverage.openQuestions = ["Question?"];
+  two.draft.reviewState.openQuestions = ["Question?"];
   const original = structuredClone(one);
   const combined = combineScanCoverage(
-    [one.draft.coverage, two.draft.coverage],
+    [one.draft.reviewState, two.draft.reviewState],
     ["Unfinished pass."],
   );
   expect(combined).not.toHaveProperty("completeness");
-  expect(combined.surfaces).toEqual(one.draft.coverage.surfaces);
+  expect(combined.surfaces).toEqual(one.draft.reviewState.surfaces);
   expect(combined.deferred).toEqual([
     { reason: "Pending review." },
     { reason: "Unfinished pass." },
@@ -261,7 +261,7 @@ test("combines coverage without namespacing twice or mutating completed inputs",
     "completeness",
   );
   expect(legacy["completeness"]).toBe("unknown");
-  expect(combineScanCoverage([two.draft.coverage])).not.toHaveProperty(
+  expect(combineScanCoverage([two.draft.reviewState])).not.toHaveProperty(
     "completeness",
   );
   expect(combineScanCoverage([])).not.toHaveProperty("completeness");
@@ -308,11 +308,14 @@ test("publishes host target and scope with the selected original finding", () =>
         },
       },
     },
-    { ...aggregate, coverage: combineScanCoverage([input.draft.coverage]) },
+    {
+      ...aggregate,
+      reviewState: combineScanCoverage([input.draft.reviewState]),
+    },
   );
   expect(prepared.manifest.scan.target.revision).toBe("pinned");
   expect(prepared.manifest.scan.scope.includePaths).toEqual(["src"]);
-  expect(prepared.coverage.mode).toBe("scoped_path");
+  expect(prepared.reviewState.mode).toBe("scoped_path");
   expect(
     prepared.findings.findings[0]!.provenance.sourceFindings![0]!.finding,
   ).toEqual(input.sourceFindings[0]!);
@@ -325,7 +328,7 @@ test("model input excludes all coverage and retains complete source evidence onc
   const accepted = merge(submission(["one:0"]), [one], null).aggregate;
   const previous: SemanticScan = {
     ...accepted,
-    coverage: semanticCoverage({
+    reviewState: semanticCoverage({
       surfaces: [
         {
           id: "coverage",
@@ -346,7 +349,7 @@ test("model input excludes all coverage and retains complete source evidence onc
   const original = structuredClone({ previous, two });
   const bytes = scanMergeModelInputs([two], previous);
   const parsed = JSON.parse(bytes.toString());
-  expect(parsed).not.toHaveProperty("coverage");
+  expect(parsed).not.toHaveProperty("reviewState");
   expect(bytes.toString()).not.toContain("coverage-only-");
   expect(parsed.sources).toEqual([
     { id: "one:0", finding: one.sourceFindings[0]! },

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    empty_target_paths,
     mark_deep_aggregate_ready,
     run_workbench,
     write_completed_contract,
@@ -22,10 +23,8 @@ from workbench_test_support import (
 def test_target_request_does_not_reuse_different_user_context(
     tmp_path: Path, first_context: str | None, next_context: str | None
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_root = tmp_path / "scans"
     first = begin_target_scan(state_dir, codex_home, target, scan_root, user_context=first_context)
     first_scan_id = str(first["scan"]["scanId"])

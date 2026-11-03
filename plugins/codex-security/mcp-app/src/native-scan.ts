@@ -80,6 +80,7 @@ export interface NativeScanInput {
   pythonPath: string;
   model?: string;
   reasoningEffort?: string;
+  serviceTier?: string;
   parentSandbox: NativeParentSandbox | (() => NativeParentSandbox);
   parentTurn?: DeepScanParentTurn;
   stateDirectory?: string;
@@ -171,8 +172,12 @@ function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
 /** Read once for completed-result comparison and any new execution it requires. */
 export async function readNativeScanSemanticInputs(
   signal?: AbortSignal,
-  modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
+  modelSettings: Pick<
+    NativeScanInput,
+    "model" | "reasoningEffort" | "serviceTier"
+  > = {},
   completedScanDir?: string,
+  projectSettings: DeepScanOptions = {},
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
   const knowledgeBasePath = environmentValue(
@@ -184,7 +189,7 @@ export async function readNativeScanSemanticInputs(
     : undefined;
   const deepScanSettings = (
     await resolveDeepScanConfig(
-      {},
+      projectSettings,
       nativeDeepScanConfigPath(environment),
       signal,
     )

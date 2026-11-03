@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
+import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
 export const scanThreadId = "scan-thread";
@@ -29,6 +30,51 @@ export function tokenUsageEvent(usage: Record<string, number>) {
   return {
     type: "event_msg",
     payload: { type: "token_count", info: { total_token_usage: usage } },
+  };
+}
+
+export function progressMarker(
+  phase: string,
+  filesCompleted: number,
+  filesTotal: number,
+): string {
+  return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
+}
+
+export function nativeCommand(
+  command: string | readonly string[],
+  output: string,
+  id?: string,
+) {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        type: "CommandExecution",
+        ...(id === undefined ? {} : { id }),
+        command: typeof command === "string" ? [command] : command,
+        aggregated_output: output,
+      },
+    },
+  };
+}
+
+export function completedCommand(
+  command: string,
+  output: string,
+  id = command,
+): ThreadEvent {
+  return {
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      id,
+      command,
+      aggregated_output: output,
+      status: "completed",
+      exit_code: 0,
+    },
   };
 }
 

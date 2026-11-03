@@ -9,6 +9,7 @@
     "scripts/compare-test-reports.mts",
     "scripts/merge-eval/*.ts",
     "scripts/run-ci-tests.mts",
+    "scripts/run-mcp-test-shard.mts",
     "scripts/update-test-timings.mts"
   ],
   "compilerOptions": {

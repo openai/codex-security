@@ -5,11 +5,15 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    cancel_scan,
     create_saved_workspace,
+    empty_target_paths,
     fail_scan,
+    get_scan,
     mark_handoff_delivered,
     run_workbench,
     scan_claim_command,
+    scan_command,
     start_delivered_scan,
     start_scan_command,
     write_completed_contract,
@@ -17,9 +21,7 @@ from workbench_test_support import (
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(
         state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
@@ -40,9 +42,7 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
 
 
 def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     thread_id = "thread-cancel-owner"
     saved = create_saved_workspace(state_dir, target, thread_id=thread_id)
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
@@ -126,25 +126,17 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert delivered["results"]["progress"]["status"] == "canceled"
     assert delivered["results"]["handoffStatus"] == "delivered"
 
-    restarted = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    restarted_scan_id = str(restarted["results"]["scanId"])
+    restarted = start_delivered_scan(state_dir, str(saved["id"]))
+    restarted_scan_id = str(restarted["scanId"])
     assert restarted_scan_id != scan_id
-    assert restarted["results"]["progress"]["status"] == "running"
-    previous_scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)
+    assert restarted["progress"]["status"] == "running"
+    previous_scan = get_scan(state_dir, scan_id)
     assert previous_scan["scan"]["scanId"] == scan_id
     assert previous_scan["workspace"]["results"]["scanId"] == scan_id
     assert previous_scan["workspace"]["results"]["progress"]["status"] == "canceled"
-    write_completed_contract(Path(str(restarted["results"]["scanDir"])), restarted_scan_id, target)
-    run_workbench(state_dir, "complete-scan", "--scan-id", restarted_scan_id)
-    rejected = run_workbench(
-        state_dir,
-        "cancel-scan",
-        "--scan-id",
-        restarted_scan_id,
-        "--thread-id",
-        thread_id,
-        check=False,
-    )
+    write_completed_contract(Path(str(restarted["scanDir"])), restarted_scan_id, target)
+    scan_command(state_dir, "complete-scan", restarted_scan_id)
+    rejected = cancel_scan(state_dir, restarted_scan_id, thread_id, check=False)
     assert rejected["returncode"] != 0
     assert "Only a running scan can be canceled" in str(rejected["stderr"])
 
@@ -191,9 +183,7 @@ def test_unclaimed_scan_preserves_only_after_authorized_stop(
 
 
 def test_workbench_rejects_unconfirmed_cross_thread_handoff_delivery(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     thread_id = "thread-handoff-owner"
     saved = create_saved_workspace(state_dir, target, thread_id=thread_id)
     started = start_scan_command(state_dir, str(saved["id"]))
@@ -219,9 +209,7 @@ def test_workbench_rejects_unconfirmed_cross_thread_handoff_delivery(tmp_path: P
 
 
 def test_workbench_allows_user_confirmed_recovery_in_another_thread(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target, thread_id="thread-recovery-owner")
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])

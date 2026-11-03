@@ -13,21 +13,25 @@ import { sha256 } from "./support/finding-identity.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-const bundle = await build({
-  stdin: {
-    resolveDir: fileURLToPath(
-      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
-    ),
-    contents: `export * from "./src/artifact-scan-draft.ts";`,
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  loader: { ".md": "text" },
-  write: false,
-});
 const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
-await writeFile(bundlePath, bundle.outputFiles[0]!.contents);
+try {
+  await build({
+    stdin: {
+      resolveDir: fileURLToPath(
+        new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+      ),
+      contents: 'export * from "./src/artifact-scan-draft.ts";',
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    loader: { ".md": "text" },
+    outfile: bundlePath,
+  });
+} catch (error) {
+  await cleanup().catch(() => undefined);
+  throw error;
+}
 const { recordCodexSecurityScanDraftViaWorkbench, parseCanonicalScanDraft } =
   await import(pathToFileURL(bundlePath).href);
 
@@ -37,7 +41,7 @@ interface DraftFixture {
   scope?: Record<string, unknown>;
   threatModel?: Record<string, unknown>;
   findings: Record<string, unknown>[];
-  coverage: Record<string, unknown>;
+  reviewState: Record<string, unknown>;
 }
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
@@ -119,7 +123,7 @@ describe.each(["standard", "deep"] as const)(
               },
             },
           ],
-          coverage: {
+          reviewState: {
             ...(scenario.legacyCompleteness === undefined
               ? {}
               : { completeness: scenario.legacyCompleteness }),
@@ -158,11 +162,12 @@ describe.each(["standard", "deep"] as const)(
             const draft = JSON.parse(
               await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
             );
+            draft.manifest.scan.coverageRef = "coverage.json";
             await Promise.all(
               [
                 ["manifest", "scan-manifest.json"],
                 ["findings", "findings.json"],
-                ["coverage", "coverage.json"],
+                ["reviewState", "coverage.json"],
               ].map(([key, name]) =>
                 writeFile(
                   join(standardRoot, name!),
@@ -185,7 +190,7 @@ describe.each(["standard", "deep"] as const)(
         const coverage = JSON.parse(
           await readFile(join(standardRoot, "coverage.json"), "utf8"),
         );
-        Object.assign(coverage, submitted.coverage);
+        Object.assign(coverage, submitted.reviewState);
         await Promise.all([
           writeFile(
             join(standardRoot, "findings.json"),
@@ -202,7 +207,7 @@ describe.each(["standard", "deep"] as const)(
           scanId,
         );
 
-        if (scenario.accepted) {
+        if (scenario.accepted || scenario.mutation === "legacy-surface") {
           expect(standard.error).toBe(standard.finalization);
           expect(standard.finalizations).toBe(1);
           const canonicalDraft = parseCanonicalScanDraft({
@@ -211,9 +216,9 @@ describe.each(["standard", "deep"] as const)(
               await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
             ),
             findings,
-            coverage,
+            reviewState: coverage,
           });
-          expect(canonicalDraft.coverage).not.toHaveProperty("completeness");
+          expect(canonicalDraft.reviewState).not.toHaveProperty("completeness");
           expect(canonicalDraft.scope).toEqual(semantic.scope);
           expect(canonicalDraft.threatModel).toEqual(semantic.threatModel);
           if (scenario.mutation === "legacy-details") {
@@ -271,7 +276,7 @@ describe.each(["standard", "deep"] as const)(
     );
 
     test.each(["HTTP API", "ArchiveSurface", "", 17])(
-      "new drafts reject unsupported coverage IDs: %j",
+      "canonical admission reads named legacy surface IDs and rejects malformed ones: %j",
       async (id) => {
         const root = await temporaryDirectory();
         const repository = join(root, "repository");
@@ -288,24 +293,30 @@ describe.each(["standard", "deep"] as const)(
           join(scanDir, "coverage.json"),
           JSON.stringify(coverage),
         );
-        expect(() =>
+        const parsed = () =>
           parseCanonicalScanDraft({
             scanId: manifest.scan.id,
             manifest,
             findings,
-            coverage,
-          }),
-        ).toThrow();
+            reviewState: coverage,
+          });
+        if (typeof id === "string" && id.trim()) expect(parsed).not.toThrow();
+        else expect(parsed).toThrow();
         const admission = await observeAdmission(repository, scanDir);
-        expect(admission.error).toBeInstanceOf(Error);
-        expect(admission.finalizations).toBe(0);
+        if (typeof id === "string" && id.trim()) {
+          expect(admission.error).toBe(admission.finalization);
+          expect(admission.finalizations).toBe(1);
+        } else {
+          expect(admission.error).toBeInstanceOf(Error);
+          expect(admission.finalizations).toBe(0);
+        }
       },
     );
 
     test.each([
-      { path: "src/./extract.py", notes: " " },
-      { path: "src//extract.py", notes: " " },
-      { path: "src/extract.py/", notes: " " },
+      { path: "src/./extract.py", notes: " ", accepted: true },
+      { path: "src//extract.py", notes: " ", accepted: true },
+      { path: "src/extract.py/", notes: " ", accepted: true },
       { path: "../extract.py", notes: "Checked" },
       { path: "/src/extract.py", notes: "Checked" },
       { path: "C:/extract.py", notes: "Checked" },
@@ -321,8 +332,8 @@ describe.each(["standard", "deep"] as const)(
         questions: [17],
       },
     ])(
-      "new drafts reject legacy canonical fields: %j",
-      async ({ path, notes, questions }) => {
+      "canonical admission checks legacy paths and annotations: %j",
+      async ({ path, notes, questions, accepted }) => {
         const root = await temporaryDirectory();
         const repository = join(root, "repository");
         await mkdir(repository);
@@ -370,18 +381,24 @@ describe.each(["standard", "deep"] as const)(
           scanId: manifest.scan.id,
           manifest,
           findings,
-          coverage,
+          reviewState: coverage,
         };
         const standard = await observeAdmission(repository, scanDir);
 
-        expect(() => parseCanonicalScanDraft(canonical)).toThrow();
-        expect(standard.error).toBeInstanceOf(Error);
-        expect(standard.error).not.toBe(standard.finalization);
-        expect(standard.finalizations).toBe(0);
+        if (accepted) {
+          expect(() => parseCanonicalScanDraft(canonical)).not.toThrow();
+          expect(standard.error).toBe(standard.finalization);
+          expect(standard.finalizations).toBe(1);
+        } else {
+          expect(() => parseCanonicalScanDraft(canonical)).toThrow();
+          expect(standard.error).toBeInstanceOf(Error);
+          expect(standard.error).not.toBe(standard.finalization);
+          expect(standard.finalizations).toBe(0);
+        }
       },
     );
 
-    test("sealed legacy evidence stays readable but is not admitted as a new draft", async () => {
+    test("sealed legacy evidence stays readable during canonical admission", async () => {
       const scanDir = await copyCompletedScan(await temporaryDirectory());
       const file = join(scanDir, "findings.json");
       const findings = JSON.parse(await readFile(file, "utf8"));
@@ -421,14 +438,13 @@ describe.each(["standard", "deep"] as const)(
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       );
-      expect(() =>
-        parseCanonicalScanDraft({
-          scanId: manifest.scan.id,
-          manifest,
-          findings,
-          coverage,
-        }),
-      ).toThrow();
+      const canonical = parseCanonicalScanDraft({
+        scanId: manifest.scan.id,
+        manifest,
+        findings,
+        reviewState: coverage,
+      });
+      expect(canonical.findings[0]?.code_evidence).toEqual([evidence]);
     });
 
     test("canonical admission still rejects reversed typed evidence bounds", async () => {
@@ -531,7 +547,7 @@ function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {
     locations[0]!["endLine"] = 1;
   }
   if (mutation === "legacy-surface")
-    (draft.coverage["surfaces"] as Record<string, unknown>[])[0]!["id"] =
+    (draft.reviewState["surfaces"] as Record<string, unknown>[])[0]!["id"] =
       "HTTP API";
   if (mutation === "legacy-details")
     draft.findings[0]!["validation"] = {

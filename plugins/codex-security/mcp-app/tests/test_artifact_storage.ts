@@ -272,7 +272,7 @@ try {
     complete: false,
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -314,7 +314,7 @@ try {
     ...identity,
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
-    coverage: {
+    reviewState: {
       surfaces: [
         {
           id: "example",

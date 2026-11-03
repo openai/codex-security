@@ -70,6 +70,15 @@ export function newDeepScanCheckpoint(startedAt: string): DeepScanCheckpoint {
 export function decodeDeepScanCheckpoint(value: unknown): DeepScanCheckpoint {
   const checkpoint = value as DeepScanCheckpoint;
   requireCheckpointVersion(checkpoint);
+  const aggregate = checkpoint.aggregate as
+    (SemanticScan & { coverage?: SemanticScan["reviewState"] }) | null;
+  if (
+    aggregate?.coverage !== undefined &&
+    aggregate.reviewState === undefined
+  ) {
+    const { coverage, ...draft } = aggregate;
+    return { ...checkpoint, aggregate: { ...draft, reviewState: coverage } };
+  }
   return checkpoint;
 }
 

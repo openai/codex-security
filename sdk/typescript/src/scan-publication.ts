@@ -392,24 +392,23 @@ export async function requireScanArtifacts(
 }
 
 export async function admitCanonicalArtifacts(
-  context: ScanResultContext,
+  context: Pick<ScanResultContext, "scanId" | "scanDir" | "signal">,
 ): Promise<void> {
   const { scanDir, signal } = context;
   signal.throwIfAborted();
-  await requireScanArtifacts(
-    scanDir,
-    ["scan-manifest.json", "findings.json", "coverage.json"],
-    signal,
-  );
-  const [manifest, findings, coverage] = await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json"].map(async (name) =>
-      JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(
-          await readScanFile(scanDir, name, name, signal),
-        ),
+  const required = ["scan-manifest.json", "findings.json"];
+  await requireScanArtifacts(scanDir, required, signal);
+  const readDocument = async (name: string) =>
+    JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        await readScanFile(scanDir, name, name, signal),
       ),
-    ),
-  );
+    );
+  const [manifest, findings] = await Promise.all(required.map(readDocument));
+  const legacy =
+    manifest.scan.coverageRef !== undefined ||
+    (manifest.scan.reviewState === undefined &&
+      manifest.scan.review === undefined);
   const helper = (
     await import(
       pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
@@ -419,7 +418,7 @@ export async function admitCanonicalArtifacts(
     scanId: context.scanId ?? manifest.scan.id,
     manifest,
     findings,
-    coverage,
+    ...(legacy ? { reviewState: await readDocument("coverage.json") } : {}),
   });
   signal.throwIfAborted();
   if (draft.complete === false)
@@ -437,19 +436,19 @@ export async function collectResult(
   const { threadId, turnResult } = turn;
   await requireScanArtifacts(
     scanDir,
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    ["scan-manifest.json", "findings.json", "report.md"],
     signal,
   );
   await admitCanonicalArtifacts(context);
-  const { manifest, findings, coverage } = await loadContract(scanDir, {
+  const contract = await loadContract(scanDir, {
     pluginRoot,
     expectation,
     workbenchValidated,
     signal,
   });
-  if (manifest.scan.status !== "completed") {
+  if (contract.manifest.scan.status !== "completed") {
     throw new IncompleteScanError(
-      `Codex Security scan ${manifest.scan.status}; available results remain at ${scanDir}.`,
+      `Codex Security scan ${contract.manifest.scan.status}; available results remain at ${scanDir}.`,
     );
   }
   let sarifPath: string | null = null;
@@ -464,9 +463,7 @@ export async function collectResult(
     if (signal.aborted) throw signal.reason ?? error;
   }
   return new ScanResult({
-    manifest,
-    findings,
-    coverage,
+    ...contract,
     scanDir,
     threadId,
     turnResult:
@@ -514,7 +511,9 @@ export async function preservePublishedArtifacts(
       ...new Set([
         "scan-manifest.json",
         "findings.json",
-        "coverage.json",
+        ...(result.manifest.scan.coverageRef === undefined
+          ? []
+          : ["coverage.json"]),
         "report.md",
         ...(result.threatModelPath === null
           ? []

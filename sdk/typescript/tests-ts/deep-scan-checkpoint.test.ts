@@ -7,9 +7,9 @@ import {
 } from "../src/deep-scan-checkpoint.js";
 
 test.each(["current", "legacy"])(
-  "round-trips the shared %s checkpoint without rewriting fields",
+  "loads the shared %s checkpoint and preserves its original payload",
   async (name) => {
-    const document: unknown = JSON.parse(
+    const document = JSON.parse(
       await readFile(
         new URL(
           `../../../plugins/codex-security/tests/fixtures/composition-checkpoints/${name}.json`,
@@ -20,7 +20,12 @@ test.each(["current", "legacy"])(
     );
     const before = JSON.stringify(document);
     const checkpoint = decodeDeepScanCheckpoint(document);
-    expect(JSON.stringify(checkpoint)).toBe(before);
+    const { coverage, ...originalDraft } = document.aggregate;
+    expect(checkpoint).toEqual({
+      ...document,
+      aggregate: { ...originalDraft, reviewState: coverage },
+    });
+    expect(decodeDeepScanCheckpoint(checkpoint)).toBe(checkpoint);
     expect(JSON.stringify(document)).toBe(before);
     if (name === "current") {
       expect(checkpoint.passes[0]!["extension"]).toEqual({ retain: 1 });

@@ -1,43 +1,42 @@
-import { createReplayProfile } from "../src/provider-profile.js";
-import { readdir } from "node:fs/promises";
+import { createCliTest } from "./support/cli-run.js";
+import { readJsonLines } from "./support/json.js";
+import { fail } from "./support/errors.js";
+
 import { publishDraft } from "./support/scan-publication.js";
 
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
-
-import { randomUUID } from "node:crypto";
-import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
-import { workflowDigest } from "../src/finding-workflow.js";
-import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
-
-import { execFileSync } from "node:child_process";
-
+import { hash, randomUUID } from "node:crypto";
+import { createReplayProfile } from "../src/provider-profile.js";
 import {
   appendFile,
+  chmod,
   cp,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-import { tmpdir } from "node:os";
-
-import { parse as parseToml } from "smol-toml";
-
 import { fileURLToPath } from "node:url";
-
 import { afterEach, expect, spyOn, test } from "bun:test";
-import * as runtimeModule from "../src/runtime.js";
 
+import { tmpdir } from "node:os";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
-
 import type { ScanOptions } from "../src/api.js";
-
-import type { JsonObject } from "../src/config.js";
+import { writeCodexConfig, type JsonObject } from "../src/config.js";
+import * as runtimeModule from "../src/runtime.js";
+import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
+import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
+import { workflowDigest } from "../src/finding-workflow.js";
 
 import { loadContract } from "../src/contract.js";
 
@@ -54,16 +53,11 @@ import {
 
 import type { SemanticScan } from "../src/scan-semantics.js";
 
-import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
-
 import { ScanTransportClosedError } from "../src/scan-execution.js";
-
 import { capture, dependencies } from "./cli-fixtures.js";
-
 import { TestClient } from "./support/api-client.js";
 
 import { tokenUsageEvent } from "./support/usage-rollout.js";
-
 import {
   completedEvents,
   createApiTestFixtures,
@@ -75,7 +69,6 @@ const PLUGIN_ROOT = fileURLToPath(
 );
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
-
 afterEach(cleanup);
 
 function preparedRuntime(codexHome: string) {
@@ -99,17 +92,19 @@ async function interruptedScan(
     | "auth"
     | "inheritedPermissions"
     | "preserveProviderEnvironment"
+    | "severityRubric"
   > & {
     config?: JsonObject;
     savedTarget?: { kind: "paths"; paths: string[] };
     savedRepositoryAlias?: boolean;
+    providerProfile?: JsonObject;
   } = {},
   resolvedDeep = false,
   startedMerge = true,
   ordinaryPass: {
     cost?: ScanCost;
     findings?: SemanticScan["findings"];
-    coverage?: SemanticScan["coverage"];
+    reviewState?: SemanticScan["reviewState"];
   } | null = {},
   knowledgeState: "saved" | "legacy" = "saved",
 ) {
@@ -341,7 +336,7 @@ async function interruptedScan(
     const aggregate: SemanticScan = {
       scanId,
       findings: ordinaryPass.findings ?? [],
-      coverage: ordinaryPass.coverage ?? {
+      reviewState: ordinaryPass.reviewState ?? {
         surfaces: [],
         explicitExclusions: [],
         deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
@@ -469,12 +464,262 @@ test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
   },
 );
 
-test("CLI merge failure retains accepted ordinary scans and the original thread", async () => {
-  const f = await interruptedScan("deep", false, {}, false, true, {
-    findings: [
-      semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
-    ],
+test.each([false, true])(
+  "resume restores private provider refinements (bulk: %p)",
+  async (bulk) => {
+    const name = `codex_security_${randomUUID()}`;
+    const f = await interruptedScan("deep", bulk, {
+      config: {
+        profile: "review",
+        model_provider: "openrouter",
+        model: "synthetic-model",
+        approval_policy: "never",
+      },
+      providerProfile: { name, home: "managed" },
+    });
+    await chmod(f.codexHome, 0o700);
+    const savedProvider = {
+      base_url: "https://saved.example.invalid/custom",
+      env_key: "SYNTHETIC_REPLAY_KEY",
+      http_headers: { "X-Synthetic-Token": "synthetic-private-replay-value" },
+    };
+    const savedPath = join(f.codexHome, `${name}.config.toml`);
+    await writeCodexConfig(savedPath, {
+      model_providers: { openrouter: savedProvider },
+    });
+    const original = await readFile(savedPath, "utf8");
+    const ambient = join(f.root, "ambient-home");
+    await mkdir(ambient);
+    await writeFile(
+      join(ambient, "review.config.toml"),
+      'model_provider="openrouter"\n[model_providers.openrouter]\nname="Synthetic"\nwire_api="responses"\nbase_url="https://old.example.invalid/"\nrequest_max_retries=4\n',
+    );
+    f.environment.CODEX_HOME = ambient;
+    Object.assign(f.environment, {
+      SYNTHETIC_REPLAY_KEY: "synthetic-replay-key",
+    });
+    let restored = false;
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, async (options) => {
+        const providerProfile = parseToml(
+          await readFile(
+            join(f.codexHome, `${options.nativeProfile}.config.toml`),
+            "utf8",
+          ),
+        );
+        expect(providerProfile).toMatchObject({
+          model_providers: {
+            openrouter: { ...savedProvider, request_max_retries: 4 },
+          },
+        });
+        expect(options.env?.["SYNTHETIC_REPLAY_KEY"]).toBe(
+          "synthetic-replay-key",
+        );
+        restored = true;
+        return {
+          startThread: () => fail("Resume must use the original session."),
+          resumeThread: (threadId) => ({
+            id: threadId,
+            runStreamed: async () => {
+              throw new Error("Synthetic private resume checked");
+            },
+          }),
+        };
+      }),
+    );
+    expect(code).not.toBe(0);
+    expect(restored, stderr.text()).toBe(true);
+    expect(await readFile(savedPath, "utf8")).toBe(original);
+    expect(
+      (await readdir(f.codexHome)).filter((path) =>
+        path.endsWith(".config.toml"),
+      ),
+    ).toEqual([`${name}.config.toml`]);
+    const saved = await f.command(["get-scan-recipe", "--scan-id", f.scanId]);
+    expect(saved["recipe"]).toEqual(f.recipe);
+    expect(JSON.stringify(saved)).not.toContain(savedProvider.base_url);
+    expect(JSON.stringify(saved)).not.toContain(
+      "synthetic-private-replay-value",
+    );
+  },
+);
+
+test.each(
+  [false, true].flatMap((sealed) =>
+    [false, true].map((requiredCost) => ({ sealed, requiredCost })),
+  ),
+)(
+  "clean accepted composition needs no merge session (sealed: $sealed, required cost: $requiredCost)",
+  async ({ sealed, requiredCost }) => {
+    const cost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 100,
+      output_tokens: 10,
+    })!;
+    const f = await interruptedScan("deep", false, {}, true, false, { cost });
+    const path = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
+    const checkpoint = JSON.parse(
+      await readFile(path, "utf8"),
+    ) as DeepScanCheckpoint;
+    checkpoint.mergeStarted = false;
+    checkpoint.mergedScanIds = [f.childId!];
+    checkpoint.aggregate = {
+      scanId: f.scanId,
+      findings: [],
+      reviewState: semanticCoverage(),
+    };
+    checkpoint.terminalReason = "capped";
+    await f.saveCheckpoint(checkpoint);
+    await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate);
+    if (sealed)
+      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const before = await readFile(path);
+    let turns = 0;
+    const client = resumeClient(f, () => ({
+      startThread() {
+        return {
+          id: null,
+          async runStreamed() {
+            turns++;
+            throw new Error("A clean composition has no model merge.");
+          },
+        };
+      },
+      resumeThread() {
+        throw new Error("A clean composition has no saved model session.");
+      },
+    }))({ codexOverrides: f.recipe.config });
+    try {
+      const result = await client.run(f.repository, {
+        mode: "deep",
+        outputDir: f.scanDir,
+        resumeScanId: f.scanId,
+        ...f.recipe.deepScan,
+        ...(requiredCost ? { maxCostUsd: 1 } : {}),
+      });
+      expect(result.cost).toEqual(cost);
+      expect(result.threadId).toBeNull();
+      expect(result.findings.findings).toEqual([]);
+      expect(turns).toBe(0);
+      if (sealed) expect(await readFile(path)).toEqual(before);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+function resumeDependencies(
+  f: Awaited<ReturnType<typeof interruptedScan>>,
+  createCodex: NonNullable<
+    ConstructorParameters<typeof TestClient>[1]["createCodex"]
+  >,
+  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
+) {
+  return {
+    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+    runWorkbench: f.command,
+    createSecurity: (config: ConstructorParameters<typeof TestClient>[0]) =>
+      new TestClient(config, {
+        environment: f.environment,
+        prepareRuntime: async () => {
+          const runtime = {
+            ...preparedRuntime(f.codexHome),
+            ...runtimeOverrides,
+          };
+          runtime.configPath = join(f.root, "resumed-runtime.toml");
+          runtime.environment = Object.fromEntries(
+            Object.entries(f.environment).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          );
+          runtime.plugin.version = JSON.parse(
+            await readFile(
+              join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
+              "utf8",
+            ),
+          ).version;
+          return runtime;
+        },
+        resolvePluginPython: async () => f.python,
+        prepareScanArtifactRestorer,
+        runWorkbench,
+        createCodex,
+      }),
+  };
+}
+
+test("CLI resumes with current permissions and retains accepted ordinary scans, output permissions and the original thread after a merge failure", async () => {
+  const markdown = "Keep the grading policy chosen when this scan started.";
+  const severityRubric = {
+    markdown,
+    revision: 12,
+    sha256: hash("sha256", markdown),
+  };
+  const f = await interruptedScan(
+    "deep",
+    false,
+    {
+      severityRubric,
+      inheritedPermissions: {
+        filesystem: { ":root": "read" },
+        network: { enabled: false },
+      },
+    },
+    false,
+    true,
+    {
+      findings: [
+        semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
+      ],
+    },
+  );
+  Object.assign(f.environment, {
+    CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
   });
+  using request = spyOn(globalThis, "fetch").mockRejectedValue(
+    new Error("Unexpected rubric lookup"),
+  );
+  await f.command([
+    "update-scan-context",
+    "--scan-id",
+    f.scanId,
+    "--thread-id",
+    f.threadId,
+    "--user-context",
+    "Review the revised scan scope.",
+  ]);
+  if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
+  const feedbackPath = join(
+    f.scanDir,
+    "artifacts",
+    "01_context",
+    "false_positive_feedback.json",
+  );
+  const originalFeedback =
+    JSON.stringify([{ reason: "Original reviewer rationale." }]) + "\n";
+  await mkdir(join(f.scanDir, "artifacts", "01_context"), { recursive: true });
+  await writeFile(feedbackPath, originalFeedback, { mode: 0o600 });
+  const originalHome = join(f.root, "original-codex-home");
+  await appendFile(
+    f.sessionPath,
+    JSON.stringify({
+      type: "turn_context",
+      payload: {
+        permission_profile: {
+          type: "managed",
+          file_system: {
+            type: "restricted",
+            entries: [
+              { path: { type: "path", path: originalHome }, access: "deny" },
+            ],
+          },
+        },
+      },
+    }) + "\n",
+  );
   const checkpoint = JSON.parse(
     await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
   ) as DeepScanCheckpoint;
@@ -500,6 +745,23 @@ test("CLI merge failure retains accepted ordinary scans and the original thread"
           expect(threadOptions.workingDirectory).toBe(
             join(f.scanDir, "artifacts/deep-scan/merge"),
           );
+          expect(threadOptions.approvalPolicy).toBe("never");
+          expect(options.config).toMatchObject({
+            model: f.recipe.config["model"],
+            default_permissions: "codex_security_scan",
+          });
+          const permissions = {
+            ...options.config,
+            ...parseToml((options.configOverrides ?? []).join("\n")),
+          } as {
+            permissions: {
+              codex_security_scan: { filesystem: Record<string, unknown> };
+            };
+          };
+          const filesystem =
+            permissions.permissions.codex_security_scan.filesystem;
+          expect(filesystem[f.codexHome]).toEqual({ ".": "deny" });
+          expect(filesystem[originalHome]).toBeUndefined();
           expect(options.env).toMatchObject({
             CODEX_SECURITY_SCAN_ID: f.scanId,
             CODEX_SECURITY_SCAN_DIR: f.scanDir,
@@ -507,6 +769,11 @@ test("CLI merge failure retains accepted ordinary scans and the original thread"
           return {
             id: threadId,
             async runStreamed() {
+              if (process.platform !== "win32")
+                expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
+              expect(await readFile(feedbackPath, "utf8")).toBe(
+                originalFeedback,
+              );
               throw new Error("Synthetic transport disconnected");
             },
           };
@@ -525,6 +792,12 @@ test("CLI merge failure retains accepted ordinary scans and the original thread"
   expect(await readFile(join(f.childDir!, "findings.json"))).toEqual(
     childBefore,
   );
+  expect(request).not.toHaveBeenCalled();
+  const saved = await f.command(["get-scan-recipe", "--scan-id", f.scanId]);
+  expect(saved["recipe"]).toMatchObject({ severityRubric });
+  expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
+  if (process.platform !== "win32")
+    expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
 });
 
 function resumeClient(
@@ -568,6 +841,142 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  "resumed CLI seals the original scan after its instructions are cleared (coordinator finished: %p, bulk: %p)",
+  async (alreadyFinished, bulk) => {
+    const f = await interruptedScan("deep", bulk);
+    await f.command(
+      [
+        "update-scan-context",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+        "--user-context-stdin",
+      ],
+      "",
+    );
+    if (alreadyFinished) await finishDiscovery(f);
+    await appendFile(
+      f.sessionPath,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
+          },
+        },
+      }) + "\n",
+    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    const code = await runCli(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed(prompt) {
+              expect(prompt).not.toContain(
+                "Keep the original scan instructions.",
+              );
+              if (!alreadyFinished) await finishDiscovery(f);
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+    );
+    // A valid bounded result succeeds while retaining follow-up notes.
+    expect(code, stderr.text()).toBe(0);
+    const result = JSON.parse(stdout.text());
+    if (bulk) {
+      expect(result, stderr.text()).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const receipts = await readJsonLines(result.resultsPath);
+      expect(receipts).toHaveLength(2);
+      expect(receipts[1]).toMatchObject({
+        attempt: 1,
+        outputDir: f.scanDir,
+        status: "completed",
+        cost: { inputTokens: 10000, outputTokens: 2000 },
+      });
+      // Reconcile a crash after sealing but before the bulk receipt was appended.
+      await writeFile(result.resultsPath, JSON.stringify(receipts[0]) + "\n");
+      const reconciledOutput = capture();
+      expect(
+        await main(
+          ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+          reconciledOutput.stream,
+          stderr.stream,
+          {
+            ...dependencies({
+              onRun: () => fail("A sealed scan needs no Codex invocation"),
+            }),
+            runWorkbench: f.command,
+          },
+        ),
+      ).toBe(0);
+      expect(JSON.parse(reconciledOutput.text())).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const reconciled = await readJsonLines(result.resultsPath);
+      expect(reconciled[1]).toMatchObject({
+        attempt: 1,
+        cost: { inputTokens: 10000, outputTokens: 2000 },
+      });
+      // A subsequent bulk recovery must skip the reconciled completion.
+      const nextOutput = capture();
+      expect(
+        await main(
+          ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+          nextOutput.stream,
+          stderr.stream,
+          { ...dependencies(), runWorkbench: f.command },
+        ),
+      ).toBe(0);
+      expect(JSON.parse(nextOutput.text())).toMatchObject({
+        skipped: 1,
+        completed: 1,
+        failed: 0,
+      });
+    } else {
+      expect(result.manifest.scan.id).toBe(f.scanId);
+      expect(result.manifest.scan.sealedAt).toBeString();
+      expect(result.cost.inputTokens).toBe(10000);
+      expect(result.cost.outputTokens).toBe(2000);
+    }
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: "complete" },
+      continuationThreadId: f.threadId,
+    });
+    expect(
+      (await f.command(["list-scans", "--repository", f.repository]))["scans"],
+    ).toHaveLength(1);
+    expect(await readFile(f.checkpoint, "utf8")).toBe(
+      '{"completed":"setup"}\n',
+    );
+    await expect(
+      f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+    ).rejects.toThrow("running scan");
+  },
+);
+
 test.each(["failed", "canceled"] as const)(
   "rejecting a %s checkpoint repairs an interrupted database transition and retains results",
   async (terminalReason) => {
@@ -586,7 +995,7 @@ test.each(["failed", "canceled"] as const)(
     const f = await interruptedScan("deep", false, {}, false, true, {
       cost,
       findings: [finding],
-      coverage,
+      reviewState: coverage,
     });
     const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
     const checkpoint = JSON.parse(
@@ -604,12 +1013,9 @@ test.each(["failed", "canceled"] as const)(
     const paths = [
       checkpointPath,
       f.checkpoint,
-      ...[
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-        "report.md",
-      ].map((name) => join(f.childDir!, name)),
+      ...["scan-manifest.json", "findings.json", "report.md"].map((name) =>
+        join(f.childDir!, name),
+      ),
     ];
     const artifacts = await Promise.all(paths.map((path) => readFile(path)));
     const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
@@ -679,12 +1085,7 @@ test.each(["failed", "canceled"] as const)(
         title: finding.title,
         locations: finding.locations,
       });
-      expect(retained.coverage).toMatchObject({
-        surfaces: coverage.surfaces,
-        deferred: expect.arrayContaining(
-          coverage.deferred.map((entry) => expect.objectContaining(entry)),
-        ),
-      });
+      expect(retained.review).toEqual({ excludedPaths: [] });
     } finally {
       await client.close();
     }
@@ -715,7 +1116,7 @@ test("bulk recovery completes a sealed legacy attempt without another scan", asy
   await publishDraft(f.command, f.registration, "deep", {
     scanId: f.scanId,
     findings: [semanticFinding({ identity: { anchor: "retained-legacy" } })],
-    coverage: semanticCoverage(),
+    reviewState: semanticCoverage(),
   });
   execFileSync(f.python, [
     "-c",
@@ -747,12 +1148,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     threadId: f.threadId,
     compositionCheckpoint: null,
   });
-  const names = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+  const names = ["scan-manifest.json", "findings.json", "report.md"];
   const before = await Promise.all(
     names.map((name) => readFile(join(f.scanDir, name))),
   );
@@ -784,7 +1180,8 @@ with sqlite3.connect(sys.argv[1]) as connection:
       createSecurity(config) {
         const client = createClient(config);
         return {
-          preflight: (options) => client.preflight(options),
+          validate: client.validate.bind(client),
+          preflight: (...args) => client.preflight(...args),
           close: () => client.close(),
           async run(repository, options = {}) {
             requests.push(options.resumeScanId);
@@ -937,7 +1334,7 @@ test.each([
         failed: 0,
       });
     } else {
-      expect(result.coverage).not.toHaveProperty("completeness");
+      expect(result.review).not.toHaveProperty("completeness");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
       expect(result.cost.inputTokens).toBe(11000);
@@ -986,7 +1383,7 @@ test.each([
       { maxCostUsd: 0.01 },
       true,
       true,
-      { cost: cost(100, 10), findings: [finding], coverage },
+      { cost: cost(100, 10), findings: [finding], reviewState: coverage },
     );
     const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
     const checkpoint = JSON.parse(
@@ -1155,7 +1552,7 @@ test.each([
           title: finding.title,
           locations: finding.locations,
         });
-        expect(retained.coverage.deferred.length).toBeGreaterThan(0);
+        expect(retained.review).toEqual({ excludedPaths: [] });
         return;
       }
       const result = await pending;
@@ -1176,19 +1573,14 @@ test.each([
         title: finding.title,
         locations: finding.locations,
       });
-      expect(result.coverage).toMatchObject({
-        surfaces: coverage.surfaces,
-        deferred: expect.arrayContaining(
-          coverage.deferred.map((entry) => expect.objectContaining(entry)),
-        ),
-      });
+      expect(result.review).toEqual({ excludedPaths: [] });
       const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
       expect(saved).toMatchObject({
         terminalReason: "capped",
         mergedScanIds: [f.childId],
         aggregate: {
           findings: [finding],
-          coverage: {
+          reviewState: {
             ...coverage,
             deferred: expect.arrayContaining(coverage.deferred),
           },
@@ -1346,7 +1738,7 @@ test.each([
       checkpoint.aggregate = {
         scanId: f.scanId,
         findings: [finding],
-        coverage: semanticCoverage(),
+        reviewState: semanticCoverage(),
       };
       checkpoint.terminalReason = "saturated";
       await publishDraft(
@@ -1558,7 +1950,7 @@ test("sealed legacy results retain their saved accounting", async () => {
     startedAt: "2000-01-01T00:00:00Z",
     passes: [],
     mergedScanIds: [],
-    aggregate: { scanId: f.scanId, findings: [], coverage },
+    aggregate: { scanId: f.scanId, findings: [], reviewState: coverage },
     noNewStreak: 0,
     consecutiveErrors: 0,
     terminalReason: "capped",
@@ -1574,7 +1966,6 @@ test("sealed legacy results retain their saved accounting", async () => {
   const artifactNames = [
     "scan-manifest.json",
     "findings.json",
-    "coverage.json",
     "report.md",
     DEEP_SCAN_CHECKPOINT,
   ];
@@ -1610,7 +2001,7 @@ test("sealed legacy results retain their saved accounting", async () => {
     expect(result.manifest.scan.id).toBe(f.scanId);
     expect(result.manifest.scan.sealedAt).toBeString();
     expect(result.threadId).toBe(f.threadId);
-    expect(result.coverage).not.toHaveProperty("completeness");
+    expect(result.review).not.toHaveProperty("completeness");
     expect(result.cost).toMatchObject(expectedCost);
     expect(turns).toBe(0);
     expect(
@@ -1765,7 +2156,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       ...(scenario === "selected-python" ? ["threatmodel.md"] : []),
       DEEP_SCAN_CHECKPOINT,
@@ -1979,7 +2369,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];
@@ -2106,7 +2495,7 @@ test.each([
     const aggregate: SemanticScan = {
       scanId: f.scanId,
       findings: [semanticFinding({ identity: { anchor: "retained-legacy" } })],
-      coverage: semanticCoverage(),
+      reviewState: semanticCoverage(),
     };
     const checkpoint: DeepScanCheckpoint = {
       version: 2,
@@ -2120,7 +2509,7 @@ test.each([
       legacy: {
         originThreadId: f.threadId,
         discoveryRuns: 1,
-        coverage: aggregate.coverage,
+        reviewState: aggregate.reviewState,
       },
     };
     if (state === "sealed-v1") {
@@ -2155,7 +2544,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const names = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       ...(state === "sealed" ? [DEEP_SCAN_CHECKPOINT] : []),
     ];
@@ -2201,7 +2589,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
             : null,
         );
         expect(result.findings.findings).toHaveLength(1);
-        expect(result.coverage).not.toHaveProperty("completeness");
+        expect(result.review).not.toHaveProperty("completeness");
       }
       const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
         "scan"
@@ -2253,12 +2641,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     }
     if (scenario === "changed-artifact")
       await appendFile(join(f.scanDir, "findings.json"), "\n");
-    const names = [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-      "report.md",
-    ];
+    const names = ["scan-manifest.json", "findings.json", "report.md"];
     const artifacts = await Promise.all(
       names.map((name) => readFile(join(f.scanDir, name))),
     );
@@ -2383,7 +2766,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       ...(checkpoint === "v2" ? [DEEP_SCAN_CHECKPOINT] : []),
     ];
@@ -2542,7 +2924,6 @@ test.each([
     const names = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];
@@ -2744,12 +3125,7 @@ test.each([
     if (scenario === "changed-findings") {
       await appendFile(join(f.scanDir, "findings.json"), "\n");
     }
-    const artifactNames = [
-      "scan-manifest.json",
-      "findings.json",
-      "coverage.json",
-      "report.md",
-    ];
+    const artifactNames = ["scan-manifest.json", "findings.json", "report.md"];
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
@@ -3159,6 +3535,68 @@ test.each(["legacy", "missing", "modified"] as const)(
   },
 );
 
+test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
+  const documentRoot = await temporaryDirectory();
+  const document = join(documentRoot, "architecture.md");
+  await writeFile(document, "Original architecture.");
+  const f = await interruptedScan("deep", true, {
+    knowledgeBasePaths: [document],
+  });
+  const stdout = capture();
+  const stderr = capture();
+  let resumed = false;
+  const code = await main(
+    [
+      "bulk-scan",
+      f.input,
+      "--output-dir",
+      f.root,
+      "--recover",
+      "--knowledge-base",
+      document,
+      "--json",
+    ],
+    stdout.stream,
+    stderr.stream,
+    {
+      ...resumeDependencies(f, async (codex) => {
+        const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+        expect(await readdir(directory)).toEqual(["0-architecture.md.txt"]);
+        expect(
+          await readFile(join(directory, "0-architecture.md.txt"), "utf8"),
+        ).toBe("Original architecture.");
+        resumed = true;
+        return {
+          startThread() {
+            throw new Error("Expected original session");
+          },
+          resumeThread(threadId) {
+            expect(threadId).toBe(f.threadId);
+            return {
+              id: threadId,
+              async runStreamed() {
+                throw new Error(
+                  "Accepted capped aggregate needs no additional model turn",
+                );
+              },
+            };
+          },
+        };
+      }),
+      runWorkbench: async (args, input) => {
+        if (args[0] === "get-cli-scan-resume") await rm(document);
+        return f.command(args, input);
+      },
+    },
+  );
+  expect(resumed, stderr.text()).toBe(true);
+  expect(code, stderr.text()).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({ completed: 1, failed: 0 });
+  expect(
+    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
+  ).toMatchObject({ knowledgeBasePaths: [document] });
+});
+
 test("missing session logs do not create another session or fail the original scan", async () => {
   const f = await interruptedScan();
   await rm(f.sessionPath);
@@ -3238,7 +3676,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 manifest: { scan: { status: "completed" } },
                 coverage: {},
                 cost: null,
-              } as import("../src/result.js").ScanResult;
+              } as unknown as import("../src/result.js").ScanResult;
             },
           }),
         },
@@ -3296,170 +3734,52 @@ test("resume requires an explicit scan ID", async () => {
   expect(stderr.text()).toContain("scanId");
 });
 
-test.each(
-  [false, true].flatMap((sealed) =>
-    [false, true].map((requiredCost) => ({ sealed, requiredCost })),
-  ),
-)(
-  "clean accepted composition needs no merge session (sealed: $sealed, required cost: $requiredCost)",
-  async ({ sealed, requiredCost }) => {
-    const cost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 100,
-      output_tokens: 10,
-    })!;
-    const f = await interruptedScan("deep", false, {}, true, false, { cost });
-    const path = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
-    const checkpoint = JSON.parse(
-      await readFile(path, "utf8"),
-    ) as DeepScanCheckpoint;
-    checkpoint.mergeStarted = false;
-    checkpoint.mergedScanIds = [f.childId!];
-    checkpoint.aggregate = {
-      scanId: f.scanId,
-      findings: [],
-      coverage: semanticCoverage(),
-    };
-    checkpoint.terminalReason = "capped";
-    await f.saveCheckpoint(checkpoint);
-    await publishDraft(f.command, f.registration, "deep", checkpoint.aggregate);
-    if (sealed)
-      await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    const before = await readFile(path);
-    let turns = 0;
-    const client = resumeClient(f, () => ({
-      startThread() {
-        return {
-          id: null,
-          async runStreamed() {
-            turns++;
-            throw new Error("A clean composition has no model merge.");
-          },
-        };
-      },
-      resumeThread() {
-        throw new Error("A clean composition has no saved model session.");
-      },
-    }))({ codexOverrides: f.recipe.config });
-    try {
-      const result = await client.run(f.repository, {
-        mode: "deep",
-        outputDir: f.scanDir,
-        resumeScanId: f.scanId,
-        ...f.recipe.deepScan,
-        ...(requiredCost ? { maxCostUsd: 1 } : {}),
-      });
-      expect(result.cost).toEqual(cost);
-      expect(result.threadId).toBeNull();
-      expect(result.findings.findings).toEqual([]);
-      expect(turns).toBe(0);
-      if (sealed) expect(await readFile(path)).toEqual(before);
-    } finally {
-      await client.close();
-    }
+test.each([false, true])(
+  "unfinished empty artifact list does not pin producer on resume (empty=%p)",
+  async (empty) => {
+    const f = await interruptedScan("deep");
+    await finishDiscovery(f);
+    const manifestPath = join(f.scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    delete manifest.scan.sealedAt;
+    manifest.scan.producer.version = f.recipe.pluginVersion;
+    if (empty) manifest.scan.artifacts = [];
+    else delete manifest.scan.artifacts;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const resume = await f.command([
+      "get-cli-scan-resume",
+      "--scan-id",
+      f.scanId,
+    ]);
+    expect(resume["sealedProducerVersion"]).toBeUndefined();
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          return {
+            id: threadId,
+            async runStreamed() {
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+    );
+    expect(code, stderr.text()).toBe(0);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "complete" } });
+    const sealed = JSON.parse(await readFile(manifestPath, "utf8"));
+    const plugin = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".codex-plugin/plugin.json"), "utf8"),
+    );
+    expect(sealed.scan.producer.version).toBe(plugin.version);
+    expect(sealed.scan.artifacts.length).toBeGreaterThan(0);
   },
 );
-
-function resumeDependencies(
-  f: Awaited<ReturnType<typeof interruptedScan>>,
-  createCodex: NonNullable<
-    ConstructorParameters<typeof TestClient>[1]["createCodex"]
-  >,
-  runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
-) {
-  return {
-    ...dependencies({ environment: f.environment, currentDirectory: f.root }),
-    runWorkbench: f.command,
-    createSecurity: (config: ConstructorParameters<typeof TestClient>[0]) =>
-      new TestClient(config, {
-        environment: f.environment,
-        prepareRuntime: async () => {
-          const runtime = {
-            ...preparedRuntime(f.codexHome),
-            ...runtimeOverrides,
-          };
-          runtime.configPath = join(f.root, "resumed-runtime.toml");
-          runtime.environment = Object.fromEntries(
-            Object.entries(f.environment).filter(
-              (entry): entry is [string, string] => entry[1] !== undefined,
-            ),
-          );
-          runtime.plugin.version = JSON.parse(
-            await readFile(
-              join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"),
-              "utf8",
-            ),
-          ).version;
-          return runtime;
-        },
-        resolvePluginPython: async () => f.python,
-        prepareScanArtifactRestorer,
-        runWorkbench,
-        createCodex,
-      }),
-  };
-}
-
-test("bulk Deep resume stages campaign knowledge after its source is removed", async () => {
-  const documentRoot = await temporaryDirectory();
-  const document = join(documentRoot, "architecture.md");
-  await writeFile(document, "Original architecture.");
-  const f = await interruptedScan("deep", true, {
-    knowledgeBasePaths: [document],
-  });
-  const stdout = capture();
-  const stderr = capture();
-  let resumed = false;
-  const code = await main(
-    [
-      "bulk-scan",
-      f.input,
-      "--output-dir",
-      f.root,
-      "--recover",
-      "--knowledge-base",
-      document,
-      "--json",
-    ],
-    stdout.stream,
-    stderr.stream,
-    {
-      ...resumeDependencies(f, async (codex) => {
-        const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-        expect(await readdir(directory)).toEqual(["0-architecture.md.txt"]);
-        expect(
-          await readFile(join(directory, "0-architecture.md.txt"), "utf8"),
-        ).toBe("Original architecture.");
-        resumed = true;
-        return {
-          startThread() {
-            throw new Error("Expected original session");
-          },
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed() {
-                throw new Error(
-                  "Accepted capped aggregate needs no additional model turn",
-                );
-              },
-            };
-          },
-        };
-      }),
-      runWorkbench: async (args, input) => {
-        if (args[0] === "get-cli-scan-resume") await rm(document);
-        return f.command(args, input);
-      },
-    },
-  );
-  expect(resumed, stderr.text()).toBe(true);
-  expect(code, stderr.text()).toBe(0);
-  expect(JSON.parse(stdout.text())).toMatchObject({ completed: 1, failed: 0 });
-  expect(
-    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
-  ).toMatchObject({ knowledgeBasePaths: [document] });
-});
 
 test.each([
   { bulk: false, missingHome: true, publicationOnly: true },
@@ -3565,7 +3885,6 @@ test.each([
     const names = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       ...(unsealed ? [] : ["report.md"]),
       DEEP_SCAN_CHECKPOINT,
     ];
@@ -3651,6 +3970,7 @@ test.each([
             },
           );
           return {
+            validate: client.validate.bind(client),
             preflight: (...args: Parameters<TestClient["preflight"]>) =>
               client.preflight(...args),
             close: () => client.close(),
@@ -3707,7 +4027,7 @@ test.each([
       findings: [
         semanticFinding({ locations: [{ path: "source.py", startLine: 1 }] }),
       ],
-      coverage: semanticCoverage(),
+      reviewState: semanticCoverage(),
     });
     await finishDiscovery(f);
     const home = join(f.root, "private-replay-home");
@@ -3752,7 +4072,6 @@ test.each([
     const files = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
       DEEP_SCAN_CHECKPOINT,
     ];

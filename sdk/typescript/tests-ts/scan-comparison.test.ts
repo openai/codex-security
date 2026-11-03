@@ -1,20 +1,13 @@
-import { runReadOnlyCodex } from "../src/scan-comparison.js";
+import { modelResponseText } from "./support/model-response-text.js";
 import { once } from "node:events";
 import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { createInterface } from "node:readline";
+import { existsSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import { stat } from "node:fs/promises";
-import { type TomlTable } from "smol-toml";
-import * as runtimeCommands from "../src/runtime.js";
-import { executablePathForSpawn } from "../src/runtime.js";
-import {
-  resolveCommandAuthConfig,
-  structuredCodexConfig,
-} from "../src/config.js";
-import { removeTemporaryDirectory } from "./support/temporary-directories.js";
-import { execFileSync } from "node:child_process";
-
 import {
   copyFile,
   mkdir,
@@ -26,26 +19,27 @@ import {
 } from "node:fs/promises";
 
 import { tmpdir } from "node:os";
-
 import { join, relative, win32 } from "node:path";
-
 import { pathToFileURL } from "node:url";
-
+import { type TomlTable } from "smol-toml";
 import { parse, stringify } from "smol-toml";
-
 import {
   Codex,
   type CodexOptions,
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-
+import * as runtimeCommands from "../src/runtime.js";
+import { executablePathForSpawn } from "../src/runtime.js";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
-
+import {
+  resolveCommandAuthConfig,
+  structuredCodexConfig,
+} from "../src/config.js";
 import type { JsonObject } from "../src/config.js";
-
+import * as providerProfiles from "../src/provider-profile.js";
+import { runReadOnlyCodex } from "../src/scan-comparison.js";
 import {
   comparisonForScan,
   comparisonEnvironment,
@@ -56,6 +50,10 @@ import {
   type ScanComparisonOptions,
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
+import { planComponents } from "../src/component-plan.js";
+import { VERSION } from "../src/version.js";
+import { nodeCommand } from "./support/shell.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -64,6 +62,12 @@ afterEach(async () => {
     temporaryDirectories.splice(0).map(removeTemporaryDirectory),
   );
 });
+
+async function temporaryDirectory(prefix = "codex-security-comparison-") {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
@@ -90,7 +94,237 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
+function observeCodexOptions(
+  codex: NonNullable<ScanComparisonOptions["codex"]>,
+  observe: (options: CodexOptions) => void,
+) {
+  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
+    this: Codex,
+    options,
+  ) {
+    observe((this as unknown as { options: CodexOptions }).options);
+    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+  });
+}
+
+function captureProfileClient() {
+  const profiles: {
+    name: string;
+    path: string;
+    config: TomlTable;
+    scanId: string | undefined;
+  }[] = [];
+  const spy = spyOn(providerProfiles, "createProfileCodex").mockImplementation(
+    async (options, name) => {
+      const path = join(options.env!["CODEX_HOME"]!, `${name}.config.toml`);
+      profiles.push({
+        name,
+        path,
+        config: parse(await readFile(path, "utf8")),
+        scanId: options.env?.["CODEX_SECURITY_SCAN_ID"],
+      });
+      return new Codex(options);
+    },
+  );
+  return { profiles, spy };
+}
+
 describe("semantic scan comparison", () => {
+  test.each([
+    ["sdk", "matching"],
+    ["cli", "matching"],
+    ["sdk", "planning"],
+    ["cli", "planning"],
+  ] as const)(
+    "preserves request metadata and attributes %s %s at the model boundary",
+    async (surface, helper) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      await mkdir(home);
+      await mkdir(repository);
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            synthetic_home: "preserved",
+            codex_security_surface: "previous",
+          },
+        }),
+      );
+      const options = {
+        config: {
+          codexOverrides: {
+            responses_api_metadata: {
+              synthetic_caller: "preserved",
+              codex_security_command: "previous",
+            },
+          },
+        },
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+      };
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex(
+        helper === "matching"
+          ? { matches: [], uncertain: [] }
+          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      );
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        if (helper === "planning") {
+          await planComponents(repository, {
+            ...options,
+            ...(surface === "cli" ? { surface } : {}),
+          });
+        } else {
+          const input = {
+            before: [finding("before")],
+            after: [finding("after")],
+          };
+          if (surface === "sdk") await matchScanFindings(input, options);
+          else await matchScanFindingsInternal(input, options, { surface });
+        }
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config).not.toHaveProperty("responses_api_metadata");
+        expect(
+          parse(captured!.configOverrides!.join("\n"))[
+            "responses_api_metadata"
+          ],
+        ).toEqual({
+          synthetic_home: "preserved",
+          synthetic_caller: "preserved",
+          codex_security_surface: surface,
+          codex_security_command:
+            helper === "matching" ? "compare" : "scan-components",
+          codex_security_package_version: VERSION,
+        });
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves literal metadata keys in SDK arguments with provider profile %p",
+    async (withProfile) => {
+      const home = await temporaryDirectory();
+      const preload = join(home, "capture-codex.mjs");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            "team.tag": "from-home",
+            "overlap.tag": "home",
+          },
+        }),
+      );
+      await writeFile(
+        preload,
+        [
+          "for await (const _chunk of process.stdin) {}",
+          "const send = (event) => console.log(JSON.stringify(event));",
+          'send({ type: "thread.started", thread_id: "fixture-thread" });',
+          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
+          'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      let captured: CodexOptions | undefined;
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              OPENAI_API_KEY: "synthetic-key",
+            },
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                responses_api_metadata: {
+                  "caller.tag": "from-caller",
+                  "overlap.tag": "caller",
+                },
+                ...(withProfile
+                  ? {
+                      model_provider: "synthetic",
+                      model_providers: {
+                        synthetic: {
+                          name: "Synthetic",
+                          wire_api: "responses",
+                          base_url: "https://provider.example.test/v1",
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            },
+          },
+        );
+      } finally {
+        startThread.mockRestore();
+        profileClient.spy.mockRestore();
+      }
+      expect(captured).toBeDefined();
+      expect(profileClient.profiles).toHaveLength(withProfile ? 1 : 0);
+      const capture = new Codex({
+        ...captured,
+        codexPathOverride: nodeCommand().command,
+        env: {
+          ...captured!.env,
+          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        },
+      });
+      const turn = await capture
+        .startThread({ workingDirectory: home, skipGitRepoCheck: true })
+        .run("Capture the invocation.");
+      const args: string[] = JSON.parse(turn.finalResponse);
+      const metadataOverrides = args
+        .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
+        .filter((value) => value.startsWith("responses_api_metadata"));
+      expect(metadataOverrides).toHaveLength(1);
+      expect(parse(metadataOverrides[0]!)).toEqual({
+        responses_api_metadata: {
+          "team.tag": "from-home",
+          "caller.tag": "from-caller",
+          "overlap.tag": "caller",
+          codex_security_surface: "sdk",
+          codex_security_command: "compare",
+          codex_security_package_version: VERSION,
+          ...(withProfile ? { codex_security_provider: "custom" } : {}),
+        },
+      });
+      const parsed = await runCodexCommand(
+        resolveCodexCommand(captured!.env),
+        [
+          ...metadataOverrides.flatMap((value) => ["-c", value]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        captured!.env!,
+      );
+      expect(parsed).toMatchObject({ success: true });
+    },
+  );
+
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
@@ -100,6 +334,669 @@ describe("semantic scan comparison", () => {
     );
     expect(calls.threadOptions?.threadSource).toBe("security_scan_comparison");
   });
+
+  test.each([
+    "synthetic.gateway",
+    "fireworks",
+    "amazon-bedrock",
+    "command",
+    "file-command-shadow",
+    "file-command-shadow-lowercase",
+  ])(
+    "automatic matching retains the per-scan %s provider",
+    async (selection) => {
+      const home = await temporaryDirectory();
+      const commandProfile =
+        selection === "command" || selection.startsWith("file-command-shadow");
+      const providerName = commandProfile ? "synthetic.command" : selection;
+      const provider = {
+        ...(selection === "amazon-bedrock"
+          ? { aws: { region: "us-east-1" } }
+          : {
+              name: "Synthetic",
+              wire_api: "responses",
+              requires_openai_auth: false,
+            }),
+        base_url: "https://provider.example.test/v1",
+        http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
+        ...(commandProfile
+          ? {
+              auth: {
+                command: "synthetic-auth",
+                cwd: join(home, "helpers"),
+                env: { SYNTHETIC_AUTH_KEY: "synthetic-command-marker" },
+              },
+            }
+          : selection === "amazon-bedrock"
+            ? {}
+            : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
+      };
+      const homeConfig = selection.startsWith("file-command-shadow")
+        ? stringify({
+            profiles: {
+              review: {
+                model_provider: providerName,
+                model_providers: {
+                  [providerName]: {
+                    ...provider,
+                    auth: {
+                      command: "synthetic-ambient-auth",
+                    },
+                  },
+                },
+              },
+            },
+          })
+        : "";
+      await writeFile(join(home, "config.toml"), homeConfig);
+      if (selection.startsWith("file-command-shadow")) {
+        await writeFile(
+          join(home, "review.config.toml"),
+          stringify({
+            model_provider: providerName,
+            model_providers: { [providerName]: provider },
+          }),
+        );
+      }
+      const parentProfile =
+        selection === "fireworks"
+          ? await providerProfiles.createProviderProfile(home, {
+              model_provider: providerName,
+              model_providers: { [providerName]: provider },
+            })
+          : undefined;
+      const profileClient = captureProfileClient();
+      const startupCommands: Parameters<typeof runCodexCommand>[0][] = [];
+      const runNativeCommand = runtimeCommands.runCodexCommand;
+      const nativeCommand = spyOn(
+        runtimeCommands,
+        "runCodexCommand",
+      ).mockImplementation((...args) => {
+        if (args[1].includes("mcp")) startupCommands.push(args[0]);
+        return runNativeCommand(...args);
+      });
+      const before = finding("before");
+      const after = finding("after");
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      let captured: CodexOptions | undefined;
+      let saved = false;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchCompletedScan({
+          scanId: "current",
+          repository: home,
+          previousFindings: [before],
+          falsePositives: [],
+          findings: [after],
+          ...(parentProfile === undefined
+            ? {}
+            : { nativeProfile: parentProfile }),
+          environment: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            [selection.endsWith("lowercase") ? "codex_home" : "CODEX_HOME"]:
+              home,
+            CODEX_SECURITY_SCAN_ID: "current",
+            OPENAI_API_KEY: "synthetic-ambient-key",
+            SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
+          },
+          config: {
+            codexOverrides: {
+              ...(selection.startsWith("file-command-shadow")
+                ? { profile: "review" }
+                : {
+                    profile: "selected",
+                    profiles: {
+                      selected: {
+                        model_provider: providerName,
+                        model_providers: { [providerName]: provider },
+                      },
+                    },
+                    model_providers: { [providerName]: provider },
+                  }),
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: { filesystem: { [home]: "write" } },
+              },
+              projects: { [home]: { trust_level: "trusted" } },
+            },
+          },
+          async workbench(args) {
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    beforeScans: [{ scanId: "prior", findings: [before] }],
+                  },
+                ],
+              };
+            }
+            saved = args[0] === "save-scan-comparison";
+            return {};
+          },
+        });
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config).toMatchObject({
+          model_provider: providerName,
+        });
+        expect(profileClient.profiles).toHaveLength(1);
+        const profile = profileClient.profiles[0]!;
+        expect(profile.config).toEqual({
+          model_providers: { [providerName]: provider },
+        });
+        expect(startupCommands).toHaveLength(1);
+        expect(parse(startupCommands[0]!.args![1]!)).toEqual({
+          model_providers: {
+            [providerName]:
+              selection === "amazon-bedrock"
+                ? {}
+                : {
+                    name: "Synthetic",
+                    wire_api: "responses",
+                    requires_openai_auth: false,
+                  },
+          },
+        });
+        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
+          "synthetic-command-marker",
+        );
+        expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+          responses_api_metadata: {
+            codex_security_surface: "sdk",
+            codex_security_command: "compare",
+            codex_security_package_version: VERSION,
+            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
+              selection,
+            )
+              ? selection
+              : "custom",
+          },
+          default_permissions: "codex_security_deep_scan_worker",
+          permissions: {
+            codex_security_deep_scan_worker: {
+              extends: ":read-only",
+              filesystem: { ":root": "read", [home]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          },
+        });
+        expect(JSON.stringify(captured?.config)).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(captured!.configOverrides!.join("\n")).not.toContain(
+          "synthetic-header-marker",
+        );
+        expect(JSON.stringify(captured?.config)).not.toContain(
+          "synthetic-command-marker",
+        );
+        expect(captured!.configOverrides!.join("\n")).not.toContain(
+          "synthetic-command-marker",
+        );
+        if (parentProfile === undefined) {
+          await expect(readFile(profile.path, "utf8")).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } else {
+          expect(profile.name).toBe(parentProfile.name);
+          expect(parse(await readFile(parentProfile.path, "utf8"))).toEqual(
+            profile.config,
+          );
+        }
+        for (const key of [
+          "model_providers",
+          "default_permissions",
+          "permissions",
+          "projects",
+          "profile",
+          "profiles",
+        ]) {
+          expect(captured?.config).not.toHaveProperty(key);
+        }
+        if (commandProfile) {
+          expect(captured?.apiKey).toBeUndefined();
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+        }
+        expect(calls.threadOptions).toMatchObject({
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(calls.threadOptions?.sandboxMode).toBeUndefined();
+        expect(saved).toBe(true);
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          homeConfig,
+        );
+      } finally {
+        nativeCommand.mockRestore();
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+        await parentProfile?.cleanup();
+      }
+    },
+  );
+
+  test.each(["complete", "turn error", "abort"])(
+    "keeps its private provider profile through evidence turns and cleans up on %s",
+    async (outcome) => {
+      const home = await temporaryDirectory();
+      const controller = new AbortController();
+      const profileClient = captureProfileClient();
+      let turns = 0;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(
+        () =>
+          ({
+            async run() {
+              expect(
+                parse(await readFile(profileClient.profiles[0]!.path, "utf8")),
+              ).toMatchObject({
+                model_providers: {
+                  synthetic: {
+                    http_headers: {
+                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
+                    },
+                  },
+                },
+              });
+              turns++;
+              if (turns === 2 && outcome === "turn error")
+                throw new Error("synthetic turn failure");
+              if (turns === 1 && outcome === "abort")
+                controller.abort(new DOMException("canceled", "AbortError"));
+              return {
+                finalResponse: JSON.stringify({
+                  matches: [],
+                  uncertain: [],
+                  ...(turns === 1
+                    ? {
+                        request: {
+                          kind: "evidence",
+                          beforeOccurrenceIds: ["before"],
+                          afterOccurrenceIds: ["after"],
+                          offset: 0,
+                        },
+                      }
+                    : {}),
+                }),
+              };
+            },
+          }) as unknown as ReturnType<Codex["startThread"]>,
+      );
+      try {
+        const result = matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            signal: controller.signal,
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+            },
+            config: {
+              codexOverrides: {
+                model_provider: "synthetic",
+                model_providers: {
+                  synthetic: {
+                    name: "Synthetic",
+                    wire_api: "responses",
+                    base_url: "https://provider.example.test/v1",
+                    http_headers: {
+                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        );
+        if (outcome === "complete")
+          await expect(result).resolves.toEqual({ matches: [], uncertain: [] });
+        else if (outcome === "turn error")
+          await expect(result).rejects.toThrow("synthetic turn failure");
+        else await expect(result).rejects.toMatchObject({ name: "AbortError" });
+        expect(turns).toBe(outcome === "abort" ? 1 : 2);
+        expect(profileClient.profiles).toHaveLength(1);
+        await expect(
+          readFile(profileClient.profiles[0]!.path, "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["codex_security_policy", "codex_security_deep_scan_worker"])(
+    "does not inherit write grants from the existing %s permission profile",
+    async (permissionId) => {
+      const home = await temporaryDirectory();
+      const work = await temporaryDirectory();
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          default_permissions: permissionId,
+          permissions: {
+            [permissionId]: {
+              extends: ":read-only",
+              filesystem: { [work]: "write" },
+            },
+          },
+        }),
+      );
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      let captured: CodexOptions | undefined;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        const matching = matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            workingDirectory: work,
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+            },
+            config: {
+              codexOverrides: {
+                model_provider: "synthetic",
+                model_providers: {
+                  synthetic: {
+                    name: "Synthetic",
+                    wire_api: "responses",
+                    base_url: "https://provider.example.test/v1",
+                  },
+                },
+              },
+            },
+          },
+        );
+        if (permissionId === "codex_security_deep_scan_worker") {
+          await expect(matching).rejects.toThrow(
+            "existing Codex configuration changes the reserved",
+          );
+          expect(startThread).not.toHaveBeenCalled();
+          expect(
+            (await readdir(home)).filter((name) =>
+              name.endsWith(".config.toml"),
+            ),
+          ).toEqual([]);
+          return;
+        }
+        await matching;
+        // App-server reads the same native permission layers without a model turn.
+        // Provider definitions stay in their private file and are unnecessary here.
+        const child = spawn(
+          executablePathForSpawn(resolveCodexCommand({}).command),
+          [
+            ...captured!.configOverrides!.flatMap((value) => ["-c", value]),
+            "-c",
+            'model_provider="openai"',
+            "app-server",
+            "--stdio",
+          ],
+          {
+            cwd: work,
+            env: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+            },
+            windowsHide: true,
+          },
+        );
+        const closed = once(child, "close");
+        const lines = createInterface({ input: child.stdout });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        try {
+          child.stdin.write(
+            JSON.stringify({
+              id: 1,
+              method: "initialize",
+              params: {
+                clientInfo: { name: "synthetic_permission_test", version: "1" },
+                capabilities: { experimentalApi: true },
+              },
+            }) + "\n",
+          );
+          let inspected = false;
+          for await (const line of lines) {
+            const message = JSON.parse(line);
+            if (message.error) throw new Error(JSON.stringify(message.error));
+            if (message.id === 1)
+              child.stdin.write(
+                JSON.stringify({
+                  id: 2,
+                  method: "config/read",
+                  params: { cwd: work, includeLayers: false },
+                }) + "\n",
+              );
+            if (message.id === 2) {
+              const config = message.result.config;
+              expect(
+                config.permissions[config.default_permissions].filesystem,
+              ).not.toHaveProperty(work);
+              expect(config.default_permissions).toBe(
+                "codex_security_deep_scan_worker",
+              );
+              expect(
+                config.permissions.codex_security_deep_scan_worker.filesystem,
+              ).toMatchObject({
+                ":root": "read",
+                [home]: { ".": "deny" },
+              });
+              expect(
+                config.permissions.codex_security_policy.filesystem[work],
+              ).toBe("write");
+              inspected = true;
+              break;
+            }
+          }
+          expect(inspected, stderr).toBe(true);
+        } finally {
+          lines.close();
+          child.kill();
+          await closed;
+        }
+      } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["allowed", "disallowed", "fallback", "empty"])(
+    "checks the actual helper permission child before starting a turn when %s",
+    async (mode) => {
+      const home = await temporaryDirectory();
+      const work = await temporaryDirectory();
+      const executable = join(home, "synthetic-codex.mjs");
+      const callsPath = join(home, "preflight-calls.jsonl");
+      const profileId = "codex_security_deep_scan_worker";
+      await writeFile(
+        executable,
+        `
+        import { appendFileSync, existsSync } from "node:fs";
+        import { join } from "node:path";
+        import { createInterface } from "node:readline";
+        const args = process.argv.slice(2);
+        if (args.includes("mcp")) { console.log("[]"); process.exit(0); }
+        const id = ${JSON.stringify(profileId)};
+        const mode = ${JSON.stringify(mode)};
+        const profile = {
+          extends: ":read-only",
+          filesystem: { ":root": "read", [process.env.CODEX_HOME]: { ".": "deny" } },
+          network: { enabled: false },
+        };
+        const lines = createInterface({ input: process.stdin });
+        for await (const line of lines) {
+          const request = JSON.parse(line);
+          appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
+            method: request.method, args, cwd: process.cwd(),
+            home: process.env.CODEX_HOME, sentinel: process.env.SYNTHETIC_PREFLIGHT_SENTINEL,
+            lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
+          }) + "\\n");
+          if (request.id === undefined) continue;
+          const result = request.method === "config/read"
+            ? { config: { default_permissions: mode === "fallback" ? ":workspace" : id, permissions: { [id]: profile } } }
+            : request.method === "permissionProfile/list"
+            ? { data: [{ id, allowed: mode !== "disallowed" }], nextCursor: null }
+            : request.method === "configRequirements/read"
+            ? { requirements: { allowedPermissionProfiles: { ":workspace": true } } }
+            : {};
+          console.log(JSON.stringify({ id: request.id, result }));
+        }
+      `,
+      );
+      const originalSpawn = childProcess.spawn;
+      const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+        ...input: Parameters<typeof originalSpawn>
+      ) => {
+        const [command, args, options] = input;
+        return command === process.execPath ||
+          command === executablePathForSpawn(process.execPath)
+          ? originalSpawn(
+              process.execPath,
+              [executable, ...(args ?? [])],
+              options ?? {},
+            )
+          : originalSpawn(...input);
+      }) as typeof originalSpawn);
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const lockPath = join(
+        home,
+        ".codex-security-preflight",
+        ".codex-security-scan.lock",
+      );
+      let windows: unknown;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        windows = (this as unknown as { options: CodexOptions }).options
+          .config?.["windows"];
+        expect(existsSync(lockPath)).toBe(false);
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        const matching = matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            workingDirectory: work,
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_CLI_PATH: process.execPath,
+              CODEX_HOME: home,
+              SYNTHETIC_PREFLIGHT_SENTINEL: "synthetic-inherited-setting",
+              ...(mode === "empty"
+                ? { OPENAI_API_KEY: "synthetic-api-key" }
+                : {}),
+            },
+            config: {
+              codexOverrides:
+                mode === "empty"
+                  ? { model_providers: {} }
+                  : {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          name: "Synthetic provider",
+                          wire_api: "responses",
+                          auth: {
+                            command: "synthetic-auth",
+                            env: {
+                              SYNTHETIC_SECRET: "synthetic-private-marker",
+                            },
+                          },
+                        },
+                      },
+                    },
+            },
+          },
+        );
+        if (mode === "allowed" || mode === "empty") {
+          await expect(matching).resolves.toEqual({
+            matches: [],
+            uncertain: [],
+          });
+          expect(startThread).toHaveBeenCalledTimes(1);
+        } else {
+          await expect(matching).rejects.toThrow(
+            mode === "disallowed"
+              ? "organization policy does not allow"
+              : "did not select",
+          );
+          expect(startThread).not.toHaveBeenCalled();
+        }
+        if (mode === "empty") {
+          expect(windows).toEqual({ sandbox: "elevated" });
+          expect(existsSync(callsPath)).toBe(false);
+          expect(profileClient.profiles).toEqual([]);
+          return;
+        }
+        const calls = (await readFile(callsPath, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(calls.map(({ method }) => method)).toEqual([
+          "initialize",
+          "initialized",
+          "config/read",
+          "permissionProfile/list",
+          ...(mode === "disallowed" ? ["configRequirements/read"] : []),
+        ]);
+        expect(calls[0]).toMatchObject({
+          cwd: work,
+          home,
+          sentinel: "synthetic-inherited-setting",
+          lockHeld: true,
+        });
+        expect(existsSync(lockPath)).toBe(false);
+        const args = calls[0].args as string[];
+        const overrides = args.flatMap((arg, index) =>
+          arg === "--config" ? [args[index + 1]!] : [],
+        );
+        expect(parse(overrides.join("\n"))).toMatchObject({
+          default_permissions: profileId,
+          permissions: {
+            [profileId]: {
+              filesystem: { [home]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          },
+          model_providers: {
+            "synthetic.provider": {
+              name: "Synthetic provider",
+              wire_api: "responses",
+            },
+          },
+        });
+        expect(args.join("\n")).not.toContain("synthetic-private-marker");
+        expect(
+          (await readdir(home)).filter((name) => name.endsWith(".config.toml")),
+        ).toEqual([]);
+      } finally {
+        startThread.mockRestore();
+        profileClient.spy.mockRestore();
+        spawnSpy.mockRestore();
+      }
+    },
+  );
 
   test.each([false, true])(
     "uses prepared scan execution with the matcher restrictions (selected profile: %p)",
@@ -586,6 +1483,172 @@ process.exit(0);
     },
   );
 
+  test.each([
+    [
+      "OPENAI_API_KEY",
+      { OPENAI_API_KEY: "synthetic-openai-key" },
+      "synthetic-openai-key",
+    ],
+    [
+      "CODEX_API_KEY",
+      { CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    [
+      "OPENAI_API_KEY precedence",
+      {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+      },
+      "synthetic-openai-key",
+    ],
+    [
+      "blank OPENAI_API_KEY fallback",
+      { OPENAI_API_KEY: " \t ", CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    ["no environment key", {}, undefined],
+  ] as const)(
+    "supplies %s authentication to Codex matching",
+    async (_name, keys, expected) => {
+      const home = await temporaryDirectory("codex-security-matcher-auth-");
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              ...keys,
+            },
+            workingDirectory: home,
+          },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.apiKey).toBe(expected);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    "unselected",
+    "default",
+    "home",
+    "overrides",
+    "override-profile",
+    "toggle-only",
+  ])(
+    "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
+    async (selection) => {
+      const home = await temporaryDirectory("codex-security-cyber-helper-");
+      const disabled = {
+        cli_daybreak: false,
+        api_key_cyber_access_programs: false,
+        api_key_model_discovery: false,
+        shell_tool: true,
+      };
+      const profile = {
+        daybreak: true,
+        profile: "selected",
+        features: { cli_daybreak: true, api_key_cyber_access_programs: true },
+        profiles: { selected: { daybreak: false, features: disabled } },
+      };
+      await writeFile(
+        join(home, "config.toml"),
+        stringify(selection === "home" ? { features: disabled } : {}),
+      );
+      const options: ScanComparisonOptions = {
+        cyberAccessProgram:
+          selection === "unselected" || selection === "toggle-only"
+            ? undefined
+            : ("daybreak_blue" as const),
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+        workingDirectory: home,
+        ...(selection === "home"
+          ? { config: { codexOverrides: { daybreak: true } } }
+          : selection === "overrides" || selection === "toggle-only"
+            ? {
+                config: {
+                  codexOverrides: { daybreak: true, features: disabled },
+                },
+              }
+            : selection === "override-profile"
+              ? { config: { codexOverrides: profile } }
+              : {}),
+      };
+      let captured: CodexOptions | undefined;
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        for (const helper of ["matching", "planning"]) {
+          if (helper === "matching") {
+            await matchScanFindings(
+              { before: [finding("before")], after: [finding("after")] },
+              options,
+            );
+          } else {
+            await runReadOnlyCodex("Plan components.", {}, options, {
+              surface: "cli",
+              command: "scan-components",
+              threadSource: "security_scan",
+            });
+          }
+          expect(calls.turnOptions?.cyberAccessProgram).toBe(
+            options.cyberAccessProgram,
+          );
+          const features = captured?.config?.["features"] as Record<
+            string,
+            unknown
+          >;
+          expect(captured?.config?.["daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : selection !== "override-profile",
+          );
+          expect(features["cli_daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
+          expect(features["api_key_cyber_access_programs"]).toBe(
+            selection === "unselected" ? undefined : selection === "default",
+          );
+          expect(features["api_key_model_discovery"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
+          expect(features).toMatchObject({
+            shell_tool: false,
+            plugins: false,
+            multi_agent: false,
+            unified_exec: false,
+          });
+        }
+        expect(startThread).toHaveBeenCalledTimes(2);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test.each(["home", "home-override", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
@@ -745,6 +1808,318 @@ process.exit(0);
     },
   );
 
+  test.each(["home", "home-override", "profile", "overrides", "override-away"])(
+    "preserves native command auth selection from %s",
+    async (selection) => {
+      const root = await temporaryDirectory(
+        "codex-security-command-comparison-",
+      );
+      const home =
+        selection === "home" && process.platform !== "win32"
+          ? join(root, " selected home ")
+          : root;
+      if (home !== root) {
+        await mkdir(home, { mode: 0o700 });
+        await mkdir(home.trim());
+        await writeFile(
+          join(home.trim(), "config.toml"),
+          'model_provider = "openai"\n',
+        );
+      }
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        ...(selection === "home-override"
+          ? { windows: { sandbox: "unelevated" } }
+          : {}),
+        model_provider:
+          selection === "overrides" || selection === "profile"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(config);
+      await writeFile(join(home, "config.toml"), contents);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
+      };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
+                  },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection === "profile"
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: { model_provider: "synthetic.provider" },
+                          },
+                        },
+                      },
+                    }
+                  : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection === "profile") {
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config).not.toHaveProperty("profile");
+          expect(captured?.config).not.toHaveProperty("profiles");
+        }
+        if (commandAuth) {
+          expect(captured?.config?.["windows"]).toEqual({
+            sandbox: selection === "home-override" ? "unelevated" : "elevated",
+          });
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.apiKey).toBeUndefined();
+          expect(profileClient.profiles).toHaveLength(1);
+          expect(profileClient.profiles[0]!.config).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                },
+              },
+            },
+          });
+          await expect(
+            readFile(profileClient.profiles[0]!.path, "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(captured?.config?.["model_provider"]).toBe("openai");
+          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+            responses_api_metadata: {
+              codex_security_surface: "sdk",
+              codex_security_command: "compare",
+              codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
+            },
+          });
+          expect(profileClient.profiles).toHaveLength(0);
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(threadOptions?.sandboxMode).toBe(
+          commandAuth ? undefined : "read-only",
+        );
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
+        );
+      } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["command", "environment", "permissions"] as const)(
+    "automatic matching keeps concurrent %s configurations isolated",
+    async (mode) => {
+      const home = await temporaryDirectory(
+        "codex-security-automatic-matching-",
+      );
+      await writeFile(join(home, "config.toml"), "");
+      if (process.platform !== "win32") await chmod(home, 0o755);
+      const providers = [0, 1].map((index) => ({
+        name: `Synthetic provider ${index}`,
+        base_url: `https://provider-${index}.example.test/v1`,
+        wire_api: "responses",
+        http_headers: {
+          "X-Synthetic-Secret": `synthetic-concurrent-header-${index}`,
+        },
+        ...(mode === "environment"
+          ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+          : {
+              auth: {
+                command: `synthetic-auth-${index}`,
+                cwd: join(home, `native-${index}`, "helpers"),
+              },
+            }),
+      }));
+      const captured: CodexOptions[] = [];
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const turnsStarted = Promise.withResolvers<void>();
+      let runningTurns = 0;
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured.push((this as unknown as { options: CodexOptions }).options);
+        const thread = codex.startThread(options!);
+        return {
+          async run(...args: Parameters<typeof thread.run>) {
+            if (++runningTurns === 2) turnsStarted.resolve();
+            await turnsStarted.promise;
+            return thread.run(...args);
+          },
+        } as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await Promise.all(
+          providers.map(async (provider, index) => {
+            const before = finding(`before-${index}`);
+            const after = finding(`after-${index}`);
+            const scanId = `current-${index}`;
+            const codexConfig = resolveCommandAuthConfig(
+              {
+                ...(mode === "permissions"
+                  ? {
+                      permissions: {
+                        audit: { filesystem: { [home]: { ".": "read" } } },
+                      },
+                    }
+                  : {}),
+                model_provider: "synthetic.provider",
+                model_providers: {
+                  "synthetic.provider": {
+                    ...provider,
+                    ...(!("auth" in provider)
+                      ? {}
+                      : { auth: { ...provider.auth, cwd: "helpers" } }),
+                  },
+                },
+              },
+              join(home, `native-${index}`),
+            );
+            await matchCompletedScan({
+              scanId,
+              repository: home,
+              previousFindings: [before],
+              falsePositives: [],
+              findings: [after],
+              config: { codexOverrides: codexConfig },
+              environment: {
+                PATH: process.env["PATH"],
+                SystemRoot: process.env["SystemRoot"],
+                CODEX_HOME: home,
+                CODEX_SECURITY_SCAN_ID: scanId,
+                OPENAI_API_KEY: "synthetic-ambient-key",
+                SYNTHETIC_PROVIDER_KEY: `synthetic-provider-${index}`,
+              },
+              async workbench(args) {
+                return args[0] === "list-unmatched-scan-pairs"
+                  ? {
+                      batches: [
+                        {
+                          afterScanId: scanId,
+                          afterFindings: [after],
+                          beforeScans: [
+                            { scanId: `prior-${index}`, findings: [before] },
+                          ],
+                        },
+                      ],
+                    }
+                  : {};
+              },
+            });
+          }),
+        );
+        expect(captured).toHaveLength(2);
+        for (const [index, provider] of providers.entries()) {
+          const options = captured.find(
+            ({ env }) => env?.["CODEX_SECURITY_SCAN_ID"] === `current-${index}`,
+          );
+          expect(options?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          const profile = profileClient.profiles.find(
+            ({ scanId }) => scanId === `current-${index}`,
+          );
+          expect(profile).toBeDefined();
+          expect(profile!.config).toEqual({
+            model_providers: { "synthetic.provider": provider },
+          });
+          for (const markerIndex of [0, 1]) {
+            expect(JSON.stringify(options!.config)).not.toContain(
+              `synthetic-concurrent-header-${markerIndex}`,
+            );
+            expect(options!.configOverrides!.join("\n")).not.toContain(
+              `synthetic-concurrent-header-${markerIndex}`,
+            );
+          }
+          await expect(readFile(profile!.path, "utf8")).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+          expect(options?.config).not.toHaveProperty("permissions");
+          if (mode !== "environment") {
+            expect(options?.apiKey).toBeUndefined();
+            expect(options?.env).not.toHaveProperty("OPENAI_API_KEY");
+          } else {
+            expect(options?.env?.["SYNTHETIC_PROVIDER_KEY"]).toBe(
+              `synthetic-provider-${index}`,
+            );
+          }
+        }
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
+        if (process.platform !== "win32") {
+          expect((await stat(home)).mode & 0o777).toBe(0o755);
+          expect(
+            (await stat(join(home, ".codex-security-preflight"))).mode & 0o777,
+          ).toBe(0o700);
+        }
+      } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test("does not substitute managed login for an explicitly configured command provider", async () => {
     const home = await mkdtemp(join(tmpdir(), "codex-security-command-login-"));
     temporaryDirectories.push(home);
@@ -829,22 +2204,50 @@ process.exit(0);
         expect(startThread).toHaveBeenCalledTimes(1);
         startThread.mockClear();
 
-        // An ambient profile must not replace that explicitly selected provider.
+        // An ambient profile must not replace the caller's selected profile.
         await writeFile(
           join(home, "config.toml"),
           stringify({
             profile: "ambient",
-            profiles: { ambient: { model_provider: "other" } },
+            profiles: {
+              ambient: { model_provider: "other" },
+              caller: { model_provider: "other" },
+            },
             model_providers: { other: provider },
           }),
         );
-        await expect(
-          matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            { ...options, config: { codexOverrides: config } },
-          ),
-        ).rejects.toThrow("conflicts with command authentication");
-        expect(startThread).not.toHaveBeenCalled();
+        await writeFile(join(home, "caller.config.toml"), stringify(config));
+        const nativeCommand = spyOn(runtimeCommands, "runCodexCommand");
+        try {
+          for (const [selected, codexOverrides] of [
+            ["synthetic", { profile: "caller", profiles: { caller: config } }],
+            [
+              "openai",
+              {
+                profile: "caller",
+                profiles: { caller: { model_provider: "openai" } },
+              },
+            ],
+            ["synthetic", { profile: "caller" }],
+            ["synthetic", config],
+          ] as [string, JsonObject][]) {
+            nativeCommand.mockClear();
+            await expect(
+              matchScanFindings(
+                { before: [finding("before")], after: [finding("after")] },
+                { ...options, config: { codexOverrides } },
+              ),
+            ).rejects.toThrow("Could not read MCP configuration");
+            // Native Codex rejects the legacy home selector after caller selection.
+            expect(nativeCommand).toHaveBeenCalledTimes(1);
+            expect(nativeCommand.mock.calls[0]![0].args).toContain(
+              `model_provider="${selected}"`,
+            );
+            expect(startThread).not.toHaveBeenCalled();
+          }
+        } finally {
+          nativeCommand.mockRestore();
+        }
       } finally {
         profileClient.spy.mockRestore();
         startThread.mockRestore();
@@ -852,116 +2255,135 @@ process.exit(0);
     },
   );
 
-  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
-    const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
-    temporaryDirectories.push(home);
-    const repositoryPath = join(home, "repository");
-    await mkdir(join(repositoryPath, ".git"), { recursive: true });
-    const repository = await realpath(repositoryPath);
-    await mkdir(join(repository, ".codex"));
-    await writeFile(
-      join(repository, ".codex", "config.toml"),
-      stringify({ mcp_servers: { project: { command: "synthetic-project" } } }),
-    );
-    await writeFile(
-      join(home, "config.toml"),
-      stringify({
-        mcp_servers: { inherited: { command: "synthetic-inherited" } },
-        projects: { [repository]: { trust_level: "trusted" } },
-      }),
-    );
-    const executable = join(
-      home,
-      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
-    );
-    await copyFile(resolveCodexCommand({}).command, executable);
-    const environment = {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      TEMP: process.env["TEMP"],
-      TMP: process.env["TMP"],
-      CODEX_HOME: home,
-      CODEX_CLI_PATH: executable,
-      OPENAI_API_KEY: "synthetic-key",
-    };
-    const { codex } = fakeCodex({ matches: [], uncertain: [] });
-    let config: CodexOptions["config"];
-    let codexPath: string | undefined;
-    let codexEnvironment: CodexOptions["env"];
-    const startThread = spyOn(
-      Codex.prototype,
-      "startThread",
-    ).mockImplementation(function (this: Codex, options) {
-      config = (this as unknown as { options: CodexOptions }).options.config;
-      codexPath = (this as unknown as { options: CodexOptions }).options
-        .codexPathOverride;
-      codexEnvironment = (this as unknown as { options: CodexOptions }).options
-        .env;
-      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-    });
-    try {
-      await matchScanFindings(
-        { before: [finding("before")], after: [finding("after")] },
-        {
-          environment,
-          workingDirectory: repository,
-          config: {
-            codexOverrides: {
-              mcp_servers: {
-                synthetic: { command: "synthetic-integration", enabled: true },
+  test.each([
+    ["default", {}, "elevated"],
+    ["file", { profile: "selected" }, "unelevated"],
+    [
+      "file-explicit",
+      { profile: "selected", windows: { sandbox: "elevated" } },
+      "elevated",
+    ],
+    ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
+    ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
+    ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
+    [
+      "profile",
+      {
+        profile: "selected",
+        profiles: { selected: { windows: { sandbox: "unelevated" } } },
+      },
+      "unelevated",
+    ],
+  ] as const)(
+    "keeps MCP servers disabled with %s Windows settings",
+    async (name, homeConfig, sandbox) => {
+      const home = await temporaryDirectory("codex-security-comparison-");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          ...(name === "profile"
+            ? {}
+            : name.startsWith("file")
+              ? { windows: { sandbox: "elevated" } }
+              : homeConfig),
+          mcp_servers: { inherited: { command: "synthetic-inherited" } },
+        }),
+      );
+      if (name.startsWith("file")) {
+        await writeFile(
+          join(home, "selected.config.toml"),
+          '[windows]\nsandbox = "unelevated"\n',
+        );
+      }
+      const executable = join(
+        home,
+        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+      );
+      await copyFile(resolveCodexCommand({}).command, executable);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        TEMP: process.env["TEMP"],
+        TMP: process.env["TMP"],
+        CODEX_HOME: home,
+        CODEX_CLI_PATH: executable,
+        OPENAI_API_KEY: "synthetic-key",
+      };
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      let config: CodexOptions["config"];
+      let codexPath: string | undefined;
+      let codexEnvironment: CodexOptions["env"];
+      const startThread = observeCodexOptions(codex, (options) => {
+        config = options.config;
+        codexPath = options.codexPathOverride;
+        codexEnvironment = options.env;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            config: {
+              codexOverrides: {
+                ...(name === "profile" || name.startsWith("file")
+                  ? homeConfig
+                  : {}),
+                mcp_servers: {
+                  synthetic: {
+                    command: "synthetic-integration",
+                    enabled: true,
+                  },
+                },
               },
             },
           },
-        },
-      );
-      expect(config?.["mcp_servers"]).toEqual({
-        synthetic: { command: "synthetic-integration", enabled: false },
-        inherited: { enabled: false },
-        project: { enabled: false },
-      });
-      expect(codexPath).toBe(
-        process.platform === "win32"
-          ? win32.toNamespacedPath(executable)
-          : executable,
-      );
-      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
-      const effective = await runCodexCommand(
-        resolveCodexCommand(environment),
-        [
-          "-C",
-          repository,
-          "-c",
-          'mcp_servers.synthetic.command="synthetic-integration"',
-          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+        );
+        expect(config?.["mcp_servers"]).toEqual({
+          synthetic: { command: "synthetic-integration", enabled: false },
+          inherited: { enabled: false },
+        });
+        expect(config?.["windows"]).toEqual({ sandbox });
+        expect(codexPath).toBe(
+          process.platform === "win32"
+            ? win32.toNamespacedPath(executable)
+            : executable,
+        );
+        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+        const effective = await runCodexCommand(
+          resolveCodexCommand(environment),
+          [
+            "-C",
+            home,
             "-c",
-            `mcp_servers.${name}.enabled=false`,
-          ]),
-          "mcp",
-          "list",
-          "--json",
-        ],
-        environment,
-        undefined,
-        undefined,
-        repository,
-      );
-      expect(effective.success).toBe(true);
-      expect(
-        JSON.parse(effective.stdout).map(
-          (server: { name: string; enabled: boolean }) => ({
-            name: server.name,
-            enabled: server.enabled,
-          }),
-        ),
-      ).toEqual([
-        { name: "inherited", enabled: false },
-        { name: "project", enabled: false },
-        { name: "synthetic", enabled: false },
-      ]);
-    } finally {
-      startThread.mockRestore();
-    }
-  });
+            'mcp_servers.synthetic.command="synthetic-integration"',
+            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+              "-c",
+              `mcp_servers.${name}.enabled=false`,
+            ]),
+            "mcp",
+            "list",
+            "--json",
+          ],
+          environment,
+        );
+        expect(effective.success).toBe(true);
+        expect(
+          JSON.parse(effective.stdout).map(
+            (server: { name: string; enabled: boolean }) => ({
+              name: server.name,
+              enabled: server.enabled,
+            }),
+          ),
+        ).toEqual([
+          { name: "inherited", enabled: false },
+          { name: "synthetic", enabled: false },
+        ]);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
 
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -1163,6 +2585,24 @@ process.exit(0);
     expect(environment["OPENAI_API_KEY"]).toBe("synthetic-comparison-key");
     expect(environment["CODEX_HOME"]).toBe(ambientHome);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "recognizes stored credentials in a literal spaced home",
+    async () => {
+      const root = await temporaryDirectory("codex-security-spaced-home-");
+      const home = join(root, " selected home ");
+      await mkdir(home);
+      await mkdir(home.trim());
+      await writeFile(join(home, "auth.json"), "{}");
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+      });
+      expect(environment["CODEX_HOME"]).toBe(home);
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "recognizes stored credentials under a backslash home-relative path",
@@ -2009,7 +3449,6 @@ process.exit(0);
     confidence: "high" as const,
     reason: "Same root cause.",
   });
-
   const uncertain = (afterOccurrenceId = "after-1") => ({
     beforeOccurrenceId: "before-1",
     afterOccurrenceId,
@@ -2121,1008 +3560,114 @@ process.exit(0);
       ),
     ).rejects.toThrow(error);
   });
-
-  test.each([
-    ["sdk", "matching"],
-    ["cli", "matching"],
-    ["sdk", "planning"],
-    ["cli", "planning"],
-  ] as const)(
-    "preserves request metadata and attributes %s %s at the model boundary",
-    async (surface, helper) => {
-      const root = await temporaryDirectory();
-      const home = join(root, "home");
-      const repository = join(root, "repository");
-      await mkdir(home);
-      await mkdir(repository);
-      await writeFile(join(repository, "source.ts"), "export {};\n");
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          responses_api_metadata: {
-            synthetic_home: "preserved",
-            codex_security_surface: "previous",
-          },
-        }),
-      );
-      const options = {
-        config: {
-          codexOverrides: {
-            responses_api_metadata: {
-              synthetic_caller: "preserved",
-              codex_security_command: "previous",
-            },
-          },
-        },
-        environment: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_HOME: home,
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-key",
-        },
-      };
-      let captured: CodexOptions | undefined;
-      const { codex } = fakeCodex(
-        helper === "matching"
-          ? { matches: [], uncertain: [] }
-          : { components: [{ name: "Source", paths: ["source.ts"] }] },
-      );
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        if (helper === "planning") {
-          await planComponents(repository, {
-            ...options,
-            ...(surface === "cli" ? { surface } : {}),
-          });
-        } else {
-          const input = {
-            before: [finding("before")],
-            after: [finding("after")],
-          };
-          if (surface === "sdk") await matchScanFindings(input, options);
-          else await matchScanFindingsInternal(input, options, { surface });
-        }
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(captured?.config).not.toHaveProperty("responses_api_metadata");
-        expect(
-          parse(captured!.configOverrides!.join("\n"))[
-            "responses_api_metadata"
-          ],
-        ).toEqual({
-          synthetic_home: "preserved",
-          synthetic_caller: "preserved",
-          codex_security_surface: surface,
-          codex_security_command:
-            helper === "matching" ? "compare" : "scan-components",
-          codex_security_package_version: VERSION,
-        });
-      } finally {
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each([false, true])(
-    "preserves literal metadata keys in SDK arguments with provider profile %p",
-    async (withProfile) => {
-      const home = await temporaryDirectory();
-      const preload = join(home, "capture-codex.mjs");
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          responses_api_metadata: {
-            "team.tag": "from-home",
-            "overlap.tag": "home",
-          },
-        }),
-      );
-      await writeFile(
-        preload,
-        [
-          "for await (const _chunk of process.stdin) {}",
-          "const send = (event) => console.log(JSON.stringify(event));",
-          'send({ type: "thread.started", thread_id: "fixture-thread" });',
-          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
-          'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
-          "process.exit(0);",
-        ].join("\n"),
-      );
-      let captured: CodexOptions | undefined;
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-              CODEX_SECURITY_STATE_DIR: join(home, "state"),
-              OPENAI_API_KEY: "synthetic-key",
-            },
-            workingDirectory: home,
-            config: {
-              codexOverrides: {
-                responses_api_metadata: {
-                  "caller.tag": "from-caller",
-                  "overlap.tag": "caller",
-                },
-                ...(withProfile
-                  ? {
-                      model_provider: "synthetic",
-                      model_providers: {
-                        synthetic: {
-                          name: "Synthetic",
-                          wire_api: "responses",
-                          base_url: "https://provider.example.test/v1",
-                        },
-                      },
-                    }
-                  : {}),
+  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
+    const home = await temporaryDirectory("codex-security-comparison-");
+    await writeFile(
+      join(home, "config.toml"),
+      '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
+    );
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      config = (this as unknown as { options: CodexOptions }).options.config;
+      codexPath = (this as unknown as { options: CodexOptions }).options
+        .codexPathOverride;
+      codexEnvironment = (this as unknown as { options: CodexOptions }).options
+        .env;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          environment,
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              mcp_servers: {
+                synthetic: { command: "synthetic-integration", enabled: true },
               },
             },
           },
-        );
-      } finally {
-        startThread.mockRestore();
-        profileClient.spy.mockRestore();
-      }
-      expect(captured).toBeDefined();
-      expect(profileClient.profiles).toHaveLength(withProfile ? 1 : 0);
-      const capture = new Codex({
-        ...captured,
-        codexPathOverride: nodeCommand().command,
-        env: {
-          ...captured!.env,
-          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
         },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
       });
-      const turn = await capture
-        .startThread({ workingDirectory: home, skipGitRepoCheck: true })
-        .run("Capture the invocation.");
-      const args: string[] = JSON.parse(turn.finalResponse);
-      const metadataOverrides = args
-        .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
-        .filter((value) => value.startsWith("responses_api_metadata"));
-      expect(metadataOverrides).toHaveLength(1);
-      expect(parse(metadataOverrides[0]!)).toEqual({
-        responses_api_metadata: {
-          "team.tag": "from-home",
-          "caller.tag": "from-caller",
-          "overlap.tag": "caller",
-          codex_security_surface: "sdk",
-          codex_security_command: "compare",
-          codex_security_package_version: VERSION,
-          ...(withProfile ? { codex_security_provider: "custom" } : {}),
-        },
-      });
-      const parsed = await runCodexCommand(
-        resolveCodexCommand(captured!.env),
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+      const effective = await runCodexCommand(
+        resolveCodexCommand(environment),
         [
-          ...metadataOverrides.flatMap((value) => ["-c", value]),
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
           "mcp",
           "list",
           "--json",
         ],
-        captured!.env!,
+        environment,
       );
-      expect(parsed).toMatchObject({ success: true });
-    },
-  );
-
-  test.each(["synthetic.gateway", "fireworks", "amazon-bedrock", "command"])(
-    "automatic matching retains the per-scan %s provider",
-    async (selection) => {
-      const home = await temporaryDirectory();
-      await writeFile(join(home, "config.toml"), "");
-      const providerName =
-        selection === "command" ? "synthetic.command" : selection;
-      const provider = {
-        ...(selection === "amazon-bedrock"
-          ? { aws: { region: "us-east-1" } }
-          : {
-              name: "Synthetic",
-              wire_api: "responses",
-              requires_openai_auth: false,
-            }),
-        base_url: "https://provider.example.test/v1",
-        http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
-        ...(selection === "command"
-          ? {
-              auth: {
-                command: "synthetic-auth",
-                cwd: join(home, "helpers"),
-                env: { SYNTHETIC_AUTH_KEY: "synthetic-command-marker" },
-              },
-            }
-          : selection === "amazon-bedrock"
-            ? {}
-            : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
-      };
-      const parentProfile =
-        selection === "fireworks"
-          ? await providerProfiles.createProviderProfile(home, {
-              model_provider: providerName,
-              model_providers: { [providerName]: provider },
-            })
-          : undefined;
-      const profileClient = captureProfileClient();
-      const startupCommands: Parameters<typeof runCodexCommand>[0][] = [];
-      const runNativeCommand = runtimeCommands.runCodexCommand;
-      const nativeCommand = spyOn(
-        runtimeCommands,
-        "runCodexCommand",
-      ).mockImplementation((...args) => {
-        if (args[1].includes("mcp")) startupCommands.push(args[0]);
-        return runNativeCommand(...args);
-      });
-      const before = finding("before");
-      const after = finding("after");
-      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
-      let captured: CodexOptions | undefined;
-      let saved = false;
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        await matchCompletedScan({
-          scanId: "current",
-          repository: home,
-          previousFindings: [before],
-          falsePositives: [],
-          findings: [after],
-          ...(parentProfile === undefined
-            ? {}
-            : { nativeProfile: parentProfile }),
-          environment: {
-            PATH: process.env["PATH"],
-            SystemRoot: process.env["SystemRoot"],
-            CODEX_HOME: home,
-            CODEX_SECURITY_SCAN_ID: "current",
-            OPENAI_API_KEY: "synthetic-ambient-key",
-            SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
-          },
-          config: {
-            codexOverrides: {
-              profile: "selected",
-              profiles: {
-                selected: {
-                  model_provider: providerName,
-                  model_providers: { [providerName]: provider },
-                },
-              },
-              model_providers: { [providerName]: provider },
-              default_permissions: "codex_security_scan",
-              permissions: {
-                codex_security_scan: { filesystem: { [home]: "write" } },
-              },
-              projects: { [home]: { trust_level: "trusted" } },
-            },
-          },
-          async workbench(args) {
-            if (args[0] === "list-unmatched-scan-pairs") {
-              return {
-                batches: [
-                  {
-                    afterScanId: "current",
-                    afterFindings: [after],
-                    beforeScans: [{ scanId: "prior", findings: [before] }],
-                  },
-                ],
-              };
-            }
-            saved = args[0] === "save-scan-comparison";
-            return {};
-          },
-        });
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(captured?.config).toMatchObject({
-          model_provider: providerName,
-        });
-        expect(profileClient.profiles).toHaveLength(1);
-        const profile = profileClient.profiles[0]!;
-        expect(profile.config).toEqual({
-          model_providers: { [providerName]: provider },
-        });
-        expect(startupCommands).toHaveLength(1);
-        expect(parse(startupCommands[0]!.args![1]!)).toEqual({
-          model_providers: {
-            [providerName]:
-              selection === "amazon-bedrock"
-                ? {}
-                : {
-                    name: "Synthetic",
-                    wire_api: "responses",
-                    requires_openai_auth: false,
-                  },
-          },
-        });
-        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
-          "synthetic-header-marker",
-        );
-        expect(startupCommands[0]!.args!.join("\n")).not.toContain(
-          "synthetic-command-marker",
-        );
-        expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
-          responses_api_metadata: {
-            codex_security_surface: "sdk",
-            codex_security_command: "compare",
-            codex_security_package_version: VERSION,
-            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
-              selection,
-            )
-              ? selection
-              : "custom",
-          },
-          default_permissions: "codex_security_deep_scan_worker",
-          permissions: {
-            codex_security_deep_scan_worker: {
-              extends: ":read-only",
-              filesystem: { ":root": "read", [home]: { ".": "deny" } },
-              network: { enabled: false },
-            },
-          },
-        });
-        expect(JSON.stringify(captured?.config)).not.toContain(
-          "synthetic-header-marker",
-        );
-        expect(captured!.configOverrides!.join("\n")).not.toContain(
-          "synthetic-header-marker",
-        );
-        expect(JSON.stringify(captured?.config)).not.toContain(
-          "synthetic-command-marker",
-        );
-        expect(captured!.configOverrides!.join("\n")).not.toContain(
-          "synthetic-command-marker",
-        );
-        if (parentProfile === undefined) {
-          await expect(readFile(profile.path, "utf8")).rejects.toMatchObject({
-            code: "ENOENT",
-          });
-        } else {
-          expect(profile.name).toBe(parentProfile.name);
-          expect(parse(await readFile(parentProfile.path, "utf8"))).toEqual(
-            profile.config,
-          );
-        }
-        for (const key of [
-          "model_providers",
-          "default_permissions",
-          "permissions",
-          "projects",
-          "profile",
-          "profiles",
-        ]) {
-          expect(captured?.config).not.toHaveProperty(key);
-        }
-        if (selection === "command") {
-          expect(captured?.apiKey).toBeUndefined();
-          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
-        }
-        expect(calls.threadOptions).toMatchObject({
-          approvalPolicy: "never",
-          networkAccessEnabled: false,
-        });
-        expect(calls.threadOptions?.sandboxMode).toBeUndefined();
-        expect(saved).toBe(true);
-        expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
-      } finally {
-        nativeCommand.mockRestore();
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-        await parentProfile?.cleanup();
-      }
-    },
-  );
-
-  test.each(["complete", "turn error", "abort"])(
-    "keeps its private provider profile through evidence turns and cleans up on %s",
-    async (outcome) => {
-      const home = await temporaryDirectory();
-      const controller = new AbortController();
-      const profileClient = captureProfileClient();
-      let turns = 0;
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(
-        () =>
-          ({
-            async run() {
-              expect(
-                parse(await readFile(profileClient.profiles[0]!.path, "utf8")),
-              ).toMatchObject({
-                model_providers: {
-                  synthetic: {
-                    http_headers: {
-                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
-                    },
-                  },
-                },
-              });
-              turns++;
-              if (turns === 2 && outcome === "turn error")
-                throw new Error("synthetic turn failure");
-              if (turns === 1 && outcome === "abort")
-                controller.abort(new DOMException("canceled", "AbortError"));
-              return {
-                finalResponse: JSON.stringify({
-                  matches: [],
-                  uncertain: [],
-                  ...(turns === 1
-                    ? {
-                        request: {
-                          kind: "evidence",
-                          beforeOccurrenceIds: ["before"],
-                          afterOccurrenceIds: ["after"],
-                          offset: 0,
-                        },
-                      }
-                    : {}),
-                }),
-              };
-            },
-          }) as unknown as ReturnType<Codex["startThread"]>,
-      );
-      try {
-        const result = matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            signal: controller.signal,
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-            },
-            config: {
-              codexOverrides: {
-                model_provider: "synthetic",
-                model_providers: {
-                  synthetic: {
-                    name: "Synthetic",
-                    wire_api: "responses",
-                    base_url: "https://provider.example.test/v1",
-                    http_headers: {
-                      "X-Synthetic-Secret": "synthetic-lifecycle-marker",
-                    },
-                  },
-                },
-              },
-            },
-          },
-        );
-        if (outcome === "complete")
-          await expect(result).resolves.toEqual({ matches: [], uncertain: [] });
-        else if (outcome === "turn error")
-          await expect(result).rejects.toThrow("synthetic turn failure");
-        else await expect(result).rejects.toMatchObject({ name: "AbortError" });
-        expect(turns).toBe(outcome === "abort" ? 1 : 2);
-        expect(profileClient.profiles).toHaveLength(1);
-        await expect(
-          readFile(profileClient.profiles[0]!.path, "utf8"),
-        ).rejects.toMatchObject({ code: "ENOENT" });
-      } finally {
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each(["codex_security_policy", "codex_security_deep_scan_worker"])(
-    "does not inherit write grants from the existing %s permission profile",
-    async (permissionId) => {
-      const home = await temporaryDirectory();
-      const work = await temporaryDirectory();
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          default_permissions: permissionId,
-          permissions: {
-            [permissionId]: {
-              extends: ":read-only",
-              filesystem: { [work]: "write" },
-            },
-          },
-        }),
-      );
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      let captured: CodexOptions | undefined;
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        const matching = matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            workingDirectory: work,
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-            },
-            config: {
-              codexOverrides: {
-                model_provider: "synthetic",
-                model_providers: {
-                  synthetic: {
-                    name: "Synthetic",
-                    wire_api: "responses",
-                    base_url: "https://provider.example.test/v1",
-                  },
-                },
-              },
-            },
-          },
-        );
-        if (permissionId === "codex_security_deep_scan_worker") {
-          await expect(matching).rejects.toThrow(
-            "existing Codex configuration changes the reserved",
-          );
-          expect(startThread).not.toHaveBeenCalled();
-          expect(
-            (await readdir(home)).filter((name) =>
-              name.endsWith(".config.toml"),
-            ),
-          ).toEqual([]);
-          return;
-        }
-        await matching;
-        // App-server reads the same native permission layers without a model turn.
-        // Provider definitions stay in their private file and are unnecessary here.
-        const child = spawn(
-          executablePathForSpawn(resolveCodexCommand({}).command),
-          [
-            ...captured!.configOverrides!.flatMap((value) => ["-c", value]),
-            "-c",
-            'model_provider="openai"',
-            "app-server",
-            "--stdio",
-          ],
-          {
-            cwd: work,
-            env: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-            },
-            windowsHide: true,
-          },
-        );
-        const closed = once(child, "close");
-        const lines = createInterface({ input: child.stdout });
-        let stderr = "";
-        child.stderr.on("data", (chunk) => {
-          stderr += chunk;
-        });
-        try {
-          child.stdin.write(
-            JSON.stringify({
-              id: 1,
-              method: "initialize",
-              params: {
-                clientInfo: { name: "synthetic_permission_test", version: "1" },
-                capabilities: { experimentalApi: true },
-              },
-            }) + "\n",
-          );
-          let inspected = false;
-          for await (const line of lines) {
-            const message = JSON.parse(line);
-            if (message.error) throw new Error(JSON.stringify(message.error));
-            if (message.id === 1)
-              child.stdin.write(
-                JSON.stringify({
-                  id: 2,
-                  method: "config/read",
-                  params: { cwd: work, includeLayers: false },
-                }) + "\n",
-              );
-            if (message.id === 2) {
-              const config = message.result.config;
-              expect(
-                config.permissions[config.default_permissions].filesystem,
-              ).not.toHaveProperty(work);
-              expect(config.default_permissions).toBe(
-                "codex_security_deep_scan_worker",
-              );
-              expect(
-                config.permissions.codex_security_deep_scan_worker.filesystem,
-              ).toMatchObject({
-                ":root": "read",
-                [home]: { ".": "deny" },
-              });
-              expect(
-                config.permissions.codex_security_policy.filesystem[work],
-              ).toBe("write");
-              inspected = true;
-              break;
-            }
-          }
-          expect(inspected, stderr).toBe(true);
-        } finally {
-          lines.close();
-          child.kill();
-          await closed;
-        }
-      } finally {
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each(["allowed", "disallowed", "fallback", "empty"])(
-    "checks the actual helper permission child before starting a turn when %s",
-    async (mode) => {
-      const home = await temporaryDirectory();
-      const work = await temporaryDirectory();
-      const executable = join(home, "synthetic-codex.mjs");
-      const callsPath = join(home, "preflight-calls.jsonl");
-      const profileId = "codex_security_deep_scan_worker";
-      await writeFile(
-        executable,
-        `
-        import { appendFileSync, existsSync } from "node:fs";
-        import { join } from "node:path";
-        import { createInterface } from "node:readline";
-        const args = process.argv.slice(2);
-        if (args.includes("mcp")) { console.log("[]"); process.exit(0); }
-        const id = ${JSON.stringify(profileId)};
-        const mode = ${JSON.stringify(mode)};
-        const profile = {
-          extends: ":read-only",
-          filesystem: { ":root": "read", [process.env.CODEX_HOME]: { ".": "deny" } },
-          network: { enabled: false },
-        };
-        const lines = createInterface({ input: process.stdin });
-        for await (const line of lines) {
-          const request = JSON.parse(line);
-          appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
-            method: request.method, args, cwd: process.cwd(),
-            home: process.env.CODEX_HOME, sentinel: process.env.SYNTHETIC_PREFLIGHT_SENTINEL,
-            lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
-          }) + "\\n");
-          if (request.id === undefined) continue;
-          const result = request.method === "config/read"
-            ? { config: { default_permissions: mode === "fallback" ? ":workspace" : id, permissions: { [id]: profile } } }
-            : request.method === "permissionProfile/list"
-            ? { data: [{ id, allowed: mode !== "disallowed" }], nextCursor: null }
-            : request.method === "configRequirements/read"
-            ? { requirements: { allowedPermissionProfiles: { ":workspace": true } } }
-            : {};
-          console.log(JSON.stringify({ id: request.id, result }));
-        }
-      `,
-      );
-      const originalSpawn = childProcess.spawn;
-      const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
-        ...input: Parameters<typeof originalSpawn>
-      ) => {
-        const [command, args, options] = input;
-        return command === process.execPath ||
-          command === executablePathForSpawn(process.execPath)
-          ? originalSpawn(
-              process.execPath,
-              [executable, ...(args ?? [])],
-              options ?? {},
-            )
-          : originalSpawn(...input);
-      }) as typeof originalSpawn);
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const lockPath = join(
-        home,
-        ".codex-security-preflight",
-        ".codex-security-scan.lock",
-      );
-      let windows: unknown;
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        windows = (this as unknown as { options: CodexOptions }).options
-          .config?.["windows"];
-        expect(existsSync(lockPath)).toBe(false);
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-      });
-      try {
-        const matching = matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            workingDirectory: work,
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_CLI_PATH: process.execPath,
-              CODEX_HOME: home,
-              SYNTHETIC_PREFLIGHT_SENTINEL: "synthetic-inherited-setting",
-              ...(mode === "empty"
-                ? { OPENAI_API_KEY: "synthetic-api-key" }
-                : {}),
-            },
-            config: {
-              codexOverrides:
-                mode === "empty"
-                  ? { model_providers: {} }
-                  : {
-                      model_provider: "synthetic.provider",
-                      model_providers: {
-                        "synthetic.provider": {
-                          name: "Synthetic provider",
-                          wire_api: "responses",
-                          auth: {
-                            command: "synthetic-auth",
-                            env: {
-                              SYNTHETIC_SECRET: "synthetic-private-marker",
-                            },
-                          },
-                        },
-                      },
-                    },
-            },
-          },
-        );
-        if (mode === "allowed" || mode === "empty") {
-          await expect(matching).resolves.toEqual({
-            matches: [],
-            uncertain: [],
-          });
-          expect(startThread).toHaveBeenCalledTimes(1);
-        } else {
-          await expect(matching).rejects.toThrow(
-            mode === "disallowed"
-              ? "organization policy does not allow"
-              : "did not select",
-          );
-          expect(startThread).not.toHaveBeenCalled();
-        }
-        if (mode === "empty") {
-          expect(windows).toEqual({ sandbox: "elevated" });
-          expect(existsSync(callsPath)).toBe(false);
-          expect(profileClient.profiles).toEqual([]);
-          return;
-        }
-        const calls = (await readFile(callsPath, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
-        expect(calls.map(({ method }) => method)).toEqual([
-          "initialize",
-          "initialized",
-          "config/read",
-          "permissionProfile/list",
-          ...(mode === "disallowed" ? ["configRequirements/read"] : []),
-        ]);
-        expect(calls[0]).toMatchObject({
-          cwd: work,
-          home,
-          sentinel: "synthetic-inherited-setting",
-          lockHeld: true,
-        });
-        expect(existsSync(lockPath)).toBe(false);
-        const args = calls[0].args as string[];
-        const overrides = args.flatMap((arg, index) =>
-          arg === "--config" ? [args[index + 1]!] : [],
-        );
-        expect(parse(overrides.join("\n"))).toMatchObject({
-          default_permissions: profileId,
-          permissions: {
-            [profileId]: {
-              filesystem: { [home]: { ".": "deny" } },
-              network: { enabled: false },
-            },
-          },
-          model_providers: {
-            "synthetic.provider": {
-              name: "Synthetic provider",
-              wire_api: "responses",
-            },
-          },
-        });
-        expect(args.join("\n")).not.toContain("synthetic-private-marker");
-        expect(
-          (await readdir(home)).filter((name) => name.endsWith(".config.toml")),
-        ).toEqual([]);
-      } finally {
-        startThread.mockRestore();
-        profileClient.spy.mockRestore();
-        spawnSpy.mockRestore();
-      }
-    },
-  );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
+    } finally {
+      startThread.mockRestore();
+    }
+  });
 
   test.each([
-    [
-      "OPENAI_API_KEY",
-      { OPENAI_API_KEY: "synthetic-openai-key" },
-      "synthetic-openai-key",
-    ],
-    [
-      "CODEX_API_KEY",
-      { CODEX_API_KEY: "synthetic-codex-key" },
-      "synthetic-codex-key",
-    ],
-    [
-      "OPENAI_API_KEY precedence",
-      {
-        OPENAI_API_KEY: "synthetic-openai-key",
-        CODEX_API_KEY: "synthetic-codex-key",
-      },
-      "synthetic-openai-key",
-    ],
-    [
-      "blank OPENAI_API_KEY fallback",
-      { OPENAI_API_KEY: " \t ", CODEX_API_KEY: "synthetic-codex-key" },
-      "synthetic-codex-key",
-    ],
-    ["no environment key", {}, undefined],
-  ] as const)(
-    "supplies %s authentication to Codex matching",
-    async (_name, keys, expected) => {
-      const home = await temporaryDirectory("codex-security-matcher-auth-");
-      let captured: CodexOptions | undefined;
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-              CODEX_SECURITY_STATE_DIR: join(home, "state"),
-              ...keys,
-            },
-            workingDirectory: home,
-          },
-        );
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(captured?.apiKey).toBe(expected);
-      } finally {
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each([
-    "unselected",
-    "default",
     "home",
+    "profile",
+    "profile-only",
+    "profile-partial",
+    "native",
     "overrides",
-    "override-profile",
-    "toggle-only",
+    "override-away",
   ])(
-    "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
+    "preserves selected file and partial command auth in private matcher profiles: %s",
     async (selection) => {
-      const home = await temporaryDirectory("codex-security-cyber-helper-");
-      const disabled = {
-        cli_daybreak: false,
-        api_key_cyber_access_programs: false,
-        api_key_model_discovery: false,
-        shell_tool: true,
-      };
-      const profile = {
-        daybreak: true,
-        profile: "selected",
-        features: { cli_daybreak: true, api_key_cyber_access_programs: true },
-        profiles: { selected: { daybreak: false, features: disabled } },
-      };
-      await writeFile(
-        join(home, "config.toml"),
-        stringify(selection === "home" ? { features: disabled } : {}),
-      );
-      const options: ScanComparisonOptions = {
-        cyberAccessProgram:
-          selection === "unselected" || selection === "toggle-only"
-            ? undefined
-            : ("daybreak_blue" as const),
-        environment: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_HOME: home,
-          CODEX_SECURITY_STATE_DIR: join(home, "state"),
-          OPENAI_API_KEY: "synthetic-key",
-        },
-        workingDirectory: home,
-        ...(selection === "home"
-          ? { config: { codexOverrides: { daybreak: true } } }
-          : selection === "overrides" || selection === "toggle-only"
-            ? {
-                config: {
-                  codexOverrides: { daybreak: true, features: disabled },
-                },
-              }
-            : selection === "override-profile"
-              ? { config: { codexOverrides: profile } }
-              : {}),
-      };
-      let captured: CodexOptions | undefined;
-      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = observeCodexOptions(codex, (options) => {
-        captured = options;
-      });
-      try {
-        for (const helper of ["matching", "planning"]) {
-          if (helper === "matching") {
-            await matchScanFindings(
-              { before: [finding("before")], after: [finding("after")] },
-              options,
-            );
-          } else {
-            await runReadOnlyCodex("Plan components.", {}, options, {
-              surface: "cli",
-              command: "scan-components",
-              threadSource: "security_scan",
-            });
-          }
-          expect(calls.turnOptions?.cyberAccessProgram).toBe(
-            options.cyberAccessProgram,
-          );
-          const features = captured?.config?.["features"] as Record<
-            string,
-            unknown
-          >;
-          expect(captured?.config?.["daybreak"]).toBe(
-            selection === "unselected" || selection === "default"
-              ? undefined
-              : selection !== "override-profile",
-          );
-          expect(features["cli_daybreak"]).toBe(
-            selection === "unselected" || selection === "default"
-              ? undefined
-              : false,
-          );
-          expect(features["api_key_cyber_access_programs"]).toBe(
-            selection === "unselected" ? undefined : selection === "default",
-          );
-          expect(features["api_key_model_discovery"]).toBe(
-            selection === "unselected" || selection === "default"
-              ? undefined
-              : false,
-          );
-          expect(features).toMatchObject({
-            shell_tool: false,
-            plugins: false,
-            multi_agent: false,
-            unified_exec: false,
-          });
-        }
-        expect(startThread).toHaveBeenCalledTimes(2);
-      } finally {
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each(["home", "home-override", "profile", "overrides", "override-away"])(
-    "preserves native command auth selection from %s",
-    async (selection) => {
-      const root = await temporaryDirectory(
+      const home = await temporaryDirectory(
         "codex-security-command-comparison-",
       );
-      const home =
-        selection === "home" && process.platform !== "win32"
-          ? join(root, " selected home ")
-          : root;
-      if (home !== root) {
-        await mkdir(home, { mode: 0o700 });
-        await mkdir(home.trim());
-        await writeFile(
-          join(home.trim(), "config.toml"),
-          'model_provider = "openai"\n',
-        );
-      }
       const commandAuth = selection !== "override-away";
       const provider = {
         name: "Synthetic",
@@ -3135,17 +3680,24 @@ process.exit(0);
         },
       };
       const config = {
-        ...(selection === "home-override"
-          ? { windows: { sandbox: "unelevated" } }
-          : {}),
         model_provider:
-          selection === "overrides" || selection === "profile"
+          selection === "overrides" ||
+          selection.startsWith("profile") ||
+          selection === "native"
             ? "openai"
             : "synthetic.provider",
         model_providers: { "synthetic.provider": provider },
       };
-      const contents = stringify(config);
+      const contents = stringify(
+        selection === "profile-only" ? { model_provider: "openai" } : config,
+      );
       await writeFile(join(home, "config.toml"), contents);
+      if (selection === "native") {
+        await writeFile(
+          join(home, "review.config.toml"),
+          'model_provider = "synthetic.provider"\n',
+        );
+      }
       const environment = {
         PATH: process.env["PATH"],
         SystemRoot: process.env["SystemRoot"],
@@ -3186,36 +3738,50 @@ process.exit(0);
                 }
               : selection === "override-away"
                 ? { config: { codexOverrides: { model_provider: "openai" } } }
-                : selection === "profile"
+                : selection.startsWith("profile")
                   ? {
                       config: {
                         codexOverrides: {
                           profile: "review",
                           profiles: {
-                            review: { model_provider: "synthetic.provider" },
+                            review: {
+                              model_provider: "synthetic.provider",
+                              ...(selection === "profile-only"
+                                ? {
+                                    model_providers: {
+                                      "synthetic.provider": provider,
+                                    },
+                                  }
+                                : selection === "profile-partial"
+                                  ? {
+                                      model_providers: {
+                                        "synthetic.provider": {
+                                          auth: { refresh_interval_ms: 4567 },
+                                        },
+                                      },
+                                    }
+                                  : {}),
+                            },
                           },
                         },
                       },
                     }
-                  : {}),
+                  : selection === "native"
+                    ? { config: { codexOverrides: { profile: "review" } } }
+                    : {}),
           },
         );
         expect(captured?.env?.["CODEX_HOME"]).toBe(home);
-        if (selection === "profile") {
+        if (selection.startsWith("profile") || selection === "native") {
+          expect(captured?.config).not.toHaveProperty("profile");
           expect(captured?.config?.["model_provider"]).toBe(
             "synthetic.provider",
           );
-          expect(captured?.config).not.toHaveProperty("profile");
-          expect(captured?.config).not.toHaveProperty("profiles");
         }
         if (commandAuth) {
-          expect(captured?.config?.["windows"]).toEqual({
-            sandbox: selection === "home-override" ? "unelevated" : "elevated",
-          });
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(profileClient.profiles).toHaveLength(1);
           expect(profileClient.profiles[0]!.config).toEqual({
             model_providers: {
               "synthetic.provider": {
@@ -3224,18 +3790,16 @@ process.exit(0);
                   ...provider.auth,
                   cwd: selection === "overrides" ? "~/helpers" : home,
                   args: selection === "overrides" ? ["override"] : ["original"],
+                  refresh_interval_ms:
+                    selection === "profile-partial" ? 4567 : 1234,
                 },
               },
             },
           });
-          await expect(
-            readFile(profileClient.profiles[0]!.path, "utf8"),
-          ).rejects.toMatchObject({ code: "ENOENT" });
         } else {
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",
           );
-          expect(captured?.config?.["model_provider"]).toBe("openai");
           expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
             responses_api_metadata: {
               codex_security_surface: "sdk",
@@ -3244,7 +3808,6 @@ process.exit(0);
               codex_security_provider: "openai",
             },
           });
-          expect(profileClient.profiles).toHaveLength(0);
         }
         expect(threadOptions).toMatchObject({
           workingDirectory: home,
@@ -3263,342 +3826,4 @@ process.exit(0);
       }
     },
   );
-
-  test.each(["command", "environment", "permissions"] as const)(
-    "automatic matching keeps concurrent %s configurations isolated",
-    async (mode) => {
-      const home = await temporaryDirectory(
-        "codex-security-automatic-matching-",
-      );
-      await writeFile(join(home, "config.toml"), "");
-      if (process.platform !== "win32") await chmod(home, 0o755);
-      const providers = [0, 1].map((index) => ({
-        name: `Synthetic provider ${index}`,
-        base_url: `https://provider-${index}.example.test/v1`,
-        wire_api: "responses",
-        http_headers: {
-          "X-Synthetic-Secret": `synthetic-concurrent-header-${index}`,
-        },
-        ...(mode === "environment"
-          ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
-          : {
-              auth: {
-                command: `synthetic-auth-${index}`,
-                cwd: join(home, `native-${index}`, "helpers"),
-              },
-            }),
-      }));
-      const captured: CodexOptions[] = [];
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const turnsStarted = Promise.withResolvers<void>();
-      let runningTurns = 0;
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured.push((this as unknown as { options: CodexOptions }).options);
-        const thread = codex.startThread(options!);
-        return {
-          async run(...args: Parameters<typeof thread.run>) {
-            if (++runningTurns === 2) turnsStarted.resolve();
-            await turnsStarted.promise;
-            return thread.run(...args);
-          },
-        } as ReturnType<Codex["startThread"]>;
-      });
-      try {
-        await Promise.all(
-          providers.map(async (provider, index) => {
-            const before = finding(`before-${index}`);
-            const after = finding(`after-${index}`);
-            const scanId = `current-${index}`;
-            const codexConfig = resolveCommandAuthConfig(
-              {
-                ...(mode === "permissions"
-                  ? {
-                      permissions: {
-                        audit: { filesystem: { [home]: { ".": "read" } } },
-                      },
-                    }
-                  : {}),
-                model_provider: "synthetic.provider",
-                model_providers: {
-                  "synthetic.provider": {
-                    ...provider,
-                    ...(!("auth" in provider)
-                      ? {}
-                      : { auth: { ...provider.auth, cwd: "helpers" } }),
-                  },
-                },
-              },
-              join(home, `native-${index}`),
-            );
-            await matchCompletedScan({
-              scanId,
-              repository: home,
-              previousFindings: [before],
-              falsePositives: [],
-              findings: [after],
-              config: { codexOverrides: codexConfig },
-              environment: {
-                PATH: process.env["PATH"],
-                SystemRoot: process.env["SystemRoot"],
-                CODEX_HOME: home,
-                CODEX_SECURITY_SCAN_ID: scanId,
-                OPENAI_API_KEY: "synthetic-ambient-key",
-                SYNTHETIC_PROVIDER_KEY: `synthetic-provider-${index}`,
-              },
-              async workbench(args) {
-                return args[0] === "list-unmatched-scan-pairs"
-                  ? {
-                      batches: [
-                        {
-                          afterScanId: scanId,
-                          afterFindings: [after],
-                          beforeScans: [
-                            { scanId: `prior-${index}`, findings: [before] },
-                          ],
-                        },
-                      ],
-                    }
-                  : {};
-              },
-            });
-          }),
-        );
-        expect(captured).toHaveLength(2);
-        for (const [index, provider] of providers.entries()) {
-          const options = captured.find(
-            ({ env }) => env?.["CODEX_SECURITY_SCAN_ID"] === `current-${index}`,
-          );
-          expect(options?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
-          const profile = profileClient.profiles.find(
-            ({ scanId }) => scanId === `current-${index}`,
-          );
-          expect(profile).toBeDefined();
-          expect(profile!.config).toEqual({
-            model_providers: { "synthetic.provider": provider },
-          });
-          for (const markerIndex of [0, 1]) {
-            expect(JSON.stringify(options!.config)).not.toContain(
-              `synthetic-concurrent-header-${markerIndex}`,
-            );
-            expect(options!.configOverrides!.join("\n")).not.toContain(
-              `synthetic-concurrent-header-${markerIndex}`,
-            );
-          }
-          await expect(readFile(profile!.path, "utf8")).rejects.toMatchObject({
-            code: "ENOENT",
-          });
-          expect(options?.config).not.toHaveProperty("permissions");
-          if (mode !== "environment") {
-            expect(options?.apiKey).toBeUndefined();
-            expect(options?.env).not.toHaveProperty("OPENAI_API_KEY");
-          } else {
-            expect(options?.env?.["SYNTHETIC_PROVIDER_KEY"]).toBe(
-              `synthetic-provider-${index}`,
-            );
-          }
-        }
-        expect(await readFile(join(home, "config.toml"), "utf8")).toBe("");
-        if (process.platform !== "win32") {
-          expect((await stat(home)).mode & 0o777).toBe(0o755);
-          expect(
-            (await stat(join(home, ".codex-security-preflight"))).mode & 0o777,
-          ).toBe(0o700);
-        }
-      } finally {
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.each([
-    ["default", {}, "elevated"],
-    ["elevated", { windows: { sandbox: "elevated" } }, "elevated"],
-    ["unelevated", { windows: { sandbox: "unelevated" } }, "unelevated"],
-    ["legacy", { features: { elevated_windows_sandbox: false } }, "unelevated"],
-    [
-      "profile",
-      {
-        profile: "selected",
-        profiles: { selected: { windows: { sandbox: "unelevated" } } },
-      },
-      "unelevated",
-    ],
-  ] as const)(
-    "keeps MCP servers disabled with %s Windows settings",
-    async (name, homeConfig, sandbox) => {
-      const home = await temporaryDirectory("codex-security-comparison-");
-      await writeFile(
-        join(home, "config.toml"),
-        stringify({
-          ...(name === "profile" ? {} : homeConfig),
-          mcp_servers: { inherited: { command: "synthetic-inherited" } },
-        }),
-      );
-      const executable = join(
-        home,
-        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
-      );
-      await copyFile(resolveCodexCommand({}).command, executable);
-      const environment = {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        TEMP: process.env["TEMP"],
-        TMP: process.env["TMP"],
-        CODEX_HOME: home,
-        CODEX_CLI_PATH: executable,
-        OPENAI_API_KEY: "synthetic-key",
-      };
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      let config: CodexOptions["config"];
-      let codexPath: string | undefined;
-      let codexEnvironment: CodexOptions["env"];
-      const startThread = observeCodexOptions(codex, (options) => {
-        config = options.config;
-        codexPath = options.codexPathOverride;
-        codexEnvironment = options.env;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment,
-            workingDirectory: home,
-            config: {
-              codexOverrides: {
-                ...(name === "profile" ? homeConfig : {}),
-                mcp_servers: {
-                  synthetic: {
-                    command: "synthetic-integration",
-                    enabled: true,
-                  },
-                },
-              },
-            },
-          },
-        );
-        expect(config?.["mcp_servers"]).toEqual({
-          synthetic: { command: "synthetic-integration", enabled: false },
-          inherited: { enabled: false },
-        });
-        expect(config?.["windows"]).toEqual({ sandbox });
-        expect(codexPath).toBe(
-          process.platform === "win32"
-            ? win32.toNamespacedPath(executable)
-            : executable,
-        );
-        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
-        const effective = await runCodexCommand(
-          resolveCodexCommand(environment),
-          [
-            "-C",
-            home,
-            "-c",
-            'mcp_servers.synthetic.command="synthetic-integration"',
-            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
-              "-c",
-              `mcp_servers.${name}.enabled=false`,
-            ]),
-            "mcp",
-            "list",
-            "--json",
-          ],
-          environment,
-        );
-        expect(effective.success).toBe(true);
-        expect(
-          JSON.parse(effective.stdout).map(
-            (server: { name: string; enabled: boolean }) => ({
-              name: server.name,
-              enabled: server.enabled,
-            }),
-          ),
-        ).toEqual([
-          { name: "inherited", enabled: false },
-          { name: "synthetic", enabled: false },
-        ]);
-      } finally {
-        startThread.mockRestore();
-      }
-    },
-  );
-
-  test.skipIf(process.platform === "win32")(
-    "recognizes stored credentials in a literal spaced home",
-    async () => {
-      const root = await temporaryDirectory("codex-security-spaced-home-");
-      const home = join(root, " selected home ");
-      await mkdir(home);
-      await mkdir(home.trim());
-      await writeFile(join(home, "auth.json"), "{}");
-      const environment = await comparisonEnvironment({
-        CODEX_HOME: home,
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        OPENAI_API_KEY: "",
-      });
-      expect(environment["CODEX_HOME"]).toBe(home);
-      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
-    },
-  );
 });
-
-import { modelResponseText } from "./support/model-response-text.js";
-
-import { createInterface } from "node:readline";
-
-import { existsSync } from "node:fs";
-
-import * as providerProfiles from "../src/provider-profile.js";
-
-import { planComponents } from "../src/component-plan.js";
-
-import { VERSION } from "../src/version.js";
-
-import { nodeCommand } from "./support/shell.js";
-
-function observeCodexOptions(
-  codex: NonNullable<ScanComparisonOptions["codex"]>,
-  observe: (options: CodexOptions) => void,
-) {
-  return spyOn(Codex.prototype, "startThread").mockImplementation(function (
-    this: Codex,
-    options,
-  ) {
-    observe((this as unknown as { options: CodexOptions }).options);
-    return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-  });
-}
-
-function captureProfileClient() {
-  const profiles: {
-    name: string;
-    path: string;
-    config: TomlTable;
-    scanId: string | undefined;
-  }[] = [];
-  const spy = spyOn(providerProfiles, "createProfileCodex").mockImplementation(
-    async (options, name) => {
-      const path = join(options.env!["CODEX_HOME"]!, `${name}.config.toml`);
-      profiles.push({
-        name,
-        path,
-        config: parse(await readFile(path, "utf8")),
-        scanId: options.env?.["CODEX_SECURITY_SCAN_ID"],
-      });
-      return new Codex(options);
-    },
-  );
-  return { profiles, spy };
-}
-
-async function temporaryDirectory(prefix = "codex-security-comparison-") {
-  const directory = await realpath(await mkdtemp(join(tmpdir(), prefix)));
-  temporaryDirectories.push(directory);
-  return directory;
-}

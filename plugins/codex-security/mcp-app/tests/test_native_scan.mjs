@@ -36,7 +36,10 @@ const bundle = await build({
   },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL("../../mcp/server.mjs", import.meta.url).href,
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+        import.meta.url,
+      ).href,
     ),
   },
   format: "cjs",
@@ -2491,6 +2494,7 @@ for (const scenario of [
             },
             model: "explicit-current-model",
             reasoningEffort: "ultra",
+            serviceTier: "parent-tier",
             parentSandbox: {
               workspaceAccess:
                 scenario === "read-only-parent" ? "read" : "write",
@@ -2510,6 +2514,7 @@ for (const scenario of [
                       ...configuration,
                       model: "explicit-current-model",
                       model_reasoning_effort: "ultra",
+                      service_tier: "saved-tier",
                     },
                   }
                 : {}),
@@ -2519,6 +2524,7 @@ for (const scenario of [
                       ...configuration,
                       model: "explicit-current-model",
                       model_reasoning_effort: "ultra",
+                      service_tier: "saved-tier",
                     }),
                     replayProfile: { name: replay.name, home: "ambient" },
                   }
@@ -2722,6 +2728,10 @@ for (const scenario of [
                 );
               assert.equal(config.model, "explicit-current-model");
               assert.equal(config.model_reasoning_effort, "ultra");
+              assert.equal(
+                config.service_tier,
+                request.recipe?.config ? "saved-tier" : "parent-tier",
+              );
               if (selectedConfiguration) {
                 for (const [key, value] of Object.entries(
                   configuration.features,

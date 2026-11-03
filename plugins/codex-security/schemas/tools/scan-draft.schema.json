@@ -614,7 +614,7 @@
       "required": ["label", "disposition"],
       "additionalProperties": true
     },
-    "coverage": {
+    "reviewState": {
       "type": "object",
       "properties": {
         "documentType": false,
@@ -722,7 +722,7 @@
       "properties": {
         "complete": {
           "type": "boolean",
-          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings."
+          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings."
         },
         "scanId": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
@@ -742,11 +742,11 @@
             "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
           }
         },
-        "coverage": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage"
+        "reviewState": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/reviewState"
         }
       },
-      "required": ["scanId", "findings", "coverage"],
+      "required": ["scanId", "findings", "reviewState"],
       "additionalProperties": false
     },
     "completedScanInput": {

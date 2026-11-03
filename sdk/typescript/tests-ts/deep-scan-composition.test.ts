@@ -57,11 +57,7 @@ import {
   type JsonObject,
   type SemanticScan,
 } from "../src/scan-semantics.js";
-import type {
-  ScanManifest,
-  FindingsDocument,
-  CoverageDocument,
-} from "../src/models.js";
+import type { ScanManifest, FindingsDocument } from "../src/models.js";
 
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
@@ -70,13 +66,12 @@ const example = join(pluginRoot, "examples/completed-scan");
 const roots: string[] = [];
 let exampleManifest: ScanManifest;
 let exampleFindings: FindingsDocument;
-let exampleCoverage: CoverageDocument;
 let retryDelay:
   ReturnType<typeof spyOn<typeof timers, "setTimeout">> | undefined;
 
 beforeAll(async () => {
-  [exampleManifest, exampleFindings, exampleCoverage] = await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json"].map(async (file) =>
+  [exampleManifest, exampleFindings] = await Promise.all(
+    ["scan-manifest.json", "findings.json"].map(async (file) =>
       JSON.parse(await readFile(join(example, file), "utf8")),
     ),
   );
@@ -102,13 +97,10 @@ function result(
   findings.scanId = scanId;
   if (identity === undefined) findings.findings = [];
   else findings.findings[0]!.identity = { anchor: identity };
-  const coverage = structuredClone(exampleCoverage);
-  coverage.scanId = scanId;
-  coverage.surfaces = [];
   return new ScanResult({
     manifest,
     findings,
-    coverage,
+    review: manifest.scan.review,
     scanDir,
     threadId: `thread-${scanId}`,
     turnResult: usage === undefined ? {} : { model: "gpt-6-astra", usage },
@@ -242,7 +234,12 @@ async function harness(
         scanId,
         completed.manifest.scan,
         sourceFindings,
-        completed.coverage,
+        semanticCoverage({
+          explicitExclusions: completed.review.excludedPaths.map((pattern) => ({
+            pattern,
+            reason: "Excluded from review",
+          })),
+        }),
       );
       for (const [index, finding] of draft.findings.entries()) {
         finding.provenance.sourceFindingIds = [`${childId}:${index}`];
@@ -267,8 +264,6 @@ async function harness(
       if (args[0] === "get-scan")
         return { scan: { progress: { status: "running" } } };
       if (args[0] === "fail-scan") {
-        if (args[4]!.length > 2400)
-          throw new Error("Text value must be no longer than 2400 characters.");
         records.get(args[2]!)!.progress.status = "failed";
         return {};
       }
@@ -603,7 +598,7 @@ describe("ordinary scan composition", () => {
           ? {
               scanId: h.input.scanId,
               findings: [],
-              coverage: semanticCoverage(),
+              reviewState: semanticCoverage(),
             }
           : null,
         noNewStreak: 0,
@@ -1031,7 +1026,7 @@ describe("ordinary scan composition", () => {
           completed.manifest.scan,
           completed.findings.findings,
           {
-            ...completed.coverage,
+            ...semanticCoverage(),
             deferred: [{ reason: "Retained accepted coverage." }],
           },
         );
@@ -1201,7 +1196,7 @@ describe("ordinary scan composition", () => {
         if (aggregate) {
           expect((await h.checkpoint()).terminalReason).toBe("capped");
           expect(h.published.at(-1)!.findings).toEqual(aggregate.findings);
-          expect(h.published.at(-1)!.coverage.deferred).toContainEqual({
+          expect(h.published.at(-1)!.reviewState.deferred).toContainEqual({
             reason: "Retained accepted coverage.",
           });
           expect(costs.get(siblingDirectory)).toEqual(
@@ -2088,7 +2083,9 @@ describe("ordinary scan composition", () => {
       else {
         await runDeepScans(h.input);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
-        expect(h.published.at(-1)!.coverage).not.toHaveProperty("completeness");
+        expect(h.published.at(-1)!.reviewState).not.toHaveProperty(
+          "completeness",
+        );
       }
       expect(h.calls).toHaveLength(
         (resumed ? 0 : requireCost && !executed ? 2 : 4) + (stopped ? 0 : 1),
@@ -2386,8 +2383,8 @@ describe("ordinary scan composition", () => {
       ],
     ).toHaveLength(1);
     expect(h.published.at(-1)).toEqual(state.aggregate!);
-    expect(h.published.at(-1)!.coverage).not.toHaveProperty("completeness");
-    expect(h.published.at(-1)!.coverage["deferred"]).toHaveLength(1);
+    expect(h.published.at(-1)!.reviewState).not.toHaveProperty("completeness");
+    expect(h.published.at(-1)!.reviewState["deferred"]).toHaveLength(1);
     expect(h.metrics().closed).toBe(2);
   });
 
@@ -2420,7 +2417,11 @@ describe("ordinary scan composition", () => {
         discoveryUserContext: null,
         passes: [{ directory, scanId }],
         mergedScanIds: [],
-        aggregate: { scanId: h.input.scanId, findings: [], coverage },
+        aggregate: {
+          scanId: h.input.scanId,
+          findings: [],
+          reviewState: coverage,
+        },
         noNewStreak: 2,
         consecutiveErrors: 1,
         mergeFailures: 1,
@@ -2504,7 +2505,7 @@ test("caps an expired empty composition without requesting a model merge", async
   expect(h.mergeInputs).toEqual([]);
   expect(result.terminalReason).toBe("capped");
   expect(result.aggregate?.findings).toEqual([]);
-  expect(result.aggregate?.coverage).not.toHaveProperty("completeness");
+  expect(result.aggregate?.reviewState).not.toHaveProperty("completeness");
   expect(h.published).toHaveLength(1);
 });
 

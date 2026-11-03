@@ -12,7 +12,7 @@ import {
 
 export type ScanAggregate = Omit<
   SemanticScan,
-  "coverage" | "handoffClaimToken"
+  "reviewState" | "handoffClaimToken"
 >;
 
 export interface ScanMergeInput {

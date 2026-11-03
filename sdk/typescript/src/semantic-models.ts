@@ -74,7 +74,7 @@ export type FindingReachability =
 
 export interface SemanticScan {
   /**
-   * Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings.
+   * Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings.
    */
   complete?: boolean;
   scanId: ScanId;
@@ -82,7 +82,7 @@ export interface SemanticScan {
   scope?: Scope;
   threatModel?: ThreatModel;
   findings: Finding[];
-  coverage: Coverage;
+  reviewState: ReviewState;
 }
 export interface Scope {
   includePaths?: never;
@@ -241,7 +241,7 @@ export interface FindingAttackPath {
   summary?: Text;
   [k: string]: unknown;
 }
-export interface Coverage {
+export interface ReviewState {
   documentType?: never;
   schemaVersion?: never;
   scanId?: never;
@@ -307,7 +307,7 @@ export interface Surface {
 
 export type SemanticFinding = SemanticScan["findings"][number];
 
-export type SemanticCoverage = SemanticScan["coverage"];
+export type SemanticCoverage = SemanticScan["reviewState"];
 
 export type SemanticScope = NonNullable<SemanticScan["scope"]>;
 

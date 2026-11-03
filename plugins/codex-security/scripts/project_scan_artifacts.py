@@ -22,6 +22,7 @@ from finalize_scan_contract import (
     ContractError,
     _legacy_sealed_findings_for_validation,
     _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
     open_scan_local_file_descriptor,
     scan_root_identity,
     write_scan_local_bytes,
@@ -61,6 +62,7 @@ def merge_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
         "deferred",
         "resolvedDeferred",
         "openQuestions",
+        "reviews",
     ):
         rows = target.setdefault(field, [])
         seen = {json.dumps(row, sort_keys=True) for row in rows}
@@ -162,6 +164,7 @@ def project_scan_artifacts(
         "deferred",
         "resolvedDeferred",
         "openQuestions",
+        "reviews",
     ):
         for row in semantic_coverage.get(field, []):
             if not isinstance(row, dict):
@@ -187,7 +190,7 @@ def project_scan_artifacts(
         **({"scope": scope} if scope else {}),
         **({"threatModel": copy.deepcopy(scan["threatModel"])} if "threatModel" in scan else {}),
         "findings": projected,
-        "coverage": semantic_coverage,
+        "reviewState": semantic_coverage,
     }
     return {
         "scanId": source_scan_id,
@@ -195,6 +198,56 @@ def project_scan_artifacts(
         "draft": draft,
         "sourceFindings": originals,
     }
+
+
+def child_review_state(db, connection, child, prepared):
+    """Recover the accepted review evidence omitted from the sealed summary."""
+    from review_state import review_state, uses_legacy_review
+    from workbench.retained_coverage import merge_saved_results
+    from workbench.saved_sources import _read_saved_result
+
+    scan = prepared.manifest["scan"]
+    if not prepared.was_sealed or uses_legacy_review(scan) or "reviewState" in scan:
+        return prepared.coverage
+    if "preservedSources" not in scan:
+        head, _, _ = _read_saved_result(prepared.scan_dir, "checkpoint-head.json", child["id"])
+        filename = head["checkpoint"]
+        checkpoint, contents = _read_scan_local_json_bytes(
+            prepared.scan_dir, f"checkpoints/{filename}", "Accepted child review"
+        )
+        if filename != f"{hashlib.sha256(contents).hexdigest()}.json":
+            raise ContractError("Accepted child review no longer matches its checkpoint digest")
+        return review_state(
+            {
+                **scan,
+                "reviewState": checkpoint["reviewState"]
+                if "reviewState" in checkpoint
+                else checkpoint["coverage"],
+            }
+        )
+    workers = connection.execute(
+        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id", (child["id"],)
+    ).fetchall()
+    documents = merge_saved_results(
+        prepared.scan_dir,
+        child["id"],
+        db.workbench_completion_binding(child, scan["completedAt"], prepared.manifest),
+        workers,
+        [],
+        stopped=scan["status"] != "completed",
+        reason=child["failure_message"] or "",
+        frozen_source_digests=scan["preservedSources"],
+        checkpoint_heads=scan.get("preservedCheckpointHeads", {}).copy(),
+        scan_mode=child["mode"],
+        finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
+        project_worker_coverage=child["mode"] == "deep",
+        reuse_sealed_result=False,
+    )
+    if documents is None:
+        raise ContractError(
+            "Accepted child review could not be reconstructed from its saved checkpoints"
+        )
+    return documents[2]
 
 
 def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
@@ -217,6 +270,7 @@ def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
         require_deep_pass_target(parent, stored_scan_target_identity(source))
         workbench_db.require_recorded_manifest_digest(source, source_directory)
         workbench_db.verify_manifest_binding(source, manifest)
+        coverage = child_review_state(workbench_db, connection, source, prepared)
     expected = request["expectedParentIdentity"]
     return project_scan_artifacts(
         request["parentScanId"],

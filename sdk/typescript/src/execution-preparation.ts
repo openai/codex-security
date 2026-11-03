@@ -22,6 +22,7 @@ import {
   isExternalModelProvider,
   resolveCodexProfile,
   scanModelProvider,
+  scanProviderEnvKey,
   structuredCodexConfig,
   scanCompositionOverrides,
   setScanSubagentBudget,
@@ -86,9 +87,11 @@ export interface ExecutionSource {
   readonly environment: ProcessEnvironment;
   readonly authentication: ScanAuthentication;
   readonly modelProvider: unknown;
-  readonly externalProvider:
-    | (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS]
-    | null;
+  readonly externalProvider: {
+    readonly name: string;
+    readonly env_key: string;
+    readonly base_url: string;
+  } | null;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
 }
@@ -118,18 +121,23 @@ export function prepareExecutionSource(input: {
     !preserveProviderEnvironment &&
     !commandAuth &&
     isExternalModelProvider(modelProvider)
-      ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+      ? {
+          ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+          env_key:
+            scanProviderEnvKey(configuration) ??
+            EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key,
+        }
       : null;
   const authentication = scanAuthentication(
     environment,
     preserveProviderEnvironment ? "auto" : input.auth,
     modelProvider,
     commandAuth,
-    { preserveProviderEnvironment },
+    { preserveProviderEnvironment, providerEnvKey: externalProvider?.env_key },
   );
   const apiKey =
     !preserveProviderEnvironment && authentication.method === "api_key"
-      ? environmentApiKey(environment, modelProvider)
+      ? environmentApiKey(environment, modelProvider, externalProvider?.env_key)
       : null;
   if (externalProvider !== null && apiKey === null)
     throw new AuthenticationRequiredError(
@@ -149,6 +157,7 @@ export function prepareExecutionSource(input: {
           commandAuth ? withoutOpenAiApiKeys(environment) : environment,
           input.auth,
           modelProvider,
+          externalProvider?.env_key,
         ),
   };
 }
@@ -571,14 +580,19 @@ export async function prepareAmbientRuntime(
 
 export async function nativeScanConfiguration(
   environment: NodeJS.ProcessEnv,
-  input: { recipe?: JsonObject; model?: string; reasoningEffort?: string },
+  input: {
+    recipe?: JsonObject;
+    model?: string;
+    reasoningEffort?: string;
+    serviceTier?: string;
+  },
   subagents: number,
 ): Promise<JsonObject> {
   if (input.recipe?.["config"] !== undefined)
     return scanCompositionOverrides(
       await restoreReplayProfile(
         input.recipe["config"] as JsonObject,
-        input.recipe["replayProfile"],
+        input.recipe["replayProfile"] ?? input.recipe["providerProfile"],
         environment,
       ),
       subagents,
@@ -603,6 +617,7 @@ export async function nativeScanConfiguration(
     subagents,
   );
   if (input.model) config["model"] = input.model;
+  if (input.serviceTier) config["service_tier"] = input.serviceTier;
   if (input.reasoningEffort)
     config["model_reasoning_effort"] = input.reasoningEffort;
   return config;

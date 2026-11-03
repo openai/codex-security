@@ -1,20 +1,21 @@
-import { cp } from "node:fs/promises";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-import { TestClient } from "./support/api-client.js";
+import { runWorkbench } from "../src/runtime.js";
 import {
   preparedRuntime,
   codexFactory,
   completedEvents,
 } from "./support/api-events.js";
 import { afterEach, expect, test } from "bun:test";
-import { stringify as stringifyToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { cp } from "node:fs/promises";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
+import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -68,6 +69,41 @@ async function nativeRequest(
     child.kill();
     await closed;
   }
+}
+
+async function effectiveProvider(
+  environment: Record<string, string>,
+  cwd: string,
+  overrides: string[],
+  nativeProfile?: string,
+) {
+  if (nativeProfile !== undefined) {
+    const config = parseToml(
+      await readFile(
+        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
+        "utf8",
+      ),
+    );
+    const result = await nativeRequest(environment, cwd, [], "thread/start", {
+      cwd,
+      ephemeral: true,
+      // This no-turn configuration check never executes model commands.
+      sandbox: "danger-full-access",
+      threadSource: "security_scan",
+      config: { ...config, ...parseToml(overrides.join("\n")) },
+    });
+    return (config["model_providers"] as Record<string, unknown>)?.[
+      result.modelProvider
+    ];
+  }
+  const { config } = await nativeRequest(
+    environment,
+    cwd,
+    overrides.flatMap((value) => ["-c", value]),
+    "config/read",
+    { cwd, includeLayers: false },
+  );
+  return config.model_providers?.[config.model_provider];
 }
 
 test("native override tables retain inherited features and MCP servers", async () => {
@@ -207,6 +243,215 @@ test("native patch overrides disable repository MCP while preserving host MCP", 
     await readFile(join(repository, ".codex", "config.toml"), "utf8"),
   ).toBe(repositoryConfig);
 });
+
+const fileProviderKeyCases = [
+  ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "default", "FIREWORKS_API_KEY"],
+  ["fireworks", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "custom Codex key", "CODEX_API_KEY"],
+  ["openrouter", "other external key", "FIREWORKS_API_KEY"],
+] as const;
+
+test.each(["openrouter", "fireworks"] as const)(
+  "native file profile accepts the %s custom environment key",
+  async (providerId) => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    await writeFile(
+      join(home, "review.config.toml"),
+      stringifyToml({
+        model_provider: providerId,
+        model: "synthetic-model",
+        model_providers: {
+          [providerId]: {
+            name: "Synthetic provider",
+            wire_api: "responses",
+            base_url: "https://provider.example.test/v1",
+            env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          },
+        },
+      }),
+    );
+    const selected = await effectiveProvider(
+      { CODEX_HOME: home, SYNTHETIC_CUSTOM_API_KEY: "synthetic-custom-key" },
+      root,
+      [],
+      "review",
+    );
+    expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
+  },
+  30_000,
+);
+
+for (const mode of ["standard", "deep"] as const) {
+  test.each(fileProviderKeyCases)(
+    `file provider %s preserves %s authentication for ${mode} preflight and children`,
+    async (providerId, _selection, providerKey) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scan = join(root, "scan");
+      const sourceHome = join(root, "source-home");
+      await mkdir(repository);
+      await mkdir(scan, { mode: 0o700 });
+      await mkdir(sourceHome, { mode: 0o700 });
+      const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const headerEnvironment =
+        _selection === "canonical header" ||
+        _selection === "missing custom primary"
+          ? { [canonicalKey]: " synthetic-header-key " }
+          : {};
+      const inheritedEnvironment = {
+        ...(_selection === "custom Codex key" ||
+        _selection === "other external key"
+          ? Object.fromEntries(
+              [
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "FIREWORKS_API_KEY",
+              ]
+                .filter((name) => name !== providerKey)
+                .map((name) => [name, "synthetic-unrelated-key"]),
+            )
+          : {}),
+        ...headerEnvironment,
+        ...(_selection === "missing custom primary"
+          ? {}
+          : { [providerKey]: "synthetic-file-key" }),
+      };
+      const provider = {
+        name: "Synthetic file provider",
+        wire_api: "responses",
+        base_url: "https://provider.example.test/v1",
+        env_key: providerKey,
+        ...(_selection === "canonical header"
+          ? { env_http_headers: { "X-Synthetic-Token": canonicalKey } }
+          : {}),
+      };
+      const original = stringifyToml({
+        model: "synthetic-model",
+        model_provider: providerId,
+        model_providers: { [providerId]: provider },
+        features: { shell_tool: false, unified_exec: false },
+      });
+      await writeFile(join(sourceHome, "review.config.toml"), original);
+      const controller = new AbortController();
+      let launched = false;
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT, codexOverrides: { profile: "review" } },
+        {
+          environment: {
+            CODEX_HOME: sourceHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            ...inheritedEnvironment,
+          },
+          resolvePluginPython: async () =>
+            Bun.which("python3") ?? Bun.which("python")!,
+          runWorkbench,
+          prepareOutputDir: async (directory) => {
+            const path = directory ?? scan;
+            await mkdir(path, { recursive: true, mode: 0o700 });
+            return path;
+          },
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            launched = true;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  expect(options.apiKey).toBeUndefined();
+                  const environment = options.env!;
+                  expect(environment[providerKey]).toBe("synthetic-file-key");
+                  for (const name of [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "FIREWORKS_API_KEY",
+                  ]) {
+                    expect(environment[name]).toBe(
+                      name === providerKey || name === canonicalKey
+                        ? inheritedEnvironment[name]
+                        : undefined,
+                    );
+                  }
+                  const activeProfile = options.nativeProfile ?? "review";
+                  const activeConfig = parseToml(
+                    await readFile(
+                      join(
+                        environment["CODEX_HOME"]!,
+                        activeProfile + ".config.toml",
+                      ),
+                      "utf8",
+                    ),
+                  );
+                  expect(activeConfig["model_providers"]).toMatchObject({
+                    [providerId]: provider,
+                  });
+                  for (const text of [
+                    await readFile(
+                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ]) {
+                    expect(text).not.toContain("synthetic-file-key");
+                    expect(text).not.toContain("synthetic-header-key");
+                  }
+                  controller.abort(
+                    new Error("synthetic file provider child checked"),
+                  );
+                  throw controller.signal.reason;
+                },
+              }),
+            };
+          },
+        },
+      );
+      try {
+        const preflight = await client.preflight(repository, { mode });
+        expect(preflight.authentication).toEqual({
+          method: "api_key",
+          source: providerKey,
+          verified: false,
+        });
+        expect(preflight.modelProvider).toBe(providerId);
+        if (_selection === "missing custom primary") {
+          await expect(
+            client.preflight(repository, { mode, auth: "api-key" }),
+          ).rejects.toThrow(providerKey);
+          await expect(client.run(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          expect(launched).toBe(false);
+          return;
+        }
+        await expect(
+          client.run(repository, { mode, signal: controller.signal }),
+        ).rejects.toThrow();
+        expect(controller.signal.reason?.message).toBe(
+          "synthetic file provider child checked",
+        );
+        expect(launched).toBe(true);
+        expect(
+          await readFile(join(sourceHome, "review.config.toml"), "utf8"),
+        ).toBe(original);
+      } finally {
+        await client.close();
+      }
+    },
+    Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? 30_000),
+  );
+}
 
 test("standard scans do not require Deep Scan plugin capabilities", async () => {
   const root = await temporaryDirectory();

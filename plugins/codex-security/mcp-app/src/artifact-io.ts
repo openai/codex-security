@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 export interface DeepReducerWorkerContext {
   id: string;
   resultPath: string;
+  attempt?: number;
 }
 
 export interface DeepReducerContext {

@@ -112,7 +112,7 @@ try {
     scope: { summary: "Archive handling" },
     threatModel: { summary: "Untrusted users may upload archives." },
     findings: [finding],
-    coverage,
+    reviewState: coverage,
   };
 
   const interruptedFinding = structuredClone(finding);
@@ -173,10 +173,10 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ),
   );
   assert.deepEqual(producerCheckpoint.scope.includePaths, ["."]);
-  assert.deepEqual(producerCheckpoint.coverage.includePaths, ["."]);
-  assert.deepEqual(producerCheckpoint.coverage.excludePaths, []);
-  assert.equal(producerCheckpoint.coverage.mode, "repository");
-  assert.equal(producerCheckpoint.coverage.inventoryStrategy, "repository");
+  assert.deepEqual(producerCheckpoint.reviewState.includePaths, ["."]);
+  assert.deepEqual(producerCheckpoint.reviewState.excludePaths, []);
+  assert.equal(producerCheckpoint.reviewState.mode, "repository");
+  assert.equal(producerCheckpoint.reviewState.inventoryStrategy, "repository");
   const producerContext = { ...context, root: parentCheckpointRoot };
   const producerPath = await saveScanDraftCheckpoint(
     producerContext,
@@ -204,7 +204,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ],
     [
       "coverage",
-      { coverage: { ...producerCheckpoint.coverage, surfaces: "invalid" } },
+      { reviewState: { ...producerCheckpoint.reviewState, surfaces: "invalid" } },
       /current schema/,
     ],
   ]) {
@@ -256,7 +256,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ...input,
     complete: false,
     findings: [interruptedFinding],
-    coverage: {
+    reviewState: {
       ...coverage,
       deferred: [
         {
@@ -441,7 +441,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ...input,
     complete: false,
     findings: [obsoleteFinding],
-    coverage: {
+    reviewState: {
       ...coverage,
       surfaces: [
         {
@@ -493,7 +493,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const acceptedDeepDraft = {
     ...input,
     complete: true,
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -560,7 +560,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         await readFile(checkpointPath, "utf8"),
       );
       assert.deepEqual(staged.findings, acceptedDeepFindings);
-      assert.deepEqual(staged.coverage, acceptedDeepCoverage);
+      assert.deepEqual(staged.reviewState, acceptedDeepCoverage);
       assert.deepEqual(stagedCheckpoint.findings, acceptedDeepDraft.findings);
       assert.equal(stagedCheckpoint.handoffClaimToken, undefined);
     },
@@ -619,7 +619,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const semanticInput = {
     ...input,
     findings: [semanticFinding],
-    coverage: semanticCoverage,
+    reviewState: semanticCoverage,
   };
 
   const reasonOnlyDeferred = [
@@ -661,7 +661,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   ];
   const reasonOnlyInput = {
     ...input,
-    coverage: {
+    reviewState: {
       ...coverage,
       deferred: reasonOnlyDeferred,
     },
@@ -761,7 +761,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "coverage surfaces must use canonical labels and dispositions",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           surfaces: [{ surface: "Archive extraction", outcome: "reported" }],
         },
@@ -771,7 +771,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "reason-only deferred coverage rejects a missing reason",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [{ paths: ["src/extract.py"] }],
         },
@@ -781,7 +781,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "reason-only deferred coverage rejects a whitespace-only reason",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [{ reason: "  \t\n  " }],
         },
@@ -791,7 +791,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "explicit deferred identities do not bypass the required reason",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [{ id: "deferred-explicit-archive" }],
         },
@@ -801,7 +801,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "deferred candidate identities must not contain only whitespace",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [
             {
@@ -816,14 +816,14 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "plain-string open questions must contain meaningful text",
       {
         ...input,
-        coverage: { ...coverage, openQuestions: ["  \t  "] },
+        reviewState: { ...coverage, openQuestions: ["  \t  "] },
       },
     ],
     [
       "structured open questions require a question",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           openQuestions: [{ followUpPrompt: "Trace the upload boundary." }],
         },
@@ -833,7 +833,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       "structured open questions must not contain only whitespace",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           openQuestions: [{ question: "  \n  " }],
         },
@@ -849,25 +849,25 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ],
     [
       "coverage mode is derived by the authoritative scan",
-      { ...input, coverage: { ...coverage, mode: "repository" } },
+      { ...input, reviewState: { ...coverage, mode: "repository" } },
     ],
     [
       "inventory strategy is derived by the authoritative scan",
-      { ...input, coverage: { ...coverage, inventoryStrategy: "repository" } },
+      { ...input, reviewState: { ...coverage, inventoryStrategy: "repository" } },
     ],
     [
       "coverage included paths are derived from the authoritative scope",
-      { ...input, coverage: { ...coverage, includePaths: ["src"] } },
+      { ...input, reviewState: { ...coverage, includePaths: ["src"] } },
     ],
     [
       "coverage excluded paths are derived from the authoritative scope",
-      { ...input, coverage: { ...coverage, excludePaths: ["vendor"] } },
+      { ...input, reviewState: { ...coverage, excludePaths: ["vendor"] } },
     ],
     [
       "top-level receipt references are not semantic coverage inputs",
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           receiptRefs: ["artifacts/02_discovery/candidate_ledger.jsonl"],
         },
@@ -926,7 +926,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       `deferred candidate identities reject ${description}`,
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [
             { candidateId, reason: "The candidate identity must remain safe." },
@@ -938,7 +938,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       `explicit deferred identities do not bypass invalid candidate ${description}`,
       {
         ...input,
-        coverage: {
+        reviewState: {
           ...coverage,
           deferred: [
             {
@@ -992,7 +992,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     true,
   );
   assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, coverage: undefined }).success,
+    scanDraftInputSchema.safeParse({ ...input, reviewState: undefined }).success,
     false,
   );
   assert.equal(
@@ -1021,7 +1021,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         surfaces: [{ label: "surface", disposition: "unreviewed" }],
       },
@@ -1047,28 +1047,28 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: { ...coverage, inventoryStrategy: "directory" },
+      reviewState: { ...coverage, inventoryStrategy: "directory" },
     }).success,
     false,
   );
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: { ...coverage, mode: "repository" },
+      reviewState: { ...coverage, mode: "repository" },
     }).success,
     false,
   );
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: { ...coverage, includePaths: ["outside"] },
+      reviewState: { ...coverage, includePaths: ["outside"] },
     }).success,
     false,
   );
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: { ...coverage, excludePaths: ["outside"] },
+      reviewState: { ...coverage, excludePaths: ["outside"] },
     }).success,
     false,
   );
@@ -1082,7 +1082,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         surfaces: [
           {
@@ -1098,7 +1098,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     scanDraftInputSchema.safeParse({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         surfaces: [
           {
@@ -1141,7 +1141,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
           finding.taxonomy,
         );
         assert.deepEqual(staged.manifest.scan.threatModel, input.threatModel);
-        assert.equal(staged.coverage.completeness, undefined);
+        assert.equal(staged.reviewState.completeness, undefined);
         throw new Error(
           "The scan stopped before the staged draft was published.",
         );
@@ -1205,7 +1205,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ...input,
     complete: false,
     findings: [finding, interruptedFinding],
-    coverage: {
+    reviewState: {
       ...coverage,
       surfaces: [
         {
@@ -1220,7 +1220,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const finalDraft = {
     ...input,
     complete: true,
-    coverage: {
+    reviewState: {
       ...coverage,
       surfaces: [
         {
@@ -1252,7 +1252,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
         [finding.provenance.candidateId],
       );
       assert.deepEqual(
-        staged.coverage.surfaces.map(({ id, disposition }) => ({
+        staged.reviewState.surfaces.map(({ id, disposition }) => ({
           id,
           disposition,
         })),
@@ -1270,7 +1270,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       ...input,
       complete: false,
       findings: [],
-      coverage: {
+      reviewState: {
         explicitExclusions: [],
         surfaces: [
           {
@@ -1292,12 +1292,12 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     await recordCodexSecurityScanDraft(pendingContext, {
       ...pending,
       complete: terminal,
-      coverage: {
-        ...pending.coverage,
+      reviewState: {
+        ...pending.reviewState,
         surfaces: terminal
-          ? [{ ...pending.coverage.surfaces[0], disposition: "rejected" }]
+          ? [{ ...pending.reviewState.surfaces[0], disposition: "rejected" }]
           : [],
-        deferred: terminal ? [] : pending.coverage.deferred,
+        deferred: terminal ? [] : pending.reviewState.deferred,
       },
     });
     const saved = await readJson(pendingRoot, "coverage.json");
@@ -1315,7 +1315,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ...input,
     complete: false,
     findings: [],
-    coverage: {
+    reviewState: {
       ...coverage,
       deferred: [
         {
@@ -1341,7 +1341,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ...input,
     findings: [],
     complete: false,
-    coverage: {
+    reviewState: {
       explicitExclusions: [],
       surfaces: [
         {
@@ -1361,11 +1361,11 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const closedSurfaceDraft = {
     ...surfaceDraft,
     complete: true,
-    coverage: {
-      ...surfaceDraft.coverage,
+    reviewState: {
+      ...surfaceDraft.reviewState,
       deferred: [],
       surfaces: [
-        { ...surfaceDraft.coverage.surfaces[0], disposition: "not_applicable" },
+        { ...surfaceDraft.reviewState.surfaces[0], disposition: "not_applicable" },
       ],
     },
   };
@@ -1378,8 +1378,8 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   await assert.rejects(
     recordCodexSecurityScanDraft(surfaceContext, {
       ...closedSurfaceDraft,
-      coverage: {
-        ...closedSurfaceDraft.coverage,
+      reviewState: {
+        ...closedSurfaceDraft.reviewState,
         resolvedDeferred: [
           { id: "unknown-review", reason: "Synthetic review completed." },
         ],
@@ -1390,7 +1390,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const closure = { id: deferredId, reason: "Synthetic review completed." };
   await recordCodexSecurityScanDraft(surfaceContext, {
     ...closedSurfaceDraft,
-    coverage: { ...closedSurfaceDraft.coverage, resolvedDeferred: [closure] },
+    reviewState: { ...closedSurfaceDraft.reviewState, resolvedDeferred: [closure] },
   });
   assert.equal(
     (await readJson(surfaceRoot, "coverage.json")).completeness,
@@ -1438,20 +1438,20 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     };
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...surfaceDraft,
-      coverage: {
-        ...surfaceDraft.coverage,
+      reviewState: {
+        ...surfaceDraft.reviewState,
         deferred: [unresolved],
       },
     });
     const resolvedSurfaceDraft = {
       ...surfaceDraft,
       complete: true,
-      coverage: {
-        ...surfaceDraft.coverage,
+      reviewState: {
+        ...surfaceDraft.reviewState,
         deferred: [],
         surfaces: [
           {
-            ...surfaceDraft.coverage.surfaces[0],
+            ...surfaceDraft.reviewState.surfaces[0],
             candidateId: "candidate-already-reported",
             disposition: "reported",
           },
@@ -1461,8 +1461,8 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     await assert.rejects(
       recordCodexSecurityScanDraft(sharedSurfaceContext, {
         ...resolvedSurfaceDraft,
-        coverage: {
-          ...resolvedSurfaceDraft.coverage,
+        reviewState: {
+          ...resolvedSurfaceDraft.reviewState,
           resolvedDeferred: [
             {
               id: candidate.candidateId ?? candidate.id,
@@ -1487,10 +1487,10 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
 
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...resolvedSurfaceDraft,
-      coverage: {
-        ...resolvedSurfaceDraft.coverage,
+      reviewState: {
+        ...resolvedSurfaceDraft.reviewState,
         surfaces: [
-          ...resolvedSurfaceDraft.coverage.surfaces,
+          ...resolvedSurfaceDraft.reviewState.surfaces,
           {
             label: "Independent candidate review",
             candidateId: candidate.candidateId ?? candidate.id,
@@ -1514,7 +1514,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverage: await readJson(root, "coverage.json"),
+    reviewState: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });
@@ -1704,7 +1704,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   ];
   await recordFreshScanDraft(context, {
     ...input,
-    coverage: {
+    reviewState: {
       ...coverage,
       deferred: reservedDeferred,
     },
@@ -1726,7 +1726,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const existingReceiptRefs = ["artifacts/02_discovery/candidate_ledger.jsonl"];
   await recordFreshScanDraft(context, {
     ...input,
-    coverage: {
+    reviewState: {
       ...coverage,
       surfaces: [
         {
@@ -2354,17 +2354,17 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     module.parseScanDraft({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         deferred: [{ id: "deferred-upload", reason: "Runtime unavailable." }],
       },
-    }).coverage.completeness,
+    }).reviewState.completeness,
     undefined,
   );
   assert.equal(
     module.parseScanDraft({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         deferred: [
           {
@@ -2373,17 +2373,17 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
           },
         ],
       },
-    }).coverage.completeness,
+    }).reviewState.completeness,
     undefined,
   );
   assert.equal(
     module.parseScanDraft({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         deferred: [{ reason: "The upload runtime was unavailable." }],
       },
-    }).coverage.completeness,
+    }).reviewState.completeness,
     undefined,
   );
   assert.equal(
@@ -2401,11 +2401,11 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   assert.equal(
     module.parseScanDraft({
       ...input,
-      coverage: {
+      reviewState: {
         ...coverage,
         surfaces: [{ label: "Uploads", disposition: "needs_follow_up" }],
       },
-    }).coverage.completeness,
+    }).reviewState.completeness,
     undefined,
   );
   await assert.rejects(
@@ -2547,7 +2547,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   };
   await recordFreshScanDraft(context, {
     ...input,
-    coverage: duplicateSurfaceCoverage,
+    reviewState: duplicateSurfaceCoverage,
   });
   const normalizedDuplicateCoverage = await readJson(root, "coverage.json");
   const surfaceIds = normalizedDuplicateCoverage.surfaces.map(
@@ -2588,13 +2588,13 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   };
   const repairedPartial = await recordFreshScanDraft(context, {
     ...input,
-    coverage: partialCoverage,
+    reviewState: partialCoverage,
   });
   assert.deepEqual(repairedPartial, {
     scanId,
     findingCount: 1,
     surfaceCount: 1,
-    coverage: await readJson(root, "coverage.json"),
+    reviewState: await readJson(root, "coverage.json"),
     operation: "replace",
     status: "draft_written",
   });
@@ -2610,7 +2610,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const noFindings = {
     ...input,
     findings: [],
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -2637,7 +2637,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     },
   };
   const sealedFindings = { scanId, findings: [] };
-  const sealedCoverage = { scanId, surfaces: [] };
+  const sealedCoverage = { scanId, surfaces: [], explicitExclusions: [] };
   await writeFile(
     path.join(root, "scan-manifest.json"),
     `${JSON.stringify(sealedManifest)}\n`,
@@ -2661,7 +2661,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       scanId,
       manifest: sealedManifest,
       findings: sealedFindings,
-      coverage: sealedCoverage,
+      review: { excludedPaths: [] },
     },
   );
 
@@ -2752,7 +2752,7 @@ function recordCodexSecurityScanDraft(context, input, publish, signal) {
         for (const [name, document] of Object.entries({
           "scan-manifest.json": draft.manifest,
           "findings.json": draft.findings,
-          "coverage.json": draft.coverage,
+          "coverage.json": draft.reviewState,
         }))
           await writeFile(
             path.join(context.root, name),

@@ -1,3 +1,4 @@
+import type { ParentProgressSource } from "./cost.js";
 import type {
   ScanAuthentication,
   ScanObserverName,
@@ -62,7 +63,8 @@ interface ScanEventRunOptions {
     details?: ScanReconnectDetails,
   ) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -110,7 +112,7 @@ function throwScanFailure(
     !(error instanceof ScanExecutionError)
   ) {
     throw new ScanInterruptedError(
-      `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+      `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
       options.scanDir,
       { cause: error },
     );
@@ -187,18 +189,14 @@ export async function runScanTurn(
           }
         }
         reportScanActivities(event, options.expectation.repository, options);
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          if (
-            options.expectedFilesTotal !== undefined &&
-            progress.filesTotal !== options.expectedFilesTotal
-          ) {
-            continue;
-          }
           notifyObserver(
             "onProgress",
             options.onProgress,
             options.onObserverError,
             progress,
+            { event },
           );
         }
         const workerStatus = workerStatusFromEvent(event);
@@ -231,7 +229,7 @@ export async function runScanTurn(
     let { usage } = turn;
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
+        `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
         options.scanDir,
       );
     }
@@ -539,7 +537,7 @@ export function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   )
     throw signal.reason;
   const message = scanDir
-    ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
+    ? `Codex Security scan was interrupted; output directory: ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
 }

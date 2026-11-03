@@ -1,4 +1,5 @@
-import { mock } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   chmod,
   mkdir,
@@ -11,28 +12,21 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-
 import * as filesystem from "node:fs/promises";
-
 import * as os from "node:os";
-
 import { tmpdir } from "node:os";
-
 import { join } from "node:path";
-
+import { mock } from "bun:test";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-
 import { strToU8, zipSync } from "fflate";
-
+import { ConfigurationError } from "../src/errors.js";
 import {
   prepareKnowledgeBase,
   readKnowledgeBaseSnapshot,
 } from "../src/knowledge-base.js";
-
 import { expandHome } from "../src/runtime.js";
 
 const temporaryDirectories: string[] = [];
-
 const testPosix = process.platform === "win32" ? test.skip : test;
 
 test("ordinary passes share immutable extracted inputs while resume detects document changes", async () => {
@@ -99,15 +93,25 @@ function docxBody(body: string): Uint8Array {
 }
 
 function pdf(text: string): Uint8Array {
-  const escaped = text.replace(/[\\()]/gu, "\\$&");
-  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  return pdfContent(`(${text.replace(/[\\()]/gu, "\\$&")}) Tj`);
+}
+
+function pdfContent(operators: string, form?: string): Uint8Array {
+  const stream = `BT /F1 12 Tf 72 720 Td ${operators} ET`;
+  const font = "/Font << /F1 4 0 R >>";
+  const forms = form ? " /XObject << /Word 6 0 R >>" : "";
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << ${font}${forms} >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
+  if (form) {
+    objects.push(
+      `<< /Type /XObject /Subtype /Form /BBox [0 0 300 100] /Resources << ${font} >> /Length ${Buffer.byteLength(form)} >>\nstream\n${form}\nendstream`,
+    );
+  }
   let output = "%PDF-1.4\n";
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
@@ -124,6 +128,177 @@ function pdf(text: string): Uint8Array {
 }
 
 describe("scan knowledge bases", () => {
+  test.each(["win32", "darwin", "linux"])(
+    "matches case-variant Git metadata using %s platform and filesystem rules",
+    async (platform) => {
+      const root = await temporaryDirectory();
+      await mkdir(join(root, ".GIT"));
+      await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
+      await writeFile(join(root, "guide.md"), "Synthetic guide");
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `
+      Object.defineProperty(process, "platform", { value: process.argv[1] });
+      const { prepareKnowledgeBase } = await import(process.argv[2]);
+      const { readdir, readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      const prepared = await prepareKnowledgeBase([process.argv[3]]);
+      try {
+        console.log(JSON.stringify(await Promise.all((await readdir(prepared.path)).map(name => readFile(join(prepared.path, name), "utf8")))));
+      } finally { await prepared.cleanup(); }
+    `,
+          platform,
+          fileURLToPath(new URL("../src/knowledge-base.ts", import.meta.url)),
+          root,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).sort()).toEqual(
+        platform === "win32" || aliasesGit
+          ? ["Synthetic guide"]
+          : ["Synthetic guide", "Synthetic metadata"],
+      );
+    },
+  );
+
+  test.each([
+    [".git", "directory"],
+    [".GIT", "directory"],
+    [".GIT", "directory link"],
+    [".GIT", "Git file"],
+  ] as const)(
+    "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
+    async (metadataName, metadataKind) => {
+      const linked = metadataKind === "directory link";
+      const gitFile = metadataKind === "Git file";
+      const root = await temporaryDirectory();
+      if (gitFile) {
+        const template = await temporaryDirectory();
+        const initialized = spawnSync(
+          "git",
+          [
+            "init",
+            "--quiet",
+            `--template=${template}`,
+            "--initial-branch=synthetic",
+            root,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(initialized.status, initialized.stderr).toBe(0);
+        await filesystem.rename(join(root, ".git"), join(root, ".GIT"));
+        const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+          () => true,
+          () => false,
+        );
+        // Case-insensitive filesystems cannot represent this separate Git file.
+        if (!aliasesGit) await writeFile(join(root, ".git"), "gitdir: .GIT\n");
+        const recognized = spawnSync(
+          "git",
+          ["-C", root, "rev-parse", "--absolute-git-dir"],
+          { encoding: "utf8" },
+        );
+        expect(recognized.status, recognized.stderr).toBe(0);
+        expect(await filesystem.realpath(recognized.stdout.trim())).toBe(
+          await filesystem.realpath(join(root, ".GIT")),
+        );
+      } else {
+        await mkdir(join(root, metadataName));
+      }
+      const metadata = join(root, metadataName, "config");
+      await writeFile(
+        metadata,
+        (gitFile ? await readFile(metadata, "utf8") : "") +
+          "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
+        () => true,
+        () => false,
+      );
+      if (metadataName !== ".git" && !aliasesGit) {
+        if (linked) {
+          await symlink(
+            join(root, metadataName),
+            join(root, ".git"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        } else {
+          await mkdir(join(root, ".git"));
+          await writeFile(
+            join(root, ".git", "config"),
+            "Separate Git metadata.",
+          );
+        }
+      }
+      const directory = await prepareKnowledgeBase([root]);
+      temporaryDirectories.push(directory.path);
+      expect((await extractedDocuments(directory.path)).sort()).toEqual(
+        [
+          "Documented application behavior.",
+          ...(process.platform !== "win32" && !aliasesGit && !linked
+            ? [await readFile(metadata, "utf8")]
+            : []),
+        ].sort(),
+      );
+      const explicit = await prepareKnowledgeBase([metadata]);
+      temporaryDirectories.push(explicit.path);
+      expect(await extractedDocuments(explicit.path)).toEqual([
+        await readFile(metadata, "utf8"),
+      ]);
+    },
+  );
+
+  testPosix(
+    "omits case-variant metadata aliases on a case-insensitive filesystem",
+    async () => {
+      const root = await temporaryDirectory();
+      const preservedGit = join(root, ".GIT");
+      await mkdir(preservedGit);
+      const metadata = join(preservedGit, "config");
+      await writeFile(
+        metadata,
+        "[http]\nextraheader = synthetic-authorization\n",
+      );
+      await writeFile(
+        join(root, "guide.md"),
+        "Documented application behavior.",
+      );
+      const originalStat = filesystem.stat;
+      const aliasSpy = spyOn(filesystem, "stat").mockImplementation(
+        async (path, options?) =>
+          Reflect.apply(originalStat, filesystem, [
+            path === join(root, ".git") ? preservedGit : path,
+            options,
+          ]),
+      );
+      try {
+        const directory = await prepareKnowledgeBase([root]);
+        temporaryDirectories.push(directory.path);
+        expect(await extractedDocuments(directory.path)).toEqual([
+          "Documented application behavior.",
+        ]);
+        const explicit = await prepareKnowledgeBase([metadata]);
+        temporaryDirectories.push(explicit.path);
+        expect(await extractedDocuments(explicit.path)).toEqual([
+          await readFile(metadata, "utf8"),
+        ]);
+      } finally {
+        aliasSpy.mockRestore();
+      }
+    },
+  );
+
   test("prepares nested supported documents and retains requested source roots", async () => {
     const root = await temporaryDirectory();
     const nested = join(root, "architecture", "threats");
@@ -342,7 +517,10 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(
       join(root, "architecture.pdf"),
-      pdf("Payment service boundary"),
+      pdfContent(
+        "(Policy ) Tj /F1 14 Tf (guide) Tj /F1 12 Tf 0 -14 Td (Require) Tj ET q 1 0 0 1 117.348 706 cm /Word Do Q BT",
+        "BT /F1 12 Tf (authentication) Tj ET",
+      ),
     );
     await writeFile(
       join(root, "threat-model.docx"),
@@ -364,285 +542,45 @@ describe("scan knowledge bases", () => {
       join(root, "self-closing-tab.docx"),
       docx("User", "Permission", "<w:tab/>"),
     );
+    await writeFile(
+      join(root, "tracked-change.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
+          '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
+          "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "tracked-move.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Rotate keys. </w:t></w:r>' +
+          '<w:moveFrom w:id="2" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveFrom></w:p>' +
+          '<w:p><w:moveTo w:id="3" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveTo></w:p>',
+      ),
+    );
+    await writeFile(
+      join(root, "field-code.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
+          '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/runbook" </w:instrText></w:r>' +
+          '<w:r><w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      ),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
-    expect(documents).toContain("Payment service boundary");
+    expect(documents).toContain("Policy guide\nRequire authentication");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
+    expect(documents).toContain("See the runbook\n");
   });
-
-  test("cleans up documents and rediscovers directory contents on later runs", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "scope.md");
-    await writeFile(source, "Initial scope");
-    const first = await prepareKnowledgeBase([root]);
-    await first.cleanup();
-    await expect(stat(first.path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(source, "utf8")).toBe("Initial scope");
-
-    await writeFile(source, "Updated scope");
-    await writeFile(join(root, "priorities.txt"), "New attack priorities");
-    const second = await prepareKnowledgeBase(first.sources);
-    temporaryDirectories.push(second.path);
-    const documents = await extractedDocuments(second.path);
-
-    expect(documents.sort()).toEqual([
-      "New attack priorities",
-      "Updated scope",
-    ]);
-  });
-
-  test("rejects missing paths, explicit binary files, and binary-only directories", async () => {
-    const root = await temporaryDirectory();
-    const unsupported = join(root, "scope.doc");
-    await writeFile(unsupported, new Uint8Array([0, 1, 2]));
-
-    await expect(prepareKnowledgeBase([""])).rejects.toThrow("cannot be empty");
-    await expect(
-      prepareKnowledgeBase([join(root, "missing.md")]),
-    ).rejects.toThrow();
-    await expect(prepareKnowledgeBase([unsupported])).rejects.toThrow(
-      "contains binary data",
-    );
-    await expect(prepareKnowledgeBase([root])).rejects.toThrow(
-      "contains no supported documents",
-    );
-  });
-
-  test("rejects invalid UTF-8, malformed PDFs, and malformed DOCX files", async () => {
-    const root = await temporaryDirectory();
-    const invalidText = join(root, "invalid.md");
-    const invalidPdf = join(root, "invalid.pdf");
-    const invalidDocx = join(root, "invalid.docx");
-    const invalidXml = join(root, "invalid-xml.docx");
-    await writeFile(invalidText, new Uint8Array([0xc3, 0x28]));
-    await writeFile(invalidPdf, "not a PDF");
-    await writeFile(invalidDocx, zipSync({ "README.md": strToU8("not DOCX") }));
-    await writeFile(
-      invalidXml,
-      zipSync({ "word/document.xml": strToU8("not XML") }),
-    );
-
-    await expect(prepareKnowledgeBase([invalidText])).rejects.toThrow(
-      "not valid UTF-8",
-    );
-    await expect(prepareKnowledgeBase([invalidPdf])).rejects.toThrow(
-      "Cannot extract text from knowledge base PDF",
-    );
-    await expect(prepareKnowledgeBase([invalidDocx])).rejects.toThrow(
-      "Cannot extract text from knowledge base DOCX",
-    );
-    await expect(prepareKnowledgeBase([invalidXml])).rejects.toThrow(
-      "Cannot extract text from knowledge base DOCX",
-    );
-  });
-
-  testPosix("does not follow symbolic links", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "scope.md");
-    const linked = join(root, "linked.md");
-    await writeFile(source, "External APIs");
-    await symlink(source, linked);
-
-    const knowledgeBase = await prepareKnowledgeBase([root]);
-    temporaryDirectories.push(knowledgeBase.path);
-    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
-      "External APIs",
-    ]);
-    await expect(prepareKnowledgeBase([linked])).rejects.toThrow(
-      "cannot be symbolic links",
-    );
-  });
-
-  testPosix("rejects unreadable source documents", async () => {
-    const root = await temporaryDirectory();
-    const source = join(root, "scope.md");
-    await writeFile(source, "External APIs");
-    await chmod(source, 0o000);
-
-    try {
-      await expect(prepareKnowledgeBase([source])).rejects.toThrow();
-    } finally {
-      await chmod(source, 0o600);
-    }
-  });
-
-  test.each(["win32", "darwin", "linux"])(
-    "matches case-variant Git metadata using %s platform and filesystem rules",
-    async (platform) => {
-      const root = await temporaryDirectory();
-      await mkdir(join(root, ".GIT"));
-      await writeFile(join(root, ".GIT", "config"), "Synthetic metadata");
-      await writeFile(join(root, "guide.md"), "Synthetic guide");
-      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
-        () => true,
-        () => false,
-      );
-      const result = spawnSync(
-        process.execPath,
-        [
-          "-e",
-          `
-      Object.defineProperty(process, "platform", { value: process.argv[1] });
-      const { prepareKnowledgeBase } = await import(process.argv[2]);
-      const { readdir, readFile } = await import("node:fs/promises");
-      const { join } = await import("node:path");
-      const prepared = await prepareKnowledgeBase([process.argv[3]]);
-      try {
-        console.log(JSON.stringify(await Promise.all((await readdir(prepared.path)).map(name => readFile(join(prepared.path, name), "utf8")))));
-      } finally { await prepared.cleanup(); }
-    `,
-          platform,
-          fileURLToPath(new URL("../src/knowledge-base.ts", import.meta.url)),
-          root,
-        ],
-        { encoding: "utf8" },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout).sort()).toEqual(
-        platform === "win32" || aliasesGit
-          ? ["Synthetic guide"]
-          : ["Synthetic guide", "Synthetic metadata"],
-      );
-    },
-  );
-
-  test.each([
-    [".git", "directory"],
-    [".GIT", "directory"],
-    [".GIT", "directory link"],
-    [".GIT", "Git file"],
-  ] as const)(
-    "directory knowledge bases handle %s metadata with %s while direct files remain explicit",
-    async (metadataName, metadataKind) => {
-      const linked = metadataKind === "directory link";
-      const gitFile = metadataKind === "Git file";
-      const root = await temporaryDirectory();
-      if (gitFile) {
-        const template = await temporaryDirectory();
-        const initialized = spawnSync(
-          "git",
-          [
-            "init",
-            "--quiet",
-            `--template=${template}`,
-            "--initial-branch=synthetic",
-            root,
-          ],
-          { encoding: "utf8" },
-        );
-        expect(initialized.status, initialized.stderr).toBe(0);
-        await filesystem.rename(join(root, ".git"), join(root, ".GIT"));
-        const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
-          () => true,
-          () => false,
-        );
-        // Case-insensitive filesystems cannot represent this separate Git file.
-        if (!aliasesGit) await writeFile(join(root, ".git"), "gitdir: .GIT\n");
-        const recognized = spawnSync(
-          "git",
-          ["-C", root, "rev-parse", "--absolute-git-dir"],
-          { encoding: "utf8" },
-        );
-        expect(recognized.status, recognized.stderr).toBe(0);
-        expect(await filesystem.realpath(recognized.stdout.trim())).toBe(
-          await filesystem.realpath(join(root, ".GIT")),
-        );
-      } else {
-        await mkdir(join(root, metadataName));
-      }
-      const metadata = join(root, metadataName, "config");
-      await writeFile(
-        metadata,
-        (gitFile ? await readFile(metadata, "utf8") : "") +
-          "[http]\nextraheader = synthetic-authorization\n",
-      );
-      await writeFile(
-        join(root, "guide.md"),
-        "Documented application behavior.",
-      );
-      const aliasesGit = await filesystem.lstat(join(root, ".git")).then(
-        () => true,
-        () => false,
-      );
-      if (metadataName !== ".git" && !aliasesGit) {
-        if (linked) {
-          await symlink(
-            join(root, metadataName),
-            join(root, ".git"),
-            process.platform === "win32" ? "junction" : "dir",
-          );
-        } else {
-          await mkdir(join(root, ".git"));
-          await writeFile(
-            join(root, ".git", "config"),
-            "Separate Git metadata.",
-          );
-        }
-      }
-      const directory = await prepareKnowledgeBase([root]);
-      temporaryDirectories.push(directory.path);
-      expect((await extractedDocuments(directory.path)).sort()).toEqual(
-        [
-          "Documented application behavior.",
-          ...(process.platform !== "win32" && !aliasesGit && !linked
-            ? [await readFile(metadata, "utf8")]
-            : []),
-        ].sort(),
-      );
-      const explicit = await prepareKnowledgeBase([metadata]);
-      temporaryDirectories.push(explicit.path);
-      expect(await extractedDocuments(explicit.path)).toEqual([
-        await readFile(metadata, "utf8"),
-      ]);
-    },
-  );
-
-  testPosix(
-    "omits case-variant metadata aliases on a case-insensitive filesystem",
-    async () => {
-      const root = await temporaryDirectory();
-      const preservedGit = join(root, ".GIT");
-      await mkdir(preservedGit);
-      const metadata = join(preservedGit, "config");
-      await writeFile(
-        metadata,
-        "[http]\nextraheader = synthetic-authorization\n",
-      );
-      await writeFile(
-        join(root, "guide.md"),
-        "Documented application behavior.",
-      );
-      const originalStat = filesystem.stat;
-      const aliasSpy = spyOn(filesystem, "stat").mockImplementation(
-        async (path, options?) =>
-          Reflect.apply(originalStat, filesystem, [
-            path === join(root, ".git") ? preservedGit : path,
-            options,
-          ]),
-      );
-      try {
-        const directory = await prepareKnowledgeBase([root]);
-        temporaryDirectories.push(directory.path);
-        expect(await extractedDocuments(directory.path)).toEqual([
-          "Documented application behavior.",
-        ]);
-        const explicit = await prepareKnowledgeBase([metadata]);
-        temporaryDirectories.push(explicit.path);
-        expect(await extractedDocuments(explicit.path)).toEqual([
-          await readFile(metadata, "utf8"),
-        ]);
-      } finally {
-        aliasSpy.mockRestore();
-      }
-    },
-  );
 
   test("prepares nested supported documents and retains requested source roots", async () => {
     const root = await temporaryDirectory();
@@ -1048,6 +986,47 @@ describe("scan knowledge bases", () => {
   });
 
   test.each([
+    [
+      "CDATA between text nodes",
+      "Require <![CDATA[authorization]]> before access",
+      "Require authorization before access",
+    ],
+    [
+      "comments containing markup",
+      "Require<!-- x > hidden <w:tab/> --> authorization",
+      "Require authorization",
+    ],
+    [
+      "processing instructions",
+      "Require<?note x > hidden?> authorization",
+      "Require authorization",
+    ],
+  ])("preserves DOCX text with %s", async (_name, xml, expected) => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(source, docx(xml));
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.push(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([`${expected}\n`]);
+  });
+
+  test("keeps quoted XML attributes out of DOCX text", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "guide.docx");
+    await writeFile(
+      source,
+      docx("Authorization", "Review permissions", '<w:br note="x > y"/>'),
+    );
+
+    const prepared = await prepareKnowledgeBase([source]);
+    temporaryDirectories.push(prepared.path);
+    expect(await extractedDocuments(prepared.path)).toEqual([
+      "Authorization\nReview permissions\n",
+    ]);
+  });
+
+  test.each([
     ["preparation", prepareKnowledgeBase],
     ["snapshot extraction", readKnowledgeBaseSnapshot],
   ] as const)(
@@ -1173,10 +1152,113 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Authentication boundary notes");
     expect(documents).toContain("Boundary &#x110000; case.\n");
   });
+
+  test("skips Office owner files while a document is open", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "policy.docx"), docx("Access policy."));
+    await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Access policy.\n",
+    ]);
+  });
+
+  test("cleans up documents and rediscovers directory contents on later runs", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "scope.md");
+    await writeFile(source, "Initial scope");
+    const first = await prepareKnowledgeBase([root]);
+    await first.cleanup();
+    await expect(stat(first.path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(source, "utf8")).toBe("Initial scope");
+
+    await writeFile(source, "Updated scope");
+    await writeFile(join(root, "priorities.txt"), "New attack priorities");
+    const second = await prepareKnowledgeBase(first.sources);
+    temporaryDirectories.push(second.path);
+    const documents = await extractedDocuments(second.path);
+
+    expect(documents.sort()).toEqual([
+      "New attack priorities",
+      "Updated scope",
+    ]);
+  });
+
+  test("rejects missing paths, explicit binary files, and binary-only directories", async () => {
+    const root = await temporaryDirectory();
+    const unsupported = join(root, "scope.doc");
+    await writeFile(unsupported, new Uint8Array([0, 1, 2]));
+
+    await expect(prepareKnowledgeBase([""])).rejects.toThrow("cannot be empty");
+    await expect(
+      prepareKnowledgeBase([join(root, "missing.md")]),
+    ).rejects.toThrow();
+    await expect(prepareKnowledgeBase([unsupported])).rejects.toThrow(
+      "contains binary data",
+    );
+    await expect(prepareKnowledgeBase([root])).rejects.toThrow(
+      "contains no supported documents",
+    );
+  });
+
+  test("rejects invalid UTF-8, malformed PDFs, and malformed DOCX files", async () => {
+    const root = await temporaryDirectory();
+    const invalidText = join(root, "invalid.md");
+    const invalidPdf = join(root, "invalid.pdf");
+    const invalidDocx = join(root, "invalid.docx");
+    const invalidXml = join(root, "invalid-xml.docx");
+    await writeFile(invalidText, new Uint8Array([0xc3, 0x28]));
+    await writeFile(invalidPdf, "not a PDF");
+    await writeFile(invalidDocx, zipSync({ "README.md": strToU8("not DOCX") }));
+    await writeFile(
+      invalidXml,
+      zipSync({ "word/document.xml": strToU8("not XML") }),
+    );
+
+    await expect(prepareKnowledgeBase([invalidText])).rejects.toThrow(
+      "not valid UTF-8",
+    );
+    await expect(prepareKnowledgeBase([invalidPdf])).rejects.toThrow(
+      "Cannot extract text from knowledge base PDF",
+    );
+    await expect(prepareKnowledgeBase([invalidDocx])).rejects.toThrow(
+      "Cannot extract text from knowledge base DOCX",
+    );
+    await expect(prepareKnowledgeBase([invalidXml])).rejects.toThrow(
+      "Cannot extract text from knowledge base DOCX",
+    );
+  });
+
+  testPosix("does not follow symbolic links", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "scope.md");
+    const linked = join(root, "linked.md");
+    await writeFile(source, "External APIs");
+    await symlink(source, linked);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "External APIs",
+    ]);
+    await expect(prepareKnowledgeBase([linked])).rejects.toThrow(
+      "cannot be symbolic links",
+    );
+  });
+
+  testPosix("rejects unreadable source documents", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "scope.md");
+    await writeFile(source, "External APIs");
+    await chmod(source, 0o000);
+
+    try {
+      await expect(prepareKnowledgeBase([source])).rejects.toThrow();
+    } finally {
+      await chmod(source, 0o600);
+    }
+  });
 });
-
-import { spawnSync } from "node:child_process";
-
-import { fileURLToPath } from "node:url";
-
-import { ConfigurationError } from "../src/errors.js";

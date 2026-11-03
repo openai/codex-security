@@ -60,14 +60,21 @@ const stoppedScanProbe = [
   "    checkpoint = {**payload, 'complete': False}",
   "    checkpoint_dir = scan_dir / 'checkpoints'",
   "    checkpoint_dir.mkdir()",
-  "    if source == 'refined-checkpoint':",
+  "    if source.startswith('refined-checkpoint'):",
   "        earlier = json.loads(json.dumps(checkpoint))",
   "        earlier['findings'][0]['locations'][0].update({'startLine': 21, 'endLine': 26})",
   "        later = json.loads(json.dumps(checkpoint))",
   "        later['findings'][0]['locations'][0].update({'startLine': 24, 'endLine': 26})",
   "        later['findings'][0]['provenance']['previousFindings'] = earlier['findings']",
-  "        for document in (later,):",
+  "        for document in (earlier, later):",
   "            encoded = json.dumps(document).encode()",
+  "            if document is earlier:",
+  "                earlier_digest = hashlib.sha256(encoded).hexdigest()",
+  "            else:",
+  "                # JSON whitespace controls hash order without changing either checkpoint.",
+  "                earlier_first = source.endswith('earlier-first')",
+  "                while (earlier_digest < hashlib.sha256(encoded).hexdigest()) != earlier_first:",
+  "                    encoded += b'\\n'",
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "    else:",
   "        if source == 'distinct-instances':",
@@ -78,8 +85,8 @@ const stoppedScanProbe = [
   "            checkpoint['findings'] = [first, second]",
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
-  "documents = {name: json.loads((plugin / 'examples' / 'completed-scan' / name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json')}",
-  "child_findings = later['findings'] if source == 'refined-checkpoint' else checkpoint['findings'] if source == 'distinct-instances' else payload['findings']",
+  "documents = {name: json.loads((plugin / 'examples' / 'legacy-completed-scan' / name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json')}",
+  "child_findings = later['findings'] if source.startswith('refined-checkpoint') else checkpoint['findings'] if source == 'distinct-instances' else payload['findings']",
   "manifest = documents['scan-manifest.json']['scan']",
   "for field in ('id','producer','startedAt','completedAt','sealedAt','artifacts','status'): manifest.pop(field, None)",
   "manifest['target'] = {'kind': child['contract']['target']['allowedKinds'][0]}",
@@ -89,7 +96,7 @@ const stoppedScanProbe = [
   "for name, document in documents.items(): (artifact_dir / name).write_text(json.dumps(document))",
   "run('prepare-scan-completion', '--scan-id', child['scanId'])",
   "run('complete-scan', '--scan-id', child['scanId'])",
-  "aggregate = later if source == 'refined-checkpoint' else checkpoint if source != 'accepted' else payload",
+  "aggregate = later if source.startswith('refined-checkpoint') else checkpoint if source != 'accepted' else payload",
   "composition = {'version':2,'startedAt':'2026-01-01T00:00:00Z','passes':[{'directory':'artifacts/deep-scan/passes/pass-1','scanId':child['scanId']}],'mergedScanIds':[child['scanId']],'aggregate':aggregate,'noNewStreak':0,'consecutiveErrors':0}",
   "(scan_dir / 'artifacts' / 'deep-scan' / 'checkpoint.json').write_text(json.dumps(composition))",
   "if source == 'cancel-io-retry':",
@@ -120,6 +127,15 @@ const stoppedScanProbe = [
   "    legacy_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    legacy_manifest['scan']['status'] = 'completed'",
   "    legacy_manifest['scan'].pop('preservedSources', None)",
+  "    legacy_coverage = json.loads((plugin / 'examples' / 'legacy-completed-scan' / 'coverage.json').read_text())",
+  "    legacy_coverage.update(payload['coverage'], scanId=scan_id, mode='deep_repository')",
+  "    legacy_coverage['deferred'] = [{**item, 'id': item['candidateId']} for item in legacy_coverage['deferred']]",
+  "    legacy_bytes = json.dumps(legacy_coverage).encode()",
+  "    (scan_dir / 'coverage.json').write_bytes(legacy_bytes)",
+  "    legacy_manifest['scan'].pop('review', None)",
+  "    legacy_manifest['scan'].pop('mode', None)",
+  "    legacy_manifest['scan']['coverageRef'] = 'coverage.json'",
+  "    legacy_manifest['scan']['artifacts'].append({'path': 'coverage.json', 'mediaType': 'application/json', 'sha256': hashlib.sha256(legacy_bytes).hexdigest()})",
   "    manifest_path.write_text(json.dumps(legacy_manifest, indent=2, sort_keys=True) + '\\n', encoding='utf-8')",
   "    os.environ.update(environment)",
   "    sys.path.insert(0, str(plugin / 'scripts'))",
@@ -141,13 +157,14 @@ const stoppedScanProbe = [
   "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
   "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
   "    connection.close()",
-  "    frozen_sources = json.loads(frozen_after_success)",
+  "    frozen_state = json.loads(frozen_after_success)",
+  "    frozen_sources = frozen_state['sources'] if isinstance(frozen_state.get('sources'), dict) else frozen_state",
   "    head_relative = next(path for path in frozen_sources if path.startswith('checkpoint-heads/'))",
   "    head_bytes = (scan_dir / head_relative).read_bytes()",
   "    head = json.loads(head_bytes)",
   "    snapshot_bytes = (scan_dir / 'checkpoints' / head['checkpoint']).read_bytes()",
   "    snapshot = json.loads(snapshot_bytes)",
-  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': frozen_sources, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_bytes).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': frozen_state, 'frozenSources': frozen_sources, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings), 'scanId': scan_id, 'head': head, 'headPath': head_relative, 'headDigest': hashlib.sha256(head_bytes).hexdigest(), 'snapshot': snapshot, 'snapshotDigest': hashlib.sha256(snapshot_bytes).hexdigest()}))",
   "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
@@ -167,7 +184,7 @@ const stoppedScanProbe = [
   "findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
   "if source == 'late-checkpoint':",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'manifestUnchanged': manifest_before == (scan_dir / 'scan-manifest.json').read_bytes(), 'findingsUnchanged': findings_before == (scan_dir / 'findings.json').read_bytes()}))",
-  "elif source == 'refined-checkpoint':",
+  "elif source.startswith('refined-checkpoint'):",
   "    histories = [item for finding in findings for item in finding.get('provenance', {}).get('previousFindings', [])]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'historyCount': len(histories), 'representedStartLines': sorted([finding['locations'][0]['startLine'] for finding in findings] + [finding['locations'][0]['startLine'] for finding in histories])}))",
   "elif source == 'distinct-instances':",
@@ -198,6 +215,50 @@ test.each(["accepted", "checkpoint"] as const)(
   30_000,
 );
 
+function runStoppedScanProbe(
+  source: string,
+  prefix: string,
+  terminalStatus?: string,
+) {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      source,
+      ...(terminalStatus === undefined ? [] : [terminalStatus]),
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout);
+}
+
+test.each(["earlier-first", "later-first"] as const)(
+  "keeps refined checkpoints as one finding with retained history (%s)",
+  (order) => {
+    const recovered = runStoppedScanProbe(
+      `refined-checkpoint-${order}`,
+      "codex-security-refined-checkpoint-",
+    );
+    expect(recovered).toEqual({
+      findingCount: 1,
+      progressStatus: "failed",
+      artifactFindingCount: 1,
+      historyCount: 1,
+      representedStartLines: [21, 24],
+    });
+  },
+  30_000,
+);
 test("keeps ordinary scan refinement history when the parent stops", () => {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
@@ -287,7 +348,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     status: "failed",
     findingCount: 1,
   });
-  const frozenSources = Object.entries(recovered.frozenAfterSuccess);
+  const frozenSources = Object.entries(recovered.frozenSources);
   expect(frozenSources.map(([path]) => path.split("/")[0]).sort()).toEqual([
     "checkpoint-heads",
     "checkpoints",
@@ -301,11 +362,10 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(recovered.headPath).toBe(
     `checkpoint-heads/${recovered.headDigest}.json`,
   );
-  expect(recovered.frozenAfterSuccess).toMatchObject({
+  expect(recovered.frozenSources).toMatchObject({
     [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
     [recovered.headPath]: recovered.headDigest,
   });
-  expect(recovered.snapshot.coverage).not.toHaveProperty("completeness");
   expect(recovered.snapshot).toMatchObject({
     scanId: recovered.scanId,
     findings: [
@@ -315,7 +375,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
         }),
       }),
     ],
-    coverage: {
+    reviewState: {
       deferred: expect.arrayContaining([
         expect.objectContaining({ candidateId: "pending-validation" }),
       ]),

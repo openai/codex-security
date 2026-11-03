@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
@@ -18,8 +19,8 @@ const { applyMigrations, migrations } = (await importSource(
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 const repository = join(process.cwd(), "synthetic-repository");
-const created = "2026-01-01T00:00:00.000Z";
-const updated = "2026-01-02T00:00:00.000Z";
+const created = "2026-01-01T00:00:00.123456Z";
+const updated = "2026-01-02T00:00:00.789012Z";
 
 function open(t: TestContext) {
   const database = new DatabaseSync(":memory:");
@@ -38,7 +39,10 @@ function batch(): External.ExternalFindingsImport {
         source_finding_id: "finding-one",
         evidence: {
           title: "Dependency finding",
-          source_data: { retained: { fields: [null, "value"] } },
+          source_data: {
+            retained: { fields: [null, "value"] },
+            title: "Provider title",
+          },
           commit_sha: "a".repeat(40),
         },
       },
@@ -47,15 +51,57 @@ function batch(): External.ExternalFindingsImport {
   };
 }
 
+test("storing an empty selection validates its envelope without opening a write transaction", async (t) => {
+  const path = join(
+    await temporary.create("external-empty-"),
+    "workbench.sqlite3",
+  );
+  const writer = new DatabaseSync(path);
+  t.after(() => writer.close());
+  applyMigrations(writer);
+  const database = new DatabaseSync(path);
+  t.after(() => database.close());
+  database.exec("PRAGMA busy_timeout = 0");
+  writer.exec("BEGIN IMMEDIATE");
+
+  const empty = { ...batch(), findings: [] };
+  assert.deepEqual(storeExternalFindings(database, empty, updated), {
+    findings: [],
+    counts: { created: 0, updated: 0, unchanged: 0 },
+  });
+  assert.throws(
+    () =>
+      storeExternalFindings(
+        database,
+        { ...empty, repository: "relative" },
+        updated,
+      ),
+    /absolute local path/u,
+  );
+  assert.throws(
+    () => storeExternalFindings(database, empty, "\ud800"),
+    /valid Unicode/u,
+  );
+  assert.throws(
+    () => storeExternalFindings(database, batch(), updated),
+    /database is locked/u,
+  );
+});
+
 test("external imports preserve incomplete evidence without creating assessed findings or scans", (t) => {
   const database = open(t);
   const input = batch();
   const result = storeExternalFindings(database, input, created);
   assert.deepEqual(result.counts, { created: 2, updated: 0, unchanged: 0 });
   for (const [index, finding] of result.findings.entries()) {
-    assert.match(finding.id, /^ext_[0-9a-f]{64}$/u);
+    const identity = [
+      repository,
+      input.provider,
+      input.sourceKey,
+      input.findings[index].source_finding_id,
+    ];
     assert.deepEqual(finding, {
-      id: finding.id,
+      id: `ext_${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`,
       repository,
       provider: input.provider,
       sourceKey: input.sourceKey,
@@ -88,16 +134,24 @@ test("repeat imports keep identities and unchanged timestamps; changed evidence 
         source_finding_id: "finding-one",
         evidence: {
           commit_sha: "a".repeat(40),
-          source_data: { retained: { fields: [null, "value"] } },
+          source_data: {
+            title: "Provider title",
+            retained: { fields: [null, "value"] },
+          },
           title: "Dependency finding",
         },
       },
     ],
   };
-  assert.deepEqual(storeExternalFindings(database, reordered, updated), {
+  const replay = storeExternalFindings(database, reordered, updated);
+  assert.deepEqual(replay, {
     findings: [first.findings[0]],
     counts: { created: 0, updated: 0, unchanged: 1 },
   });
+  assert.deepEqual(
+    Object.keys(replay.findings[0].evidence),
+    Object.keys(input.findings[0].evidence),
+  );
   assert.equal(
     database
       .prepare("SELECT evidence_json FROM external_source_reports WHERE id = ?")
@@ -119,6 +173,59 @@ test("repeat imports keep identities and unchanged timestamps; changed evidence 
     all.find(({ id }) => id === first.findings[1].id),
     first.findings[1],
   );
+});
+
+test("a large mixed import and its replay return every stored row in input order", (t) => {
+  const database = open(t);
+  const findings = Array.from({ length: 512 }, (_, index) => ({
+    source_finding_id: `synthetic-${index}`,
+    evidence: {
+      title: "Normalized title",
+      source_data: {
+        title: `Provider title ${index}`,
+        occurrence: 9007199254740992n,
+      },
+    },
+  }));
+  const input = { ...batch(), findings };
+  const first = storeExternalFindings(database, input, created);
+  assert.deepEqual(first.counts, { created: 512, updated: 0, unchanged: 0 });
+
+  const [last, ...rest] = findings.toReversed();
+  const changed = structuredClone(last);
+  changed.evidence.source_data.occurrence++;
+  const added = { ...last, source_finding_id: "synthetic-added" };
+  const mixed = { ...input, findings: [changed, ...rest, added] };
+  const result = storeExternalFindings(database, mixed, updated);
+  assert.deepEqual(result.counts, { created: 1, updated: 1, unchanged: 511 });
+  assert.deepEqual(result.findings[0], {
+    ...first.findings.at(-1),
+    version: 2,
+    updatedAt: updated,
+    evidence: changed.evidence,
+  });
+  assert.notEqual(
+    result.findings[0].evidence.source_data,
+    changed.evidence.source_data,
+  );
+  assert.deepEqual(
+    result.findings.slice(1, -1),
+    first.findings.toReversed().slice(1),
+  );
+  assert.deepEqual(result.findings.at(-1), {
+    ...first.findings.at(-1),
+    id: result.findings.at(-1)!.id,
+    sourceFindingId: added.source_finding_id,
+    createdAt: updated,
+    updatedAt: updated,
+  });
+  const changes = database.prepare("SELECT total_changes() AS writes");
+  const beforeReplay = changes.get()!.writes;
+  assert.deepEqual(storeExternalFindings(database, mixed, created), {
+    findings: result.findings,
+    counts: { created: 0, updated: 0, unchanged: 513 },
+  });
+  assert.equal(changes.get()!.writes, beforeReplay);
 });
 
 test("repository, provider and source namespaces keep distinct finding identities", (t) => {
@@ -168,24 +275,29 @@ test("invalid batches and failed writes preserve all previously stored evidence"
   assert.deepEqual(listExternalFindings(database, { repository }), before);
   database.exec(`CREATE TRIGGER fail_external_insert BEFORE INSERT ON external_source_reports
     WHEN NEW.source_finding_id = 'fail'
+    BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END;
+    CREATE TRIGGER fail_external_update AFTER UPDATE ON external_source_reports
+    WHEN OLD.source_finding_id = 'finding-two'
     BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END;`);
-  assert.throws(
-    () =>
-      storeExternalFindings(
-        database,
-        {
-          ...input,
-          findings: [
-            { ...input.findings[0], evidence: { changed: true } },
-            { source_finding_id: "inserted-before-failure", evidence: {} },
-            { source_finding_id: "fail", evidence: {} },
-          ],
-        },
-        updated,
-      ),
-    /synthetic write failure/u,
-  );
-  assert.deepEqual(listExternalFindings(database, { repository }), before);
+  for (const source_finding_id of ["fail", "finding-two"]) {
+    assert.throws(
+      () =>
+        storeExternalFindings(
+          database,
+          {
+            ...input,
+            findings: [
+              { ...input.findings[0], evidence: { changed: true } },
+              { source_finding_id: "inserted-before-failure", evidence: {} },
+              { source_finding_id, evidence: { changed: true } },
+            ],
+          },
+          updated,
+        ),
+      /synthetic write failure/u,
+    );
+    assert.deepEqual(listExternalFindings(database, { repository }), before);
+  }
 });
 
 test("a Python database at the preceding schema upgrades in Node and remains readable in Python", async () => {

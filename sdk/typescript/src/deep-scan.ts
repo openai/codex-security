@@ -209,19 +209,19 @@ export async function runDeepScans(
   await save();
   const completed = new Map<string, ScanMergeInput>();
   const saved = new Map<string, SavedScanRecord>();
-  const coverage = new Map<string, SemanticScan["coverage"]>();
+  const coverage = new Map<string, SemanticScan["reviewState"]>();
   const updateAggregateCoverage = (): void => {
     if (state.aggregate === null) return;
     const merged = new Set(state.mergedScanIds);
     state.aggregate = {
       ...state.aggregate,
-      coverage: combineScanCoverage(
+      reviewState: combineScanCoverage(
         [...coverage].filter(([id]) => merged.has(id)).map(([, pass]) => pass),
         state.passes
           .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
           .map((pass) => pass.directory),
         state.mergedScanIds.some((id) => !coverage.has(id))
-          ? state.aggregate.coverage
+          ? state.aggregate.reviewState
           : undefined,
       ),
     };
@@ -314,7 +314,7 @@ export async function runDeepScans(
           record.scanDir,
           signal,
         );
-        coverage.set(record.scanId, projected.draft.coverage);
+        coverage.set(record.scanId, projected.draft.reviewState);
         if (!state.mergedScanIds.includes(record.scanId))
           completed.set(record.scanId, projected);
         if (recoverOutcomes)
@@ -384,7 +384,7 @@ export async function runDeepScans(
     if (!pending.length) {
       state.aggregate = {
         ...validateScanMerge({ scanId, groups: [] }, [], null).aggregate,
-        coverage: combineScanCoverage([]),
+        reviewState: combineScanCoverage([]),
       };
       await save();
       return;
@@ -517,7 +517,7 @@ export async function runDeepScans(
         "--scan-id",
         pass.scanId,
         "--message",
-        errorMessage(error).slice(0, 2400),
+        errorMessage(error),
         ...(latestCost ? ["--cost-json", JSON.stringify(latestCost)] : []),
       ]);
     };
@@ -567,7 +567,7 @@ export async function runDeepScans(
             signal,
           );
           completed.set(result.manifest.scan.id, projected);
-          coverage.set(result.manifest.scan.id, projected.draft.coverage);
+          coverage.set(result.manifest.scan.id, projected.draft.reviewState);
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
           observePassCompletion(state, pass);

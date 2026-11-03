@@ -268,7 +268,7 @@ describe("delegated scan attribution", () => {
         (["cli", "sdk"] as const).map(async (surface, index) => {
           const model = selectModel
             ? surface === "cli"
-              ? "gpt-daybreak-blue-latest"
+              ? "gpt-6.1-sol"
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
@@ -565,7 +565,7 @@ describe("delegated scan attribution", () => {
               expect(
                 await client.preflight(repository, { mode }),
               ).toMatchObject({
-                model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+                model: index === 0 ? "gpt-6.1-sol" : "gpt-5.6-sol",
                 authentication: { method: "api_key", verified: false },
               });
             }),

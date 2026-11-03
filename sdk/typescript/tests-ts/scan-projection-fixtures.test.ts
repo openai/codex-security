@@ -133,7 +133,7 @@ test("completed projection follows the shared canonical child fixture", async ()
       ...("writeup" in expected ? { writeup: expected.writeup } : {}),
     });
   }
-  expect<unknown>(combineScanCoverage([projected.draft.coverage])).toEqual({
+  expect<unknown>(combineScanCoverage([projected.draft.reviewState])).toEqual({
     ...fixture.expected.coverage,
   });
   expect(
@@ -230,9 +230,9 @@ print(json.dumps({"parent": parent, "children": children}))
     parent: { scanId: string };
     children: Array<{ scanId: string; scanDir: string }>;
   };
-  const originalCoverage = await Promise.all(
+  const childManifests = await Promise.all(
     fixture.children.map((child) =>
-      readFile(join(child.scanDir, "coverage.json")),
+      readFile(join(child.scanDir, "scan-manifest.json")),
     ),
   );
   const writer = await prepareScanArtifactRestorer(
@@ -245,7 +245,7 @@ print(json.dumps({"parent": parent, "children": children}))
     ),
   );
   const coverage = combineScanCoverage(
-    projected.map((child) => child.draft.coverage),
+    projected.map((child) => child.draft.reviewState),
   );
   const published = await runCodexCommand(
     { command: python },
@@ -272,13 +272,14 @@ for name, values in (("findings", {"findings": []}), ("coverage", coverage)):
     path = directory / f"{name}.json"
     path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
 saved = support.checkpoint(state, parent, passes=[{"directory": child["scanDir"], "scanId": child["scanId"], "completed": True} for child in children], merged=[child["scanId"] for child in children], terminal="saturated")
-saved["aggregate"] = {"scanId": parent["scanId"], "findings": [], "coverage": coverage}
+saved["aggregate"] = {"scanId": parent["scanId"], "findings": [], "reviewState": coverage}
 support.run_workbench(state, "save-scan-artifact", "--scan-id", parent["scanId"], "--artifact-path", "artifacts/deep-scan/checkpoint.json", input_text=json.dumps(saved))
 prepared = support.run_workbench(state, "prepare-scan-completion", "--scan-id", parent["scanId"], check=False)
 if prepared["returncode"]:
     sys.stderr.write(prepared["stderr"])
     raise SystemExit(prepared["returncode"])
-print(json.dumps(support.run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])))
+completed = support.run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
+print(json.dumps({**completed, "reviewState": support.read_review_state(state, directory)}))
 `,
       sourcePlugin,
       PLUGIN_ROOT,
@@ -309,9 +310,7 @@ print(json.dumps(support.run_workbench(state, "complete-scan", "--scan-id", pare
       reason: "Second child's local review remains open.",
     },
   ]);
-  const publishedCoverage = JSON.parse(
-    await readFile(join(parent, "coverage.json"), "utf8"),
-  );
+  const publishedCoverage = JSON.parse(published.stdout).reviewState;
   expect(publishedCoverage.resolvedDeferred).toEqual(coverage.resolvedDeferred);
   expect(publishedCoverage.deferred).toEqual(coverage.deferred);
   for (const [index, child] of fixture.children.entries()) {
@@ -322,8 +321,8 @@ print(json.dumps(support.run_workbench(state, "complete-scan", "--scan-id", pare
         child.scanDir,
       ),
     ).toEqual(projected[index]!);
-    expect(await readFile(join(child.scanDir, "coverage.json"))).toEqual(
-      originalCoverage[index]!,
+    expect(await readFile(join(child.scanDir, "scan-manifest.json"))).toEqual(
+      childManifests[index]!,
     );
   }
 });

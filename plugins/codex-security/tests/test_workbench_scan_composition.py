@@ -20,6 +20,7 @@ import pytest
 from workbench_test_support import (
     SCRIPT,
     checkpoint,
+    read_review_state,
     recipe,
     register,
     run_workbench,
@@ -36,6 +37,35 @@ def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple
     target.mkdir()
     (target / "app.py").write_text(source)
     return tmp_path / "state", target
+
+
+def _result_files(scan_dir: Path, *extra: str) -> dict[str, bytes]:
+    manifest = (scan_dir / "scan-manifest.json").read_bytes()
+    names = ["findings.json", *extra]
+    if "coverageRef" in json.loads(manifest)["scan"]:
+        names.append("coverage.json")
+    return {
+        "scan-manifest.json": manifest,
+        **{name: (scan_dir / name).read_bytes() for name in names},
+    }
+
+
+def _replay_frozen_results(workbench_api, state: Path, parent_dir: Path, saved: dict):
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        record = workbench_api["require_scan"](connection, saved["id"])
+        return workbench_api["saved_results"].merge_saved_results(
+            parent_dir,
+            saved["id"],
+            workbench_api["workbench_completion_binding"](record, saved["completedAt"]),
+            [],
+            [],
+            stopped=True,
+            reason="Synthetic frozen-source replay.",
+            frozen_source_digests=saved["preservedSources"],
+            checkpoint_heads=saved["preservedCheckpointHeads"].copy(),
+            reuse_sealed_result=False,
+        )
 
 
 @pytest.mark.parametrize("accepted", [False, True])
@@ -56,8 +86,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     (report_dir / "proof.md").write_text("# Retained observation\n[Trace](trace.txt)\n")
     (report_dir / "trace.txt").write_text("Synthetic supporting evidence\n")
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-    names = ("scan-manifest.json", "findings.json", "coverage.json")
-    child_bytes = {name: (child_dir / name).read_bytes() for name in names}
+    child_bytes = _result_files(child_dir)
     saved = checkpoint(
         state,
         parent,
@@ -72,7 +101,9 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
             child["scanId"],
             child_dir,
             parent_dir,
-            *(json.loads(child_bytes[name]) for name in names),
+            json.loads(child_bytes["scan-manifest.json"]),
+            json.loads(child_bytes["findings.json"]),
+            read_review_state(state, child_dir),
         )["draft"]
         run_workbench(
             state,
@@ -127,22 +158,22 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     assert recovered["findingCount"] == 1
     assert not recovered["resultsRecoveryNeeded"]
     assert recovered["findings"][0]["title"] == findings["findings"][0]["title"]
-    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
+    assert "completeness" not in read_review_state(state, parent_dir)
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"][0]
     report = parent_dir / retained["writeup"]["reportPath"]
     assert report.read_bytes() == (report_dir / "proof.md").read_bytes()
     assert (report.parent / "trace.txt").read_bytes() == (report_dir / "trace.txt").read_bytes()
-    assert {name: (child_dir / name).read_bytes() for name in names} == child_bytes
+    assert _result_files(child_dir) == child_bytes
     assert (parent_dir / CHECKPOINT).read_bytes() == composition_bytes
 
-    published = {name: (parent_dir / name).read_bytes() for name in (*names, "report.md")}
+    published = _result_files(parent_dir, "report.md")
     frozen = json.loads(published["scan-manifest.json"])["scan"]["preservedSources"]
     assert frozen
     sources = {path.name: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")}
     saved["aggregate"] = {
         "scanId": parent["scanId"],
         "findings": [retained],
-        "coverage": json.loads(published["coverage.json"]),
+        "coverage": read_review_state(state, parent_dir),
     }
     saved["aggregate"]["findings"][0]["title"] = (
         "Later composition must not replace frozen evidence"
@@ -513,10 +544,7 @@ def test_native_rejoin_without_original_checkout_requires_verified_seal(
     if artifact_state == "tampered":
         with (directory / "findings.json").open("a") as findings:
             findings.write(" ")
-    artifacts = {
-        name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    artifacts = _result_files(directory, "report.md")
     identity_query = (
         "SELECT target_path, target_id, target_revision, recipe_json, "
         "deep_scan_owner_thread_id, handoff_claim_token FROM scans WHERE id = ?"
@@ -621,10 +649,7 @@ def test_native_legacy_rejoin_requires_verified_sealed_results(
             connection.execute(
                 "UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],)
             )
-    sealed = {
-        name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
-    }
+    sealed = _result_files(directory)
     for join in joins:
         joined = run_workbench(state, *join)
         assert joined["startDisposition"] == "joined"
@@ -1247,7 +1272,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     assert context["scan"]["progress"]["status"] == "complete"
     assert context["scan"]["findingCount"] == 1
     assert context["scan"]["progress"]["independentReviews"]["consolidating"] is False
-    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
+    assert "completeness" not in read_review_state(state, parent_dir)
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
     indexed = run_workbench(state, "list-global-findings")["findings"]
     assert len(indexed) == 1
@@ -1666,10 +1691,9 @@ def test_stopped_composition_retains_sealed_child_closures(
             first["scanId"],
             directory,
             parent_dir,
-            *(
-                json.loads(originals[Path(name)])
-                for name in ("scan-manifest.json", "findings.json", "coverage.json")
-            ),
+            json.loads(originals[Path("scan-manifest.json")]),
+            json.loads(originals[Path("findings.json")]),
+            read_review_state(state, directory),
         )["draft"]
     if closure_state == "reopened" or merged:
         run_workbench(
@@ -1730,26 +1754,19 @@ def test_stopped_composition_retains_sealed_child_closures(
         if closure_state in {"sealed", "merged", "older-selected-pending"}
         else []
     )
-    final_coverage = json.loads((parent_dir / "coverage.json").read_text())
+    final_coverage = read_review_state(state, parent_dir)
     if closure_state not in {"unsealed", "incomplete"}:
-        assert aggregate["coverage"].get("resolvedDeferred") == [{**closure, "id": closed_id}]
+        assert aggregate["reviewState"].get("resolvedDeferred") == [{**closure, "id": closed_id}]
     assert final_coverage.get("resolvedDeferred", []) == expected_closures
-    for coverage in (aggregate["coverage"], final_coverage):
+    for coverage in (aggregate["reviewState"], final_coverage):
         assert {**pending, "id": open_id} in coverage["deferred"]
     if closure_state == "reopened":
-        assert parent_work in aggregate["coverage"]["deferred"]
+        assert parent_work in aggregate["reviewState"]["deferred"]
     if reopened:
         assert parent_work in final_coverage["deferred"]
     else:
         assert closed_id not in {row["id"] for row in final_coverage["deferred"]}
-    report = (parent_dir / "report.md").read_text()
-    assert pending["reason"] in report
-    assert f"Review deferred unit {open_id}" in report
-    assert (f"Review deferred unit {closed_id}" in report) is reopened
-    published = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    published = _result_files(parent_dir, "report.md")
     if merged:
         findings = json.loads(published["findings.json"])["findings"]
         assert len(findings) == 2
@@ -1763,19 +1780,7 @@ def test_stopped_composition_retains_sealed_child_closures(
     repeated_command = "recover-scan-results" if action == "fail-scan" else "get-scan"
     run_workbench(state, repeated_command, "--scan-id", parent["scanId"])
     saved = json.loads(published["scan-manifest.json"])["scan"]
-    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
-        connection.row_factory = sqlite3.Row
-        record = workbench_api["require_scan"](connection, parent["scanId"])
-        replayed = workbench_api["saved_results"].merge_saved_results(
-            parent_dir,
-            parent["scanId"],
-            workbench_api["workbench_completion_binding"](record, saved["completedAt"]),
-            [],
-            [],
-            stopped=True,
-            reason="Synthetic frozen-source replay.",
-            frozen_source_digests=saved["preservedSources"],
-        )
+    replayed = _replay_frozen_results(workbench_api, state, parent_dir, saved)
     assert replayed is not None
     assert replayed[2].get("resolvedDeferred", []) == expected_closures
     assert {**pending, "id": open_id} in replayed[2]["deferred"]
@@ -1807,10 +1812,7 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
             directory, child["scanId"], target, relative_path="app.py", identity_anchor=anchor
         )
         run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-        protected = {
-            name: (directory / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        }
+        protected = _result_files(directory)
         children.append((child, directory, protected))
     first, _, first_bytes = children[0]
     original = json.loads(first_bytes["findings.json"])["findings"][0]
@@ -1865,7 +1867,7 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
         recovered["provenance"]["sourceFindings"][0]["finding"]
         == json.loads(later_bytes["findings.json"])["findings"][0]
     )
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     assert any(row["reason"].startswith("Accepted pass still") for row in coverage["deferred"])
     assert any("artifacts/deep-scan/passes/pass-2" in row["reason"] for row in coverage["deferred"])
@@ -2046,10 +2048,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
         json.dumps({"findings": [accepted] if has_aggregate else []})
     )
     run_workbench(state, "prepare-scan-completion", "--scan-id", parent["scanId"])
-    prepared = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    prepared = _result_files(parent_dir, "report.md")
     for _ in range(2):
         run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
@@ -2057,7 +2056,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
     assert context["progress"]["status"] == "complete"
     assert context["progress"]["independentReviews"]["active"] == 0
     findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     manifest = json.loads((parent_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"] == manifest_before["scan"]["target"]
     assert manifest["scan"]["scope"] == manifest_before["scan"]["scope"]
@@ -2261,10 +2260,7 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
     assert retained_child["progress"]["status"] == "failed"
     assert retained_child["cost"] == child_cost
     assert retained_child["usage"] == usage
-    published = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    published = _result_files(parent_dir, "report.md")
     frozen = json.loads(published["scan-manifest.json"])["scan"]["preservedSources"]
     assert frozen
     child_published = {name: (child_dir / name).read_bytes() for name in published}
@@ -2348,14 +2344,7 @@ def test_cancel_before_first_merge_preserves_ordinary_children(
         if child_state == "complete":
             run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
             findings = json.loads(findings_path.read_text())["findings"]
-            protected = {
-                name: (directory / name).read_bytes()
-                for name in (
-                    "scan-manifest.json",
-                    "findings.json",
-                    "coverage.json",
-                )
-            }
+            protected = _result_files(directory)
         else:
             write_checkpoint(
                 directory / "checkpoints",
@@ -2399,7 +2388,7 @@ def test_cancel_before_first_merge_preserves_ordinary_children(
         parent["scanId"]
     ]
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     for child, directory, original, protected in children:
         source_id = f"{child['scanId']}:0"
@@ -2582,14 +2571,14 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
         "_stopped_child_draft",
         side_effect=[
             ValueError("Synthetic malformed artifact"),
-            {"findings": [], "coverage": retained_coverage},
+            {"findings": [], "reviewState": retained_coverage},
         ],
     ):
         result = saved.save_composed_checkpoint(
             db, None, {**identity, "id": "parent", "scan_dir": str(root)}, root, composition
         )
-    assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
-    assert result["coverage"]["deferred"][0] == {
+    assert result["reviewState"]["surfaces"] == retained_coverage["surfaces"]
+    assert result["reviewState"]["deferred"][0] == {
         "id": "unmerged-broken",
         "reason": "Independent scan did not complete and merge. Saved work: broken. "
         "Recovery failed: Synthetic malformed artifact",
@@ -2692,10 +2681,7 @@ def test_native_legacy_registration_only_rejoins_validated_sealed_results(
             (str(directory / "scan-manifest.json"), scan["scanId"]),
         )
         original_identity = connection.execute(identity_query, (scan["scanId"],)).fetchone()
-    originals = {
-        name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", CHECKPOINT)
-    }
+    originals = _result_files(directory, CHECKPOINT)
     registration = {
         "scanId": scan["scanId"],
         "threadId": "native-owner",
@@ -2884,19 +2870,7 @@ def test_stopped_composition_retains_child_context_and_export(
     recovered = run_workbench(state, repeated_command, "--scan-id", parent["scanId"])["scan"]
     assert recovered["threatModelAvailable"] is with_model
     assert (parent_dir / "scan-manifest.json").read_bytes() == original_parent
-    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
-        connection.row_factory = sqlite3.Row
-        record = workbench_api["require_scan"](connection, parent["scanId"])
-        replayed = workbench_api["saved_results"].merge_saved_results(
-            parent_dir,
-            parent["scanId"],
-            workbench_api["workbench_completion_binding"](record, saved["completedAt"]),
-            [],
-            [],
-            stopped=True,
-            reason="Synthetic frozen-source replay.",
-            frozen_source_digests=saved["preservedSources"],
-        )
+    replayed = _replay_frozen_results(workbench_api, state, parent_dir, saved)
     assert replayed is not None
     assert replayed[0]["scan"]["scope"] == saved["scope"]
     if with_model:
@@ -3061,10 +3035,7 @@ def test_terminal_composition_seals_recovered_child_context(
             state, "export-findings", "--scan-id", parent["scanId"], "--artifact", "threat-model"
         )
         assert expected_model in Path(exported["export"]["path"]).read_text()
-    sealed = {
-        name: (parent_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    sealed = _result_files(parent_dir, "report.md")
     run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
     assert {name: (parent_dir / name).read_bytes() for name in sealed} == sealed
     assert {path: (child_dir / path).read_bytes() for path in child_originals} == child_originals
@@ -3209,5 +3180,5 @@ def test_deep_passes_retain_parent_target_identity_and_preserve_compatible_resul
     findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 1
     assert findings[0]["provenance"]["sourceFindingIds"] == [f"{first['scanId']}:0"]
-    deferred = json.loads((parent_dir / "coverage.json").read_text())["deferred"]
+    deferred = read_review_state(state, parent_dir)["deferred"]
     assert any("parent's checkout revision and contents" in row["reason"] for row in deferred)

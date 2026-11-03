@@ -57,7 +57,7 @@ function input(scanId: string, findings: SemanticFinding[]): ScanMergeInput {
           sourceFindingIds: [`${scanId}:${index}`],
         },
       })),
-      coverage: semanticCoverage({
+      reviewState: semanticCoverage({
         completeness: "partial",
         deferred: [{ reason: "Synthetic outstanding work." }],
       }),

@@ -57,7 +57,7 @@ test("Deep projection uses persisted file scope before assigning identities and 
     findings: ["src/app.ts/generated", "src/app.ts"].map((path) =>
       semanticFinding({ locations: [{ path, startLine: 1 }] }),
     ),
-    coverage: semanticCoverage(),
+    reviewState: semanticCoverage(),
   };
   const before = structuredClone({ context, input });
   const resumed: SemanticScanContext = JSON.parse(JSON.stringify(context));

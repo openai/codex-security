@@ -1,7 +1,11 @@
 import { workbenchArgs } from "./workbench-arguments.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanMode } from "./targets.js";
-import type { ScanCost, ScanCostTracker } from "./cost.js";
+import type {
+  ParentProgressSource,
+  ScanCost,
+  ScanCostTracker,
+} from "./cost.js";
 import type { WorkbenchCommandOptions, runWorkbench } from "./runtime.js";
 import {
   scanPhaseSchema,
@@ -127,40 +131,74 @@ export class ScanProgressReporter {
   phase: ScanProgress["phase"] = "preflight";
   reviewItems: ScanProgress["reviewItems"];
 
+  #lastProgress: string | null = null;
+
   constructor(
     private readonly mode: ScanMode,
     private readonly options: Pick<
       ScanOptions,
       "onProgress" | "onWorkerStatus" | "onObserverError"
     >,
+    private readonly isValidating?: () => boolean,
   ) {}
 
-  readonly report = (progress: ScanProgress): void => {
+  readonly report = (
+    progress: ScanProgress,
+    source?: ParentProgressSource,
+    tracker?: ScanCostTracker,
+  ): void => {
+    const liveEvent = source?.reconciled === true ? undefined : source?.event;
     if (
-      this.scopeFileCount === null ||
-      progress.filesTotal > this.scopeFileCount ||
-      progress.filesCompleted < this.reviewedFileCount
+      liveEvent !== undefined &&
+      tracker !== undefined &&
+      !tracker.recordParentProgress(progress, liveEvent)
     )
       return;
-    this.reviewedFileCount = progress.filesCompleted;
+    const inventory =
+      source?.inventory === true ||
+      (progress.phase === "discovery" &&
+        this.reviewedFileCount === 0 &&
+        progress.filesCompleted === 0);
+    const filesTotal = inventory ? progress.filesTotal : this.scopeFileCount;
     if (
+      filesTotal === null ||
+      progress.filesTotal > filesTotal ||
+      (source?.inventory !== true &&
+        progress.filesCompleted < this.reviewedFileCount)
+    ) {
+      if (liveEvent !== undefined) tracker?.deferParentInventory(liveEvent);
+      return;
+    }
+    if (inventory) {
+      this.scopeFileCount = filesTotal;
+      tracker?.setExpectedFilesTotal(filesTotal);
+    }
+    this.reviewedFileCount = progress.filesCompleted;
+    if (liveEvent !== undefined)
+      tracker?.acceptParentProgress(progress, liveEvent);
+    if (
+      source !== undefined ||
       this.mode === "deep" ||
       scanPhaseSchema.options.indexOf(progress.phase) >
         scanPhaseSchema.options.indexOf(this.phase)
     )
       this.phase = progress.phase;
+    const update = {
+      ...progress,
+      phase: this.isValidating?.() ? ("validation" as const) : this.phase,
+      filesTotal,
+      ...(this.reviewItems === undefined
+        ? {}
+        : { reviewItems: this.reviewItems }),
+    };
+    const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}:${update.reviewItems?.completed}:${update.reviewItems?.total}`;
+    if (key === this.#lastProgress) return;
+    this.#lastProgress = key;
     notifyObserver(
       "onProgress",
       this.options.onProgress,
       this.options.onObserverError,
-      {
-        ...progress,
-        phase: this.phase,
-        filesTotal: this.scopeFileCount,
-        ...(this.reviewItems === undefined
-          ? {}
-          : { reviewItems: this.reviewItems }),
-      },
+      update,
     );
   };
 
@@ -211,19 +249,18 @@ export class ScanProgressReporter {
     );
   }
 
-  fromScan(progress: ScanProgress, tracker: ScanCostTracker): void {
-    if (
-      progress.phase === "discovery" &&
-      progress.filesCompleted === 0 &&
-      this.reviewedFileCount === 0 &&
-      progress.filesTotal !== this.scopeFileCount
-    ) {
-      this.scopeFileCount = progress.filesTotal;
-      tracker.setExpectedFilesTotal(this.scopeFileCount);
-    }
-    this.report({
-      ...progress,
-      phase: this.mode === "deep" ? "discovery" : progress.phase,
-    });
+  fromScan(
+    progress: ScanProgress,
+    tracker: ScanCostTracker,
+    source?: ParentProgressSource,
+  ): void {
+    this.report(
+      {
+        ...progress,
+        phase: this.mode === "deep" ? "discovery" : progress.phase,
+      },
+      source,
+      tracker,
+    );
   }
 }

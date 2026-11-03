@@ -9,10 +9,8 @@ import {
   watch,
   writeFile,
 } from "node:fs/promises";
-import { EventEmitter } from "node:events";
-import { createRequire, syncBuiltinESMExports } from "node:module";
+import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import { importModule } from "./import-module.ts";
 import {
@@ -90,7 +88,7 @@ for (const complete of [true, undefined]) {
         for (const checkpoint of checkpoints) {
           assert.notEqual(checkpoint.complete, false);
           assert.deepEqual(checkpoint.threatModel, expectedModel);
-          assert.deepEqual(checkpoint.coverage.deferred, []);
+          assert.deepEqual(checkpoint.reviewState.deferred, []);
         }
         const savedCoverage = await readJson(root, "coverage.json");
         assert.deepEqual(savedCoverage.deferred, []);
@@ -187,7 +185,7 @@ test("model-only scan checkpoints save Markdown before findings and retain it on
       complete: false,
       threatModel,
       findings: [],
-      coverage,
+      reviewState: coverage,
     };
     assert.deepEqual(
       scanDraftInputSchema.parse(checkpoint).threatModel,
@@ -231,7 +229,7 @@ test("model-only scan checkpoints save Markdown before findings and retain it on
       scanId,
       complete: false,
       findings: [],
-      coverage,
+      reviewState: coverage,
     });
     const saved = await readJson(root, "scan-manifest.json");
     assert.deepEqual(saved.scan.threatModel, threatModel);
@@ -254,7 +252,13 @@ test("a convenience-document failure preserves the scan result and reports a war
         handoffClaimToken: undefined,
         pluginRoot,
       },
-      { scanId, complete: false, threatModel, findings: [], coverage },
+      {
+        scanId,
+        complete: false,
+        threatModel,
+        findings: [],
+        reviewState: coverage,
+      },
     );
     assert.match(result.warnings[0], /threatmodel\.md could not be written/);
     assert.deepEqual(
@@ -266,86 +270,73 @@ test("a convenience-document failure preserves the scan result and reports a war
   }
 });
 
-test("the configured scan interpreter is honored without losing the canonical model on failure", async () => {
-  const root = await temporaryDirectory("threatmodel-python-");
+test("a renderer failure preserves saved canonical bytes and reports a warning", async () => {
+  const root = await temporaryDirectory("threatmodel-render-failure-");
   try {
-    const result = await recordCodexSecurityScanDraft(
-      {
-        ...draftFixture(root, "standard").context,
-        handoffClaimToken: undefined,
-        pluginRoot,
-        pythonCommand: join(root, "missing-interpreter"),
-      },
-      { scanId, complete: false, threatModel, findings: [], coverage },
+    const resultPath = join(root, "scan-manifest.json");
+    const canonical = Buffer.from(
+      JSON.stringify(
+        {
+          scanId,
+          complete: false,
+          scan: { threatModel: { summary: "" } },
+          findings: [],
+          reviewState: coverage,
+        },
+        null,
+        2,
+      ) + "\n",
     );
-    assert.match(result.warnings[0], /missing-interpreter/);
-    assert.deepEqual(
-      (await readJson(root, "scan-manifest.json")).scan.threatModel,
+    await writeFile(resultPath, canonical);
+    const warning = await saveThreatModelDocument(
+      { ...draftFixture(root, "standard").context, pluginRoot },
       threatModel,
     );
+    assert.equal(
+      warning,
+      "The threat model was saved, but threatmodel.md could not be written: threatModel.summary: expected a non-empty string",
+    );
+    assert.deepEqual(await readFile(resultPath), canonical);
+    await assert.rejects(readFile(join(root, "threatmodel.md")), {
+      code: "ENOENT",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("overlapping draft projections retain the latest committed model", async (t) => {
-  const root = await temporaryDirectory("threatmodel-concurrent-");
-  const childProcess = createRequire(import.meta.url)("node:child_process");
-  const firstStarted = Promise.withResolvers<{
-    provenance: { revision: string; snapshotDigest: string };
-  }>();
-  let releaseFirst: (() => void) | undefined;
+  const root = await temporaryDirectory("threatmodel-concurrent-", true);
+  const firstStarted = Promise.withResolvers<string>();
+  const releaseFirst = Promise.withResolvers<void>();
+  const originalRename = fs.rename;
+  let firstProjection = true;
   let activeRenderers = 0;
   let maximumRenderers = 0;
-  t.mock.method(childProcess, "spawn", (command: string, args: string[]) => {
-    assert.equal(command, "fixture-python");
-    assert.deepEqual(args, [
-      "-B",
-      "-I",
-      "-X",
-      "utf8",
-      join(pluginRoot, "scripts", "threat_model_projection.py"),
-      "--input-json-stdin",
-    ]);
-    const child = new EventEmitter() as EventEmitter & {
-      stdout: PassThrough;
-      stderr: PassThrough;
-      stdin: Writable;
-    };
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    let contents = "";
-    child.stdin = new Writable({
-      write(chunk, _encoding, callback) {
-        contents += chunk.toString("utf8");
-        callback();
-      },
-      final(callback) {
-        const input = JSON.parse(contents);
-        activeRenderers += 1;
-        maximumRenderers = Math.max(maximumRenderers, activeRenderers);
-        const finish = () => {
-          child.stdout.end(input.threatModel.content);
-          activeRenderers -= 1;
-          child.emit("close", 0, null);
-        };
-        if (!releaseFirst) {
-          releaseFirst = finish;
-          firstStarted.resolve(input);
-        } else {
-          finish();
+  t.mock.method(
+    fs,
+    "rename",
+    async (...[source, destination]: Parameters<typeof fs.rename>) => {
+      if (destination !== join(root, "threatmodel.md"))
+        return originalRename(source, destination);
+      activeRenderers += 1;
+      maximumRenderers = Math.max(maximumRenderers, activeRenderers);
+      try {
+        if (firstProjection) {
+          firstProjection = false;
+          firstStarted.resolve(await readFile(source, "utf8"));
+          await releaseFirst.promise;
         }
-        callback();
-      },
-    });
-    return child;
-  });
-  syncBuiltinESMExports();
+        return await originalRename(source, destination);
+      } finally {
+        activeRenderers -= 1;
+      }
+    },
+  );
   const context = {
     ...draftFixture(root, "standard").context,
     handoffClaimToken: undefined,
     pluginRoot,
-    pythonCommand: "fixture-python",
     targetRevision: "example-revision",
   };
   const firstModel = { format: "markdown", content: "# First model\n" };
@@ -364,47 +355,46 @@ test("overlapping draft projections retain the latest committed model", async (t
       complete: false,
       threatModel: firstModel,
       findings: [],
-      coverage,
+      reviewState: coverage,
     });
-    const input = await firstStarted.promise;
-    assert.equal(input.provenance.revision, context.targetRevision);
-    assert.equal(
-      input.provenance.snapshotDigest,
-      context.targetContract.target.requiredSnapshotDigest,
+    const firstDocument = await firstStarted.promise;
+    assert.ok(firstDocument.includes(`Revision: ${context.targetRevision}`));
+    assert.ok(
+      firstDocument.includes(
+        `Snapshot: ${context.targetContract.target.requiredSnapshotDigest}`,
+      ),
     );
     const latest = recordCodexSecurityScanDraft(context, {
       scanId,
       complete: false,
       threatModel: latestModel,
       findings: [],
-      coverage,
+      reviewState: coverage,
     });
     await latestCommitted;
-    releaseFirst!();
+    releaseFirst.resolve();
     const results = await Promise.all([first, latest]);
     assert.deepEqual(
       results.map((result) => result.warnings),
       [undefined, undefined],
     );
     assert.equal(maximumRenderers, 1);
-    assert.equal(
-      await readFile(join(root, "threatmodel.md"), "utf8"),
-      latestModel.content,
-    );
+    const latestDocument = await readFile(join(root, "threatmodel.md"), "utf8");
+    assert.ok(latestDocument.startsWith(latestModel.content));
     // A caller queued with older input must reread the saved canonical result.
     await saveThreatModelDocument(context, firstModel);
     assert.equal(
       await readFile(join(root, "threatmodel.md"), "utf8"),
-      latestModel.content,
+      latestDocument,
     );
     assert.deepEqual(
       (await readJson(root, "scan-manifest.json")).scan.threatModel,
       latestModel,
     );
   } finally {
+    releaseFirst.resolve();
     await events.return!();
     t.mock.restoreAll();
-    syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
   }
 });

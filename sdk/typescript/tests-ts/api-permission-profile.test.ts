@@ -265,7 +265,7 @@ async function fixture(
                   },
                 },
               ],
-              coverage: {
+              reviewState: {
                 completeness: "complete",
                 surfaces: [],
                 explicitExclusions: [],

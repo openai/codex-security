@@ -60,9 +60,9 @@ export function acceptMerge(
   state: DeepScanCheckpoint,
   merged: ScanMergeResult,
   pendingScanIds: readonly string[],
-  coverage: SemanticCoverage,
+  reviewState: SemanticCoverage,
 ): void {
-  state.aggregate = { ...merged.aggregate, coverage };
+  state.aggregate = { ...merged.aggregate, reviewState };
   state.mergeFailures = 0;
   state.mergedScanIds.push(...pendingScanIds);
   const novelPasses = new Set(merged.newFindingScanIds);
