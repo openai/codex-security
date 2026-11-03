@@ -204,7 +204,9 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ],
     [
       "coverage",
-      { reviewState: { ...producerCheckpoint.reviewState, surfaces: "invalid" } },
+      {
+        reviewState: { ...producerCheckpoint.reviewState, surfaces: "invalid" },
+      },
       /current schema/,
     ],
   ]) {
@@ -853,7 +855,10 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ],
     [
       "inventory strategy is derived by the authoritative scan",
-      { ...input, reviewState: { ...coverage, inventoryStrategy: "repository" } },
+      {
+        ...input,
+        reviewState: { ...coverage, inventoryStrategy: "repository" },
+      },
     ],
     [
       "coverage included paths are derived from the authoritative scope",
@@ -992,7 +997,8 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     true,
   );
   assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, reviewState: undefined }).success,
+    scanDraftInputSchema.safeParse({ ...input, reviewState: undefined })
+      .success,
     false,
   );
   assert.equal(
@@ -1365,7 +1371,10 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
       ...surfaceDraft.reviewState,
       deferred: [],
       surfaces: [
-        { ...surfaceDraft.reviewState.surfaces[0], disposition: "not_applicable" },
+        {
+          ...surfaceDraft.reviewState.surfaces[0],
+          disposition: "not_applicable",
+        },
       ],
     },
   };
@@ -1390,7 +1399,10 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
   const closure = { id: deferredId, reason: "Synthetic review completed." };
   await recordCodexSecurityScanDraft(surfaceContext, {
     ...closedSurfaceDraft,
-    reviewState: { ...closedSurfaceDraft.reviewState, resolvedDeferred: [closure] },
+    reviewState: {
+      ...closedSurfaceDraft.reviewState,
+      resolvedDeferred: [closure],
+    },
   });
   assert.equal(
     (await readJson(surfaceRoot, "coverage.json")).completeness,

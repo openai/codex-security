@@ -38,9 +38,15 @@ def test_sealed_resume_uses_stored_target_without_execution_inputs(
         "recipe": recipe(requested_target),
     }
     original_recipe = copy.deepcopy(registration["recipe"])
+    manifest = json.loads((directory / "scan-manifest.json").read_text())["scan"]
     sealed = {
         name: (directory / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in (
+            "scan-manifest.json",
+            "report.md",
+            *(item["path"] for item in manifest["artifacts"]),
+            *manifest["preservedSources"],
+        )
     }
     if target_state == "deleted":
         shutil.rmtree(target)
@@ -61,10 +67,7 @@ def test_sealed_resume_uses_stored_target_without_execution_inputs(
         resumed = run_workbench(state, "get-cli-scan-resume", "--scan-id", scan["scanId"])
     assert resumed["scanId"] == scan["scanId"]
     assert resumed["recipe"] == original_recipe
-    assert (
-        resumed["sealedProducerVersion"]
-        == json.loads(sealed["scan-manifest.json"])["scan"]["producer"]["version"]
-    )
+    assert resumed["sealedProducerVersion"] == manifest["producer"]["version"]
     assert {name: (directory / name).read_bytes() for name in sealed} == sealed
     completed = run_workbench(
         state,

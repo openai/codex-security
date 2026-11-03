@@ -218,7 +218,9 @@ def test_legacy_rows_do_not_invent_target_provenance(tmp_path: Path, kind: str) 
         if kind == "legacy":
             connection.execute("ALTER TABLE scans DROP COLUMN target_protection_roots_json")
             connection.execute("ALTER TABLE workspaces DROP COLUMN target_protection_roots_json")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE name = 'persist scan target executable protection'"
+            )
     restored = run_workbench(
         state,
         "begin-deep-scan",

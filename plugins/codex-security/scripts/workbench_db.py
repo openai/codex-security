@@ -449,6 +449,10 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     if target_path:
         try:
             roots = target_protection_roots(target_path)
+            target = require_target(target_path)
+            # Bind an alias to its physical target even if the remaining setup is incomplete.
+            if target != Path(os.path.normpath(Path(target_path).expanduser())):
+                target_path = str(target)
             inspected = inspect_setup_values(
                 target_path,
                 default_scope,

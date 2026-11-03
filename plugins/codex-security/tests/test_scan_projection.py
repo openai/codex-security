@@ -23,6 +23,7 @@ def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> N
             {"id": "surface", "notes": "Later observation"},
         ],
         "openQuestions": [{"question": "Remaining coverage?"}],
+        "reviews": [{"workerId": "review-1", "attempt": 1, "completeness": "partial"}],
     }
     workbench_api["saved_results"].merge_coverage(coverage, addition)
     assert coverage == {
@@ -35,6 +36,7 @@ def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> N
         "deferred": [],
         "resolvedDeferred": [],
         "openQuestions": [{"question": "Remaining coverage?"}],
+        "reviews": [{"workerId": "review-1", "attempt": 1, "completeness": "partial"}],
     }
 
 
@@ -125,7 +127,7 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
     assert live["sourceFindings"] == [
         originals[index] for index in fixture["expected"]["sourceFindingIndexes"]
     ]
-    assert live["draft"]["coverage"] == fixture["expected"]["coverage"]
+    assert live["draft"]["reviewState"] == fixture["expected"]["coverage"]
     assert live["draft"]["scanId"] == parent["scanId"]
     for finding, wanted in zip(
         live["draft"]["findings"], fixture["expected"]["findings"], strict=True
@@ -138,8 +140,8 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
     with workbench_api["connect"]() as connection:
         row = workbench_api["require_scan"](connection, child["scanId"])
         project = workbench_api["saved_results"]._stopped_child_draft
-        draft = project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir)
-        assert project(workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir) == draft
+        draft = project(workbench_api["_WORKBENCH_DB_CONTEXT"], connection, row, parent_dir)
+        assert project(workbench_api["_WORKBENCH_DB_CONTEXT"], connection, row, parent_dir) == draft
     expected = fixture["expected"]
     for actual, wanted, original_index in zip(
         draft["findings"], expected["findings"], expected["sourceFindingIndexes"], strict=True
@@ -155,7 +157,7 @@ def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, mo
         ]
         assert not {"findingId", "occurrenceId", "fingerprints"}.intersection(actual)
     for key, wanted in expected["coverage"].items():
-        assert draft["coverage"][key] == wanted
+        assert draft["reviewState"][key] == wanted
     for destination, source in expected["fileProjections"].items():
         assert (parent_dir / destination).read_bytes() == (child_dir / source).read_bytes()
     for name, contents in fixture["files"].items():
@@ -189,10 +191,11 @@ def test_completed_projection_rejects_rewritten_saved_scan(
         manifest["scan"]["target"]["displayName"] = "Different target"
         message = "target displayName must match the workbench target"
     manifest_path.write_text(json.dumps(manifest))
-    source_bytes = {
-        name: (child_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
-    }
+
+    def source_files():
+        return {path: path.read_bytes() for path in child_dir.rglob("*") if path.is_file()}
+
+    source_bytes = source_files()
     listed = run_workbench(state, "list-scans", "--scan-root", str(child_dir))["scans"]
     assert len(listed) == 1
     assert listed[0]["scanId"] == child["scanId"]
@@ -202,13 +205,13 @@ def test_completed_projection_rejects_rewritten_saved_scan(
         row = workbench_api["require_scan"](connection, child["scanId"])
         with pytest.raises(SystemExit, match=message):
             workbench_api["saved_results"]._stopped_child_draft(
-                workbench_api["_WORKBENCH_DB_CONTEXT"], row, parent_dir
+                workbench_api["_WORKBENCH_DB_CONTEXT"], connection, row, parent_dir
             )
     projected = completed_projection(state, parent_dir, parent, child_dir, child)
     assert projected.returncode != 0
     assert message in projected.stderr
     assert not (parent_dir / "findings").exists()
-    assert {name: (child_dir / name).read_bytes() for name in source_bytes} == source_bytes
+    assert source_files() == source_bytes
 
 
 def test_projection_preserves_long_report_references(tmp_path):

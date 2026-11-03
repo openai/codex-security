@@ -151,7 +151,7 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
         "--scan-root",
         str(tmp_path / "scans"),
         environment=environment,
-    )["results"]
+    )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         row = connection.execute(
             "SELECT started_at FROM scans WHERE id = ?", (started["scanId"],)

@@ -37,7 +37,6 @@ from workbench_test_support import (
     set_triage,
     start_delivered_scan,
     start_saved_scan,
-    start_scan_command,
     start_workspace_scan,
     update_progress,
     workspace_command,
@@ -133,10 +132,7 @@ def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
 ) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_scan_command(
-        state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
-    )
-    scan_id, scan_dir = str(started["scanId"]), Path(str(started["scanDir"]))
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
 
     scan_command(state_dir, "cancel-scan", scan_id)

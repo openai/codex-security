@@ -197,9 +197,6 @@ test("the paired evaluator preserves aggregate usage across production completio
             ...dependencies,
             now: () => Date.UTC(2026, 0, 1),
             probeCodexSandbox: async () => {},
-            prepareScanArtifactRestorer: async () => ({
-              restore: async () => {},
-            }),
             prepareRuntime: async () => ({
               codexHome: home,
               plugin: {

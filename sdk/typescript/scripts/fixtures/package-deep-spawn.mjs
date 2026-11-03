@@ -10,13 +10,13 @@ const script = fileURLToPath(
   new URL("package-deep-codex.mjs", import.meta.url),
 );
 
-export function installFixtureSpawn(executable) {
+export function installFixtureSpawn(executable, fixture = script) {
   const selected = win32.toNamespacedPath(executable);
   const spawn = childProcess.spawn;
   childProcess.spawn = (command, args, options) =>
     spawn(
       command,
-      win32.toNamespacedPath(command) === selected ? [script, ...args] : args,
+      win32.toNamespacedPath(command) === selected ? [fixture, ...args] : args,
       options,
     );
   syncBuiltinESMExports();

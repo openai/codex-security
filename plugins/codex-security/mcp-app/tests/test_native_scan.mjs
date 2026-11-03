@@ -1,6 +1,10 @@
 import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import {
+  syntheticPermissionAppServer,
+  writeNativeWorkerExecutable,
+} from "./support/fake-codex-fixture.ts";
+import {
   chmod,
   mkdir,
   mkdtemp,
@@ -14,10 +18,16 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+const standalonePlugin = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const packagedPlugin =
+  standalonePlugin ??
+  fileURLToPath(
+    new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
+  );
 let onNativeSealRead;
 
 const bundle = await build({
@@ -36,10 +46,7 @@ const bundle = await build({
   },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-        import.meta.url,
-      ).href,
+      pathToFileURL(join(packagedPlugin, "mcp/server.mjs")).href,
     ),
   },
   format: "cjs",
@@ -130,57 +137,6 @@ async function collectNativeEvents(thread, prompt, options) {
   const collected = [];
   for await (const event of events) collected.push(event);
   return collected;
-}
-
-function syntheticPermissionAppServer(parentPath) {
-  return `function servePermissionProfiles() {
-  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
-  const config = {};
-  const argv = process.argv.slice(2);
-  function merge(target, value) {
-    for (const [key, child] of Object.entries(value)) {
-      if (child && typeof child === "object" && !Array.isArray(child)) {
-        target[key] = merge(target[key] ?? {}, child);
-      } else target[key] = child;
-    }
-    return target;
-  }
-  for (let index = 0; index < argv.length; index++) {
-    if (argv[index] === "--config" || argv[index] === "-c") merge(config, parse(argv[++index]));
-  }
-  const scenario = process.env.NATIVE_PROFILE_SCENARIO
-    ? fs.readFileSync(process.env.NATIVE_PROFILE_SCENARIO, "utf8").trim() : "valid";
-  const selected = config.default_permissions;
-  const profile = config.permissions?.[selected] ?? { filesystem: {}, network: {} };
-  profile.description = "Synthetic profile description";
-  profile.network.fixtureNull = null;
-  if (scenario === "substituted-default") config.default_permissions = ":read-only";
-  if (scenario === "substituted-profile") {
-    for (const [key, value] of Object.entries(profile.filesystem)) {
-      if (value === "deny") delete profile.filesystem[key];
-    }
-  }
-  const capture = (value) => {
-    if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
-  };
-  capture({ kind: "preflight", executable: process.argv[1], argv, modelProvider: config.model_provider, provider: config.model_providers?.[config.model_provider], cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
-    codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
-    gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
-  require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
-    const request = JSON.parse(line);
-    capture({ kind: "request", method: request.method, params: request.params });
-    if (request.id === undefined) return;
-    let result;
-    if (request.method === "initialize") result = {};
-    else if (request.method === "config/read") result = { config };
-    else if (request.method === "thread/read") result = { thread: { id: request.params.threadId, path: ${JSON.stringify(parentPath ?? null)} } };
-    else if (request.method === "permissionProfile/list") result = request.params?.cursor === "selected-page"
-      ? { data: [{ id: selected, allowed: scenario !== "disallowed" }], nextCursor: null }
-      : { data: [{ id: "other-profile", allowed: true }], nextCursor: "selected-page" };
-    else throw new Error("Unexpected app-server request " + request.method);
-    console.log(JSON.stringify({ id: request.id, result }));
-  });
-}`;
 }
 
 function input(id = "parent") {
@@ -1957,9 +1913,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
     });
     const ownedDirectory = join(root, "owned-scan");
     await mkdir(ownedDirectory, { mode: 0o700 });
-    const nativePlugin = fileURLToPath(
-      new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
-    );
+    const nativePlugin = packagedPlugin;
     const releaseOwner = await acquireScanExecution(
       root,
       ownedDirectory,
@@ -2085,43 +2039,6 @@ test("native saved scans retain settings, auth environment, permissions and iden
   }
 });
 
-async function writeNativeWorkerExecutable(executable, capture) {
-  await writeFile(
-    executable,
-    `#!${process.execPath}
-const fs = require("node:fs");
-${syntheticPermissionAppServer()}
-if (process.argv.includes("app-server")) servePermissionProfiles();
-else {
-  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
-  const argv = process.argv.slice(2);
-  const path = require("node:path");
-  const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
-  const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
-  const profile = argv.includes("--profile") ? parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")) : {};
-  merge(effective, profile);
-  for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
-  const provider = effective.model_providers?.[effective.model_provider];
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
-    knowledgeDocuments: process.env.CODEX_SECURITY_KNOWLEDGE_BASE && Object.fromEntries(fs.readdirSync(process.env.CODEX_SECURITY_KNOWLEDGE_BASE).map(name => [name, fs.readFileSync(path.join(process.env.CODEX_SECURITY_KNOWLEDGE_BASE, name), "utf8")])),
-    model: effective.model,
-    reasoningEffort: effective.model_reasoning_effort,
-    modelProvider: effective.model_provider,
-    safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
-    provider,
-    profileProvider: profile.model_providers?.[effective.model_provider],
-    providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
-    providerHeaders: provider && {...provider.http_headers, ...Object.fromEntries(Object.entries(provider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
-    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
-  }));
-  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
-  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
-}
-`,
-    { mode: 0o700 },
-  );
-}
-
 async function nativeWorkerSession(prepared, repository) {
   const ambient = prepared.client.dependencies.ambientExecution;
   const runtime = await prepareAmbientRuntime(ambient);
@@ -2185,22 +2102,24 @@ for (const scenario of [
   "openrouter-env-http-headers",
   "fireworks-env-http-headers",
 ]) {
+  const portable = scenario === "both-finite";
   test(
     `native merged settings reach every worker: ${scenario}`,
     {
       skip:
-        process.platform === "win32"
+        process.platform === "win32" && !portable
           ? "Synthetic executable uses a POSIX shebang."
           : false,
     },
-    async () => {
+    async (t) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "native-merged-worker-")),
       );
       const home = join(root, "home");
       const repository = join(root, "repository");
-      const pluginRoot = join(root, "plugin");
-      const executable = join(root, "codex");
+      const pluginRoot = standalonePlugin ?? join(root, "plugin");
+      const executable = join(root, portable ? "codex.exe" : "codex");
+      const script = portable ? join(root, "codex-worker.cjs") : executable;
       const capture = join(root, "worker.json");
       const preflights = join(root, "preflights.jsonl");
       const lexicalTarget = [
@@ -2243,12 +2162,19 @@ for (const scenario of [
       try {
         await mkdir(home);
         await mkdir(repository);
-        await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
-        await writeFile(
-          join(pluginRoot, ".codex-plugin/plugin.json"),
-          JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+        if (!standalonePlugin) {
+          await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+          await writeFile(
+            join(pluginRoot, ".codex-plugin/plugin.json"),
+            JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+          );
+        }
+        const restoreSpawn = await writeNativeWorkerExecutable(
+          executable,
+          capture,
+          script,
         );
-        await writeNativeWorkerExecutable(executable, capture);
+        if (restoreSpawn) t.after(restoreSpawn);
         if (lexicalTarget) {
           await writeFile(preflights, "");
           await mkdir(lexicalBin, { recursive: true });
@@ -2650,7 +2576,12 @@ for (const scenario of [
                 request.stateDirectory ??
                   join(home, "state", "plugins", "codex-security"),
               );
-              assert.equal(observed.executable, executable);
+              assert.equal(observed.executable, script);
+              if (portable)
+                assert.equal(
+                  await realpath(observed.binary),
+                  await realpath(executable),
+                );
               if (lexicalTarget) {
                 assert.equal(
                   observed.path,

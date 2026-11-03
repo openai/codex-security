@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 
-const {
-  codexWorkerTurnError,
-  DeepScanNonRetryableError,
-} = await importModule({
+const { codexWorkerTurnError, DeepScanNonRetryableError } = await importModule({
   entryPoints: [
     fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
   ],

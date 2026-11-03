@@ -35,7 +35,7 @@ def test_saved_checkpoint_fallback_classifies_windows_missing_errors(
 ) -> None:
     saved = workbench_api["saved_results"]
     finalizer = sys.modules[saved._read_scan_local_json.__module__]
-    payload = {"scanId": "fixture-scan", "findings": [], "coverage": {}}
+    payload = {"scanId": "fixture-scan", "findings": [], "reviewState": {}}
     contents = json.dumps(payload).encode()
     name = hashlib.sha256(contents).hexdigest() + ".json"
     relative = f"checkpoints/{name}"
@@ -275,13 +275,29 @@ def test_native_windows_snapshot_open_failure_closes_owned_handles(
     assert moved.read_bytes() == b"original"
 
 
+@pytest.mark.parametrize("replace_existing", [False, True])
 @pytest.mark.parametrize(
     ("extended_error", "classic_error"),
-    [(0, None), (1, 0), (1, 5), (50, 0), (50, 5), (87, 0), (87, 5), (5, None), (32, None)],
+    [
+        (0, None),
+        (1, 0),
+        (1, 5),
+        (50, 0),
+        (50, 5),
+        (87, 0),
+        (87, 5),
+        (5, None),
+        (32, None),
+        (80, None),
+        (183, None),
+        (1, 80),
+        (1, 183),
+    ],
 )
 def test_rename_uses_classic_semantics_only_when_extended_operation_is_unsupported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    replace_existing: bool,
     extended_error: int,
     classic_error: int | None,
 ) -> None:
@@ -310,18 +326,26 @@ def test_rename_uses_classic_semantics_only_when_extended_operation_is_unsupport
     )
     unsupported = extended_error in {1, 50, 87}
     expected_error = classic_error if unsupported else extended_error
-    if expected_error:
+    if not replace_existing and expected_error in (80, 183):
+        with pytest.raises(FileExistsError) as collision:
+            WINDOWS_FILES._rename_handle(123, destination, replace_existing)
+        assert collision.value.errno == errno.EEXIST
+        assert collision.value.filename == str(destination)
+    elif expected_error:
         with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError) as caught:
-            WINDOWS_FILES._rename_handle(123, destination)
+            WINDOWS_FILES._rename_handle(123, destination, replace_existing)
         assert caught.value.errno == expected_error
         operation = "FileRenameInfo" if unsupported else "FileRenameInfoEx"
         assert caught.value.strerror == (
             f"SetFileInformationByHandle({operation}): synthetic native error {expected_error}"
         )
     else:
-        WINDOWS_FILES._rename_handle(123, destination)
+        WINDOWS_FILES._rename_handle(123, destination, replace_existing)
     target = WINDOWS_FILES._extended_path(destination)
-    assert calls == [(123, 22, 3, target)] + ([(123, 3, 1, target)] if unsupported else [])
+    replace_flag = int(replace_existing)
+    assert calls == [(123, 22, replace_flag | 2, target)] + (
+        [(123, 3, replace_flag, target)] if unsupported else []
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")

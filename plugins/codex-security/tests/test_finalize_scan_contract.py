@@ -16,10 +16,7 @@ from unittest import main, mock, skipIf
 
 import pytest
 from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
-from workbench_test_support import ScanFixtureTestCase, load_script
-
-FINALIZER = load_script("finalize_scan_contract")
-
+from workbench_test_support import ScanFixtureTestCase, windows_file_backend
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
@@ -1373,33 +1370,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.coverage["surfaces"][0]["disposition"] = "no_issue_found"
         self.write_scan()
 
-        backend = mock.Mock()
-
-        def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
-            return os.open(scan_dir / relative_path, os.O_RDONLY)
-
-        def atomic_write(
-            scan_dir: Path,
-            relative_path: str,
-            payload: bytes,
-            *,
-            expected_root_identity: tuple[int, int] | None = None,
-        ) -> None:
-            path = scan_dir / relative_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(payload)
-
-        def unlink_if_exists(
-            scan_dir: Path,
-            relative_path: str,
-            *,
-            expected_root_identity: tuple[int, int] | None = None,
-        ) -> None:
-            (scan_dir / relative_path).unlink(missing_ok=True)
-
-        backend.open_read_fd.side_effect = open_read_fd
-        backend.atomic_write.side_effect = atomic_write
-        backend.unlink_if_exists.side_effect = unlink_if_exists
+        backend = windows_file_backend()
 
         with (
             mock.patch.object(FINALIZER.os, "supports_dir_fd", set()),

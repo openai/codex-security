@@ -262,6 +262,7 @@ def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
     scan_dir.mkdir(mode=0o700)
     stage_path = "drafts/00000000-0000-0000-0000-000000000001.checkpoint.json"
     payload = {"scanId": "fixture", "findings": [], "coverage": {}}
+    normalized = {"scanId": "fixture", "findings": [], "reviewState": {}}
     contents = json.dumps(payload).encode()
     name = hashlib.sha256(contents).hexdigest() + ".json"
     saved.write_scan_local_bytes(scan_dir, stage_path, contents)
@@ -269,10 +270,10 @@ def test_pending_stage_requires_a_matching_marker_and_unchanged_bytes(
     assert (f"checkpoints/{name}", None) not in saved._saved_result_paths(scan_dir, [])
     saved.write_scan_local_bytes(scan_dir, f"checkpoints/pending/{name}", stage_path.encode())
     assert (f"checkpoints/{name}", None) in saved._saved_result_paths(scan_dir, [])
-    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload
+    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == normalized
     saved.write_scan_local_bytes(scan_dir, stage_path, contents + b"\n")
     with pytest.raises(saved.ContractError, match="changed after publication failed"):
         saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")
     # Existing history takes precedence over a changed leftover stage.
     saved.write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
-    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == payload
+    assert saved._read_saved_result(scan_dir, f"checkpoints/{name}", "fixture")[0] == normalized

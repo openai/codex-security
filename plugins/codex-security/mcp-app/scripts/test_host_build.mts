@@ -114,9 +114,10 @@ test("builds and loads the host runtime from standalone plugin source", async (t
   );
   assert.equal(launcherOutput, "[]\n");
 
-  for (const file of contract.shippedExact.filter(
-    (file: string) => !file.startsWith("mcp/"),
-  )) {
+  for (const file of [
+    ".codex-plugin/plugin.json",
+    ...contract.shippedExact.filter((file: string) => !file.startsWith("mcp/")),
+  ]) {
     await mkdir(dirname(join(output, file)), { recursive: true });
     await copyFile(join(plugin, file), join(output, file));
   }
@@ -133,17 +134,15 @@ test("builds and loads the host runtime from standalone plugin source", async (t
     ],
     { env },
   );
-  if (windows) {
-    runNode(
-      [
-        "--experimental-strip-types",
-        "--test",
-        "--test-name-pattern=^Deep worker runtime settings at the child-process boundary$",
-        "mcp-app/tests/test_deep_scan_executor.ts",
-      ],
-      { env },
-    );
-  }
+  runNode(
+    [
+      "--experimental-strip-types",
+      "--test",
+      "--test-name-pattern=^native merged settings reach every worker: both-finite$",
+      "mcp-app/tests/test_native_scan.mjs",
+    ],
+    { env },
+  );
 });
 
 test("rejects an unsupported native host before replacing existing output", async (t) => {

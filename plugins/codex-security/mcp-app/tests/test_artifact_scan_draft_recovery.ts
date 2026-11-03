@@ -245,7 +245,10 @@ for (const layout of ["standard", "diff"] as const) {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const result = await f.write(resolved);
         assert.equal(result.reviewState.completeness, undefined);
-        assert.deepEqual(result.reviewState.surfaces, resolved.reviewState.surfaces);
+        assert.deepEqual(
+          result.reviewState.surfaces,
+          resolved.reviewState.surfaces,
+        );
         assert.deepEqual(result.reviewState.deferred, []);
       }
     });
@@ -862,7 +865,9 @@ for (const layout of ["standard", "diff"] as const) {
       assert.deepEqual(retried.reviewState.deferred, []);
       assert.deepEqual(
         new Set(
-          retried.reviewState.resolvedDeferred.map(({ id }: { id: string }) => id),
+          retried.reviewState.resolvedDeferred.map(
+            ({ id }: { id: string }) => id,
+          ),
         ),
         new Set(named.map(({ id }: { id: string }) => id)),
       );

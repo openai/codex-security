@@ -10,10 +10,11 @@ import pytest
 @pytest.mark.parametrize(
     ("shared_version", "relocations"),
     [
-        (41, ((42, 43), (43, 54), (44, 55))),
-        (47, ((48, 54), (49, 55))),
-        (51, ((52, 54), (53, 55))),
-        (52, ((53, 54), (54, 55))),
+        (41, ((42, 43), (43, 61), (44, 62))),
+        (47, ((48, 61), (49, 62))),
+        (51, ((52, 61), (53, 62))),
+        (52, ((53, 61), (54, 62))),
+        (53, ((54, 61), (55, 62), (56, 63))),
     ],
 )
 def test_composition_preview_history_preserves_rows_and_migration_timestamps(

@@ -1028,7 +1028,12 @@ def windows_file_backend() -> mock.Mock:
         with path.open("wb" if replace_existing else "xb") as handle:
             handle.write(payload)
 
-    def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
+    def unlink_if_exists(
+        scan_dir: Path,
+        relative_path: str,
+        *,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)
 
     backend.open_read_fd.side_effect = open_read_fd
