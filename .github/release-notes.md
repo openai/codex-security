@@ -114,6 +114,7 @@
 - save generated patches for completed scans ([#2033](https://github.com/openai/codex-security/pull/2033))
 - prepare local deduplication in Node ([#1840](https://github.com/openai/codex-security/pull/1840))
 - bump ruff from 0.17.2 to 0.17.3 in /plugins/codex-security ([#2267](https://github.com/openai/codex-security/pull/2267))
+- preserve caller tool settings across scan turns ([#2012](https://github.com/openai/codex-security/pull/2012))
 
 <!-- release-section: highlights:end -->
 
