@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state
 
@@ -63,8 +62,8 @@ def test_stale_coordinator_cannot_replace_newer_canonical_publication(
     workbench_api, workbench_db, publication_scan, stale, complete
 ):
     scan = publication_scan()
-    old_result = add_worker(workbench_db, scan)
-    new_result = add_worker(workbench_db, scan)
+    old_result = scan.add_worker()
+    new_result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 3 WHERE scan_id = ?",
@@ -120,7 +119,7 @@ def test_current_publication_replays_without_changing_checkpoint_or_worker_state
     instant = workbench_api["now"]()
     monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = ?, status = 'running' "
@@ -182,7 +181,7 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
     with monkeypatch.context() as patch:
         patch.setitem(finalizer_globals, "write_scan_local_bytes", fail_report)
         with pytest.raises(SystemExit, match="Synthetic report write interruption"):
-            complete(workbench_api, workbench_db, scan)
+            scan.complete()
 
     run = workbench_db.execute(
         "SELECT status, coordinator_generation FROM deep_scan_runs WHERE scan_id = ?",
@@ -212,7 +211,7 @@ def test_legacy_terminal_aggregate_survives_a_late_partial_draft_after_write_fai
         for path in scan.scan_dir.rglob("*.json")
         if "drafts" not in path.parts
     } == saved
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [finding["title"] for finding in findings] == [scan.findings[0]["title"]]
     assert read_review_state(workbench_db, scan.scan_dir)["deferred"] == scan.coverage["deferred"]
@@ -227,7 +226,7 @@ def test_failed_publication_does_not_acknowledge_staged_input(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
@@ -278,6 +277,7 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     backend = finalizer._windows_scan_local_files()
     paths = {}
     streams = {}
+    movable_directories = {}
     pending_deletions = set()
     next_directory_handle = -1
 
@@ -297,16 +297,25 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
                 stream.close()
                 raise
         paths[descriptor] = path
+        if path.is_dir() and kwargs["share"] & backend._FILE_SHARE_DELETE:
+            movable_directories[descriptor] = path.stat()
         return backend._OwnedHandle(descriptor)
 
-    def rename_handle(handle, destination):
-        os.replace(paths[handle], destination)
+    def rename_handle(handle, destination, replace_existing):
+        if replace_existing:
+            os.replace(paths[handle], destination)
+        else:
+            os.link(paths[handle], destination)
+            paths[handle].unlink()
         paths[handle] = destination
 
     def close_handle(handle):
-        if handle >= 0:
-            streams[handle].close()
+        if handle in streams:
+            streams.pop(handle).close()
+        elif handle >= 0:
+            os.close(handle)
         if handle in pending_deletions:
+            pending_deletions.remove(handle)
             paths[handle].unlink()
 
     def attributes(handle):
@@ -321,12 +330,39 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
     monkeypatch.setattr(backend, "_require_windows", lambda: None)
     monkeypatch.setattr(backend, "_validate_existing_output", lambda path: None)
     monkeypatch.setattr(backend, "_create_file", create_file)
+
+    def reopen_file(handle, *_):
+        fd = os.open(paths[handle], os.O_RDONLY) if handle < 0 else os.dup(handle)
+        paths[fd] = paths[handle]
+        return fd
+
+    monkeypatch.setattr(backend, "_ReOpenFile", reopen_file, raising=False)
+    monkeypatch.setattr(backend, "file_change_time", lambda fd: os.fstat(fd).st_ctime_ns)
+    monkeypatch.setattr(
+        backend,
+        "_msvcrt",
+        SimpleNamespace(
+            open_osfhandle=lambda handle, flags: (
+                os.open(paths[handle], flags) if handle < 0 else handle
+            )
+        ),
+    )
+    monkeypatch.setattr(os, "O_BINARY", getattr(os, "O_BINARY", 0), raising=False)
     monkeypatch.setattr(backend, "_close_handle", close_handle)
     monkeypatch.setattr(backend, "_attributes", attributes)
     monkeypatch.setattr(
         backend, "_GetFileType", lambda handle: backend._FILE_TYPE_DISK, raising=False
     )
-    monkeypatch.setattr(backend, "_final_path", lambda handle, **kwargs: str(paths[handle]))
+
+    def final_path(handle, **kwargs):
+        path = paths[handle]
+        if handle in movable_directories:
+            for sibling in path.parent.iterdir():
+                if os.path.samestat(movable_directories[handle], sibling.lstat()):
+                    return str(sibling)
+        return str(path)
+
+    monkeypatch.setattr(backend, "_final_path", final_path)
     monkeypatch.setattr(backend, "_write_all", os.write)
     monkeypatch.setattr(backend, "_rename_handle", rename_handle)
     monkeypatch.setattr(backend, "_mark_handle_for_deletion", pending_deletions.add)
@@ -352,7 +388,7 @@ def test_receipt_io_failure_preserves_successful_publication(
     if backend_kind == "posix" and os.name == "nt":
         pytest.skip("POSIX descriptor-relative directory errors")
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
@@ -501,7 +537,7 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     failure,
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
@@ -628,7 +664,7 @@ def test_receipt_contract_errors_still_reject_publication(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
@@ -672,7 +708,7 @@ def test_accepted_publication_replay_retains_original_warning_and_bytes(
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
