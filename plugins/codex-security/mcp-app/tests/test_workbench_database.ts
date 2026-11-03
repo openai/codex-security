@@ -169,7 +169,7 @@ test("every released schema upgrades to the same current schema and remains idem
 });
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [57, 58], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [57, 58, 59], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
@@ -915,11 +915,16 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58])
+  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  assert.equal(
+    database.prepare("SELECT service_tier FROM deep_scan_runs").get()
+      ?.service_tier,
+    null,
+  );
   assert.equal(
     database
       .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")

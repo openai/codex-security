@@ -328,6 +328,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
     return {
         "scanId": run["scan_id"],
         "sdkOwnsCompletion": scan["recipe_json"] is not None,
+        "serviceTier": run["service_tier"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),
@@ -455,6 +456,7 @@ def ensure_deep_scan_run(
     workflow_version: str,
     timestamp: str,
     *,
+    service_tier: str | None,
     pending_target_project_path: str | None = None,
 ) -> sqlite3.Row:
     existing = connection.execute(
@@ -472,8 +474,8 @@ def ensure_deep_scan_run(
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
             max_discovery_runs, max_time_hours, discovery_user_context_json,
-            created_at, updated_at, pending_target_project_path
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, updated_at, service_tier, pending_target_project_path
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -487,6 +489,7 @@ def ensure_deep_scan_run(
             json.dumps(scan["user_context"]),
             timestamp,
             timestamp,
+            service_tier,
             pending_target_project_path,
         ),
     )
@@ -661,7 +664,14 @@ def begin_deep_scan_for_scan(
             "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ? AND deep_scan_config_json IS NULL",
             (json.dumps(configuration), workspace["id"]),
         )
-        ensure_deep_scan_run(connection, scan, config, workflow_version, dependencies().now())
+        ensure_deep_scan_run(
+            connection,
+            scan,
+            config,
+            workflow_version,
+            dependencies().now(),
+            service_tier=args.service_tier,
+        )
     return deep_scan_result(connection, scan_id, start_disposition="created")
 
 
@@ -810,6 +820,7 @@ def begin_deep_scan_for_target(
             config,
             workflow_version,
             timestamp,
+            service_tier=args.service_tier,
             pending_target_project_path=project_path,
         )
     return deep_scan_result(connection, scan_id, start_disposition="created")

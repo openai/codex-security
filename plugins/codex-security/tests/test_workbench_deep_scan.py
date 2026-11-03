@@ -64,6 +64,7 @@ def begin_target_scan(
     *,
     thread_id: str = "thread-deep-scan",
     user_context: str | None = None,
+    service_tier: str | None = None,
 ) -> dict[str, object]:
     return begin_deep_scan(
         state_dir,
@@ -77,6 +78,7 @@ def begin_target_scan(
         "--available-parallelism",
         "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
+        *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
         input_text=user_context,
     )
@@ -95,6 +97,7 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN service_tier")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN terminal_reviewed_surface_count")
         connection.execute("ALTER TABLE scans DROP COLUMN retained_checkpoint_heads_json")
         connection.execute("ALTER TABLE workspaces DROP COLUMN deep_scan_config_json")
@@ -1198,9 +1201,10 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
     (target / "source.py").write_text("print('fixture')\n")
     scan_root = tmp_path / "scans"
 
-    first = begin_target_scan(state_dir, codex_home, target, scan_root)
+    first = begin_target_scan(state_dir, codex_home, target, scan_root, service_tier="default")
     assert first["startDisposition"] == "created"
     deep_scan = first["deepScan"]
+    assert deep_scan["serviceTier"] == "default"
     assert deep_scan["status"] == "running"
     assert deep_scan["phase"] == "setup"
     assert deep_scan["config"] == {
@@ -1220,10 +1224,11 @@ def test_target_begin_is_atomic_idempotent_and_snapshots_config(tmp_path: Path) 
     assert deep_scan["canonicalArtifacts"] is None
 
     config_path.write_text("[deep_scan]\nworkers = 1\nmax_time_hours = 8\n")
-    second = begin_target_scan(state_dir, codex_home, target, scan_root)
+    second = begin_target_scan(state_dir, codex_home, target, scan_root, service_tier="priority")
     assert second["startDisposition"] == "joined"
     assert second["deepScan"]["scanId"] == deep_scan["scanId"]
     assert second["deepScan"]["config"] == deep_scan["config"]
+    assert second["deepScan"]["serviceTier"] == "default"
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
@@ -1298,14 +1303,30 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
     begun = begin_deep_scan(
-        state_dir, "sdk-thread", "--scan-id", scan_id, environment=deep_environment(codex_home)
+        state_dir,
+        "sdk-thread",
+        "--scan-id",
+        scan_id,
+        "--service-tier",
+        "priority",
+        environment=deep_environment(codex_home),
     )
 
+    assert begun["deepScan"]["serviceTier"] == "priority"
     assert begun["deepScan"]["scanId"] == scan_id
     assert begun["deepScan"]["scanDir"] == str(scan_dir)
     assert begun["deepScan"]["userContext"] == user_context
     restore_v53_schema(state_dir)
-    get_deep_scan(state_dir, scan_id, "sdk-thread", environment=deep_environment(codex_home))
+    # An existing run from a host without tier metadata keeps using its config.
+    resumed = resume_deep_scan(
+        state_dir,
+        scan_id,
+        "sdk-thread",
+        "--service-tier",
+        "default",
+        environment=deep_environment(codex_home),
+    )
+    assert resumed["deepScan"]["serviceTier"] is None
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
         assert connection.execute("SELECT thread_id FROM workspaces").fetchone() == ("sdk-thread",)
