@@ -100,6 +100,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ParentProgressSource,
   type ScanSessionEvent,
   type ScanUsageObservation,
   type ScanWorkerEvent,
@@ -1979,7 +1980,9 @@ export class CodexSecurity {
     let scanProgressTracker: ScanProgressTracker | null = null;
     let savedProviderProfile: ProviderProfile | undefined;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
-    let customValidationComplete = false;
+    const customValidation = {
+      status: "pending" as "pending" | "running" | "complete",
+    };
     let completionCost: ScanCost | null = null;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
@@ -2317,31 +2320,63 @@ export class CodexSecurity {
       let reviewedFileCount = 0;
       let latestPhase: ScanProgress["phase"] = "preflight";
       let reviewItems: ScanProgress["reviewItems"];
-      const reportProgress = (progress: ScanProgress): void => {
+      let lastProgress: string | null = null;
+      const progressKey = (progress: ScanProgress): string =>
+        `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}:${progress.reviewItems?.completed}:${progress.reviewItems?.total}`;
+      const reportProgress = (
+        progress: ScanProgress,
+        source?: ParentProgressSource,
+      ): void => {
+        const liveEvent =
+          source?.reconciled === true ? undefined : source?.event;
         if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
+          liveEvent !== undefined &&
+          !tracker.recordParentProgress(progress, liveEvent)
+        )
+          return;
+        const inventory =
+          source?.inventory === true ||
+          (progress.phase === "discovery" &&
+            reviewedFileCount === 0 &&
+            progress.filesCompleted === 0);
+        const filesTotal = inventory ? progress.filesTotal : scopeFileCount;
+        if (
+          filesTotal === null ||
+          progress.filesTotal > filesTotal ||
+          (source?.inventory !== true &&
+            progress.filesCompleted < reviewedFileCount)
         ) {
+          if (liveEvent !== undefined) tracker.deferParentInventory(liveEvent);
           return;
         }
+        if (inventory) {
+          scopeFileCount = filesTotal;
+          tracker.setExpectedFilesTotal(filesTotal);
+        }
         reviewedFileCount = progress.filesCompleted;
+        if (liveEvent !== undefined)
+          tracker.acceptParentProgress(progress, liveEvent);
         if (
+          source !== undefined ||
           mode === "deep" ||
           scanPhaseSchema.options.indexOf(progress.phase) >
             scanPhaseSchema.options.indexOf(latestPhase)
         ) {
           latestPhase = progress.phase;
         }
-        notifyObserver(
-          options,
-          "onProgress",
-        )({
+        const update = {
           ...progress,
-          phase: latestPhase,
-          filesTotal: scopeFileCount,
+          phase:
+            customValidation.status === "running"
+              ? ("validation" as const)
+              : latestPhase,
+          filesTotal,
           ...(reviewItems === undefined ? {} : { reviewItems }),
-        });
+        };
+        const key = progressKey(update);
+        if (lastProgress === key) return;
+        lastProgress = key;
+        notifyObserver(options, "onProgress")(update);
       };
       const reportWorkerStatus = (status: ScanWorkerStatus): void => {
         if (mode !== "deep") {
@@ -2408,12 +2443,20 @@ export class CodexSecurity {
         onProgress:
           options.onProgress === undefined
             ? undefined
-            : (progress) =>
-                reportProgress({
-                  ...progress,
-                  // Worker counts belong to the parent scan's current phase.
-                  phase: mode === "deep" ? progress.phase : latestPhase,
-                }),
+            : (progress, source) =>
+                reportProgress(
+                  {
+                    ...progress,
+                    // Only worker counts use the last accepted parent phase.
+                    phase:
+                      mode === "deep" ||
+                      (source !== undefined &&
+                        (source.reconciled !== true || !source.worker))
+                        ? progress.phase
+                        : latestPhase,
+                  },
+                  source,
+                ),
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
@@ -3038,6 +3081,7 @@ export class CodexSecurity {
           ),
         )}`;
       }
+      tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             codexOptions,
@@ -3125,6 +3169,7 @@ export class CodexSecurity {
                 // This turn follows the primary scan's reporting phase.
                 scanProgressTracker?.stop();
                 latestPhase = "validation";
+                customValidation.status = "running";
                 if (scopeFileCount !== null)
                   reportProgress({
                     phase: "validation",
@@ -3164,7 +3209,7 @@ export class CodexSecurity {
                 return turn.finalResponse;
               },
             });
-            customValidationComplete = true;
+            customValidation.status = "complete";
           }
           budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
@@ -3221,18 +3266,11 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: (progress) => {
-          if (
-            progress.phase === "discovery" &&
-            progress.filesCompleted === 0 &&
-            reviewedFileCount === 0 &&
-            progress.filesTotal !== scopeFileCount
-          ) {
-            scopeFileCount = progress.filesTotal;
-            tracker.setExpectedFilesTotal(scopeFileCount);
-          }
-          reportProgress(progress);
-        },
+        onProgressItem:
+          options.onProgress === undefined
+            ? undefined
+            : (event) => tracker.recordParentItem(event),
+        onProgress: reportProgress,
         onWorkerStatus: reportWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
@@ -3599,7 +3637,7 @@ export class CodexSecurity {
       if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
-          !customValidationComplete
+          customValidation.status !== "complete"
         ) {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
@@ -5068,7 +5106,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -5112,8 +5151,15 @@ export async function runScanEvents(
         )) {
           notifyObserver(options, "onActivity")(activity);
         }
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
+          notifyObserver(
+            {
+              onProgress: (update) => options.onProgress?.(update, { event }),
+              onObserverError: options.onObserverError,
+            },
+            "onProgress",
+          )(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {

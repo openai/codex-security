@@ -100,6 +100,7 @@
 - skip the old position of moved DOCX text ([#2256](https://github.com/openai/codex-security/pull/2256))
 - honor signed-in tracker connections for finding reads ([#2212](https://github.com/openai/codex-security/pull/2212))
 - inherit the launching turn's Deep Scan speed ([#2231](https://github.com/openai/codex-security/pull/2231))
+- reconcile live and saved parent updates ([#1596](https://github.com/openai/codex-security/pull/1596))
 
 <!-- release-section: highlights:end -->
 
