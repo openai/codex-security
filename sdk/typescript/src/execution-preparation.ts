@@ -236,11 +236,25 @@ export async function lockExecutionConfiguration(
     signal,
   );
   try {
-    await writeCodexConfig(
-      join(session.runtime.codexHome, "config.toml"),
-      deepMerge({ ...session.runtimeConfig }, config),
+    const configPath = join(session.runtime.codexHome, "config.toml");
+    const previousConfig = await readCodexHomeConfig(
+      { CODEX_HOME: session.runtime.codexHome },
+      signal,
     );
-    return release;
+    // The launch selects its own provider through SDK overrides and a private
+    // native profile. Keep that selection out of the shared credential home.
+    const launchConfig = resolveCodexProfile(config);
+    delete launchConfig["model_provider"];
+    delete launchConfig["model_providers"];
+    await writeCodexConfig(
+      configPath,
+      deepMerge({ ...session.runtimeConfig }, launchConfig),
+    );
+    let cleanup: Promise<void> | undefined;
+    return () =>
+      (cleanup ??= writeCodexConfig(configPath, previousConfig).finally(
+        release,
+      ));
   } catch (error) {
     await release();
     throw error;
@@ -320,7 +334,12 @@ export async function createExecutionCodex(
   let sdkEnvironment = definedEnvironment(
     preserveProviderEnvironment
       ? environment
-      : withoutOpenAiApiKeys(environment),
+      : {
+          ...withoutOpenAiApiKeys(environment),
+          ...(externalProvider === null
+            ? {}
+            : { [externalProvider.env_key]: apiKey! }),
+        },
   );
   if (
     checkPermissions ||

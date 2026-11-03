@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { checkReplayWorkerSettings } from "./support/replay-worker-boundary.js";
 import { once } from "node:events";
 import {
   cp,
@@ -11,7 +11,6 @@ import {
 } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { stringify } from "smol-toml";
 import { main } from "../src/cli.js";
 import {
@@ -316,6 +315,7 @@ test.each(
       await mkdir(path, { mode: 0o700 });
     const profilePath = join(home, "review.config.toml");
     const fileProfile = (version: string) => ({
+      model_provider: "synthetic",
       model: version === "first" ? "initial-model" : "updated-model",
       model_reasoning_effort: version === "first" ? "low" : "high",
       analytics: { enabled: true },
@@ -338,6 +338,15 @@ test.each(
     await writeFile(profilePath, stringify(fileProfile("first")));
     const explicit: JsonObject = {
       profile: "review",
+      approval_policy: "never",
+      model_providers: {
+        synthetic: {
+          name: "Synthetic",
+          wire_api: "responses",
+          env_key: "SYNTHETIC_GATEWAY_KEY",
+          http_headers: { "X-Fixture": "synthetic-private-provider-header" },
+        },
+      },
       analytics: { enabled: false },
       shell_environment_policy: {
         inherit: "none",
@@ -378,12 +387,9 @@ test.each(
             recipe = JSON.parse(input!).recipe;
           return mockWorkbench(args, input);
         },
-        createCodex: async () => ({
-          startThread: () => ({
-            id: null,
-            runStreamed: rejecting("synthetic stop after registration"),
-          }),
-        }),
+        createCodex: () => {
+          throw new Error("synthetic stop after registration");
+        },
       },
     );
     try {
@@ -414,6 +420,8 @@ test.each(
       );
       expect(restored).toMatchObject({
         model: "updated-model",
+        model_provider: "synthetic",
+        model_providers: explicit["model_providers"],
         model_reasoning_effort: "high",
         analytics: { enabled: false },
         shell_environment_policy: {
@@ -445,18 +453,7 @@ test.each(
               : undefined,
       );
       expect(restored).not.toHaveProperty("model_instructions_file");
-      const workerResult = execFileSync(
-        Bun.which("node")!,
-        [
-          "--experimental-strip-types",
-          fileURLToPath(
-            new URL("./support/replay-worker-boundary.ts", import.meta.url),
-          ),
-          root,
-        ],
-        { input: JSON.stringify(restored), encoding: "utf8" },
-      );
-      expect(JSON.parse(workerResult)).toEqual({ launches: 4 });
+      await checkReplayWorkerSettings(root, restored);
       const profile = recipe!["providerProfile"] as JsonObject;
       const privatePath = join(
         codexSecurityCredentialHome(environment),

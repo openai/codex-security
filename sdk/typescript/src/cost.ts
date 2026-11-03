@@ -2317,28 +2317,49 @@ export class ScanCostTracker {
       (session.parentThreadId !== null && included.has(session.parentThreadId));
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage(observeUsage);
-        this.#sessions.set(path, session);
+    const buffers = [buffer];
+    const pending: Promise<void | { session: SessionUsage; error: unknown }>[] =
+      [];
+    const drain = async () => {
+      const results = await Promise.all(pending);
+      pending.length = 0;
+      for (const result of results) {
+        if (result === undefined) continue;
+        if (result.session.threadId === null) throw result.error;
+        unreadable.push(result);
       }
-      // Read unrelated logs only through their ownership metadata. A later
-      // association resumes at the byte after that record.
-      if (session.deferred) continue;
-      try {
-        await readSessionUsage(path, session, repository, progressThread, {
-          buffer,
-          includeNewSession,
-        });
-        if (session.threadId !== null && includeNewSession(session))
-          included.add(session.threadId);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+    };
+    try {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, "sessions"),
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage(observeUsage);
+          this.#sessions.set(path, session);
+        }
+        // Read unrelated logs only through their ownership metadata. A later
+        // association resumes at the byte after that record.
+        if (session.deferred) continue;
+        const tracked = session;
+        pending.push(
+          readSessionUsage(path, tracked, repository, progressThread, {
+            buffer: (buffers[pending.length] ??=
+              Buffer.alloc(SESSION_READ_SIZE)),
+            includeNewSession,
+          }).then(
+            () => {
+              if (tracked.threadId !== null && includeNewSession(tracked))
+                included.add(tracked.threadId);
+            },
+            (error: unknown) => ({ session: tracked, error }),
+          ),
+        );
+        if (pending.length === 8) await drain();
       }
+    } finally {
+      // Directory traversal can fail while reads still own file handles.
+      await drain();
     }
 
     if (this.#options.scanDirectory !== undefined) {

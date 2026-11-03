@@ -1,11 +1,8 @@
-import { sha256 } from "./support/finding-identity.js";
+import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { spawnSync } from "node:child_process";
-
-import { createHash } from "node:crypto";
 
 import {
   chmod,
-  cp,
   mkdir,
   readFile,
   rm,
@@ -35,7 +32,7 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const directories: string[] = [];
@@ -55,9 +52,7 @@ afterEach(async () => {
 async function fixture(scanId?: string, savedRoot?: string) {
   const root = savedRoot ?? (await temporaryDirectory());
   const scanDirectory = join(root, "scan");
-  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDirectory, {
-    recursive: true,
-  });
+  await copyCompletedScanFixture(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   const manifest = JSON.parse(
     await readFile(join(scanDirectory, "scan-manifest.json"), "utf8"),
@@ -67,26 +62,13 @@ async function fixture(scanId?: string, savedRoot?: string) {
   ) as FindingsDocument;
   const other = structuredClone(document.findings[0]!);
   other.identity.instance = "second-instance";
-  const sha256 = (input: string | Buffer) =>
-    createHash("sha256").update(input).digest("hex");
-  const fingerprint = `codex-security/v1:sha256:${sha256(
-    [
-      "codex-security/v1",
-      manifest.scan.target.targetId,
-      other.ruleId,
-      other.identity.anchor,
-      other.identity.instance,
-    ].join("\0"),
-  )}`;
-  other.fingerprints.primary = fingerprint;
-  other.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
-  other.occurrenceId = `occ_${sha256([manifest.scan.id, fingerprint].join("\0")).slice(0, 24)}`;
+  setFindingIdentity(manifest.scan, other);
   document.findings.push(other);
   if (scanId) {
     manifest.scan.id = scanId;
     document.scanId = scanId;
     for (const finding of document.findings)
-      finding.occurrenceId = `occ_${sha256([scanId, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
+      setFindingIdentity(manifest.scan, finding);
     const coveragePath = join(scanDirectory, "coverage.json");
     const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
     coverage.scanId = scanId;
@@ -589,6 +571,12 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
     environment,
     "DELETE FROM schema_migrations WHERE version IN (43, 52, 60) OR name = 'reuse scan severity assessments'",
   );
+  const legacyClassification = {
+    ...classification,
+    classificationRuns: undefined,
+    rubricRevision: undefined,
+    rubricSha256: workflowDigest([defaultSeverityRubric]),
+  };
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -597,12 +585,7 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
       undefined,
       environment,
     ),
-  ).toEqual({
-    ...classification,
-    classificationRuns: undefined,
-    rubricRevision: undefined,
-    rubricSha256: workflowDigest([defaultSeverityRubric]),
-  });
+  ).toEqual(legacyClassification);
   expect(
     query(
       environment,
@@ -621,15 +604,19 @@ test("migration preserves exact-owned legacy assessments without occurrence inde
       undefined,
       environment,
     ),
-  ).toEqual({ ...classification, classificationRuns: undefined });
+  ).toEqual(legacyClassification);
   expect(
-    (
-      await classifyScanDirectorySeverity(first.scanDirectory, {
-        environment,
-        codex: recordingClassifier().codex,
-      })
-    ).assessments,
-  ).toEqual(classification.assessments);
+    await classifyScanDirectorySeverity(first.scanDirectory, {
+      environment,
+      codex: recordingClassifier().codex,
+    }),
+  ).toMatchObject({
+    scanId,
+    assessments: classification.assessments,
+    classificationRuns: classification.classificationRuns,
+    rubricRevision: classification.rubricRevision,
+    rubricSha256: classification.rubricSha256,
+  });
   expect(
     query(
       environment,
@@ -674,9 +661,9 @@ test("changed rubric, context, or evidence invalidates matching checkpoints", as
     await readFile(manifestPath, "utf8"),
   ) as ScanManifest;
   for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = createHash("sha256")
-      .update(await readFile(join(scanDirectory, artifact.path)))
-      .digest("hex");
+    artifact.sha256 = sha256(
+      await readFile(join(scanDirectory, artifact.path)),
+    );
   await writeFile(manifestPath, JSON.stringify(manifest));
   await expect(
     prepareScanPublication(scanDirectory, { ...destination, environment }),
@@ -1049,28 +1036,7 @@ import { codexWithRun, jsonCodex } from "./support/codex.js";
 
 test("classifying another scan preserves both recurring-finding assessments", async () => {
   const first = await fixture();
-  const second = await fixture();
-  const manifestPath = join(second.scanDirectory, "scan-manifest.json");
-  const manifest = JSON.parse(
-    await readFile(manifestPath, "utf8"),
-  ) as ScanManifest;
-  manifest.scan.id = "scan_example_002";
-  for (const file of ["findings.json", "coverage.json"]) {
-    const path = join(second.scanDirectory, file);
-    const document = JSON.parse(await readFile(path, "utf8"));
-    document.scanId = manifest.scan.id;
-    if (file === "findings.json") {
-      for (const finding of document.findings as Finding[]) {
-        finding.occurrenceId = `occ_${sha256([manifest.scan.id, finding.fingerprints.primary].join("\0")).slice(0, 24)}`;
-      }
-    }
-    await writeFile(path, JSON.stringify(document));
-  }
-  for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = sha256(
-      await readFile(join(second.scanDirectory, artifact.path)),
-    );
-  await writeFile(manifestPath, JSON.stringify(manifest));
+  const second = await fixture("scan_example_002");
   const { codex, calls } = recordingClassifier();
   const options = {
     environment: first.environment,
@@ -1091,11 +1057,11 @@ test("classifying another scan preserves both recurring-finding assessments", as
   expect(calls).toEqual(
     first.findings.flatMap((finding) => Array(3).fill(finding.findingId)),
   );
-  expect(secondResult.scanId).toBe(manifest.scan.id);
+  expect(secondResult.scanId).toBe(second.scanId);
   expect(secondResult.assessments).toEqual(
     firstResult.assessments.map((assessment, index) => ({
       ...assessment,
-      occurrenceId: `occ_${sha256([manifest.scan.id, first.findings[index]!.fingerprints.primary].join("\0")).slice(0, 24)}`,
+      occurrenceId: `occ_${sha256([second.scanId, first.findings[index]!.fingerprints.primary].join("\0")).slice(0, 24)}`,
     })),
   );
   calls.length = 0;

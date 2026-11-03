@@ -8269,7 +8269,8 @@ if __name__ == "__main__":
       try {
         await expect(
           client.run(repository, {
-            mode: "deep",
+            mode: "standard",
+            deepScanPass: true,
             outputDir: scanDir,
             resumeScanId: "scan_example_001",
             onProgress: (update) => updates.push(update),
@@ -13574,7 +13575,8 @@ if __name__ == "__main__":
     try {
       await expect(
         client.run(repository, {
-          mode: "deep",
+          mode: "standard",
+          deepScanPass: true,
           outputDir: scanDir,
           resumeScanId: "scan_example_001",
           onProgress: (progress) => updates.push(progress),
@@ -14308,7 +14310,6 @@ if __name__ == "__main__":
     expect(updates).toEqual([
       { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
       { phase: "preflight", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "preflight", filesCompleted: 1_249, filesTotal: 1_258 },
       { phase: "preflight", filesCompleted: 1_249, filesTotal: 1_258 },
     ]);
     expect(sessionEvents).toHaveLength(10);
@@ -16347,6 +16348,22 @@ if __name__ == "__main__":
   test.each([
     ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
+    [
+      "managed custom",
+      "synthetic.gateway",
+      "OPENAI_API_KEY",
+      "gpt-5.6-sol",
+      {
+        name: "Synthetic",
+        wire_api: "responses",
+        requires_openai_auth: false,
+        http_headers: { "X-Synthetic-Key": "synthetic-provider-secret" },
+        auth: {
+          command: "synthetic-auth",
+          args: ["synthetic-command-secret"] as string[],
+        },
+      },
+    ],
   ] as const)(
     "retains %s scan sessions in the managed Codex home",
     async (_name, provider, apiKey, model, providerConfig) => {
@@ -16389,6 +16406,30 @@ if __name__ == "__main__":
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          probeCodexSandbox: async (command) => {
+            if (provider === undefined) {
+              expect(command.args).toBeUndefined();
+            } else {
+              expect(command.args?.[0]).toBe("-c");
+              expect(parseToml(command.args![1]!)).toEqual({
+                model_providers: {
+                  [provider]: {
+                    name: providerConfig!.name,
+                    wire_api: providerConfig!.wire_api,
+                    ...(provider === "synthetic.gateway"
+                      ? { requires_openai_auth: false }
+                      : {}),
+                  },
+                },
+              });
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-provider-secret",
+              );
+              expect(command.args!.join(" ")).not.toContain(
+                "synthetic-command-secret",
+              );
+            }
+          },
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
@@ -16416,6 +16457,9 @@ if __name__ == "__main__":
         await expect(client.run(repository)).rejects.toThrow(
           "persistent session recorded",
         );
+        await expect(client.run(repository)).rejects.toThrow(
+          "persistent session recorded",
+        );
       } finally {
         await client.close();
       }
@@ -16431,13 +16475,9 @@ if __name__ == "__main__":
       );
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
-      expect(persistentConfig["model"]).toBe(model);
-      if (provider !== undefined) {
-        expect(persistentConfig).toMatchObject({
-          model_provider: provider,
-          model_providers: { [provider]: providerConfig },
-        });
-      }
+      expect(persistentConfig["model"]).toBeUndefined();
+      expect(persistentConfig["model_provider"]).toBeUndefined();
+      expect(persistentConfig["model_providers"]).toBeUndefined();
     },
   );
 
@@ -19552,7 +19592,7 @@ test.each([false, true])(
         filesTotal: 1_258,
         reviewItems: { completed: 0, total: 0 },
       },
-      ...[3, 1_249, 1_249].map<ScanProgress>((filesCompleted) => ({
+      ...[3, 1_249].map<ScanProgress>((filesCompleted) => ({
         phase: parentDispatch ? "validation" : "discovery",
         filesCompleted,
         filesTotal: 1_258,

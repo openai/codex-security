@@ -231,15 +231,15 @@ await new Promise(() => {});
   const replayProfile = recipe["replayProfile"] as JsonObject;
   const savedProfilePath = join(
     codexHome,
-    `${replayProfile["name"]}.config.toml`,
+    `${replayProfile["name"]}.config.json`,
   );
   const savedProfileBytes = await readFile(savedProfilePath);
   const replayProfiles = async () =>
     (await readdir(codexHome))
-      .filter((name) => /^codex_security_.*\.config\.toml$/.test(name))
+      .filter((name) => /^codex_security_.*\.config\.(?:json|toml)$/.test(name))
       .sort();
   const retainedProfiles = await replayProfiles();
-  expect(retainedProfiles).toEqual([`${replayProfile["name"]}.config.toml`]);
+  expect(retainedProfiles).toEqual([`${replayProfile["name"]}.config.json`]);
   expect(recipe["config"]).not.toHaveProperty("plugins");
   expect(recipe["config"]).not.toHaveProperty("marketplaces");
   expect(recipe["config"]).not.toHaveProperty("features.plugins");

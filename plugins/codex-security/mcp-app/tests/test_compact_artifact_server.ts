@@ -793,9 +793,26 @@ async function testSemanticScanDraftCompletion(
       findings: [finding],
       reviewState: { ...reviewState },
     };
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", checkpoint),
+    const threatModel = {
+      summary: "Legacy structured model.",
+      format: "markdown",
+      content: "# Saved model\r\n\r\n    Preserve  spacing.\r\n",
+      origin: false,
+      scope: { includePaths: ["src/[api]"] },
+    };
+    const firstDraft = requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...checkpoint,
+        threatModel,
+      }),
     );
+    assert.equal(firstDraft.warnings, undefined);
+    const documentPath = path.join(scanDirectory, "threatmodel.md");
+    const savedDocument = await readFile(documentPath, "utf8");
+    assert.ok(savedDocument.startsWith(threatModel.content));
+    assert.match(savedDocument, /Model origin: not recorded\n/);
+    assert.match(savedDocument, /Model scope: src\/\\\[api\\\]\n/);
+    assert.match(savedDocument, /provisional/);
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
@@ -825,6 +842,11 @@ async function testSemanticScanDraftCompletion(
     );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
+    );
+    assert.equal(await readFile(documentPath, "utf8"), savedDocument);
+    assert.deepEqual(
+      (await readJson(scanDirectory, "scan-manifest.json")).scan.threatModel,
+      threatModel,
     );
     const validation = await progress();
     assert.equal(validation.phase, "validation");

@@ -165,10 +165,6 @@ describe("CodexSecurity finding validation", () => {
         codex_security_provider: "openai",
       });
       const credentialHome = captured.codex!.env!["CODEX_HOME"]!;
-      const credentialDenies = {
-        [credentialHome]: { ".": "deny" },
-        [join(credentialHome, "deep-scan.toml")]: { ".": "deny" },
-      };
       expect(
         captured.codex?.configOverrides
           ?.filter(
@@ -178,22 +174,11 @@ describe("CodexSecurity finding validation", () => {
       ).toEqual([
         {
           permissions: {
-            codex_security_scan: {
-              filesystem: {
-                ":root": "read",
-                ":workspace_roots": "write",
-                ...credentialDenies,
-              },
-            },
-          },
-        },
-        {
-          permissions: {
             codex_security_validation: {
               filesystem: {
                 ":root": "read",
                 ":workspace_roots": "read",
-                ...credentialDenies,
+                [credentialHome]: { ".": "deny" },
               },
               network: { enabled: false },
             },

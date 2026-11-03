@@ -239,10 +239,8 @@ describe("CodexSecurity orchestration", () => {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
-          expect(saved["model_provider"]).toBe("synthetic.provider");
-          expect(saved["model_providers"]).toEqual({
-            "synthetic.provider": provider,
-          });
+          expect(saved["model_provider"]).toBeUndefined();
+          expect(saved["model_providers"]).toBeUndefined();
           expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
@@ -410,6 +408,12 @@ describe("CodexSecurity orchestration", () => {
       await client.run(repository);
       expect(capturedConfigPath).toBeDefined();
       expect(capturedCodexHome).toBeDefined();
+      const restored = await readFile(
+        join(capturedCodexHome!, "config.toml"),
+        "utf8",
+      );
+      expect(restored).not.toContain("RUNTIME_MCP_SECRET");
+      expect(restored).not.toContain("RUNTIME_SHELL_SECRET");
     } finally {
       await client.close();
     }
@@ -699,6 +703,11 @@ describe("CodexSecurity orchestration", () => {
           { mode: "standard" },
         ]);
       }
+      const restored = parseToml(
+        await readFile(join(credentialHome, "config.toml"), "utf8"),
+      );
+      expect(restored).not.toHaveProperty("model");
+      expect(restored).not.toHaveProperty("features.multi_agent_v2");
       expect(existsSync(credentialHome)).toBe(true);
       expect(
         existsSync(join(credentialHome, ".codex-security-scan.lock")),

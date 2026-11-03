@@ -157,37 +157,24 @@ test(${JSON.stringify(file)}, () => {
 test("rejects an empty shard while allowing a nonempty shard with the same count", async () => {
   const node = Bun.which("node");
   expect(node).not.toBeNull();
-  const fixture = await temporaryDirectory("codex-security-empty-shard-");
-  const root = join(fixture, "sdk", "typescript");
+  const root = await temporaryDirectory("codex-security-empty-shard-");
   try {
-    await mkdir(join(root, "scripts"), { recursive: true });
+    await mkdir(join(root, "scripts"));
     await mkdir(join(root, "tests-ts"));
     await copyRunner(root);
-    const worker = "deep-scan-worker-shutdown.test.ts";
-    await copyFile(
-      new URL(worker, import.meta.url),
-      join(root, "tests-ts", worker),
-    );
-    const mcpApp = join(fixture, "plugins", "codex-security", "mcp-app");
-    const executor = join(mcpApp, "tests", "test_deep_scan_executor.ts");
-    const executed = join(root, "worker-ran");
-    await mkdir(dirname(executor), { recursive: true });
-    await writeFile(join(mcpApp, "package.json"), '{"type":"module"}\n');
+    const executed = join(root, "probe-ran");
     await writeFile(
-      executor,
+      join(root, "tests-ts", "probe.test.ts"),
       `import { writeFileSync } from "node:fs";
-import { test } from "node:test";
-test("Deep worker lifecycle", () => writeFileSync(${JSON.stringify(executed)}, "ran"));\n`,
+import { test } from "bun:test";
+test("selected probe", () => writeFileSync(${JSON.stringify(executed)}, "ran"));
+test("unselected probe", () => { throw new Error("Name filter was ignored"); });\n`,
     );
     await writeFile(
       join(root, "tests-ts", "windows-machine-policy.test.ts"),
       'throw new Error("Machine policy test must run separately");\n',
     );
-    for (const [shard, separateMcp, runsWorker] of [
-      [1, false, true],
-      [2, false, false],
-      [1, true, process.platform !== "linux"],
-    ] as const) {
+    for (const shard of [1, 2]) {
       await rm(executed, { force: true });
       const child = Bun.spawn({
         cmd: [
@@ -196,11 +183,10 @@ test("Deep worker lifecycle", () => writeFileSync(${JSON.stringify(executed)}, "
           join(root, "scripts", "run-ci-tests.mts"),
           `${shard}/2`,
           "-t",
-          "Deep worker lifecycle",
+          "^selected probe$",
         ],
         env: {
           ...process.env,
-          CODEX_SECURITY_TEST_MCP_WORKERS_SEPARATE: String(separateMcp),
           PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
         },
         stdin: "ignore",
@@ -211,15 +197,15 @@ test("Deep worker lifecycle", () => writeFileSync(${JSON.stringify(executed)}, "
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(shard === 1 ? 0 : 1);
-      expect(await Bun.file(executed).exists()).toBe(runsWorker);
+      expect(await Bun.file(executed).exists()).toBe(shard === 1);
       if (shard === 1) {
-        expect(stdout).toContain(`Test shard 1/2: ${worker}`);
+        expect(stdout).toContain("Test shard 1/2: probe.test.ts");
       } else {
         expect(stderr).toContain(`Test shard ${shard}/2 is empty.`);
       }
     }
   } finally {
-    await rm(fixture, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 });
 

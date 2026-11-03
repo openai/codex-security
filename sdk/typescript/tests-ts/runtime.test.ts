@@ -6847,10 +6847,8 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       await chmod(archived!, 0o770);
-      await expect(validateOutputDir(archived!, true)).rejects.toThrow(
-        "must not be accessible to other users",
-      );
-      await chmod(archived!, 0o700);
+      expect(await validateOutputDir(archived!, true)).toBe(archived!);
+      expect((await stat(archived!)).mode & 0o777).toBe(0o770);
     }
 
     expect(await planOutputArchive(output)).toBeNull();

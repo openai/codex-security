@@ -444,6 +444,7 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
       { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
       { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);

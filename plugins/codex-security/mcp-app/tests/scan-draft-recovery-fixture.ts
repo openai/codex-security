@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { TestContext } from "node:test";
@@ -122,7 +122,7 @@ export async function saveScanDraftCheckpoint(
   input: ScanDraftInput,
   _validate = true,
   pending = true,
-) {
+): Promise<string> {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   if (pending && context.mode === "deep" && input.complete !== false) {
     const head = await readJson(context.root, "checkpoint-head.json").catch(
@@ -140,10 +140,13 @@ export async function saveScanDraftCheckpoint(
   }
   const contents = JSON.stringify(snapshot);
   const name = createHash("sha256").update(contents).digest("hex") + ".json";
-  await replaceArtifactText(
-    await artifactDestination(context, ["checkpoints", name], "checkpoint"),
-    contents,
+  const destination = await artifactDestination(
+    context,
+    ["checkpoints", name],
+    "checkpoint",
   );
+  if (pending || !existsSync(destination))
+    await replaceArtifactText(destination, contents);
   if (pending)
     await replaceArtifactText(
       await artifactDestination(
@@ -153,7 +156,7 @@ export async function saveScanDraftCheckpoint(
       ),
       "",
     );
-  return path.join(context.root, "checkpoints", name);
+  return destination;
 }
 
 export const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";

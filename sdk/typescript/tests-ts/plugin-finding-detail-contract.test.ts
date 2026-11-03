@@ -734,7 +734,7 @@ describe("bundled plugin finding detail contracts", () => {
       "findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
       "warnings = []",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
-      "finalizer['_recover_unsealed_findings'](manifest, findings, json.loads((plugin / 'schemas' / 'findings.schema.json').read_text()), examples, warnings)",
+      "finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
       "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'rootCause': findings['findings'][0].get('root_cause'), 'warnings': warnings}))",
     ].join("\n");
     const result = runPython(python!, ["-c", script, PLUGIN_ROOT]);
@@ -770,7 +770,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    second['rootCause'] = {'summary': 'Richer root cause', **detail}",
       "    findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
       "    warnings = []",
-      "    finalizer['_recover_unsealed_findings'](manifest, findings, json.loads((plugin / 'schemas' / 'findings.schema.json').read_text()), examples, warnings)",
+      "    finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
       "    results[name] = {'summary': findings['findings'][0]['summary'], 'warnings': warnings}",
       "print(json.dumps(results))",
     ].join("\n");
@@ -971,13 +971,14 @@ function projectFindingDetails(details: JsonObject): string {
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const script = [
-    "import json, pathlib, runpy, sys",
+    "import json, pathlib, sys",
     "plugin = pathlib.Path(sys.argv[1])",
     "examples = plugin / 'examples' / 'completed-scan'",
-    "manifest, findings, coverage = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
+    "manifest, findings = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json')]",
     "findings['findings'][0].update(json.loads(sys.argv[2]))",
-    "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
-    "print(projection['build_report_markdown'](manifest, findings, coverage))",
+    "sys.path.insert(0, str(plugin / 'scripts'))",
+    "from report_projection import build_report_markdown",
+    "print(build_report_markdown(manifest, findings, {}))",
   ].join("\n");
   const result = runPython(python!, [
     "-c",

@@ -88,9 +88,11 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
+    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
@@ -509,8 +511,9 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
       );
     }
     const inventoryPath = path.join(fixtureRoot, "in_scope_files.txt");
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
-      path.join(pluginRoot, "scripts", "generate_in_scope_files.py"),
+    execFileSync(process.execPath, [
+      path.join(pluginRoot, "mcp", "helpers.mjs"),
+      "generate-in-scope-files",
       "--repo",
       canonicalTarget,
       `--scope=${scope}`,
@@ -1893,7 +1896,7 @@ try {
   ]);
   assert.deepEqual(submit._meta.ui.visibility, ["app"]);
   assert.deepEqual(inspectTarget._meta.ui.visibility, ["app"]);
-  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app"]);
+  assert.deepEqual(inspectSetup._meta.ui.visibility, ["app", "model"]);
   assert.deepEqual(start._meta.ui.visibility, ["app"]);
   assert.deepEqual(startDeepScan._meta.ui.visibility, ["model"]);
   assert.ok(startDeepScan.inputSchema.properties.scanId);

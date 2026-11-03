@@ -318,7 +318,7 @@ for (const variant of [
             scanId,
             handoffClaimToken,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "complete",
               surfaces: [
                 { label: "Synthetic fixture", disposition: "rejected" },

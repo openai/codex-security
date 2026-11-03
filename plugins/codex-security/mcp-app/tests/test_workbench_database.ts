@@ -222,6 +222,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         migrations
           .filter(
             (item) =>
+              item.version <= 60 &&
               !missingVersions.includes(item.version) &&
               !(legacyCheckpoint && [54, 55, 56].includes(item.version)) &&
               !(

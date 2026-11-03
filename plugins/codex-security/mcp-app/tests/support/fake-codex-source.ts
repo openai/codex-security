@@ -6,6 +6,7 @@ export function fakeCodexSource(
   preflightAllowed: boolean,
   accountResult: unknown,
   preflightMarkerPath: string,
+  profileId = "codex_security_deep_scan_worker",
 ): string {
   return `#!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -13,6 +14,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
+const profileId = ${JSON.stringify(profileId)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 const temporaryEnvironment = Object.fromEntries(['TEMP', 'TMP'].map(name => [name, process.env[name]]));
@@ -38,9 +40,9 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
         }
         result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
+        result = { config: { default_permissions: profileId, permissions: { [profileId]: preflightProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
-        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
+        result = { data: [{ id: profileId, description: null, allowed: preflightAllowed }], nextCursor: null };
       } else if (message.method === 'account/read') {
         result = accountResult;
       } else if (message.method === 'configRequirements/read') {

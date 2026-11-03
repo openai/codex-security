@@ -459,7 +459,12 @@ test("real severity producer reuses unchanged evidence across occurrences", asyn
   assert.equal(reviewPrompts.length, 3);
   const next = { ...finding, occurrenceId: "occurrence-b" };
   const checkpoint = store.checkpoint("scan-b", [finding.findingId], false);
-  const cached = await checkpoint.load(first, [next]);
+  const binding = {
+    ...first,
+    rubricCheckpointSha256: assessments(database, ["finding"], "scan-a")[0]
+      .rubricSha256,
+  };
+  const cached = await checkpoint.load(binding, [next]);
   assert.equal(cached.length, 1);
   assert.equal(cached[0].occurrenceId, "occurrence-a");
   const second = await classifySeverityInternal(
@@ -484,15 +489,18 @@ test("real severity producer reuses unchanged evidence across occurrences", asyn
   );
   validateSeverityClassification(second, [next]);
   assert.deepEqual(
-    await checkpoint.load(first, [{ ...next, summary: "Changed evidence" }]),
+    await checkpoint.load(binding, [{ ...next, summary: "Changed evidence" }]),
     [],
   );
   assert.deepEqual(
-    await checkpoint.load({ ...first, rubricSha256: "b".repeat(64) }, [next]),
+    await checkpoint.load(
+      { ...binding, rubricCheckpointSha256: "b".repeat(64) },
+      [next],
+    ),
     [],
   );
   assert.deepEqual(
-    await checkpoint.load({ ...first, knowledgeBaseSha256: "c".repeat(64) }, [
+    await checkpoint.load({ ...binding, knowledgeBaseSha256: "c".repeat(64) }, [
       next,
     ]),
     [],
@@ -500,7 +508,7 @@ test("real severity producer reuses unchanged evidence across occurrences", asyn
   assert.deepEqual(
     await store
       .checkpoint("scan-c", [finding.findingId], true)
-      .load(first, [next]),
+      .load(binding, [next]),
     [],
   );
 });

@@ -118,7 +118,17 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugin");
+    const source = join(root, "plugins", "codex-security");
+    const sdk = fileURLToPath(new URL("..", import.meta.url));
+    const sdkFixture = join(root, "sdk", "typescript");
+    for (const entry of ["src", "schemas", "package.json"]) {
+      await cp(join(sdk, entry), join(sdkFixture, entry), { recursive: true });
+    }
+    await symlink(
+      join(sdk, "node_modules"),
+      join(sdkFixture, "node_modules"),
+      "junction",
+    );
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),

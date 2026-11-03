@@ -153,7 +153,7 @@ if __name__ == "__main__":
             const recipe = JSON.parse(input!).recipe as JsonObject;
             const profile = recipe["replayProfile"] as JsonObject;
             expect(profile).toMatchObject({ home: "ambient" });
-            provisionalPath = join(home, `${profile["name"]}.config.toml`);
+            provisionalPath = join(home, `${profile["name"]}.config.json`);
             expect(await readFile(provisionalPath, "utf8")).toContain(
               "synthetic-replay-token",
             );
@@ -161,7 +161,7 @@ if __name__ == "__main__":
           if (stage === "resume" && args[0] === "get-cli-scan-resume") {
             expect(
               (await readdir(home)).filter((name) =>
-                /^codex_security_.*\.config\.toml$/u.test(name),
+                /^codex_security_.*\.config\.json$/u.test(name),
               ),
             ).toHaveLength(2);
           }
@@ -171,7 +171,7 @@ if __name__ == "__main__":
             if (instructionFailure) {
               ownershipChecks++;
               const profiles = (await readdir(home)).filter((name) =>
-                /^codex_security_.*\.config\.toml$/u.test(name),
+                /^codex_security_.*\.config\.json$/u.test(name),
               );
               expect(profiles).toHaveLength(1);
               provisionalPath = join(home, profiles[0]!);
@@ -267,7 +267,7 @@ if __name__ == "__main__":
       expect(await readFile(provisionalPath!)).toEqual(originalProfile);
     }
     const profiles = (await readdir(home)).filter((name) =>
-      /^codex_security_.*\.config\.toml$/u.test(name),
+      /^codex_security_.*\.config\.json$/u.test(name),
     );
     expect(profiles).toHaveLength(!registered && !queryFailure ? 0 : 1);
     if (registered) {

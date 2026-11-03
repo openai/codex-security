@@ -311,7 +311,6 @@ async function fixture(
             for (const file of [
               "scan-manifest.json",
               "findings.json",
-              "coverage.json",
               "report.md",
             ])
               completedArtifacts.set(file, await readFile(join(scanDir, file)));
@@ -639,7 +638,7 @@ test.each(["rejected", "fallback"] as const)(
       ).toHaveLength(1);
       expect(h.commands).not.toContain("save-scan-comparison");
       expect(h.commands).not.toContain("fail-scan");
-      expect(h.completedArtifacts.size).toBe(4);
+      expect(h.completedArtifacts.size).toBe(3);
       for (const [file, bytes] of h.completedArtifacts)
         expect(await readFile(join(h.scanDir, file))).toEqual(bytes);
     } finally {

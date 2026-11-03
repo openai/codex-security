@@ -1976,13 +1976,13 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     ),
     [
       { anchor: "candidate-authored-instance", instance: "dss-147-a" },
-      { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+      { anchor: "candidate-authored-instance", instance: "dss-147-a-2" },
       {
         anchor: "candidate-authored-instance",
         instance: "ledger-row-c",
       },
     ],
-    "duplicate stable instance sources remain collisions for finalization",
+    "generated instances avoid an existing authored identity",
   );
 
   const collisionFindings = [
@@ -2049,9 +2049,17 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     assert.deepEqual(
       standardFindings.map((item) => item.identity),
       collisionCase.findings.map(
-        (item) => item.identity ?? collisionCase.originalIdentity,
+        (item, index) =>
+          item.identity ?? {
+            ...collisionCase.originalIdentity,
+            ...(index === 0
+              ? {}
+              : {
+                  instance: `${collisionCase.originalIdentity.instance}-${index + 1}`,
+                }),
+          },
       ),
-      `${collisionCase.label} identity collisions retain the existing Standard shape`,
+      `${collisionCase.label} identities preserve authored values and split generated collisions`,
     );
     assert.deepEqual(
       standardFindings.map((item) => item.provenance),
@@ -2083,7 +2091,7 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     assert.deepEqual(
       deepFindings.map((item) => item.provenance),
       collisionCase.findings.map((item, index) =>
-        index === 1 || index === 2
+        item.identity !== undefined && (index === 1 || index === 2)
           ? {
               ...item.provenance,
               preservedIdentity: collisionCase.originalIdentity,

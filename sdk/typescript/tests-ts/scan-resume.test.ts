@@ -102,6 +102,7 @@ async function interruptedScan(
   resolvedDeep = false,
   startedMerge = true,
   ordinaryPass: {
+    accepted?: boolean;
     cost?: ScanCost;
     findings?: SemanticScan["findings"];
     reviewState?: SemanticScan["reviewState"];
@@ -355,15 +356,16 @@ async function interruptedScan(
         ? ["--cost-json", JSON.stringify(ordinaryPass.cost)]
         : []),
     ]);
+    const accepted = ordinaryPass.accepted ?? startedMerge;
     const state: DeepScanCheckpoint = {
       version: 2,
       startedAt: "2000-01-01T00:00:00Z",
       passes: [
         { directory: "artifacts/deep-scan/passes/pass-1", scanId: childId },
       ],
-      mergedScanIds: startedMerge ? [childId] : [],
-      aggregate: startedMerge ? aggregate : null,
-      noNewStreak: startedMerge ? 1 : 0,
+      mergedScanIds: accepted ? [childId] : [],
+      aggregate: accepted ? aggregate : null,
+      noNewStreak: accepted ? 1 : 0,
       consecutiveErrors: 0,
     };
     await saveCheckpoint(state);
@@ -468,15 +470,22 @@ test.each([false, true])(
   "resume restores private provider refinements (bulk: %p)",
   async (bulk) => {
     const name = `codex_security_${randomUUID()}`;
-    const f = await interruptedScan("deep", bulk, {
-      config: {
-        profile: "review",
-        model_provider: "openrouter",
-        model: "synthetic-model",
-        approval_policy: "never",
+    const f = await interruptedScan(
+      "deep",
+      bulk,
+      {
+        config: {
+          profile: "review",
+          model_provider: "openrouter",
+          model: "synthetic-model",
+          approval_policy: "never",
+        },
+        providerProfile: { name, home: "managed" },
       },
-      providerProfile: { name, home: "managed" },
-    });
+      false,
+      true,
+      { accepted: false, findings: [semanticFinding()] },
+    );
     await chmod(f.codexHome, 0o700);
     const savedProvider = {
       base_url: "https://saved.example.invalid/custom",
@@ -498,7 +507,7 @@ test.each([false, true])(
     Object.assign(f.environment, {
       SYNTHETIC_REPLAY_KEY: "synthetic-replay-key",
     });
-    let restored = false;
+    let resumedThread: string | undefined;
     const { stderr, runCli } = createCliTest(main);
     const code = await runCli(
       bulk
@@ -519,12 +528,12 @@ test.each([false, true])(
         expect(options.env?.["SYNTHETIC_REPLAY_KEY"]).toBe(
           "synthetic-replay-key",
         );
-        restored = true;
         return {
           startThread: () => fail("Resume must use the original session."),
           resumeThread: (threadId) => ({
             id: threadId,
             runStreamed: async () => {
+              resumedThread = threadId;
               throw new Error("Synthetic private resume checked");
             },
           }),
@@ -532,7 +541,7 @@ test.each([false, true])(
       }),
     );
     expect(code).not.toBe(0);
-    expect(restored, stderr.text()).toBe(true);
+    expect(resumedThread, stderr.text()).toBe(f.threadId);
     expect(await readFile(savedPath, "utf8")).toBe(original);
     expect(
       (await readdir(f.codexHome)).filter((path) =>
@@ -832,6 +841,23 @@ function resumeClient(
     });
 }
 
+async function* completedMergeEvents(
+  f: Awaited<ReturnType<typeof interruptedScan>>,
+  threadId: string,
+) {
+  const source = `${f.childId}:0`;
+  for await (const event of completedEvents(threadId)) {
+    if (event.type === "item.completed" && event.item.type === "agent_message")
+      event.item.text = JSON.stringify({
+        scanId: f.scanId,
+        groups: [
+          { sourceFindingIds: [source], canonicalSourceFindingId: source },
+        ],
+      });
+    yield event;
+  }
+}
+
 async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   const checkpoint = JSON.parse(
     await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
@@ -849,7 +875,16 @@ test.each([
 ])(
   "resumed CLI seals the original scan after its instructions are cleared (coordinator finished: %p, bulk: %p)",
   async (alreadyFinished, bulk) => {
-    const f = await interruptedScan("deep", bulk);
+    const childCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 100,
+    })!;
+    const f = await interruptedScan("deep", bulk, {}, false, true, {
+      accepted: alreadyFinished,
+      cost: childCost,
+      findings: [semanticFinding()],
+    });
+    await chmod(f.codexHome, 0o700);
     await f.command(
       [
         "update-scan-context",
@@ -876,6 +911,7 @@ test.each([
     );
     const { stdout, stderr, runCli } = createCliTest(main);
 
+    let mergeTurns = 0;
     const code = await runCli(
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
@@ -890,8 +926,8 @@ test.each([
               expect(prompt).not.toContain(
                 "Keep the original scan instructions.",
               );
-              if (!alreadyFinished) await finishDiscovery(f);
-              return { events: completedEvents(threadId) };
+              mergeTurns++;
+              return { events: completedMergeEvents(f, threadId) };
             },
           };
         },
@@ -899,6 +935,7 @@ test.each([
     );
     // A valid bounded result succeeds while retaining follow-up notes.
     expect(code, stderr.text()).toBe(0);
+    expect(mergeTurns).toBe(alreadyFinished ? 0 : 1);
     const result = JSON.parse(stdout.text());
     if (bulk) {
       expect(result, stderr.text()).toMatchObject({
@@ -911,7 +948,7 @@ test.each([
         attempt: 1,
         outputDir: f.scanDir,
         status: "completed",
-        cost: { inputTokens: 10000, outputTokens: 2000 },
+        cost: { inputTokens: 11000, outputTokens: 2100 },
       });
       // Reconcile a crash after sealing but before the bulk receipt was appended.
       await writeFile(result.resultsPath, JSON.stringify(receipts[0]) + "\n");
@@ -936,7 +973,7 @@ test.each([
       const reconciled = await readJsonLines(result.resultsPath);
       expect(reconciled[1]).toMatchObject({
         attempt: 1,
-        cost: { inputTokens: 10000, outputTokens: 2000 },
+        cost: { inputTokens: 11000, outputTokens: 2100 },
       });
       // A subsequent bulk recovery must skip the reconciled completion.
       const nextOutput = capture();
@@ -956,14 +993,15 @@ test.each([
     } else {
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
-      expect(result.cost.inputTokens).toBe(10000);
-      expect(result.cost.outputTokens).toBe(2000);
+      expect(result.cost.inputTokens).toBe(11000);
+      expect(result.cost.outputTokens).toBe(2100);
     }
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
+      userContext: null,
     });
     expect(
       (await f.command(["list-scans", "--repository", f.repository]))["scans"],
@@ -1796,31 +1834,7 @@ test.each([
                   .map((event) => JSON.stringify(event))
                   .join("\n") + "\n",
               );
-              async function* events() {
-                for await (const event of completedEvents(thread.id!)) {
-                  if (
-                    event.type === "item.completed" &&
-                    event.item.type === "agent_message"
-                  )
-                    yield {
-                      ...event,
-                      item: {
-                        ...event.item,
-                        text: JSON.stringify({
-                          scanId: f.scanId,
-                          groups: [
-                            {
-                              sourceFindingIds: [`${f.childId}:0`],
-                              canonicalSourceFindingId: `${f.childId}:0`,
-                            },
-                          ],
-                        }),
-                      },
-                    };
-                  else yield event;
-                }
-              }
-              return { events: events() };
+              return { events: completedMergeEvents(f, thread.id!) };
             },
           };
           return thread;
@@ -3027,31 +3041,7 @@ test("bulk recovery merges a sealed child when the parent stopped before its fir
             id: f.threadId,
             async runStreamed() {
               merges++;
-              async function* events() {
-                for await (const event of completedEvents(f.threadId)) {
-                  if (
-                    event.type === "item.completed" &&
-                    event.item.type === "agent_message"
-                  )
-                    yield {
-                      ...event,
-                      item: {
-                        ...event.item,
-                        text: JSON.stringify({
-                          scanId: f.scanId,
-                          groups: [
-                            {
-                              sourceFindingIds: [`${f.childId}:0`],
-                              canonicalSourceFindingId: `${f.childId}:0`,
-                            },
-                          ],
-                        }),
-                      },
-                    };
-                  else yield event;
-                }
-              }
-              return { events: events() };
+              return { events: completedMergeEvents(f, f.threadId) };
             },
           };
         },

@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type {
   ThreadEvent,
@@ -188,7 +188,11 @@ async function nativeScanFactory() {
   const bundle = await build({
     bundle: true,
     entryPoints: [fileURLToPath(entry)],
-    define: { "import.meta.url": JSON.stringify(entry.href) },
+    define: {
+      "import.meta.url": JSON.stringify(
+        pathToFileURL(join(PLUGIN_ROOT, "mcp", "server.mjs")).href,
+      ),
+    },
     format: "cjs",
     platform: "node",
     write: false,
@@ -2182,7 +2186,7 @@ process.exit(0);
           expect(typeof reference["name"]).toBe("string");
           const privatePath = join(
             codexHome,
-            `${reference["name"]}.config.toml`,
+            `${reference["name"]}.config.json`,
           );
           expect(await readFile(privatePath, "utf8")).toContain(
             "synthetic-inline-private-provider-token",

@@ -1269,6 +1269,7 @@ export class CodexSecurity {
         [
           `permissions.${VALIDATION_PERMISSION_PROFILE}=${inlineToml(validationPermissions)}`,
         ],
+        git,
       );
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
@@ -3860,8 +3861,10 @@ export class CodexSecurity {
         config: {
           ...this.config,
           codexOverrides: {
-            ...resolveCodexProfile(
+            ...resolveExecutionPaths(
               deepMerge({ ...session.runtimeConfig }, effectiveConfig),
+              scanDir,
+              session.source.environment,
             ),
             responses_api_metadata: {
               ...codexSecurityRequestContext(effectiveConfig, {
@@ -5863,14 +5866,21 @@ async function prepareSavedScanRecipe({
     };
     recipe["inheritedPermissions"] = session.inheritedPermissions;
   } else if (session.source.preserveProviderEnvironment) {
-    const nativeConfig = sharedCredentialCodexConfig(
-      effectiveConfig,
-      runtimeHome,
-    );
+    const resolved = resolveCodexProfile(effectiveConfig);
     const savedConfig = recipe["config"] as JsonObject;
-    for (const key of ["model_providers", ...CODEX_AUTH_CONFIG_KEYS]) {
-      if (nativeConfig[key] !== undefined)
-        savedConfig[key] = nativeConfig[key]!;
+    for (const key of CODEX_AUTH_CONFIG_KEYS) {
+      if (resolved[key] !== undefined) savedConfig[key] = resolved[key]!;
+    }
+    const modelProvider = scanModelProvider(resolved);
+    const providers = resolved["model_providers"];
+    if (
+      typeof modelProvider === "string" &&
+      isRecord(providers) &&
+      Object.hasOwn(providers, modelProvider)
+    ) {
+      savedConfig["model_providers"] = {
+        [modelProvider]: providers[modelProvider]!,
+      };
     }
   }
   if (
@@ -6180,21 +6190,6 @@ function sharedCredentialCodexConfig(
   };
   for (const key of CODEX_AUTH_CONFIG_KEYS) {
     if (Object.hasOwn(config, key)) shared[key] = config[key]!;
-  }
-  const modelProvider = scanModelProvider(config);
-  if (hasCommandAuth(config)) {
-    for (const key of ["profile", "profiles"]) {
-      if (Object.hasOwn(config, key)) shared[key] = config[key]!;
-    }
-  }
-  if (typeof modelProvider === "string" && modelProvider.length > 0) {
-    shared["model_provider"] = modelProvider;
-    const providers = config["model_providers"];
-    if (isRecord(providers) && Object.hasOwn(providers, modelProvider)) {
-      shared["model_providers"] = {
-        [modelProvider]: providers[modelProvider]!,
-      };
-    }
   }
   return scanRuntimeCodexConfig(shared, credentialHome);
 }

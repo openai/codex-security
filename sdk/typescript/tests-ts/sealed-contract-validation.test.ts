@@ -527,6 +527,15 @@ const historicalTrackingCases: Array<
     "must match pattern",
   ],
   [
+    "a nested writeup path with a final newline",
+    ({ findings }) => {
+      findings.findings[0]!.writeup = {
+        reportPath: "findings/child/proof/analysis.md\n",
+      };
+    },
+    "must match pattern",
+  ],
+  [
     "a threat model containing a byte-order-mark character",
     ({ manifest }) => {
       manifest.scan.threatModel = { format: "markdown", content: "\ufeff" };
