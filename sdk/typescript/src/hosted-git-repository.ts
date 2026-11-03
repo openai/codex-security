@@ -1,5 +1,6 @@
 import { isIPv4 } from "node:net";
 import {
+  type ExternalImportTarget,
   cloudRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
@@ -221,11 +222,17 @@ export function hostedRepositoryUrlKey(
   value: string,
   github = false,
   knownGitSuffix = false,
+  target: ExternalImportTarget = "local",
 ): string {
   const url = value.replace(
     /^(https?:\/\/)([^/?#]+)\/([^?#]*)/iu,
     (_, scheme: string, authority: string, path: string) =>
-      scheme + hostedHttpAuthority(authority) + "/" + hostedHttpPath(path),
+      scheme +
+      (target === "cloud" && ambiguousGitIpHost(value)
+        ? authority.toLowerCase()
+        : hostedHttpAuthority(authority)) +
+      "/" +
+      hostedHttpPath(path),
   );
   if (github) return cloudRepositoryUrlKey(url);
   const host = URL.parse(url)?.hostname ?? "";

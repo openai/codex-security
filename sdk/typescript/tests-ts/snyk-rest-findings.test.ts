@@ -40,15 +40,28 @@ function transport(...responses: unknown[]) {
             "token test-token",
           );
           if (responses.length === 0) throw new Error("Unexpected request");
-          return Response.json(responses.shift());
+          const next = responses.shift();
+          return next instanceof Response ? next : Response.json(next);
         },
       });
     },
   };
 }
 
+test("the Issues normalizer keeps long issue titles by default", async () => {
+  const row = issue(false);
+  row.attributes.title = "é".repeat(257);
+  const report = await transport(project(), { data: [row] }).collect();
+  expect(normalizeSnykIssues(report).findings[0]?.evidence.title).toBe(
+    row.attributes.title,
+  );
+  const cloud = normalizeSnykIssues(report, "cloud");
+  expect(cloud.findings).toHaveLength(0);
+  expect(cloud.excluded[0]?.reason).toContain("title");
+});
+
 test.each(["open-source", "code"] as const)(
-  "Snyk %s follows scoped pagination, saves original evidence, and replays unchanged in SQLite",
+  "Snyk %s retries the scoped page, saves original evidence, and replays unchanged in SQLite",
   async (product) => {
     const code = product === "code";
     const asset = project(code ? "sast" : "npm");
@@ -71,6 +84,13 @@ test.each(["open-source", "code"] as const)(
           next: `?starting_after=${encodeURIComponent(cursor)}`,
         },
       },
+      new Response("try again", {
+        status: 429,
+        headers: {
+          "Retry-After": "0",
+          Location: "https://other.invalid/issues",
+        },
+      }),
       {
         data: [record],
         links: {
@@ -82,6 +102,7 @@ test.each(["open-source", "code"] as const)(
     const report = await api.collect({ ...options, product });
     expect(api.calls.map((url) => url.pathname)).toEqual([
       `/rest/orgs/${options.organizationId}/projects/${options.projectId}`,
+      path,
       path,
       path,
     ]);
@@ -98,6 +119,7 @@ test.each(["open-source", "code"] as const)(
       );
     }
     expect(api.calls[2]!.searchParams.get("starting_after")).toBe(cursor);
+    expect(api.calls[3]!.href).toBe(api.calls[2]!.href);
     await using f = await snykLocalFixture({
       remote: options.sourceRepositoryUrl,
     });
@@ -123,6 +145,22 @@ test.each(["open-source", "code"] as const)(
     }
   },
 );
+
+test("reports the last HTTP error when the retried Snyk cursor is still throttled", async () => {
+  const limited = (detail: string) =>
+    new Response(detail, { status: 429, headers: { "Retry-After": "0" } });
+  const api = transport(
+    project(),
+    { data: [], links: { next: "?starting_after=more" } },
+    limited("first failure"),
+    limited("still throttled"),
+  );
+  await expect(api.collect()).rejects.toThrow(
+    "failed (HTTP 429); Retry-After: 0: still throttled",
+  );
+  expect(api.calls).toHaveLength(4);
+  expect(api.calls[3]!.href).toBe(api.calls[2]!.href);
+});
 
 test.each([
   ["uat", "api.eu.snyk.io"],

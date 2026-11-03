@@ -13,6 +13,8 @@
 - import saved Semgrep selections through the CLI ([#2166](https://github.com/openai/codex-security/pull/2166))
 - collect Semgrep findings through Guardian and the Web API ([#2167](https://github.com/openai/codex-security/pull/2167))
 - collect Snyk Code and Open Source findings locally ([#2168](https://github.com/openai/codex-security/pull/2168))
+- publish hosted scanner findings to Cloud ([#2085](https://github.com/openai/codex-security/pull/2085))
+- honor bounded Retry-After on hosted scanner reads ([#2086](https://github.com/openai/codex-security/pull/2086))
 
 <!-- release-section: highlights:end -->
 

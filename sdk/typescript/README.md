@@ -709,7 +709,7 @@ Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from s
 Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 Use `selectSemgrepPlatformFindings` to [save a selection for the local CLI](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
 Use `collectSemgrepPlatformFindings` to [collect one project at an explicit ref](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch) for a single product (default `sast`).
-Use `import snyk` to [collect existing Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk) for local import.
+Use `import snyk` to [collect existing Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk) for local import or Cloud publication.
 For a private repository with a verified SCM, pass its URL and `platform: "gitlab"` or `"github"` in `sourceRepositories` to match standard SSH clone URLs.
 This does not affect scan publishing or the existing GitHub alert collector.
 
