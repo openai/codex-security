@@ -7,12 +7,12 @@ with finding UUIDs.
 
 ## Quick start
 
-Verify in Endor that the project and scan context match your checkout. A
-project UUID alone doesn't establish that link. From the checkout root, set
-the namespace and project UUID for this default-branch example.
+[Enable external imports](README.md#preview-a-report). In Endor, verify that
+the project and scan context match your checkout. A project UUID alone doesn't
+establish that link. From the checkout root, set the namespace and project
+UUID for this default-branch example.
 
 ```sh
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 namespace=YOUR_NAMESPACE
 project=PROJECT_UUID
 source_key="$namespace/$project/main"

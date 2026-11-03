@@ -1,60 +1,37 @@
 # Import Snyk Open Source findings
 
-Import dependency vulnerabilities from a saved `snyk test` JSON report, a
+Prefer native `snyk test` JSON for dependency vulnerabilities. It keeps
+individual dependency paths and remediation details. You can also import a
 `snyk-findings-export/v1` plugin bundle or self-contained Open Source SARIF.
-Native CLI JSON preserves individual dependency paths and remediation details.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). For a first local import,
-set the destination from the checkout root. Choose a key for the repository,
-branch, original scan target and format. If you ran Snyk in `services/api`,
-replace `root` in the example key with `services/api`.
+[Enable external imports](README.md#preview-a-report). From the checkout root,
+set the destination and choose a key for the repository, branch, original scan
+target and format. Replace `root` with your target if you scanned a
+subdirectory such as `services/api`.
 
 ```sh
 snyk_repository=$(pwd -P)
 snyk_source_key=github.com/example/project/main/root/native-sca
 ```
 
-For a repeat import, set `snyk_repository` and `snyk_source_key` to the
-previous local preview's exact `repository` and `source.source_key`. Keep the
-original destination even if it was a package subdirectory. Changing either
-value creates a separate set of records.
+For a repeat import, use the exact `repository` and `source.source_key` from
+your earlier local preview, even if you used a package subdirectory as the
+destination. Changing either value creates a separate set of records.
 
-Set `snyk_report` to the absolute path of your saved, ungrouped Open Source
-JSON report so it still resolves if you change directories.
-
-```sh
-snyk_report=/path/to/reports/snyk-open-source.json
-```
-
-If you need a new report, [run the Snyk CLI](#native-cli-json) and keep the
-`snyk_report` it sets. Preview the selected report.
+**Saved report.** Use an absolute path to the ungrouped Open Source JSON from
+the scan you want to import.
 
 ```sh
-codex-security publish findings "$snyk_report" --to local --repository "$snyk_repository" \
-  --provider snyk --source-key "$snyk_source_key" \
-  --dry-run --format json
+snyk_report=/private/path/snyk-open-source.json
 ```
 
-## Import and verify
-
-Review coverage and exclusions, especially unsupported products and license
-records. Check the destination checkout when the report lacks a Git URL.
-[Save or publish and verify](README.md#save-or-publish-and-verify) with the
-same source key for subsequent exports in this format.
-
-## Reference
-
-Use the saved report for an earlier scan. `snyk test` and the Studio plugin’s
-`snyk-findings-export` scan the current workspace. Evo MCP’s `query_issues`
-retrieves AI asset policy violations. [Studio export scope](https://github.com/snyk/studio-recipes/blob/3752dd05a462184dcce44af3c247f287b41e35de/plugins/codex/skills/snyk-findings-export/SKILL.md#L15-L20) · [Evo MCP tools](https://docs.snyk.io/agent-security/evo-by-snyk/platform-surfaces/evo-mcp-server#policies-and-issues)
-
-### Native CLI JSON
-
-To create a report, run the authenticated Snyk CLI with the project's package
-tooling. For a project with `package.json`, run this from its root. Exit 1
-means findings. A higher exit code stops acquisition. [Snyk CLI test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
+**Scan with Snyk.** To collect a new report, run the authenticated Snyk CLI
+with the project's package tooling. From the directory containing
+`package.json`, run this in the same shell. Snyk exits with 1 when it finds
+vulnerabilities. A higher exit code stops the export.
+[Snyk CLI test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
 
 ```sh
 snyk_report=
@@ -67,47 +44,67 @@ fi
 snyk_report="$report_dir/snyk-open-source.json"
 ```
 
-For several projects under one scan root, use `--all-projects --fail-fast`
-in place of `--file=package.json`. Without `--fail-fast`, Snyk can omit
-projects it could not scan. Project errors present in the input stop import.
-Keep independent scan roots in separate reports with separate keys.
+For several projects under one scan root, replace `--file=package.json` with
+`--all-projects --fail-fast` so a scan failure stops collection. Without
+`--fail-fast`, Snyk can skip projects. An error in a saved project result
+stops import. Use separate reports and keys for independent scan roots.
 
-A native occurrence is identified by package manager, manifest, advisory,
-package name and version, and dependency path. The reader retains the
-vulnerability, project context and suggested fixes. Manifest paths are
-target-relative. [Native result fields](https://github.com/snyk/cli/blob/main/src/lib/snyk-test/legacy.ts)
+**Preview the report.**
 
-### Snyk plugin export
+```sh
+codex-security publish findings "$snyk_report" --to local --repository "$snyk_repository" \
+  --provider snyk --source-key "$snyk_source_key" \
+  --dry-run --format json
+```
 
-From the repository's Git root, ask the Snyk plugin's `snyk-findings-export`
-skill to run an SCA-only scan and save the bundle outside the checkout.
-Use the bundle as input and a key ending in `plugin-sca`. The bundle retains
-collection context, ignored status and each selected MCP record. The mapper
-can shorten descriptions and omit alternate dependency paths. Paths are
-target-relative. A dirty workspace does not establish the scanned commit.
-[Install the Snyk plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex)
-and [SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go)
+Check the expected advisories, package versions and excluded records,
+especially license findings. If the report lacks a Git URL, confirm the
+destination checkout yourself.
+[Save locally or publish to Cloud and verify the result](README.md#save-or-publish-and-verify).
 
-### SARIF compatibility
+## Native CLI JSON
 
-For SARIF, replace `--json-file-output` with `--sarif-file-output` and keep the
-exit-code check above. Use a key ending in `sarif-sca`. SARIF groups an
-advisory's occurrences and exposes one package coordinate. The reader
-retains the rule, result and report context. Use a self-contained report. Manifest paths are
-optional. If present, use direct URIs. Indexed or base-relative manifest
-locations are unsupported. [Snyk Open Source SARIF formatter](https://github.com/snyk/cli/blob/main/src/lib/formatters/open-source-sarif-output.ts)
+Package manager, manifest, advisory, package name and version, and dependency
+path identify each native occurrence. The reader keeps the vulnerability,
+project context and suggested fixes. Manifest paths are relative to the scan
+target. For native tests of a public GitHub URL, the reader checks the
+repository in the report's `path` against the destination. Any `#ref` stays
+in the original evidence.
+[Native result fields](https://github.com/snyk/cli/blob/main/src/lib/snyk-test/legacy.ts)
 
-### Identities and provenance
+## Snyk plugin export
+
+From the Git root, ask the Snyk plugin's `snyk-findings-export` skill to run
+an SCA-only scan and save the bundle outside the checkout. Set `snyk_report`
+to the bundle and use a key ending in `plugin-sca` for the preview. Like
+`snyk test`, the skill scans the current workspace. To import an earlier scan,
+use its saved report. Evo MCP's `query_issues` retrieves AI asset policy
+violations.
+[Install the plugin](https://github.com/snyk/studio-recipes/tree/main/plugins/codex) · [Studio export scope](https://github.com/snyk/studio-recipes/blob/3752dd05a462184dcce44af3c247f287b41e35de/plugins/codex/skills/snyk-findings-export/SKILL.md#L15-L20) · [Evo MCP tools](https://docs.snyk.io/agent-security/evo-by-snyk/platform-surfaces/evo-mcp-server#policies-and-issues)
+
+The bundle keeps collection context, ignored status and each selected MCP
+record. The mapper can shorten descriptions and omit alternate dependency
+paths. Paths are relative to the scan target. The reader records a commit
+only for a clean workspace with a known revision.
+[SCA mapper](https://github.com/snyk/studio-mcp/blob/main/internal/oss/map.go)
+
+## SARIF compatibility
+
+Replace `--json-file-output` with `--sarif-file-output` in the scan command
+and keep the exit-code check. Use a source key ending in `sarif-sca`. Snyk
+groups an advisory's occurrences and reports one package coordinate. The
+reader keeps the rule, result and report context. Use self-contained SARIF
+with direct URIs for any manifest locations. Indexed and base-relative
+manifest locations are unsupported.
+[Snyk Open Source SARIF formatter](https://github.com/snyk/cli/blob/main/src/lib/formatters/open-source-sarif-output.ts)
+
+## Identities and provenance
 
 Native JSON, plugin bundles and SARIF produce different source IDs. Give
-each format a separate key. Changes in collection context such as a plugin
-scan's `issueCount` can update a stored snapshot even if the occurrence
-stays the same. [Imported evidence and identity](schema-guide.md)
+each format a separate source key. A change in collection context, such as a
+plugin scan's `issueCount`, can update a stored snapshot of the same
+occurrence. [Imported evidence and identity](schema-guide.md)
 
-For native tests of a public GitHub URL, the reader checks the repository in
-the report's `path` against the selected destination. Any `#ref` stays in the
-saved source evidence.
-
-Known source Git URLs must match a comparable configured local remote when
-one is available, or the selected Cloud repository. Snyk Code, Container,
-IaC, SBOM results and hosted backlog responses use other formats.
+Known source Git URLs must match a comparable local remote when available,
+or the selected Cloud repository. Snyk Code, Container, IaC, SBOM results
+and hosted backlog responses use other formats.
