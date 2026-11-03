@@ -6,6 +6,8 @@ Use this exact reducer configuration:
 {{DEDUP_CONTEXT_JSON}}
 ```
 
+When the scan supplies `severityRubric`, use its Markdown to settle severity differences when merging findings. Grade from the existing evidence and preserve the reducer's validation and reporting constraints.
+
 Read the assigned, already-validated Standard findings and the previous aggregate with `get_codex_security_deep_reducer_inputs({ maxBytes, cursor? })`. Choose a small `maxBytes` that fits comfortably in a tool response. The budget counts serialized response bytes, including JSON escaping. Even one large finding can span pages.
 
 Each tool response has one text content block containing `{ json, nextCursor? }`. Its `json` is a fragment that may end inside a field. Follow `nextCursor` until absent and read the fragments in order as one document. The assigned document contains `{ discoveries, previous }`. Keep pages from different `findingRef` requests separate.

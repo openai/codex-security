@@ -39,6 +39,7 @@ export function startDeepScanEngine(options: {
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
+        serviceTier: run.serviceTier,
         deepScanConfig: run.config,
         parentSandbox: options.parentSandbox,
         parentTurn: options.parentTurn,

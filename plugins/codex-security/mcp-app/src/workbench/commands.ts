@@ -1,5 +1,6 @@
 import { parseJson } from "../helpers/json";
 import { openWorkbenchDatabase, workbenchDatabasePath } from "./database";
+import { localDedupe, type LocalDedupeRequest } from "./local-dedupe";
 import {
   listStoredFindings,
   storeFindings,
@@ -88,6 +89,7 @@ export async function workbenchCommand(
     workbenchDatabasePath(stateDirectory),
     {
       deferred:
+        command !== "local-dedupe" &&
         command !== "store-findings" &&
         command !== "store-external-findings" &&
         command !== "store-dedupe-groups" &&
@@ -95,6 +97,12 @@ export async function workbenchCommand(
     },
   );
   try {
+    if (command === "local-dedupe")
+      return localDedupe(
+        database,
+        payload as LocalDedupeRequest,
+        new Date().toISOString(),
+      );
     if (command === "store-external-findings")
       return storeExternalFindings(
         database,

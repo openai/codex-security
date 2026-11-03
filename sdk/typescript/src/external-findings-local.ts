@@ -55,6 +55,7 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
+import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -587,6 +588,7 @@ async function requireMatchingRepository(
     ));
   const boundProvider =
     provider === "sonar" ||
+    provider === "continuum" ||
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
@@ -822,13 +824,18 @@ export async function prepareLocalImport(
     "local",
     sameRepositories,
   );
-  for (const source of veracodeReportRepositories(
-    options.provider,
-    current.findings,
-    "local",
-    sameRepositories,
-  ).values()) {
-    sources.set(source.url, source);
+  for (const repositories of [
+    veracodeReportRepositories,
+    continuumReportRepositories,
+  ]) {
+    for (const source of repositories(
+      options.provider,
+      current.findings,
+      "local",
+      sameRepositories,
+    ).values()) {
+      sources.set(source.url, source);
+    }
   }
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();

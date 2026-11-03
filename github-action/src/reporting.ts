@@ -22,7 +22,7 @@ export function resultTitle(result: ScanResults, inputs: Inputs): string {
   if (inputs.failOnSeverity === 'none') return 'Scan completed. Findings are reported without failing the job.';
   return 'Scan completed. No findings meet the failure threshold.';
 }
-export function resultSummary(result: ScanResults, inputs: Inputs, target: Target): string {
+export function resultSummary(result: ScanResults, inputs: Inputs, target: Target, artifactUrl?: string): string {
   const esc = (value: string, limit = 4000) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(' · ') : 'unavailable';
   const usage = result.usage;
@@ -33,6 +33,7 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     : result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} · **Findings policy:** ${result.policyStatus} · **Report:** ${result.reportStatus}`,
+    ...(artifactUrl ? [`**Reports:** <a href="${html(artifactUrl)}">${esc(inputs.artifactName)}</a> · Retention: up to ${inputs.retentionDays} days.`] : []),
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(', '))}</code>` : ''} · **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,

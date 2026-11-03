@@ -17,6 +17,8 @@ being embedded in its source tree or shipped npm runtime.
 - [Workflow routing](workflow-routing/README.md): checks whether repository-installed
   production skills route natural-language requests to the appropriate workflow,
   stopping before workflow execution.
+- The [skill review fixtures](check-skills/README.md) cover pre-install decisions
+  for individual skill files and bundles, including cross-file behavior.
 
 Model runs are opt-in. CI runs the deterministic triage, secret-discovery,
 time-budget, and workflow-routing helper checks and the real-IPC reducer
