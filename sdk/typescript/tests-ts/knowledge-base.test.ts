@@ -518,6 +518,14 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "tracked-move.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Rotate keys. </w:t></w:r>' +
+          '<w:moveFrom w:id="2" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveFrom></w:p>' +
+          '<w:p><w:moveTo w:id="3" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveTo></w:p>',
+      ),
+    );
+    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -537,6 +545,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
     expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
   });
 

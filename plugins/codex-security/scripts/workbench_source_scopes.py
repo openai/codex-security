@@ -17,7 +17,7 @@ from unicodedata import normalize
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import (
     clean_worktree_content_digest,
-    git_bytes,
+    git_command,
     git_worktree_context,
 )
 from workbench_validation import reject_non_finite_json
@@ -74,19 +74,8 @@ def safe_source_path(target: Path, value: str) -> Path | None:
 
 
 def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
-    names = ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS")
-    previous = {name: os.environ.get(name) for name in names}
-    os.environ["GIT_NO_LAZY_FETCH"] = "1"
-    os.environ["GIT_ALLOW_PROTOCOL"] = ""
-    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
-    try:
-        return git_bytes(repository, *arguments)
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+    result = git_command(repository, *arguments, text=False, offline=True)
+    return result.stdout if result.returncode == 0 else None
 
 
 @cache
