@@ -1,4 +1,4 @@
-import { defaultSeverityRubric } from "./default-severity-rubric.js";
+import { getDefaultSeverityRubric } from "./severity-rubric.js";
 import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
@@ -76,20 +76,6 @@ const textSchema = z
   .min(1)
   .refine((value) => value.trim().length > 0);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const configName = "codex_security_default_severity_rubric";
-const remoteRubricConfig = z.object({
-  name: z.literal(configName),
-  value: z.strictObject({
-    markdown: textSchema.refine(
-      (text) =>
-        Buffer.byteLength(text, "utf8") <= 196_608 &&
-        !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff]/u.test(
-          text,
-        ),
-    ),
-    revision: z.number().int().positive(),
-  }),
-});
 /** @internal */
 export const severityClassificationSchema = z.strictObject({
   schemaVersion: z.literal(1),
@@ -136,7 +122,7 @@ export async function classifySeverityInternal(
   }
   const rubric =
     options.rubricPath === undefined
-      ? [await resolveDefaultRubric(options)]
+      ? [(await getDefaultSeverityRubric(options)).markdown]
       : await readDocuments([options.rubricPath], options.signal);
   const knowledge = options.knowledgeBasePaths?.length
     ? await readDocuments(options.knowledgeBasePaths, options.signal)
@@ -199,41 +185,6 @@ export async function classifySeverityInternal(
   }
   options.signal?.throwIfAborted();
   return result;
-}
-
-async function resolveDefaultRubric({
-  environment = process.env,
-  signal,
-}: ClassifySeverityOptions): Promise<string> {
-  if (environment["CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC"] !== "1")
-    return defaultSeverityRubric;
-
-  const timeout = AbortSignal.timeout(3_000);
-  try {
-    const response = await fetch("https://ab.chatgpt.com/v1/get_config", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // Public client key from openai/codex, codex-rs/otel/src/config.rs.
-        "statsig-api-key": "client-MkRuleRQBd6qakfnDYqJVR9JuXcY57Ljly3vi5JVUIO",
-      },
-      body: JSON.stringify({
-        configName,
-        statsigMetadata: { exposureLoggingDisabled: true },
-      }),
-      redirect: "error",
-      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      return defaultSeverityRubric;
-    }
-    return remoteRubricConfig.parse(await response.json()).value.markdown;
-  } catch {
-    return defaultSeverityRubric;
-  } finally {
-    signal?.throwIfAborted();
-  }
 }
 
 async function readDocuments(

@@ -3,7 +3,7 @@ import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -18,7 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
@@ -48,6 +48,7 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
+    | "severityRubric"
   > & { config?: JsonObject; providerProfile?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -385,7 +386,28 @@ test.each([
 );
 
 test("CLI resumes through native execution with current permissions and preserves interrupted state and output permissions", async () => {
-  const f = await interruptedScan();
+  const markdown = "Keep the grading policy chosen when this scan started.";
+  const severityRubric = {
+    markdown,
+    revision: 12,
+    sha256: hash("sha256", markdown),
+  };
+  const f = await interruptedScan("deep", false, { severityRubric });
+  Object.assign(f.environment, {
+    CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
+  });
+  using request = spyOn(globalThis, "fetch").mockRejectedValue(
+    new Error("Unexpected rubric lookup"),
+  );
+  await f.command([
+    "update-scan-context",
+    "--scan-id",
+    f.scanId,
+    "--thread-id",
+    f.threadId,
+    "--user-context",
+    "Review the revised scan scope.",
+  ]);
   if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
   const feedbackPath = join(
     f.scanDir,
@@ -488,9 +510,8 @@ test("CLI resumes through native execution with current permissions and preserve
                   originalFeedback,
                 );
                 expect(prompt).toContain(f.scanId);
-                expect(prompt).toContain(
-                  "Keep the original scan instructions.",
-                );
+                expect(prompt).toContain("Review the revised scan scope.");
+                expect(prompt).toContain(JSON.stringify({ severityRubric }));
                 const joined = await f.command([
                   "begin-deep-scan",
                   "--scan-id",
@@ -515,6 +536,7 @@ test("CLI resumes through native execution with current permissions and preserve
   expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
+  expect(request).not.toHaveBeenCalled();
   expect(
     await f.command([
       "get-deep-scan",

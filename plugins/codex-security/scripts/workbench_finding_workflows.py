@@ -182,9 +182,22 @@ def register_workflow_scan(
         raise SystemExit("The workflow scan is already complete.")
     previous = state.get("scanId")
     if previous is not None:
-        row = connection.execute("SELECT status FROM scans WHERE id = ?", (previous,)).fetchone()
-        if row is not None and row["status"] == "complete":
-            raise SystemExit("Reuse the workflow's completed scan instead of registering another.")
+        row = connection.execute(
+            """SELECT saved.status, saved.recipe_json AS saved, attempt.recipe_json AS attempt
+               FROM scans AS saved JOIN scans AS attempt ON attempt.id = ? WHERE saved.id = ?""",
+            (scan_id, previous),
+        ).fetchone()
+        if row is not None:
+            if row["status"] == "complete":
+                raise SystemExit(
+                    "Reuse the workflow's completed scan instead of registering another."
+                )
+            saved = json.loads(row["saved"] or "{}")
+            attempt = json.loads(row["attempt"] or "{}")
+            if saved.get("severityRubric") != attempt.get("severityRubric"):
+                raise SystemExit(
+                    "Another attempt registered a different severity rubric. Retry this workflow to reuse its saved rubric."
+                )
     state["scanId"] = scan_id
     state["scanDir"] = scan_dir
     save_workflow(connection, state, timestamp)
