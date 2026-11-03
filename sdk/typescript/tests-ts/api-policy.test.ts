@@ -114,7 +114,7 @@ async function setup(
         pythonSelections.push(selection);
         return PYTHON;
       },
-      requirePrivatePolicyOutputDirectory: async (path: string) => {
+      preparePolicyOutputDirectory: async (path: string) => {
         await options.secureOutput?.(path);
       },
       repositoryRevision: async () => {
@@ -423,10 +423,10 @@ describe("CodexSecurity policy API", () => {
     },
   );
 
-  test("requires private output before starting a policy turn", async () => {
+  test("prepares output permissions before starting a policy turn", async () => {
     const onOutputDirReady = mock();
     const secured = mock(async (_path: string) => {
-      throw new Error("Policy output could not be made private");
+      throw new Error("Policy output permissions could not be prepared");
     });
     const f = await setup({
       secureOutput: secured,
@@ -436,7 +436,7 @@ describe("CodexSecurity policy API", () => {
         outputDir: f.outputDir,
         onOutputDirReady,
       }),
-    ).rejects.toThrow("Policy output could not be made private");
+    ).rejects.toThrow("Policy output permissions could not be prepared");
     expect(secured.mock.calls.map(([value]) => value)).toEqual([f.outputDir]);
     expect(onOutputDirReady).not.toHaveBeenCalled();
     expect(f.threads).toHaveLength(0);

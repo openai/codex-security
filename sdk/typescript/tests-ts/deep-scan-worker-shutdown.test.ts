@@ -45,3 +45,22 @@ for (const boundary of [
     }
   }, 120_000);
 }
+
+it("preserves worker error classification, parent sandbox denials and workbench subprocess deadlines", async () => {
+  await promisify(execFile)("node", [
+    "--experimental-strip-types",
+    "--test",
+    ...[
+      "test_deep_scan_errors.ts",
+      "test_deep_scan_parent_sandbox.ts",
+      "test_workbench_timeouts.ts",
+    ].map((file) =>
+      fileURLToPath(
+        new URL(
+          `../../../plugins/codex-security/mcp-app/tests/${file}`,
+          import.meta.url,
+        ),
+      ),
+    ),
+  ]);
+}, 30_000);
