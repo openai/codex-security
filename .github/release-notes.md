@@ -5,6 +5,7 @@
 ## Highlights
 
 - identify invalid committed receipt lines ([#2180](https://github.com/openai/codex-security/pull/2180))
+- use the singular for one additional finding in the job summary ([#2252](https://github.com/openai/codex-security/pull/2252))
 
 <!-- release-section: highlights:end -->
 
