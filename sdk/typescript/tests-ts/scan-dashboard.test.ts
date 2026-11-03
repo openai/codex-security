@@ -80,6 +80,25 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("keeps activity while a terminal is backpressured and restores the screen", async () => {
+    const stderr = capture(true);
+    const stream = { ...stderr.stream, writableNeedDrain: true };
+    const dashboard = createDashboard(stream);
+    dashboard.start();
+    const initial = stderr.text();
+    dashboard.note("First event");
+    await Promise.resolve();
+    expect(stderr.text()).toBe(initial);
+    stream.writableNeedDrain = false;
+    dashboard.note("Second event");
+    await Promise.resolve();
+    expect(stderr.text()).toContain("First event");
+    expect(stderr.text()).toContain("Second event");
+    stream.writableNeedDrain = true;
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];
