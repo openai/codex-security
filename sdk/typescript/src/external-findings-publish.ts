@@ -1737,7 +1737,8 @@ async function preparePublicationInput(
 
   function checkRepositories(
     findings: ExternalFindings["findings"],
-    report?: ExternalFindings["report"],
+    report: ExternalFindings["report"],
+    historicalCheckmarx = Boolean(saved),
   ) {
     function requireDestination(id: string, url: string | null | undefined) {
       if (
@@ -1767,14 +1768,14 @@ async function preparePublicationInput(
         findings,
         report,
         "cloud",
-        Boolean(saved),
+        historicalCheckmarx,
       ),
     );
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
     const checkmarx =
-      saved && options.provider !== "checkmarx"
+      historicalCheckmarx && options.provider !== "checkmarx"
         ? undefined
         : checkmarxReportRepositories(options.provider, findings, "cloud");
     for (const [provider, repositories] of [
@@ -1845,17 +1846,6 @@ async function preparePublicationInput(
       for (const url of urls) requireDestination(id, url);
     }
   }
-  checkRepositories(parsed.findings, parsed.report);
-  // A retry sends its saved projection, which may differ from today's reader.
-  if (saved) {
-    // Only use report scope associated with the input digest in the saved checkpoint.
-    const report =
-      saved.inputProjection?.inputDigest === inputDigest
-        ? parsed.report
-        : undefined;
-    checkRepositories(submissionFindings(saved.requests), report);
-  }
-
   // Existing repository submissions keep their original request bodies and receipts.
   const privatePath = join(state, `${key}.private-import.json`);
   const privateSaved = await readOptionalFile(privatePath);
@@ -1923,6 +1913,8 @@ async function preparePublicationInput(
       context.formats.includes(report.format)
         ? previous?.jobId
         : undefined;
+    const resumed = previous !== undefined && retryOfJobId === undefined;
+    checkRepositories(parsed.findings, parsed.report, resumed);
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
@@ -1936,7 +1928,7 @@ async function preparePublicationInput(
       accountId: credentials.account_id,
       destination,
       source,
-      resumed: previous !== undefined && !retryOfJobId,
+      resumed,
       requests: [],
       privateImport,
     };
@@ -1956,6 +1948,8 @@ async function preparePublicationInput(
           const retrying =
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
+          if (resumed && !active)
+            checkRepositories(parsed.findings, parsed.report);
           requireAccess(current, !!active?.fileId, !!active?.jobId);
           if (await selectedCheckpoint())
             throw new CodexSecurityError(
@@ -2051,6 +2045,17 @@ async function preparePublicationInput(
           }
         }),
     };
+  }
+
+  checkRepositories(parsed.findings, parsed.report);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) {
+    // Only use report scope associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories(submissionFindings(saved.requests), report);
   }
 
   let requests = saved?.requests;

@@ -1524,17 +1524,29 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
     selected.sourceRepositoryUrl,
     "cloud",
   );
-  await expect(
-    prepareNormalizedExternalPublication(
-      {
-        read: 2,
-        excluded: [],
-        findings: [...first.preview.findings, ...otherScan.findings],
+  for (const sibling of [
+    otherScan.findings[0]!,
+    {
+      source_finding_id: "sdk-id",
+      evidence: {
+        title: "Example",
+        severity: "low" as const,
+        source_scan_id: "scan-b",
       },
-      selected,
-      f.deps,
-    ),
-  ).rejects.toThrow(/same product, project and scan/i);
+    },
+  ]) {
+    await expect(
+      prepareNormalizedExternalPublication(
+        {
+          read: 2,
+          excluded: [],
+          findings: [...first.preview.findings, sibling],
+        },
+        selected,
+        f.deps,
+      ),
+    ).rejects.toThrow(/same product, project and scan/i);
+  }
   const replayWithReport = (change: Record<string, unknown>) =>
     prepareNormalizedExternalPublication(
       { ...first.preview, report: { ...first.preview.report, ...change } },
@@ -8014,6 +8026,126 @@ test.each([
     ).toHaveLength(uploads);
   },
 );
+
+test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", async () => {
+  const f = await fixture();
+  const row = normalized();
+  const originalRepository = f.state.repositoryUrl;
+  const finding = {
+    ...row,
+    evidence: validateExternalEvidence({
+      ...row.evidence,
+      source_data: {
+        format: "cxsast-xml",
+        sourceRepositoryUrl: originalRepository,
+      },
+    }),
+  };
+  const selection = { read: 1, excluded: [], findings: [finding] };
+  const source = { provider: options.provider, source_key: options.sourceKey };
+  const repository = { id: options.repository, repo_connector_id: "github" };
+  const checkpoint = {
+    format: "security.findings.v1",
+    apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+    accountId: "synthetic-account",
+    contextVersion: "generation-a",
+    source,
+    repository,
+    sha256: "3c5deaa9e276e613a99de094126172ee45ce2195e363979bb48c323f6ece950a",
+    uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
+    jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
+    fileId: "aifile_" + "a".repeat(32),
+  };
+  const directory = join(f.root, "state", "external-finding-publications");
+  const path = join(
+    directory,
+    "886667c1525fc10ea04e55192ed613b2cabe6ec5163bb12fb13ac8fffe4faef4.private-import.json",
+  );
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
+  let contextVersion = checkpoint.contextVersion;
+  const requests: unknown[] = [];
+  const prepare = () =>
+    prepareNormalizedExternalPublication(selection, options, {
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+        CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+      },
+      fetch: async (url, init) => {
+        const pathname = new URL(url).pathname;
+        if (pathname.endsWith("/repositories")) return f.deps.fetch(url, init);
+        if (pathname.endsWith("/finding-imports/context"))
+          return Response.json({
+            object: "security.finding_import_context",
+            context_version: contextVersion,
+            can_read: true,
+            can_upload: true,
+            can_create_import_jobs: true,
+            formats: ["security.findings.v1"],
+            limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
+          });
+        expect(pathname).toEndWith("/finding-imports/jobs");
+        expect(init.method).toBe("POST");
+        const job = JSON.parse(String(init.body));
+        requests.push(job);
+        return Response.json({
+          ...job,
+          object: "security.finding_import_job",
+          id: "import_" + "b".repeat(32),
+          status: "completed",
+          counts: {
+            total: 1,
+            discovered: 1,
+            created: 1,
+            updated: 0,
+            unchanged: 0,
+            error: 0,
+            unprocessed: 0,
+          },
+          poll_after_seconds: null,
+          error: null,
+        });
+      },
+    });
+  contextVersion = "different-inbox";
+  await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+  contextVersion = checkpoint.contextVersion;
+  f.state.repositoryUrl += "-other";
+  await expect(prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  f.state.repositoryUrl = originalRepository;
+  const resumed = await prepare();
+  expect(resumed.preview.resumed).toBe(true);
+  expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
+  expect((await resumed.publish()).counts.created).toBe(1);
+  expect(requests).toEqual([
+    {
+      request_id: checkpoint.jobRequestId,
+      context_version: checkpoint.contextVersion,
+      source,
+      input: {
+        type: "file",
+        file_id: checkpoint.fileId,
+        format: checkpoint.format,
+      },
+      default_targets: [
+        {
+          type: "repository",
+          repo_id: repository.id,
+          repo_connector_id: repository.repo_connector_id,
+        },
+      ],
+    },
+  ]);
+  await rm(path);
+  await expect(resumed.publish()).rejects.toThrow(
+    "requires the checkmarx provider",
+  );
+  await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+  expect(requests).toHaveLength(1);
+});
 
 test("a private preview recognizes a later repository checkpoint under its historical filename", async () => {
   const f = await fixture();

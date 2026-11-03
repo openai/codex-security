@@ -16,23 +16,31 @@ Ask the **publish-findings** skill to preview a particular scan in your checkout
 > Preview Checkmarx One scan `SCAN_ID` for project `example-project` on `main`.
 > Its repository is `https://github.com/example/project`.
 
-For self-managed CxSAST, include the full team path and project name. If you
+For self-managed CxSAST, include the full team path and project name. Use the
+exact spelling shown in CxSAST for non-ASCII team characters. If you
 already have a supported report, give Codex its path and skip collection.
 
-Codex runs the collector with a trusted Python 3.10+ installation. For
-Checkmarx One, it uses your signed-in `cx` executable. If you set
-`CX_CONFIG_FILE_PATH`, use an absolute path. For CxSAST, it uses your Java
-executable, CxFlow JAR and SAST-only configuration. Provide their trusted
-absolute installation or configuration paths outside the scanned source tree.
-The profile must have the `CxXml` file writer enabled. The collector requests
-the existing scan in project mode and selects only the XML file writer.
+Run collection in the operator's trusted login environment, without running a
+project build or loading environment settings from the scanned source. Codex
+starts the collector from the source root for local and Cloud imports. If
+there is no local source tree, it starts from a private temporary directory.
+Provide trusted absolute paths outside the source tree for the native Python
+3.10+ interpreter and vendor tools. For Checkmarx One, supply your signed-in
+`cx` executable. If you set `CX_CONFIG_FILE_PATH`, use an absolute path to
+your trusted profile. For CxSAST, supply Java, the CxFlow JAR and a SAST-only
+configuration file. Enable the `CxXml` file writer and declare any required
+Spring configuration imports in that file. The collector retrieves the existing
+scan in project mode and selects only the XML file writer. It runs CxFlow with
+your chosen configuration, writes its logs in a private directory and ignores
+inherited JVM startup options for that process. If your setup requires a JVM
+option or agent, export the XML with your usual setup and give Codex the file.
 [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow XML configuration](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
 
 Codex checks the scan ID in the exported file. For CxSAST, it also checks the
 team and project. Review the preview for the requested repository before
 confirming the import.
 Codex reuses the same file after confirmation. The helper creates a private
-temporary directory for its report. If your build sets `TMPDIR` or `TEMP`,
+temporary directory for its report. If you set `TMPDIR` or `TEMP`,
 point it outside the scanned source tree. Remove the report directory after
 readback and any retries, or ask Codex to keep it for later use.
 

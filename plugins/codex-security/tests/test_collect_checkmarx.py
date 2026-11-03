@@ -86,6 +86,7 @@ def test_refuses_vendor_files_inside_the_scan_source(
         (source / ".git" / "HEAD").touch()
         subdir = source / "src"
         subdir.mkdir()
+        (subdir / ".git").write_text("gitdir: ../.git/modules/sub")
         monkeypatch.chdir(subdir)
         request = cxsast_args
     index = request.index(option) + 1
@@ -190,13 +191,15 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
     config = tmp_path / "my cx config"
     config.touch()
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(config))
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx256m")
     requested = ["one", ONE_SCAN, "--cx", cx]
     reports = []
 
     def run(args, *, cwd, **kwargs):
         out = Path(cwd)
         assert out.is_relative_to(capture_dir)
-        assert kwargs.get("env", os.environ)["CX_CONFIG_FILE_PATH"] == str(config)
+        assert kwargs["env"]["CX_CONFIG_FILE_PATH"] == str(config)
+        assert kwargs["env"]["JAVA_TOOL_OPTIONS"] == "-Xmx256m"
         kwargs["stdout"].write("retrieved existing scan\n")
         assert list(map(str, args)) == [
             cx,
@@ -274,7 +277,8 @@ def test_one_refuses_before_vendor_invocation(refusal, capture_dir, monkeypatch,
 
 
 @pytest.mark.parametrize(
-    "result", ["selected", "scan", "project", "team", "missing team", "invalid XML"]
+    "result",
+    ["selected", "scan", "project", "team", "missing team", "expanded team", "invalid XML"],
 )
 def test_cxsast_collects_selected_scan_with_xml_tracker(
     result, capture_dir, monkeypatch, tmp_path, capsys
@@ -289,6 +293,16 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
     monkeypatch.setenv("PATH", str(tmp_path))
     executable(tmp_path, "java")
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", "unrelated-one-config.yaml")
+    jvm_options = {
+        "JDK_JAVA_OPTIONS": "-Xmx256m",
+        "JAVA_TOOL_OPTIONS": f'-javaagent:"{Path.cwd() / "coverage.jar"}"',
+        "_JAVA_OPTIONS": f"-DLOGBACK_ROLLINGPOLICY_FILE_NAME_PATTERN={Path.cwd()}/escape.%i.gz",
+        "OPENJ9_JAVA_OPTIONS": "-Dfile.encoding=windows-1252",
+        "IBM_JAVA_OPTIONS": "-Xmx256m",
+    }
+    for name, value in jvm_options.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CX_PROFILE_SECRET", "synthetic-profile-value")
     jar = tmp_path / "Cx Flow.jar"
     config = tmp_path / "private config.yml"
     jar.touch()
@@ -296,6 +310,8 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
 
     def run(args, *, cwd, **kwargs):
         args = list(map(str, args))
+        assert jvm_options.keys().isdisjoint(kwargs["env"])
+        assert kwargs["env"]["CX_PROFILE_SECRET"] == "synthetic-profile-value"
         assert args[:6] == [
             java,
             f"-Djava.io.tmpdir={cwd}",
@@ -306,9 +322,14 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         ]
         assert {
             f"--spring.config.location={config}",
+            "--spring.config.additional-location=",
+            "--spring.config.import=",
+            f"--logging.file.path={cwd}",
+            f"--logging.file.name={Path(cwd, 'cx-flow.log')}",
+            f"--logging.logback.rollingpolicy.file-name-pattern={Path(cwd, 'cx-flow.%d{yyyy-MM-dd}.%i.gz')}",
             "--project",
             "--scanId=1234",
-            "--cx-team=/CxServer/Example Team",
+            "--cx-team=/CxServer/Masse Team",
             "--cx-project=Example Project",
             "--app=Example Project",
             "--bug-tracker=CxXml",
@@ -330,8 +351,10 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         }
         if result != "missing team":
             attributes["TeamFullPathOnReportDate"] = (
-                r"cxserver\Other Team" if result == "team" else r"CXSERVER\Example Team"
+                r"cxserver\Other Team" if result == "team" else r"CXSERVER\Masse Team"
             )
+            if result == "expanded team":
+                attributes["TeamFullPathOnReportDate"] = r"CXSERVER\Maße Team"
         if result == "invalid XML":
             path.write_text("<CxXMLResults")
         else:
@@ -350,10 +373,11 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         "--config",
         str(config),
         "--team",
-        "/CxServer/Example Team/",
+        "/CxServer/Masse Team/",
         "--project",
         "Example Project",
     )
+    assert {name: os.environ[name] for name in jvm_options} == jvm_options
     stdout = capsys.readouterr().out
     if result == "selected":
         assert code == 0
@@ -364,3 +388,90 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         assert code != 0
         assert not stdout
         assert not list(capture_dir.iterdir())
+
+
+def test_excludes_source_by_filesystem_identity(capture_dir, monkeypatch, tmp_path, capsys):
+    source = Path.cwd()
+    checkout_file = executable(source, "cx")
+    alias = source.with_name(source.name.upper())
+    if not alias.exists():
+        # Model a filesystem preserving alternate case spellings on realpath.
+        alias.symlink_to(source, target_is_directory=True)
+        resolve = Path.resolve
+        monkeypatch.setattr(
+            Path,
+            "resolve",
+            lambda path, *args, **kw: (
+                path if path.is_relative_to(alias) else resolve(path, *args, **kw)
+            ),
+        )
+    assert source.samefile(alias)
+    assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", str(alias / Path(checkout_file).name)) != 0
+    assert "outside the source checkout" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises Unix interpreter selection")
+@pytest.mark.parametrize("shebang", ["#!/usr/bin/env bash", "#!/usr/bin/env -S bash -e"])
+def test_env_shim_refuses_an_interpreter_linked_into_source(
+    capture_dir, monkeypatch, tmp_path, capsys, shebang
+):
+    bash = executable(Path.cwd(), "malicious-bash")
+    external_bin = tmp_path / "external bin"
+    external_bin.mkdir()
+    (external_bin / "bash").symlink_to(bash)
+    monkeypatch.setenv("PATH", str(external_bin))
+    cx = executable(tmp_path, "cx")
+    Path(cx).write_text(shebang + "\nexit 83\n")
+    assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", cx) != 0
+    assert "interpreter is outside the source checkout" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "lookup", ["libc", "passwd", "HOME"] if sys.platform == "linux" else ["libc"]
+)
+@pytest.mark.skipif(os.name == "nt", reason="exercises Unix account home lookup")
+def test_one_checks_default_profile_from_account_home(
+    lookup, capture_dir, monkeypatch, tmp_path, capsys
+):
+    import pwd
+    from types import SimpleNamespace
+
+    account = tmp_path / "account"
+    account.mkdir()
+    (account / ".checkmarx").symlink_to(Path.cwd(), target_is_directory=True)
+    (Path.cwd() / "checkmarxcli.yaml").touch()
+    other = tmp_path / "alternate-home"
+    monkeypatch.setenv("HOME", str(account if lookup == "HOME" else other))
+    libc_home = account if lookup == "libc" else other
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(libc_home)))
+    if sys.platform == "linux":
+        passwd = tmp_path / "passwd"
+        entry = b"cx:x:%d:1:Example:%s:/bin/sh\n" % (os.getuid(), os.fsencode(account))
+        passwd.write_bytes(entry if lookup == "passwd" else b"")
+        original_open = Path.open
+
+        def open_file(path, *args, **kwargs):
+            return original_open(passwd if str(path) == "/etc/passwd" else path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_file)
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("unexpected cx invocation"))
+    assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) != 0
+    assert "CX_CONFIG_FILE_PATH" in capsys.readouterr().err
+    assert not list(capture_dir.iterdir())
+
+
+def test_one_accepts_the_same_scan_uuid_in_server_spelling(
+    capture_dir, monkeypatch, tmp_path, capsys
+):
+    scan = "abcdef12-0000-4000-8000-123456789abc"
+
+    def run(args, *, cwd, **kwargs):
+        assert args[args.index("--scan-id") + 1] == scan.upper()
+        (Path(cwd) / "cx_result.json").write_text(json.dumps({"scanID": scan}))
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert invoke(monkeypatch, "one", scan.upper(), "--cx", executable(tmp_path, "cx")) == 0
+    saved = Path(capsys.readouterr().out.strip())
+    assert json.loads(saved.read_text())["scanID"] == scan

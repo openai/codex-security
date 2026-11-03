@@ -57,14 +57,15 @@ test("retains native triage and ordered flow with snippets for each CxSAST resul
   expect(JSON.stringify(evidence)).not.toContain("report owner");
 });
 
+const withLink = (xml: string, tag: string, link: string) =>
+  xml.replace(
+    `<${tag} `,
+    `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
+  );
+
 test("checks explicit scan and project IDs in native viewer links", () => {
   const viewer = "https://sast.example/CxWebClient/ViewerMain.aspx";
   const matching = viewer + "?pathid=17&projectid=8&scanid=100";
-  const withLink = (xml: string, tag: string, link: string) =>
-    xml.replace(
-      `<${tag} `,
-      `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
-    );
   const rows = [matching, viewer + "?scanid=101", viewer + "?projectid=9"].map(
     (link) => withLink(result(13), "Result", link),
   );
@@ -90,6 +91,40 @@ test("checks explicit scan and project IDs in native viewer links", () => {
   expect(() =>
     normalize(withLink(report(""), "CxXMLResults", viewer + "?scanid=101")),
   ).toThrow(/DeepLink/u);
+});
+
+test("requires all known CxSAST viewer instances to agree", () => {
+  const viewer = "https://sast.example/tenant/CxWebClient/ViewerMain.aspx";
+  const linked = withLink(result(13), "Result", viewer + "?pathid=1");
+  const unlinked = result(15);
+  for (const xml of [
+    withLink(report(unlinked), "CxXMLResults", viewer),
+    report(linked + unlinked),
+    report(unlinked + linked),
+  ]) {
+    const parsed = normalize(xml);
+    expect(parsed.excluded).toEqual([]);
+    expect(parsed.report).toMatchObject({
+      instance: "https://sast.example/tenant",
+    });
+    for (const { evidence } of parsed.findings)
+      expect(evidence.source_data?.["instance"]).toBe(
+        "https://sast.example/tenant",
+      );
+  }
+  for (const other of [
+    viewer.replace("sast.example", "other.example"),
+    viewer.replace("/tenant/", "/other/"),
+  ]) {
+    expect(() =>
+      normalize(withLink(report(linked), "CxXMLResults", other)),
+    ).toThrow(/same instance/u);
+    expect(() =>
+      normalize(
+        report(linked + unlinked + withLink(result(19), "Result", other)),
+      ),
+    ).toThrow(/same instance/u);
+  }
 });
 
 test("retains distinct intermediate paths and replays their identity across scans", () => {

@@ -8,20 +8,26 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from uuid import UUID
 from xml.parsers import expat
 
 
 def source_root() -> Path:
     source = Path.cwd().resolve()
+    root = source
     for parent in (source, *source.parents):
         if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
-            return parent
-    return source
+            root = parent
+    return root
 
 
 def in_source(path: Path, source: Path) -> bool:
     invocation = path.parent.resolve() / path.name
-    return any(candidate.is_relative_to(source) for candidate in (path, invocation, path.resolve()))
+    for candidate in (path, invocation, path.resolve()):
+        for ancestor in (candidate, *candidate.parents):
+            if ancestor.exists() and ancestor.samefile(source):
+                return True
+    return False
 
 
 def installed_file(value: str) -> Path:
@@ -44,7 +50,44 @@ def installed_launcher(value: str) -> Path:
     return path
 
 
-def vendor_environment(source: Path) -> dict[str, str]:
+def check_shim_interpreters(launcher: Path, source: Path, search_path: str) -> None:
+    if os.name == "nt":
+        return
+    pending = [launcher]
+    checked = set()
+    while pending:
+        program = pending.pop()
+        if in_source(program, source):
+            raise ValueError("Use a vendor shim whose interpreter is outside the source checkout.")
+        if program in checked or not program.is_file():
+            continue
+        checked.add(program)
+        with program.open("rb") as stream:
+            if stream.read(2) != b"#!":
+                continue
+            fields = os.fsdecode(stream.readline()).strip().split(None, 1)
+        if not fields:
+            continue
+        interpreter = Path(fields[0])
+        pending.append(interpreter)
+        if interpreter.name == "env" and len(fields) == 2:
+            argument = fields[1]
+            if argument.startswith("-S "):
+                command = argument[3:].lstrip().split(None, 1)[0]
+            else:
+                command = argument
+            # GNU env's -S form can expand variables and reassign PATH. Only
+            # the simple COMMAND or -S COMMAND [args...] form has a fixed lookup.
+            if not command or command.startswith("-") or any(c in command for c in "=$\\'\""):
+                raise ValueError(
+                    "Use a native launcher or an env shebang with a fixed interpreter."
+                )
+            selected = shutil.which(command, path=search_path)
+            if selected is not None:
+                pending.append(Path(selected))
+
+
+def vendor_environment(source: Path, launcher: Path) -> dict[str, str]:
     env = os.environ.copy()
     entries = []
     for entry in os.get_exec_path(env):
@@ -54,18 +97,67 @@ def vendor_environment(source: Path) -> dict[str, str]:
         if path.is_absolute() and path.is_dir() and not in_source(path, source):
             entries.append(str(path.resolve()))
     env["PATH"] = os.pathsep.join(entries)
+    check_shim_interpreters(launcher, source, env["PATH"])
     return env
+
+
+def one_default_profiles() -> set[Path]:
+    # Both cx configuration and its keyring resolver use Go's os/user.Current.
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        get_profile = ctypes.windll.userenv.GetUserProfileDirectoryW
+        token = wintypes.HANDLE(-4)  # GetCurrentProcessToken() pseudo-handle
+        size = wintypes.DWORD()
+        get_profile(token, None, ctypes.byref(size))
+        directory = ctypes.create_unicode_buffer(size.value)
+        if not get_profile(token, directory, ctypes.byref(size)):
+            raise ctypes.WinError()
+        homes = {Path(directory.value)}
+    else:
+        import pwd
+
+        try:
+            homes = {Path(pwd.getpwuid(os.getuid()).pw_dir)}
+        except KeyError:
+            homes = {Path.home()}
+        if sys.platform == "linux":
+            # Released cx uses pure Go's local passwd lookup. A libc-enabled build may
+            # instead resolve a directory-service account. Leave the choice to cx.
+            uid = str(os.getuid()).encode()
+            local_home = None
+            try:
+                with Path("/etc/passwd").open("rb") as passwd:
+                    for row in passwd:
+                        fields = row.rstrip().split(b":")
+                        if len(fields) >= 6 and fields[2] == uid:
+                            local_home = Path(os.fsdecode(fields[5]))
+                            break
+            except OSError:
+                pass
+            homes.add(local_home if local_home is not None else Path.home())
+    return {home / ".checkmarx" / "checkmarxcli.yaml" for home in homes}
 
 
 def verify_one(report: Path, scan_id: str) -> None:
     with report.open(encoding="utf-8-sig") as stream:
         data = json.load(stream)
-    if not isinstance(data, dict) or data.get("scanID") != scan_id:
-        raise ValueError("The Checkmarx One report does not match the requested scan ID.")
+    reported = data.get("scanID") if isinstance(data, dict) else None
+    if isinstance(reported, str):
+        if reported == scan_id:
+            return
+        try:
+            if UUID(reported) == UUID(scan_id):
+                return
+        except ValueError:
+            pass
+    raise ValueError("The Checkmarx One report does not match the requested scan ID.")
 
 
 def team_path(value: str) -> str:
-    return value.replace("\\", "/").strip("/").casefold()
+    path = value.replace("\\", "/").strip("/")
+    return "".join(char.lower() if char.isascii() else char for char in path)
 
 
 def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
@@ -93,13 +185,14 @@ def collect(args: argparse.Namespace) -> Path:
         raise ValueError(
             "Select a temporary directory outside the source checkout (TMPDIR or TEMP)."
         )
-    env = vendor_environment(source)
+    env = vendor_environment(source, args.cx if args.product == "one" else args.java)
     output = Path(tempfile.mkdtemp(prefix="checkmarx-report-", dir=temp)).resolve()
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
             if args.product == "one":
-                config = env.get("CX_CONFIG_FILE_PATH")
-                if config and (not Path(config).is_absolute() or in_source(Path(config), source)):
+                configured = env.get("CX_CONFIG_FILE_PATH")
+                profiles = {Path(configured)} if configured else one_default_profiles()
+                if any(not path.is_absolute() or in_source(path, source) for path in profiles):
                     raise ValueError(
                         "Set CX_CONFIG_FILE_PATH to a trusted absolute path outside the source checkout. "
                         "The collector runs Checkmarx One from a private directory."
@@ -119,6 +212,15 @@ def collect(args: argparse.Namespace) -> Path:
                     "cx_result",
                 ]
             else:
+                # Start CxFlow without JVM agents or logging overrides from the build shell.
+                for name in (
+                    "JDK_JAVA_OPTIONS",
+                    "JAVA_TOOL_OPTIONS",
+                    "_JAVA_OPTIONS",
+                    "OPENJ9_JAVA_OPTIONS",
+                    "IBM_JAVA_OPTIONS",
+                ):
+                    env.pop(name, None)
                 team = args.team.rstrip("/\\")
                 report = Path(work, "checkmarx-results.xml")
                 command = [
@@ -129,6 +231,11 @@ def collect(args: argparse.Namespace) -> Path:
                     "-jar",
                     str(args.jar),
                     f"--spring.config.location={args.config}",
+                    "--spring.config.additional-location=",
+                    "--spring.config.import=",
+                    f"--logging.file.path={work}",
+                    f"--logging.file.name={Path(work, 'cx-flow.log')}",
+                    f"--logging.logback.rollingpolicy.file-name-pattern={Path(work, 'cx-flow.%d{yyyy-MM-dd}.%i.gz')}",
                     "--project",
                     f"--scanId={args.scan_id}",
                     f"--cx-team={team}",

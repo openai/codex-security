@@ -1,4 +1,5 @@
 import { SaxesParser } from "saxes";
+import { isRecord } from "./record.js";
 import { checkmarxEvidence } from "./checkmarx-evidence.js";
 import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
@@ -45,18 +46,43 @@ interface Row extends Record<string, unknown> {
   nodes: Record<string, unknown>[];
 }
 
+const viewerPath = "/cxwebclient/viewermain.aspx";
+
+function viewerLink(value: unknown) {
+  const url = typeof value === "string" ? URL.parse(value) : null;
+  if (
+    url &&
+    /^https?:$/u.test(url.protocol) &&
+    url.pathname.toLowerCase().endsWith(viewerPath)
+  )
+    return url;
+}
+
+function viewerInstance(current: string | undefined, link: URL | undefined) {
+  if (!link) return current;
+  const instance = link.origin + link.pathname.slice(0, -viewerPath.length);
+  if (current !== undefined && current !== instance)
+    throw new Error("CxSAST viewer links must identify the same instance.");
+  return instance;
+}
+
+export function checkmarxXmlInstance(source: Record<string, unknown>) {
+  const instance = source["instance"];
+  const result = source["result"];
+  return viewerInstance(
+    instance === undefined
+      ? undefined
+      : requiredText(instance, "CxSAST instance"),
+    isRecord(result) ? viewerLink(result["DeepLink"]) : undefined,
+  );
+}
+
 function requireDeepLinkScope(
-  value: unknown,
+  url: URL | undefined,
   scanId: string,
   projectId: string,
 ) {
-  const url = typeof value === "string" ? URL.parse(value) : null;
-  if (
-    !url ||
-    !/^https?:$/u.test(url.protocol) ||
-    !url.pathname.toLowerCase().endsWith("/cxwebclient/viewermain.aspx")
-  )
-    return;
+  if (!url) return;
   for (const [name, id] of url.searchParams) {
     const key = name.toLowerCase();
     if (
@@ -76,6 +102,7 @@ function readReport(contents: string) {
   const parser = new SaxesParser({ xmlns: false });
   let projectId = "";
   let scanId = "";
+  let instance: string | undefined;
   parser.on("opentag", ({ name, attributes }) => {
     const element: Element = { name, attributes, children: [], text: "" };
     if (!stack.length) {
@@ -83,12 +110,16 @@ function readReport(contents: string) {
         throw new Error("Expected a Checkmarx CxSAST CxXMLResults report.");
       projectId = requiredText(attributes["ProjectId"], "CxSAST ProjectId");
       scanId = requiredText(attributes["ScanId"], "CxSAST ScanId");
-      requireDeepLinkScope(attributes["DeepLink"], scanId, projectId);
+      const link = viewerLink(attributes["DeepLink"]);
+      requireDeepLinkScope(link, scanId, projectId);
+      instance = viewerInstance(undefined, link);
     } else if (
       (stack.length === 1 && name !== "Query") ||
       (stack.length === 2 && name !== "Result")
     ) {
       throw new Error("Expected CxSAST results directly under their Query.");
+    } else if (stack.length === 2) {
+      instance = viewerInstance(instance, viewerLink(attributes["DeepLink"]));
     }
     // Only build subtrees within the current result, then release them.
     if (stack.length >= 3) stack.at(-1)!.children.push(element);
@@ -118,7 +149,7 @@ function readReport(contents: string) {
     });
   });
   parser.write(contents).close();
-  return { rows, projectId, scanId };
+  return { rows, projectId, scanId, instance };
 }
 
 /** SimilarityId groups paths, including paths with different intermediate nodes. */
@@ -129,7 +160,7 @@ export function checkmarxXmlId(
   const projectId = requiredText(source["projectId"], "CxSAST ProjectId");
   const query = record(source["query"], "CxSAST Query");
   const result = record(source["result"], "CxSAST Result");
-  requireDeepLinkScope(result["DeepLink"], scanId, projectId);
+  requireDeepLinkScope(viewerLink(result["DeepLink"]), scanId, projectId);
   const path = record(source["path"], "CxSAST Path");
   const nodes = array(source["nodes"], "CxSAST Path nodes");
   const route = (nodes.length ? nodes : [result]).map((value) => {
@@ -155,7 +186,7 @@ export function normalizeCheckmarxXml(
   repository: string,
   target: ExternalImportTarget,
 ): ExternalFindings {
-  const { rows, scanId, projectId } = readReport(contents);
+  const { rows, scanId, projectId, instance } = readReport(contents);
   return normalizeRecords(
     rows,
     (row) => {
@@ -175,7 +206,7 @@ export function normalizeCheckmarxXml(
               ? "False positive"
               : text(result["state"]),
           cwe: query["cweId"],
-          sourceData: row,
+          sourceData: instance ? { ...row, instance } : row,
         },
         target,
       );
@@ -187,6 +218,7 @@ export function normalizeCheckmarxXml(
         format: "cxsast-xml",
         scanId,
         projectId,
+        ...(instance && { instance }),
         sourceRepositoryUrl: repository,
       },
     },

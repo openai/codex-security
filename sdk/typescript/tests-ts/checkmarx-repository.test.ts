@@ -65,6 +65,96 @@ test("native Checkmarx batches without report metadata belong to one scan", asyn
   }
 });
 
+test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {
+  await using fixture = await localFindingsFixture();
+  const native = xml("1").findings[0]!;
+  const sdk = {
+    source_finding_id: "sdk-id",
+    evidence: { title: "Example", severity: "low" as const },
+  };
+  const bind = (row: ExternalFindings["findings"][number], reader?: string) =>
+    prepareNormalizedLocalImport(
+      { read: 2, excluded: [], findings: [row, native] },
+      {
+        provider: "checkmarx",
+        sourceKey: "example/project/main",
+        repository: fixture.repository,
+      },
+      {
+        environment: fixture.environment,
+        sourceRepositories: reader ? [{ url: reader }] : [],
+      },
+    );
+  expect((await bind(sdk, source)).preview.findings).toHaveLength(2);
+  for (const claim of [
+    { source_scan_id: "2" },
+    { source_data: { projectId: "2" } },
+    {
+      details: { kind: "sast" as const, scanner_origin: "Checkmarx One SAST" },
+    },
+    {
+      details: {
+        kind: "sast" as const,
+        repository: { url: source + "-other" },
+      },
+    },
+    { source_data: { sourceRepositoryUrl: source + "-other" } },
+  ]) {
+    await expect(
+      bind({ ...sdk, evidence: { ...sdk.evidence, ...claim } }),
+    ).rejects.toThrow(/same product|retained Checkmarx report/i);
+  }
+  await expect(bind(sdk, source + "-other")).rejects.toThrow(
+    /retained Checkmarx report/i,
+  );
+  expect(
+    (
+      await bind({
+        ...sdk,
+        evidence: {
+          ...sdk.evidence,
+          source_scan_id: "1",
+          source_data: { projectId: "1" },
+        },
+      })
+    ).preview.findings,
+  ).toHaveLength(2);
+});
+
+test("normalized CxSAST batches compare the known viewer instances, including linkless rows", async () => {
+  await using fixture = await localFindingsFixture();
+  const first = xml("1", "1", "1");
+  const second = xml("1", "1", "2").findings[0]!;
+  const third = xml("1", "1", "3").findings[0]!;
+  const result = (finding: typeof second) =>
+    finding.evidence.source_data!["result"] as Record<string, unknown>;
+  result(second)["DeepLink"] =
+    "https://one.example/CxWebClient/ViewerMain.aspx?scanid=1";
+  result(third)["DeepLink"] =
+    "https://two.example/CxWebClient/ViewerMain.aspx?scanid=1";
+  const bind = (report?: ExternalFindings["report"]) =>
+    prepareNormalizedLocalImport(
+      {
+        findings: [...first.findings, second, third],
+        read: 3,
+        excluded: [],
+        report,
+      },
+      {
+        provider: "checkmarx",
+        sourceKey: "example/project/main",
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+  await expect(bind()).rejects.toThrow(/same instance/i);
+  result(third)["DeepLink"] = result(second)["DeepLink"];
+  expect((await bind()).preview.findings).toHaveLength(3);
+  await expect(
+    bind({ ...first.report, instance: "https://two.example" }),
+  ).rejects.toThrow(/same instance/i);
+});
+
 test("normalized Checkmarx replay binds the retained occurrence to its repository and provider", async () => {
   await using fixture = await localFindingsFixture({ remote: source });
   const options = {
