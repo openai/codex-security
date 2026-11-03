@@ -13,7 +13,9 @@ export type Provider =
   | "semgrep"
   | "inspector"
   | "blackduck"
-  | "veracode";
+  | "veracode"
+  | "sonar"
+  | "continuum";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;
