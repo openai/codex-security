@@ -23,7 +23,9 @@ from workbench_test_support import (
     run_workbench,
     saved_discovery_worker,
     saved_draft,
+    select_checkpoint,
     write_checkpoint,
+    write_result_draft,
 )
 
 
@@ -79,9 +81,7 @@ def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: 
         path = checkpoints / f"{module._digest(draft)}.json"
         path.write_text(json.dumps(draft))
         os.utime(path, ns=(index * 100, index * 100))
-    result_path = output / "result.json"
-    result_path.write_text(json.dumps(result))
-    os.utime(result_path, ns=(1000, 1000))
+    write_result_draft(output / "result.json", result, mtime_ns=1000)
     return saved_discovery_worker(output, worker_id, 1)
 
 
@@ -245,15 +245,15 @@ def test_missing_parent_identity_reuses_established_checkpoint(
         "Synthetic review finding",
         summary="Retain the saved result.",
     )
-    checkpoint = write_checkpoint(
+    write_checkpoint(
         tmp_path / "checkpoints",
         saved_draft(
             "identity-scan",
             complete=True,
             findings=[{**finding, "identity": {"anchor": saved_anchor}}],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     if explicit_end_line:
         finding["locations"][0]["endLine"] = 1
     write_saved_parent(
@@ -362,10 +362,11 @@ def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(
     write_saved_parent(scan_dir, saved_draft(scan_id, findings=[first], complete=True), 100)
     revised = {**first, "title": "Revised review", "summary": "Revised synthetic evidence."}
     del revised["identity"]
-    checkpoint = write_checkpoint(
-        scan_dir / "checkpoints", saved_draft(scan_id, findings=[revised], complete=True)
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[revised], complete=True),
+        mtime_ns=200,
     )
-    os.utime(checkpoint, ns=(200, 200))
     fail_deep_scan(state, codex_home, scan_id)
     findings_path = scan_dir / "findings.json"
     findings = json.loads(findings_path.read_text())["findings"]
@@ -425,11 +426,9 @@ def test_torn_worker_closure_reuses_observed_legacy_identity(
             closures=[{"id": identity, "reason": "Review completed."}],
             complete=True,
         ),
+        mtime_ns=1100,
     )
-    os.utime(checkpoint, ns=(1100, 1100))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(1200, 1200))
+    select_checkpoint(output, checkpoint, mtime_ns=1200)
     originals = {path: path.read_bytes() for path in output.rglob("*.json")}
     result = recover(tmp_path, saved_results, [worker, other])
     replay = recover(
@@ -566,13 +565,13 @@ def test_unsafe_deferred_update_keeps_the_earlier_valid_path(
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
-    checkpoint = write_checkpoint(
-        result.parent / "checkpoints", saved_draft(scan_id, deferred=[original])
+    write_checkpoint(
+        result.parent / "checkpoints",
+        saved_draft(scan_id, deferred=[original]),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     update = {**original, "paths": ["../outside.py"]}
-    result.write_text(json.dumps(saved_draft(scan_id, deferred=[update])))
-    os.utime(result, ns=(200, 200))
+    write_result_draft(result, saved_draft(scan_id, deferred=[update]), mtime_ns=200)
 
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
 
@@ -654,9 +653,7 @@ def test_new_work_survives_accepted_candidate_rejection(
         for index, checkpoint in enumerate(checkpoints, 1):
             os.utime(checkpoint, ns=(index * 100, index * 100))
     os.utime(checkpoints[2], ns=(raw_modified, raw_modified))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[1].name}))
-    os.utime(head, ns=(200, 200))
+    select_checkpoint(output, checkpoints[1], mtime_ns=200)
     documents = recover(tmp_path, saved_results, workers)
     replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
@@ -733,21 +730,18 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     ]
     for index, checkpoint in enumerate(checkpoints, 1):
         os.utime(checkpoint, ns=(index * 100, index * 100))
-    result_path.write_text(json.dumps(accepted))
-    os.utime(result_path, ns=(200, 200))
+    write_result_draft(result_path, accepted, mtime_ns=200)
     # The terminal checkpoint survives a failed replacement of result.json.
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[2 if rejected_here else 1].name}))
+    head = select_checkpoint(result_path.parent, checkpoints[2 if rejected_here else 1])
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
         other_worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker", run=setup_workbench
         )
-        other_result.write_text(
-            json.dumps(saved_draft(scan_id, surfaces=[rejection], complete=True))
+        write_result_draft(
+            other_result, saved_draft(scan_id, surfaces=[rejection], complete=True), mtime_ns=200
         )
-        os.utime(other_result, ns=(200, 200))
 
     first_coverage, recovered = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
@@ -842,11 +836,8 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     ]
     for index, checkpoint in enumerate(checkpoints, 1):
         os.utime(checkpoint, ns=(index * 100, index * 100))
-    result_path.write_text(json.dumps(initial))
-    os.utime(result_path, ns=(100, 100))
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[0].name}))
-    os.utime(head, ns=(100, 100))
+    write_result_draft(result_path, initial, mtime_ns=100)
+    select_checkpoint(result_path.parent, checkpoints[0], mtime_ns=100)
     if close_first:
         first_id = split[0]["id"] if explicit_ids else saved_results._saved_coverage_id(split[0])
         terminal = saved_draft(
@@ -854,10 +845,10 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
             closures=[{"id": first_id, "reason": "First path reviewed."}],
             complete=True,
         )
-        terminal_checkpoint = write_checkpoint(result_path.parent / "checkpoints", terminal)
-        os.utime(terminal_checkpoint, ns=(300, 300))
-        head.write_text(json.dumps({"checkpoint": terminal_checkpoint.name}))
-        os.utime(head, ns=(300, 300))
+        terminal_checkpoint = write_checkpoint(
+            result_path.parent / "checkpoints", terminal, mtime_ns=300
+        )
+        select_checkpoint(result_path.parent, terminal_checkpoint, mtime_ns=300)
         if explicit_ids:
             expected_ids.remove(first_id)
     first_coverage, replay = cancel_and_preserve(
@@ -925,11 +916,8 @@ def test_unnamed_observation_does_not_replace_saved_context(
     accepted_index = 1 if observation == "explicit-update" else 0
     observed = (accepted_index + 1) * 100
     if layout == "worker":
-        result_path.write_text(json.dumps(accepted))
-        os.utime(result_path, ns=(observed, observed))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[accepted_index].name}))
-    os.utime(head, ns=(observed, observed))
+        write_result_draft(result_path, accepted, mtime_ns=observed)
+    select_checkpoint(output, checkpoints[accepted_index], mtime_ns=observed)
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
@@ -1093,12 +1081,9 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
     ]
     output = tmp_path / "reviewer"
     for sequence, draft in enumerate(drafts, 1):
-        path = write_checkpoint(output / "checkpoints", draft)
-        os.utime(path, ns=(sequence * 1_000_000_000, sequence * 1_000_000_000))
+        write_checkpoint(output / "checkpoints", draft, mtime_ns=sequence * 1_000_000_000)
     if saved_result:
-        result = output / "result.json"
-        result.write_text(json.dumps(drafts[-1]))
-        os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+        write_result_draft(output / "result.json", drafts[-1], mtime_ns=3_000_000_000)
     worker = saved_discovery_worker(output, "reviewer")
     sources = {path: path.read_bytes() for path in output.rglob("*.json")}
     documents = recover(tmp_path, saved_results, [worker])
@@ -1184,10 +1169,8 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
     output.mkdir()
     draft = {"scanId": "identity-scan", "complete": True, "findings": [reduced]}
     result = output / "result.json"
-    result.write_text(json.dumps(draft))
-    os.utime(result, ns=(1500, 1500))
-    checkpoint = write_checkpoint(output / "checkpoints", draft)
-    os.utime(checkpoint, ns=(1500, 1500))
+    write_result_draft(result, draft, mtime_ns=1500)
+    write_checkpoint(output / "checkpoints", draft, mtime_ns=1500)
     reducer = {
         "id": "reducer",
         "kind": "dedup",
