@@ -714,7 +714,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         )
         completed = scan_command(state_dir, "complete-scan", scan_id)
         assert completed["scan"]["progress"]["status"] == "complete"
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         assert coverage["mode"] == expected
 
 
@@ -1002,7 +1002,7 @@ def test_rejected_completion_preserves_committed_state_before_corrected_retry(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
-    final_coverage = json.loads(coverage_path.read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert final_coverage["deferred"] == []
     assert final_coverage["resolvedDeferred"] == coverage["resolvedDeferred"]
 
@@ -1480,7 +1480,9 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
         assert recovered[anchor]["codeEvidence"] == valid["codeEvidence"]
     assert linked_path.read_text() == "# Verified finding\n"
     assert shared_path.read_text() == "# Another verified finding\n"
-    assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
+    sealed_scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "completeness" not in sealed_scan["review"]
+    assert not (scan_dir / "coverage.json").exists()
     assert (scan_dir / "report.md").is_file()
 
 
@@ -1700,7 +1702,7 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     assert any("riskArea" in warning for warning in warnings)
     assert any("coverage exclusion" in warning for warning in warnings)
     assert any("deferred coverage item" in warning for warning in warnings)
-    sealed_coverage = json.loads(coverage_path.read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
 
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"

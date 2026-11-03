@@ -19,6 +19,7 @@ from workbench.retained_coverage import merge_saved_results as merge_saved_resul
 from workbench.saved_outputs import _restore_published_outputs, _snapshot_published_outputs
 from workbench.saved_sources import (
     _capture_saved_source,
+    _checkpoint_paths,
     _CheckpointSnapshotError,
     _encode_retained_sources,
     _freeze_source_times,
@@ -64,10 +65,16 @@ def uses_checkpoint_history(connection: Any, scan: Any, scan_dir: Path) -> bool:
         scan["retained_checkpoint_heads_json"] is not None
         or (scan_dir / "checkpoint-head.json").exists()
         or (scan_dir / "checkpoint-heads").is_dir()
+        # A bare checkpoint can predate the first head. Once sources are frozen,
+        # it can also be the current writer's own snapshot of an adopted parent.
+        or (
+            scan["retained_source_digests_json"] is None
+            and bool(_checkpoint_paths(scan_dir, "checkpoints"))
+        )
         or (
             scan["mode"] == "deep"
             and connection.execute(
-                "SELECT 1 FROM deep_scan_workers WHERE scan_id = ? LIMIT 1", (scan["id"],)
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
             ).fetchone()
             is not None
         )

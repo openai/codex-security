@@ -130,9 +130,12 @@ test("the developer eval preflights API-key authentication and the production bu
       preflightStandardEval({ OPENAI_API_KEY: "synthetic-environment" }, 1e12),
     /deadline within the supported date range/,
   );
-  await withEvalState(createIsolatedHome, undefined, async ({ home }) => {
-    assert.equal(existsSync(join(home, "auth.json")), false);
-  });
+  await withEvalState(
+    async () => ({ home: await createIsolatedHome() }),
+    async ({ home }) => {
+      assert.equal(existsSync(join(home, "auth.json")), false);
+    },
+  );
 });
 
 async function writeUsageSession(
@@ -199,6 +202,12 @@ test("the paired evaluator preserves aggregate usage across production completio
             probeCodexSandbox: async () => {},
             prepareScanArtifactRestorer: async () => ({
               restore: async () => {},
+              restoreMany: async () => {},
+              prepareDirectory: async () => {},
+              remove: async () => {},
+              async projectChild() {
+                throw new Error("Unexpected child scan in Standard eval");
+              },
             }),
             prepareRuntime: async () => ({
               codexHome: home,

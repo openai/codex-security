@@ -8,6 +8,7 @@ import pytest
 from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
+    read_review_state,
     register,
     run_workbench,
     saved_draft,
@@ -85,7 +86,7 @@ def test_parent_recovers_child_location_correction(tmp_path: Path, change: str) 
     if change != "unchanged":
         corrected["provenance"]["previousFindings"] = [old]
     draft = saved_draft(child["scanId"], complete=True, findings=updated)
-    draft["coverage"] = json.loads((child_dir / "coverage.json").read_text())
+    draft["coverage"] = read_review_state(state, child_dir)
     saved = write_checkpoint(child_dir / "checkpoints", draft)
     select_checkpoint(child_dir, saved)
     recovered_child = run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])[
@@ -195,7 +196,7 @@ def test_parent_recovery_recognizes_retained_unfrozen_child(
             path.write_bytes(path.read_bytes())
     else:
         draft = saved_draft(child["scanId"], complete=False, findings=child_findings["findings"])
-        draft["coverage"] = json.loads((child_dir / "coverage.json").read_text())
+        draft["coverage"] = read_review_state(state, child_dir)
         saved_path = write_checkpoint(child_dir / "checkpoints", draft)
         if new_evidence == "selected":
             select_checkpoint(child_dir, saved_path)

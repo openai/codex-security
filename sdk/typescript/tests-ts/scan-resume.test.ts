@@ -461,6 +461,7 @@ test.each([
   "partial-first-export",
   "invalid-manifest",
   "file-authored-result",
+  "file-authored-legacy-sidecar",
   "file-authored-new-timestamp",
   "file-authored-omitted-timestamp",
   "file-authored-complete-checkpoint",
@@ -489,7 +490,6 @@ test.each([
     };
     await writeDraft(f.command, f.registration, "standard", provisional);
     const oldManifest = await readFile(join(f.scanDir, "scan-manifest.json"));
-    const oldCoverage = await readFile(join(f.scanDir, "coverage.json"));
     if (!authored) {
       await writeDraft(f.command, f.registration, "standard", {
         ...provisional,
@@ -508,8 +508,7 @@ test.each([
           deferred: [],
         },
       });
-      // Reproduce failure after findings export but before coverage and manifest.
-      await writeFile(join(f.scanDir, "coverage.json"), oldCoverage);
+      // Reproduce a failure after findings export but before the manifest and its review state.
       await writeFile(join(f.scanDir, "scan-manifest.json"), oldManifest);
       if (scenario === "interrupted-missing-findings") {
         await rm(join(f.scanDir, "findings.json"));
@@ -519,7 +518,6 @@ test.each([
       ) {
         for (const name of [
           "scan-manifest.json",
-          "coverage.json",
           ...(scenario === "first-export" ? ["findings.json"] : []),
         ])
           await rm(join(f.scanDir, name));
@@ -548,6 +546,7 @@ test.each([
         {
           ...provisional,
           complete: true,
+          coverage: { ...provisional.coverage, deferred: [] },
           findings: [
             semanticFinding({
               title: "Synthetic final authored finding",
@@ -560,13 +559,17 @@ test.each([
         join(f.scanDir, "findings.json"),
         JSON.stringify(final.findings),
       );
-      const coverage = JSON.parse(oldCoverage.toString());
-      coverage.completeness = "complete";
-      coverage.deferred = [];
-      await writeFile(
-        join(f.scanDir, "coverage.json"),
-        JSON.stringify(coverage),
-      );
+      if (scenario === "file-authored-legacy-sidecar") {
+        delete manifest.scan.reviewState;
+        delete manifest.scan.review;
+        manifest.scan.coverageRef = "coverage.json";
+        await writeFile(
+          join(f.scanDir, "coverage.json"),
+          JSON.stringify({ ...final.coverage, completeness: "complete" }),
+        );
+      } else {
+        manifest.scan.reviewState = final.manifest.scan.reviewState;
+      }
       if (scenario !== "file-authored-unchanged-manifest")
         await writeFile(
           join(f.scanDir, "scan-manifest.json"),

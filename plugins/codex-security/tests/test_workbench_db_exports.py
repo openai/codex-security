@@ -873,15 +873,25 @@ def test_completed_findings_are_returned_in_bounded_pages(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
     context = get_scan(state_dir, scan_id)
-    assert context["workspace"]["results"] == context["scan"] == completed
+    assert context["workspace"]["results"] == completed
+    assert context["scan"] == {
+        **completed,
+        "coverage": {
+            "mode": "repository",
+            "includePaths": ["."],
+            "excludePaths": [],
+            "explicitExclusions": [],
+        },
+    }
     on_page_occurrence_id = completed["findings"][0]["occurrenceId"]
     assert get_scan(state_dir, scan_id, "--occurrence-id", on_page_occurrence_id) == context
+    selected_occurrence_id = on_page_occurrence_id
     if second_page["findings"]:
-        off_prefix_occurrence_id = second_page["findings"][0]["occurrenceId"]
-        selected = get_scan(state_dir, scan_id, "--occurrence-id", off_prefix_occurrence_id)
+        selected_occurrence_id = second_page["findings"][0]["occurrenceId"]
+        selected = get_scan(state_dir, scan_id, "--occurrence-id", selected_occurrence_id)
         assert selected["workspace"] == context["workspace"]
         assert selected["scan"]["findings"][:-1] == completed["findings"]
-        assert selected["scan"]["findings"][-1]["occurrenceId"] == off_prefix_occurrence_id
+        assert selected["scan"]["findings"][-1]["occurrenceId"] == selected_occurrence_id
         assert selected["scan"]["findingsTruncated"] is (finding_count > 21)
 
     other = start_delivered_scan(
@@ -899,7 +909,7 @@ def test_completed_findings_are_returned_in_bounded_pages(
     assert rejected["returncode"] != 0
     assert "does not belong to the selected scan" in rejected["stderr"]
 
-    request = RemediationRequest(state_dir, off_prefix_occurrence_id)
+    request = RemediationRequest(state_dir, selected_occurrence_id)
     action_token = str(uuid.uuid4())
     request.start(action_token)
     patch = "--- /dev/null\n+++ b/contained.txt\n@@ -0,0 +1 @@\n+safe\n"
@@ -911,13 +921,16 @@ def test_completed_findings_are_returned_in_bounded_pages(
         input_text=patch,
     )
     findings = {finding["occurrenceId"]: finding for finding in generated["scan"]["findings"]}
-    remediation = findings[off_prefix_occurrence_id]["remediationState"]
+    remediation = findings[selected_occurrence_id]["remediationState"]
     assert remediation["state"] == "generated"
     patch_path = scan_dir / remediation["patchPath"]
     assert patch_path.read_text(encoding="utf-8") == patch
     digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
     assert remediation["patchDigest"] == f"sha256:{digest}"
-    assert generated["workspace"]["results"]["findings"] == completed["findings"]
+    expected_workspace_findings = list(completed["findings"])
+    if not second_page["findings"]:
+        expected_workspace_findings[0] = findings[selected_occurrence_id]
+    assert generated["workspace"]["results"]["findings"] == expected_workspace_findings
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
@@ -1304,29 +1317,16 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
                     results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         else:
             results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        normalized_path = next(
-            path
-            for path in (scan_dir / "checkpoints").glob("*.json")
-            if json.loads(path.read_bytes())["coverage"]["deferred"]
-            == documents["coverage"]["deferred"]
+        checkpoints_dir = scan_dir / "checkpoints"
+        retained_raw = checkpoints_dir / f"{hashlib.sha256(raw_bytes).hexdigest()}.json"
+        assert retained_raw.read_bytes() == raw_bytes
+        (normalized_path,) = (
+            path for path in checkpoints_dir.glob("*.json") if path != retained_raw
         )
         normalized_bytes = normalized_path.read_bytes()
         normalized = json.loads(normalized_bytes)
-        assert normalized["reviewState"]["deferred"] == documents["coverage"]["deferred"]
         assert normalized["scanId"] == scan_id
-        retained = raw
-        if mode == "deep":
-            retained = {
-                **raw,
-                "publication": {
-                    "previousCheckpoint": None,
-                    "previousInputCheckpoint": None,
-                },
-            }
-            raw_bytes = results._encoded(retained)
-        retained_raw = scan_dir / "checkpoints" / f"{hashlib.sha256(raw_bytes).hexdigest()}.json"
-        assert retained_raw.read_bytes() == raw_bytes
-        assert json.loads(raw_bytes) == retained
+        assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
 
         rejected = copy.deepcopy(documents["coverage"]["deferred"][0])
         documents["coverage"]["deferred"] = documents["coverage"]["deferred"][1:]
@@ -1388,12 +1388,13 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
 
 @pytest.mark.parametrize("replay_accepted", [False, True])
 @pytest.mark.parametrize("empty_interruption", [False, True])
-def test_deep_draft_admission_survives_interrupted_projection(
+def test_historical_deep_draft_admission_survives_interrupted_projection(
     tmp_path, monkeypatch, replay_accepted, empty_interruption
 ):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import workbench_db as db
-    import workbench_saved_results as results
+    from workbench import checkpoint_publication as results
+    from workbench import saved_sources
 
     state_dir = tmp_path / "state"
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
@@ -1402,63 +1403,51 @@ def test_deep_draft_admission_survives_interrupted_projection(
     workspace = create_saved_workspace(state_dir, target, mode="deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
-    documents = read_draft_documents(scan_dir)
-    documents["manifest"]["scan"]["complete"] = False
-    raw = {
+    # Older writers published the input and its projection separately, then moved the head.
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    manifest["scan"]["complete"] = False
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    _, projected = saved_sources._read_saved_parent_result(scan_dir, scan_id)
+    accepted_raw = {
         "scanId": scan_id,
-        "findings": documents["findings"]["findings"],
+        "findings": projected["findings"],
         "coverage": saved_coverage(),
     }
-    drafts = scan_dir / "drafts"
-    drafts.mkdir()
-    staged = drafts / f"{uuid.uuid4()}.json"
-    raw_path = drafts / f"{uuid.uuid4()}.checkpoint.json"
-    args = SimpleNamespace(
-        scan_id=scan_id,
-        claim_token=None,
-        draft_path=str(staged),
-        checkpoint_path=str(raw_path),
-        expected_draft_digest=None,
-    )
+    checkpoints = scan_dir / "checkpoints"
+    checkpoints.mkdir(exist_ok=True)
+
+    def persist(contents: bytes) -> str:
+        name = f"{hashlib.sha256(contents).hexdigest()}.json"
+        (checkpoints / name).write_bytes(contents)
+        return name
+
+    def admit(raw: dict) -> str:
+        return persist(saved_sources._admit_parent_checkpoint(scan_dir, scan_id, raw, projected))
+
+    accepted = admit(accepted_raw)
+    selected = persist(saved_sources._encoded(projected))
+    head = scan_dir / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected, "inputCheckpoint": accepted}))
+    previous_head = head.read_bytes()
+
+    # Simulate an interruption after the new input was admitted and before the head advanced.
+    raw = copy.deepcopy(accepted_raw)
+    if empty_interruption:
+        raw["findings"].clear()
+    else:
+        raw["findings"][0]["summary"] = "Updated synthetic evidence."
+    admit(raw)
+    assert head.read_bytes() == previous_head
+    if replay_accepted:
+        replay = admit(accepted_raw)
+        assert replay != accepted
+        head.write_text(json.dumps({"checkpoint": selected, "inputCheckpoint": replay}))
+
+    expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
     with closing(db.connect()) as connection:
-        staged.write_text(json.dumps(documents))
-        raw_path.write_text(json.dumps(raw))
-        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        previous_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
-        accepted_documents = copy.deepcopy(documents)
-        accepted_raw = copy.deepcopy(raw)
-        original = results.write_scan_local_bytes
-        writes = 0
-
-        def interrupt_projection(root, relative, contents):
-            nonlocal writes
-            if relative.startswith("checkpoints/"):
-                writes += 1
-                if writes == 2:
-                    raise OSError("Interrupted projected checkpoint")
-            original(root, relative, contents)
-
-        if empty_interruption:
-            raw["findings"].clear()
-        else:
-            raw["findings"][0]["summary"] = "Updated synthetic evidence."
-        staged.write_text(json.dumps(documents))
-        raw_path.write_text(json.dumps(raw))
-        with monkeypatch.context() as context:
-            context.setattr(results, "write_scan_local_bytes", interrupt_projection)
-            with pytest.raises(OSError, match="Interrupted projected checkpoint"):
-                results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-        assert writes == 2
-        assert json.loads((scan_dir / "checkpoint-head.json").read_text()) == previous_head
-        if replay_accepted:
-            staged.write_text(json.dumps(accepted_documents))
-            raw_path.write_text(json.dumps(accepted_raw))
-            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
-            replay_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
-            assert replay_head["inputCheckpoint"] != previous_head["inputCheckpoint"]
-            assert replay_head["checkpoint"] == previous_head["checkpoint"]
-        expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
-        binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
+        scan = db.require_scan(connection, scan_id)
+        assert results.uses_checkpoint_history(connection, scan, scan_dir)
+        binding = db.workbench_completion_binding(scan, db.now())
         warnings = []
         recovered = results.merge_saved_results(
             scan_dir,

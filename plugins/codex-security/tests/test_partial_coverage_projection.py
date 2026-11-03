@@ -7,7 +7,6 @@ import os
 from argparse import Namespace
 
 import pytest
-from test_checkpoint_publication_authority import base_publication_scan as base_publication_scan
 from test_checkpoint_publication_authority import publication_scan as publication_scan
 from workbench_test_support import (
     read_review_state,

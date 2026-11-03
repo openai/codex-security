@@ -243,7 +243,7 @@ def test_new_patch_rejects_same_size_edit_during_publication(tmp_path, monkeypat
 
 def test_existing_temporary_file_survives_a_name_collision(tmp_path, monkeypatch):
     monkeypatch.setattr(secrets, "token_hex", lambda _: "collision")
-    existing = tmp_path / ".generated.patch.collision.tmp"
+    existing = tmp_path / ".codex-security-collision.tmp"
     existing.write_bytes(b"another writer")
     with pytest.raises(FileExistsError):
         FINALIZER.write_scan_local_bytes(

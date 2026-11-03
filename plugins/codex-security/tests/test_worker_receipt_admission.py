@@ -8,7 +8,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_checkpoint_publication_authority import base_publication_scan as base_publication_scan
 from test_checkpoint_publication_authority import publication_scan as publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan

@@ -14,7 +14,7 @@ from workbench_test_support import (
 )
 
 
-def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkeypatch):
+def test_native_setup_snapshots_limits_before_first_batch(tmp_path, monkeypatch):
     state = tmp_path / "state"
     target = tmp_path / "repository"
     target.mkdir()
@@ -52,14 +52,13 @@ def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkey
     create_workspace(state, workspace_id, "--thread-id", "project-owner")
     saved = save_workspace(state, workspace_id, str(target), ".", "deep", *selection)
     assert saved["deepScanConfig"] == preview
-    # The original settings survive changes even before the coordinator starts.
+    # The original settings survive changes even before the first batch starts.
     legacy.write_text("invalid TOML")
     scan_id, _ = start_workspace_scan(state, workspace_id, tmp_path / "scans")
-    initial = resume_deep_scan(state, scan_id, "project-owner")["deepScan"]
-    assert initial["config"] == preview["settings"]
-    assert (
-        resume_deep_scan(state, scan_id, "project-owner")["deepScan"]["config"] == initial["config"]
-    )
+    initial = resume_deep_scan(state, scan_id, "project-owner")
+    assert initial["deepScanSettings"] == preview["settings"]
+    resumed = resume_deep_scan(state, scan_id, "project-owner")
+    assert resumed["deepScanSettings"] == initial["deepScanSettings"]
     assert get_scan(state, scan_id)["workspace"]["deepScanConfig"] == preview
 
 
@@ -82,23 +81,23 @@ def test_headless_project_limits_are_isolated_from_unrelated_scans(tmp_path, mon
         json.dumps(
             {"path": str(target / "security.json"), "settings": {"workers": 2, "maxTimeHours": 0.5}}
         ),
-    )["deepScan"]
+    )
     assert begin_deep_scan(state, "other-owner", "--target-path", str(target), "--join-only") == {
         "newScanTarget": str(target.resolve())
     }
     second = begin_deep_scan(
         state, "other-owner", "--target-path", str(target), "--scan-root", str(tmp_path / "scans")
-    )["deepScan"]
-    assert first["config"]["workers"] == 2
-    assert first["config"]["maxTimeHours"] == 0.5
-    assert second["config"]["workers"] == 7
-    assert second["config"]["maxTimeHours"] == 4
-    repeated = begin_deep_scan(state, "project-owner", "--target-path", str(target), "--join-only")[
-        "deepScan"
-    ]
-    assert repeated["scanId"] == first["scanId"]
-    assert repeated["config"] == first["config"]
+    )
+    assert first["deepScanSettings"]["workers"] == 2
+    assert first["deepScanSettings"]["maxTimeHours"] == 0.5
+    assert second["deepScanSettings"]["workers"] == 7
+    assert second["deepScanSettings"]["maxTimeHours"] == 4
+    repeated = begin_deep_scan(state, "project-owner", "--target-path", str(target), "--join-only")
+    assert repeated["scan"]["scanId"] == first["scan"]["scanId"]
+    assert repeated["deepScanSettings"] == first["deepScanSettings"]
     assert (
-        get_scan(state, second["scanId"])["workspace"]["deepScanConfig"]["sources"]["workers"]
+        get_scan(state, second["scan"]["scanId"])["workspace"]["deepScanConfig"]["sources"][
+            "workers"
+        ]
         == "legacy"
     )

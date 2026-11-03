@@ -7,7 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import register, run_workbench, saved_draft, write_checkpoint
+from workbench_test_support import (
+    load_script,
+    published_artifacts,
+    read_review_state,
+    register,
+    run_workbench,
+    saved_draft,
+    write_checkpoint,
+)
 
 
 @pytest.mark.parametrize("unreadable", ["missing", "malformed"])
@@ -46,16 +54,16 @@ def test_failed_child_reread_retains_frozen_coverage(
     draft["coverage"]["openQuestions"] = [
         {"id": "open-question", "question": "Synthetic question?"}
     ]
-    original = write_checkpoint(child_dir / "checkpoints", draft)
-    (child_dir / "checkpoint-head.json").write_text(json.dumps({"checkpoint": original.name}))
+    checkpoint_path = write_checkpoint(child_dir / "checkpoints", draft)
+    (child_dir / "checkpoint-head.json").write_text(
+        json.dumps({"checkpoint": checkpoint_path.name})
+    )
     run_workbench(
         state, "fail-scan", "--scan-id", child["scanId"], "--message", "Synthetic child stop"
     )
+    child_review = read_review_state(state, child_dir)
     for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
-        assert (
-            draft["coverage"][field][0]
-            in json.loads((child_dir / "coverage.json").read_text())[field]
-        )
+        assert draft["coverage"][field][0] in child_review[field]
     child_bytes = {path: path.read_bytes() for path in child_dir.rglob("*") if path.is_file()}
 
     def interrupt_publication(*args, **kwargs):
@@ -84,11 +92,10 @@ def test_failed_child_reread_retains_frozen_coverage(
     assert frozen is not None
     history = {path: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")}
     assert history
-    coverage_path = child_dir / "coverage.json"
     if unreadable == "missing":
-        coverage_path.unlink()
+        checkpoint_path.unlink()
     else:
-        coverage_path.write_text("{")
+        checkpoint_path.write_text("{")
     recovery = ("recover-scan-results", "--scan-id", parent["scanId"])
     for _ in range(2):
         recovered = run_workbench(state, *recovery)["scan"]
@@ -96,7 +103,7 @@ def test_failed_child_reread_retains_frozen_coverage(
         assert any(
             "Independent scan recovery failed:" in warning for warning in recovered["warnings"]
         )
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
             for row in draft["coverage"][field]:
                 assert any(
@@ -106,16 +113,16 @@ def test_failed_child_reread_retains_frozen_coverage(
                 )
         for path, contents in history.items():
             assert path.read_bytes() == contents
-    coverage_path.write_bytes(child_bytes[coverage_path])
+    checkpoint_path.write_bytes(child_bytes[checkpoint_path])
     published = None
     for _ in range(3):
         recovered = run_workbench(state, *recovery)["scan"]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = (parent_dir / "coverage.json").read_bytes()
+        artifacts = published_artifacts(parent_dir)
         if published is not None:
-            assert coverage == published
-        published = coverage
+            assert artifacts == published
+        published = artifacts
         for path, contents in {**history, **child_bytes}.items():
             assert path.read_bytes() == contents
 
@@ -137,6 +144,8 @@ def test_legacy_child_coverage_retires_only_after_successful_empty_observation(
         document = json.loads(path.read_text())
         document[field] = []
         path.write_text(json.dumps(document))
+    # Preserve the legacy sidecar contract before the current writer adopts the child.
+    load_script("finalize_scan_contract").finalize_scan(child_dir, source_root=target)
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
     original = {path: path.read_bytes() for path in child_dir.rglob("*") if path.is_file()}
     prefix = child["scanId"] + "/"
@@ -170,7 +179,7 @@ def test_legacy_child_coverage_retires_only_after_successful_empty_observation(
     # An older failure note has no machine-readable successful observation.
     for _ in range(2):
         run_workbench(state, "recover-scan-results", "--scan-id", parent["scanId"])
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
             assert any(row["id"].startswith(prefix) for row in coverage[field])
         assert history.read_bytes() == immutable
@@ -182,8 +191,8 @@ def test_legacy_child_coverage_retires_only_after_successful_empty_observation(
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        contents = (parent_dir / "coverage.json").read_bytes()
-        coverage = json.loads(contents)
+        contents = published_artifacts(parent_dir)
+        coverage = read_review_state(state, parent_dir)
         for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
             assert not any(row["id"].startswith(prefix) for row in coverage[field])
         if published is not None:

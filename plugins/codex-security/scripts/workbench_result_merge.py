@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import sys
+from collections import defaultdict, deque
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -392,16 +393,33 @@ def _reconcile_child_coverage(
         for ref in surface.get("receiptRefs", [])
     }
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        current = {row["id"]: row for row in child.get(field, []) if isinstance(row.get("id"), str)}
+        previous_rows = coverage.get(field, [])
+        previous_keys = {_encoded(row) for row in previous_rows}
+        unchanged = set()
+        replacements: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
+        # Separate exact matches before pairing edits. Stopping a child can
+        # retain several distinct notes with the same ID.
+        for row in child.get(field, []):
+            if isinstance(row.get("id"), str):
+                key = _encoded(row)
+                if key in previous_keys:
+                    unchanged.add(key)
+                else:
+                    replacements[row["id"]].append(row)
         retained = []
-        for previous in coverage.get(field, []):
+        for previous in previous_rows:
             identity = previous.get("id") if isinstance(previous, dict) else None
             if not isinstance(identity, str) or not identity.startswith(f"{child_id}/"):
                 retained.append(previous)
                 continue
-            replacement = current.pop(identity, None)
-            if replacement is None:
+            key = _encoded(previous)
+            if key in unchanged:
+                unchanged.remove(key)
+                retained.append(previous)
                 continue
+            if not replacements[identity]:
+                continue
+            replacement = replacements[identity].popleft()
             for history_field in ("previousFindings", "receiptRefs"):
                 if history_field == "receiptRefs" and field != "surfaces":
                     continue

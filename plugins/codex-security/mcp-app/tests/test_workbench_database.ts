@@ -1462,7 +1462,24 @@ test("pre-release composition history moves without shadowing editable scan name
   assert.deepEqual(history(), before);
   database.exec("DELETE FROM schema_migrations WHERE version = 61");
   applyMigrations(database);
-  assertMigrationNames(database, 42, 43, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66);
+  assertMigrationNames(
+    database,
+    42,
+    43,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+  );
   assert.ok(
     database
       .prepare("PRAGMA table_info(scans)")

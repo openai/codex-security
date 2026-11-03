@@ -15,7 +15,8 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{
         GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{

@@ -8,6 +8,7 @@ import pytest
 from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
+    read_review_state,
     register,
     run_workbench,
     saved_draft,
@@ -74,7 +75,7 @@ def test_recovery_retains_current_child_finding_and_refreshes_source_history(
         current.setdefault("provenance", {})["previousFindings"] = [historical]
     updated_draft = saved_draft(child["scanId"], complete=True, findings=[current])
     updated_draft["coverage"] = {
-        **json.loads((directory / "coverage.json").read_text()),
+        **read_review_state(state, directory),
         **updated_draft["coverage"],
     }
     updated = write_checkpoint(directory / "checkpoints", updated_draft)
@@ -98,7 +99,7 @@ def test_recovery_retains_current_child_finding_and_refreshes_source_history(
         ]
         assert recovered["findingCount"] == 3
         if recovery >= 1:
-            coverage = json.loads((parent_dir / "coverage.json").read_text())
+            coverage = read_review_state(state, parent_dir)
             assert {"question": "Synthetic additional parent review."} in coverage["openQuestions"]
         rows = json.loads((parent_dir / "findings.json").read_text())["findings"]
         refreshed = next(row for row in rows if row["title"] == "Synthetic child observation 1")

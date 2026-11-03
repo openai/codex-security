@@ -35,7 +35,7 @@ export async function writeSemanticScanDraft(
 export async function writePreparedScanDraft(
   options: ScanDraftPublicationOptions,
   scanId: string,
-  documents: { manifest: unknown; findings: unknown; coverage: unknown },
+  documents: { manifest: unknown; findings: unknown; coverage?: unknown },
   draft?: SemanticScan,
 ): Promise<unknown> {
   const draftPath = `drafts/${randomUUID()}.json`;

@@ -246,6 +246,12 @@ describe("TypeScript package skeleton", () => {
     expect(testStep).not.toHaveProperty("if");
     expect(testStep).not.toHaveProperty("continue-on-error");
     expect(
+      job.steps!.find(({ name }) => name === "Set up TypeScript tools"),
+    ).toMatchObject({
+      if: "matrix.os == 'ubuntu-latest'",
+      with: { compile: "${{ matrix.python == '3.12' }}" },
+    });
+    expect(
       job.steps!.find(({ name }) => name === "Install plugin dependencies")?.if,
     ).toBe("matrix.os == 'ubuntu-latest'");
   });

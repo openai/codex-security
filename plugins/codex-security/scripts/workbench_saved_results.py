@@ -884,7 +884,7 @@ def merge_saved_results(
         if parent_manifest
         else {"scan": {"target": target, "scope": binding["scope"]}}
     )
-    for key in ("sealedAt", "artifacts"):
+    for key in ("sealedAt", "artifacts", "coverageRef"):
         manifest["scan"].pop(key, None)
     manifest["scan"].setdefault("target", target)
     manifest["scan"]["scope"] = {
@@ -1815,7 +1815,9 @@ def save_composed_checkpoint(
     """Retain accepted progress and unmerged ordinary child observations."""
     checkpoint = read_composition_checkpoint(scan) if composition.checkpoint is not None else None
     children = {child["scan_dir"]: child for child in composition.children}
-    if checkpoint is None and not children:
+    if not children and (
+        checkpoint is None or (checkpoint["aggregate"] is None and not checkpoint["passes"])
+    ):
         return None
     merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
     aggregate = checkpoint["aggregate"] if checkpoint is not None else None

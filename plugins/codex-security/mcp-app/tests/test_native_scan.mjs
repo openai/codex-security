@@ -1,10 +1,11 @@
+import { installFixtureSpawn } from "../../../../sdk/typescript/scripts/fixtures/package-deep-spawn.mjs";
 import { nativeSemanticWorkers } from "./helpers/native-semantic-workers.mjs";
 import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmod,
-  cp,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,66 +18,25 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, sep, relative } from "node:path";
+import { delimiter, dirname, join, sep, relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+const standalonePlugin = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+const fixturePluginRoot = await realpath(
+  standalonePlugin ??
+    fileURLToPath(
+      new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
+    ),
+);
 const pluginVersion = JSON.parse(
   await readFile(
-    new URL("../../.codex-plugin/plugin.json", import.meta.url),
+    join(fixturePluginRoot, ".codex-plugin", "plugin.json"),
     "utf8",
   ),
 ).version;
-
-const fixtureNativeRoot = await realpath(
-  new URL("../../native/dist/", import.meta.url),
-)
-  .catch((error) => {
-    if (error.code !== "ENOENT") throw error;
-    return realpath(new URL("../../native/prebuilt/", import.meta.url));
-  })
-  .catch((error) => {
-    if (error.code !== "ENOENT") throw error;
-    return realpath(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/native/",
-        import.meta.url,
-      ),
-    );
-  });
-const fixturePluginRoot = await realpath(
-  await mkdtemp(join(tmpdir(), "native-scan-plugin-")),
-);
-after(() => rm(fixturePluginRoot, { recursive: true, force: true }));
-// Host builds, universal artifacts and restored packages provide real primitives.
-await Promise.all([
-  cp(
-    new URL("../../.codex-plugin/", import.meta.url),
-    join(fixturePluginRoot, ".codex-plugin"),
-    { recursive: true },
-  ),
-  cp(
-    new URL("../../scripts/", import.meta.url),
-    join(fixturePluginRoot, "scripts"),
-    { recursive: true },
-  ),
-  cp(
-    new URL("../../../../sdk/typescript/_bundled_plugin/mcp/", import.meta.url),
-    join(fixturePluginRoot, "mcp"),
-    {
-      recursive: true,
-      filter: (source) =>
-        basename(source) === "mcp" || basename(source).startsWith("helpers.mjs"),
-    },
-  ),
-]);
-await symlink(
-  fixtureNativeRoot,
-  join(fixturePluginRoot, "mcp", "native"),
-  process.platform === "win32" ? "junction" : "dir",
-);
 
 const nativeFixture = {};
 const bundle = await build({
@@ -3159,7 +3119,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
     const nativePlugin = join(root, "native-plugin");
     await mkdir(join(nativePlugin, "mcp"), { recursive: true });
     await symlink(
-      fixtureNativeRoot,
+      join(fixturePluginRoot, "mcp", "native"),
       join(nativePlugin, "mcp", "native"),
       process.platform === "win32" ? "junction" : "dir",
     );
@@ -3343,22 +3303,24 @@ for (const scenario of [
   "repeated-literal",
   "read-only-parent",
 ]) {
+  const portable = scenario === "both-finite";
   test(
     `native merged settings reach every worker: ${scenario}`,
     {
       skip:
-        process.platform === "win32"
+        process.platform === "win32" && !portable
           ? "Synthetic executable uses a POSIX shebang."
           : false,
     },
-    async () => {
+    async (t) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "native-merged-worker-")),
       );
       const home = join(root, "home");
       const repository = join(root, "repository");
-      const pluginRoot = join(root, "plugin");
-      const executable = join(root, "codex");
+      const pluginRoot = standalonePlugin ?? join(root, "plugin");
+      const executable = join(root, portable ? "codex.exe" : "codex");
+      const script = portable ? join(root, "codex-worker.cjs") : executable;
       const capture = join(root, "worker.json");
       const restore = captureEnvironment([
         "CODEX_HOME",
@@ -3371,19 +3333,25 @@ for (const scenario of [
       try {
         await mkdir(home);
         await mkdir(repository);
-        await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+        if (!standalonePlugin) {
+          await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+          await writeFile(
+            join(pluginRoot, ".codex-plugin/plugin.json"),
+            JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+          );
+        }
+        if (portable) {
+          await copyFile(process.execPath, executable);
+          t.after(installFixtureSpawn(executable, script));
+        }
         await writeFile(
-          join(pluginRoot, ".codex-plugin/plugin.json"),
-          JSON.stringify({ name: "codex-security", version: "0.0.0" }),
-        );
-        await writeFile(
-          executable,
+          script,
           `#!${process.execPath}
 const fs = require("node:fs");
 ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) servePermissionProfiles();
 else {
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY }));
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ binary: process.execPath, argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY }));
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
@@ -3585,6 +3553,11 @@ else {
               );
               assert.equal(events.at(-1).type, "turn.completed");
               const observed = JSON.parse(await readFile(capture, "utf8"));
+              if (portable)
+                assert.equal(
+                  await realpath(observed.binary),
+                  await realpath(executable),
+                );
               const fragments = [];
               for (let i = 0; i < observed.argv.length; i++)
                 if (["-c", "--config"].includes(observed.argv[i]))

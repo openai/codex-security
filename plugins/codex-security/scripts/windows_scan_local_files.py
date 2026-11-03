@@ -695,7 +695,8 @@ def _rename_handle(handle: int, destination_path: Path, replace_existing: bool) 
     )
     buffer = ctypes.create_string_buffer(buffer_size)
     info = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
-    info.FlagsOrReplaceIfExists = int(replace_existing) | _FILE_RENAME_POSIX_SEMANTICS
+    replace_flag = _FILE_RENAME_REPLACE_IF_EXISTS if replace_existing else 0
+    info.FlagsOrReplaceIfExists = replace_flag | _FILE_RENAME_POSIX_SEMANTICS
     # The fully qualified destination uses a null RootDirectory. Verified
     # directory handles remain open to prevent ancestor replacement.
     info.RootDirectory = None
@@ -708,24 +709,20 @@ def _rename_handle(handle: int, destination_path: Path, replace_existing: bool) 
         buffer_size,
     ):
         return
-    if ctypes.get_last_error() not in {
+    operation = "FileRenameInfoEx"
+    if ctypes.get_last_error() in {
         _ERROR_INVALID_FUNCTION,
         _ERROR_NOT_SUPPORTED,
         _ERROR_INVALID_PARAMETER,
     }:
-        _raise_last_error("SetFileInformationByHandle(FileRenameInfoEx)")
-    # Older Windows/filesystem implementations do not support FileRenameInfoEx.
-    # Keep their existing replacement behavior without retrying permission errors.
-    info.FlagsOrReplaceIfExists = int(replace_existing)
-    if not _SetFileInformationByHandle(
-        handle,
-        _FILE_RENAME_INFO_CLASS,
-        buffer,
-        buffer_size,
-    ):
-        if not replace_existing and ctypes.get_last_error() in _COLLISION_ERRORS:
-            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination_path))
-        _raise_last_error("SetFileInformationByHandle(FileRenameInfo)")
+        # Older Windows/filesystem implementations only support FileRenameInfo.
+        operation = "FileRenameInfo"
+        info.FlagsOrReplaceIfExists = replace_flag
+        if _SetFileInformationByHandle(handle, _FILE_RENAME_INFO_CLASS, buffer, buffer_size):
+            return
+    if not replace_existing and ctypes.get_last_error() in _COLLISION_ERRORS:
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination_path))
+    _raise_last_error(f"SetFileInformationByHandle({operation})")
 
 
 def _mark_handle_for_deletion(handle: int) -> None:

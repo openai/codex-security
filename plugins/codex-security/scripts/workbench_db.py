@@ -1198,16 +1198,12 @@ def complete_scan_locked(
     if scan["mode"] == "deep":
         saved_results.advance_scan_phase(_WORKBENCH_DB_CONTEXT, connection, scan_id, "reporting")
     completion_warnings = warnings if scan["mode"] != "deep" else None
-    # Scans started on older versions retain accepted root observations through
-    # checkpoint heads. Committed composition drafts own their separate pending history.
+    # Older scans can have root checkpoints even before the writer selects its first head.
     accepted_heads = (
         not already_sealed
         and scan["mode"] != "deep"
         and documents is None
-        and not (scan_dir / "checkpoints/pending").exists()
-        and (
-            (scan_dir / "checkpoint-head.json").exists() or (scan_dir / "checkpoint-heads").is_dir()
-        )
+        and saved_results.checkpoint_publication.uses_checkpoint_history(connection, scan, scan_dir)
     )
     wrote = False
     try:

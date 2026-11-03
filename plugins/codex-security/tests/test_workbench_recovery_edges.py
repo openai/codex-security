@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from workbench_test_support import (
     composition_payload,
+    read_review_state,
     register,
     run_workbench,
     write_completed_contract,
@@ -73,7 +74,7 @@ def test_stopped_scan_recovers_checkpoint_with_non_string_coverage_id(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 1
     assert stopped["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert valid_work in coverage["deferred"]
     if field == "id":
         assert any(
@@ -181,7 +182,7 @@ def test_stopped_parent_preserves_work_with_malformed_child_manifest(
     assert stopped["reportAvailable"] is True
     findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
     assert {finding["title"] for finding in findings} == expected
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, parent_dir)
     assert "completeness" not in coverage
     for path, contents in original.items():
         assert path.read_bytes() == contents
@@ -498,7 +499,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
         state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic interruption"
     )["scan"]
     assert stopped["resultsRecoveryNeeded"] is False
-    observed_questions = json.loads((parent_dir / "coverage.json").read_text())["openQuestions"]
+    observed_questions = read_review_state(state, parent_dir)["openQuestions"]
     for index, (child, _, _) in enumerate(children):
         identity = observed_questions[index + 2]["id"]
         assert identity.startswith(f"{child['scanId']}/")
@@ -524,7 +525,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
     latest = write_checkpoint(directory / "checkpoints", draft)
     select_checkpoint(directory, latest)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
-    child_coverage = json.loads((directory / "coverage.json").read_text())
+    child_coverage = read_review_state(state, directory)
     assert child_coverage["openQuestions"] == [{"question": "Synthetic child 1 question."}]
     assert child_coverage["surfaces"][0]["disposition"] == (
         "not_applicable" if change == "surface" else "rejected"
@@ -590,7 +591,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         assert coverage["openQuestions"] == expected_questions
         assert [(row["id"], row["disposition"]) for row in coverage["surfaces"]] == [
             (surface["id"], "rejected"),
@@ -623,7 +624,7 @@ def test_parent_recovery_reconciles_updated_child_coverage(
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         assert coverage["openQuestions"] == expected_questions
         assert len(coverage["surfaces"]) == 3
         assert {row["disposition"] for row in coverage["surfaces"]} == {"rejected"}
@@ -671,14 +672,14 @@ def test_parent_recovery_reselects_earlier_child_coverage(tmp_path: Path) -> Non
                 )
         else:
             run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
-        child_coverage = json.loads((child_dir / "coverage.json").read_text())
+        child_coverage = read_review_state(state, child_dir)
         assert child_coverage["surfaces"][0]["disposition"] == disposition
         recovered = run_workbench(state, "recover-scan-results", "--scan-id", parent["scanId"])[
             "scan"
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         assert coverage["surfaces"][0]["disposition"] == disposition
         published = {path: path.read_bytes() for path in parent_dir.rglob("*") if path.is_file()}
         for command in ("preserve-scan-results", "recover-scan-results"):
@@ -766,7 +767,7 @@ def test_parent_recovery_reconciles_withdrawn_child_findings(
     if surviving_finding:
         rejected_draft["findings"] = [survivor]
     rejected_draft["coverage"] = {
-        **json.loads((directory / "coverage.json").read_text()),
+        **read_review_state(state, directory),
         **rejected_draft["coverage"],
     }
     rejected = write_checkpoint(directory / "checkpoints", rejected_draft)
@@ -794,7 +795,7 @@ def test_parent_recovery_reconciles_withdrawn_child_findings(
             "Synthetic child finding 2",
             *(["Synthetic surviving child finding"] if surviving_finding else []),
         }
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         decision = next(
             row
             for row in coverage["surfaces"]
@@ -890,7 +891,7 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
         state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic interruption"
     )["scan"]
     assert stopped["resultsRecoveryNeeded"] is False
-    original_questions = json.loads((parent_dir / "coverage.json").read_text())["openQuestions"]
+    original_questions = read_review_state(state, parent_dir)["openQuestions"]
     assert {row["question"] for row in original_questions} == {
         parent_question["question"],
         "Synthetic child 1 question.",
@@ -912,9 +913,7 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
     latest = write_checkpoint(directory / "checkpoints", draft)
     select_checkpoint(directory, latest)
     run_workbench(state, "recover-scan-results", "--scan-id", child["scanId"])
-    assert (
-        json.loads((directory / "coverage.json").read_text())["openQuestions"] == updated_questions
-    )
+    assert read_review_state(state, directory)["openQuestions"] == updated_questions
     unchanged = {
         path: path.read_bytes()
         for _, child_dir, _ in children
@@ -934,7 +933,7 @@ def test_parent_recovery_refreshes_child_questions_without_replaying_previous_ro
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         rows = coverage["openQuestions"]
         assert {row["question"] for row in rows} == {
             parent_question["question"],
@@ -1014,7 +1013,7 @@ def test_recovery_publishes_readable_children_while_other_children_remain_unread
         assert any(
             "Independent scan recovery failed:" in warning for warning in recovered["warnings"]
         )
-        coverage = json.loads((parent_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, parent_dir)
         assert any(
             "pass-2" in row["reason"] and "Recovery failed:" in row["reason"]
             for row in coverage["deferred"]
@@ -1413,7 +1412,7 @@ def test_parent_recovery_refreshes_repaired_empty_child_note(
     run_workbench(state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic stop")
     stopped = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
     assert stopped["resultsRecoveryNeeded"] is True
-    assert "Recovery failed:" in (parent_dir / "report.md").read_text()
+    assert any("Independent scan recovery failed:" in warning for warning in stopped["warnings"])
     history = {path: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")}
     findings_path.write_bytes(evidence[findings_path])
     published = {path: path.read_bytes() for path in parent_dir.iterdir() if path.is_file()}
@@ -1430,8 +1429,8 @@ def test_parent_recovery_refreshes_repaired_empty_child_note(
         with pytest.raises(OSError, match="Synthetic repaired-note publication interruption"):
             results.recover_scan_results(db, connection, SimpleNamespace(scan_id=parent["scanId"]))
     assert {path: path.read_bytes() for path in parent_dir.iterdir() if path.is_file()} == published
-    run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"])
-    assert "Recovery failed:" in (parent_dir / "report.md").read_text()
+    preserved = run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"])["scan"]
+    assert any("Independent scan recovery failed:" in warning for warning in preserved["warnings"])
     for _ in range(2):
         recovered = run_workbench(state, "recover-scan-results", "--scan-id", parent["scanId"])[
             "scan"
@@ -1441,7 +1440,7 @@ def test_parent_recovery_refreshes_repaired_empty_child_note(
         assert not any(
             "Independent scan recovery failed:" in warning for warning in recovered["warnings"]
         )
-        deferred = json.loads((parent_dir / "coverage.json").read_text())["deferred"]
+        deferred = read_review_state(state, parent_dir)["deferred"]
         note = next(row for row in deferred if row["id"] == f"unmerged-{child['scanId']}")
         assert "Saved work:" in note["reason"]
         assert "Recovery failed:" not in note["reason"]
@@ -1491,7 +1490,7 @@ def test_stopped_recovery_retains_findings_with_ambiguous_task_surface_metadata(
     stopped = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert stopped["findingCount"] == 1
     assert stopped["resultsRecoveryNeeded"] is False
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert valid_work in coverage["deferred"]
     assert any(row["reason"] == "Distinct saved review." for row in coverage["deferred"])
     assert checkpoint.read_bytes() == original
@@ -1573,7 +1572,7 @@ def test_stopped_scan_recovers_unhashable_terminal_surface_id(
     stopped = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert stopped["progress"]["status"] == ("canceled" if action == "cancel-scan" else "failed")
     assert stopped["findingCount"] == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     if isinstance(surface_id, str):
         assert surface in coverage["surfaces"]
     else:

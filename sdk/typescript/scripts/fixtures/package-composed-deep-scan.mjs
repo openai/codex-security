@@ -62,17 +62,15 @@ async function writeCompletedScan(env) {
     displayName: env.CODEX_SECURITY_TARGET_DISPLAY_NAME,
     snapshotDigest: env.CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST,
   };
-  for (const name of ["findings.json", "coverage.json"]) {
-    const path = join(directory, name);
-    const document = JSON.parse(await readFile(path, "utf8"));
-    document.scanId = manifest.scan.id;
-    for (const finding of document.findings ?? []) {
-      delete finding.findingId;
-      delete finding.occurrenceId;
-      delete finding.fingerprints;
-    }
-    await writeFile(path, `${JSON.stringify(document)}\n`);
+  const findingsPath = join(directory, manifest.scan.findingsRef);
+  const findings = JSON.parse(await readFile(findingsPath, "utf8"));
+  findings.scanId = manifest.scan.id;
+  for (const finding of findings.findings) {
+    delete finding.findingId;
+    delete finding.occurrenceId;
+    delete finding.fingerprints;
   }
+  await writeFile(findingsPath, `${JSON.stringify(findings)}\n`);
   await writeFile(
     join(directory, "scan-manifest.json"),
     `${JSON.stringify(manifest)}\n`,
@@ -218,7 +216,7 @@ try {
     signal: undefined,
   });
   assert.equal(result.manifest.scan.status, "completed");
-  assert.equal(result.coverage.mode, "deep_repository");
+  assert.equal(result.mode, "deep_repository");
   assert.ok(result.findings.findings.length > 0);
   assert.equal(
     launches.length,

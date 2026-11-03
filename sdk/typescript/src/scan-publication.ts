@@ -293,13 +293,13 @@ export async function publishScan(
                 findings: JSON.parse(
                   contents.get("findings.json")!.toString("utf8"),
                 ),
-                coverage:
-                  manifest.scan?.reviewState ??
-                  (contents.has("coverage.json")
-                    ? JSON.parse(
+                ...(contents.has("coverage.json")
+                  ? {
+                      coverage: JSON.parse(
                         contents.get("coverage.json")!.toString("utf8"),
-                      )
-                    : { surfaces: [], explicitExclusions: [], deferred: [] }),
+                      ),
+                    }
+                  : {}),
               },
             );
         }

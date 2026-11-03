@@ -21,9 +21,8 @@ const { CodexSecurity } =
 
 const threadId = "synthetic-eval-thread";
 
-async function readCheckpoint(scanDir: string) {
-  const { checkpoint } = await readJson(scanDir, "checkpoint-head.json");
-  return readJson(scanDir, "checkpoints", checkpoint);
+async function readCommittedDraft(scanDir: string) {
+  return readJson(scanDir, "artifacts", "scan-draft.json");
 }
 
 for (const deferLast of [false, true]) {
@@ -143,10 +142,15 @@ for (const deferLast of [false, true]) {
             _meta: { "openai/threadId": threadId },
           });
           assert.notEqual(result.isError, true, JSON.stringify(result.content));
-          const checkpoint = await readCheckpoint(env.CODEX_SECURITY_SCAN_DIR!);
-          assert.equal(checkpoint.complete !== false, complete);
-          assertAcceptedFindings(checkpoint.findings);
-          assert.deepEqual(checkpoint.reviewState.deferred, deferred);
+          const committed = await readCommittedDraft(
+            env.CODEX_SECURITY_SCAN_DIR!,
+          );
+          assert.equal(committed.manifest.scan.complete !== false, complete);
+          assertAcceptedFindings(committed.findings.findings);
+          assert.deepEqual(
+            committed.manifest.scan.reviewState.deferred,
+            deferred,
+          );
         }
       } finally {
         await client.close();
@@ -243,8 +247,8 @@ for (const deferLast of [false, true]) {
     assert.equal(scan.id, report.scanId);
     assert.equal(scan.status, "completed");
     assert.ok(scan.sealedAt);
-    const terminal = await readCheckpoint(scanDir);
-    assert.notEqual(terminal.complete, false);
-    assert.deepEqual(terminal.reviewState.deferred, deferred);
+    const terminal = await readCommittedDraft(scanDir);
+    assert.notEqual(terminal.manifest.scan.complete, false);
+    assert.deepEqual(terminal.manifest.scan.reviewState.deferred, deferred);
   });
 }

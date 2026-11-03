@@ -76,10 +76,19 @@ class PublicationScan(SimpleNamespace):
 
 @pytest.fixture
 def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
+    return _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, historical=False)
+
+
+@pytest.fixture
+def historical_publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
+    return _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, historical=True)
+
+
+def _publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch, *, historical):
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
 
-    def create(*, mode="deep", scope=".", paths=None, historical=False):
+    def create(*, mode="deep", scope=".", paths=None):
         target = tmp_path / "target"
         target.mkdir()
         (target / "subdir").mkdir()

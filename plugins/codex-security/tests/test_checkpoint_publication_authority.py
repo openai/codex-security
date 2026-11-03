@@ -8,7 +8,6 @@ import sqlite3
 import subprocess
 import sys
 from argparse import Namespace
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -24,12 +23,7 @@ from workbench_test_support import (
     write_result_draft,
 )
 
-base_publication_scan = test_deep_scan_successful_publication.publication_scan
-
-
-@pytest.fixture
-def publication_scan(base_publication_scan):
-    return partial(base_publication_scan, historical=True)
+publication_scan = test_deep_scan_successful_publication.historical_publication_scan
 
 
 def captured_head(scan_dir, directory):

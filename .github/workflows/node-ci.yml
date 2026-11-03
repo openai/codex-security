@@ -358,16 +358,14 @@ jobs:
             .github/actions/setup-tools
       - *set-up-typescript-tools
       - *install-dependencies
-      - name: Build and test the standalone host runtime
-        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
-      - name: Test native executable discovery
-        run: node --test plugins/codex-security/mcp-app/tests/test_native_executable.mjs
       - name: Enable user namespaces for Codex sandbox tests
         if: runner.os == 'Linux'
         # Codex's sandbox needs user namespaces on the ephemeral Ubuntu runner.
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Test native scans and permissions
-        run: node --test plugins/codex-security/mcp-app/tests/test_native_scan.mjs plugins/codex-security/mcp-app/tests/test_native_permissions.mjs
+      - name: Build and test the standalone host runtime
+        run: node --experimental-strip-types --test plugins/codex-security/mcp-app/scripts/test_host_build.mts
+      - name: Test native executable discovery
+        run: node --test plugins/codex-security/mcp-app/tests/test_native_executable.mjs
 
   plugin-source:
     if: needs.classify-changes.outputs.plugin-tests-required == 'true'
@@ -381,10 +379,10 @@ jobs:
     steps:
       - *checkout-repository
       - name: Set up TypeScript tools
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-latest'
         uses: ./.github/actions/setup-tools
         with:
-          compile: true
+          compile: ${{ matrix.python == '3.12' }}
           cache-dependency-path: |
             sdk/typescript/pnpm-lock.yaml
             plugins/codex-security/mcp-app/pnpm-lock.yaml

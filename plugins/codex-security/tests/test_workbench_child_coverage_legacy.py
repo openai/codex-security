@@ -10,6 +10,8 @@ import pytest
 from test_workbench_recovery_edges import select_checkpoint
 from workbench_test_support import (
     checkpoint,
+    published_artifacts,
+    read_review_state,
     register,
     run_workbench,
     saved_draft,
@@ -68,7 +70,7 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
             ),
         )
     # The old writer coalesced identical anonymous rows and saved no row owner.
-    assert json.loads((parent_dir / "coverage.json").read_text())["openQuestions"] == [question]
+    assert read_review_state(state, parent_dir)["openQuestions"] == [question]
     child, directory, draft = children[0]
     draft["coverage"]["openQuestions"] = []
     latest = write_checkpoint(directory / "checkpoints", draft)
@@ -87,8 +89,8 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
         ]
         assert recovered["resultsRecoveryNeeded"] is False
         assert recovered["warnings"] == []
-        coverage = (parent_dir / "coverage.json").read_bytes()
-        questions = json.loads(coverage)["openQuestions"]
+        artifacts = published_artifacts(parent_dir)
+        questions = read_review_state(state, parent_dir)["openQuestions"]
         # A matching historical child source cannot establish exclusive ownership.
         assert question in questions
         owned = [row for row in questions if "id" in row]
@@ -96,7 +98,7 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
         assert owned[0]["id"].startswith(f"{children[1][0]['scanId']}/")
         assert {key: value for key, value in owned[0].items() if key != "id"} == question
         if previous is not None:
-            assert coverage == previous
-        previous = coverage
+            assert artifacts == previous
+        previous = artifacts
         for path, contents in unchanged.items():
             assert path.read_bytes() == contents
