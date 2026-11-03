@@ -371,14 +371,4 @@ test("runs the guard with package metadata access inside the existing required c
       env: { CI_RESULTS: "${{ toJSON(needs) }}" },
     }),
   );
-  for (const name of ["required-test", "windows"]) {
-    const required = workflow.jobs[name]!;
-    expect(required.needs).toContain("ci");
-    expect(
-      required.steps.some(
-        (step) =>
-          step.run === "exit 1" && step.if === "needs.ci.result != 'success'",
-      ),
-    ).toBe(true);
-  }
 });

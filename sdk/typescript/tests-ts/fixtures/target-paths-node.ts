@@ -337,7 +337,10 @@ try {
     publication.stderr.text(),
   );
   assert.deepEqual(published, [await realpath(repository)]);
-  const sourceOptions = dependencies({ currentDirectory: root });
+  const sourceOptions = dependencies({
+    currentDirectory: root,
+    environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+  });
   sourceOptions.readLocalExternalFindings = async ({
     repository: selected,
   }) => {
@@ -494,6 +497,7 @@ try {
         currentDirectory: root,
         environment: {
           ...process.env,
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           CODEX_SECURITY_STATE_DIR: join(owner, "state"),
         },
       }),
@@ -581,6 +585,7 @@ try {
       {
         environment: {
           ...process.env,
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           CODEX_SECURITY_STATE_DIR: join(repository, "state"),
         },
       },

@@ -27,13 +27,21 @@ async function repositoryFixture({
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "patch-results-"));
   const git = (...args: string[]) =>
-    runRepositoryCommand("git", args, directory);
+    runRepositoryCommand(
+      "git",
+      [
+        "-c",
+        "user.name=Synthetic User",
+        "-c",
+        "user.email=synthetic@example.test",
+        ...args,
+      ],
+      directory,
+    );
   try {
     await writeFile(join(directory, "app.ts"), "original\n");
     if (initializeGit) {
       await git("init", "--initial-branch=main");
-      await git("config", "user.name", "Synthetic User");
-      await git("config", "user.email", "synthetic@example.test");
       await git("add", ".");
       if (initialCommit) await git("commit", "-m", "Synthetic fixture");
     }

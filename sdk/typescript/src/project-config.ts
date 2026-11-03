@@ -10,7 +10,6 @@ import {
 } from "node:path";
 import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
-import { parseDocument } from "yaml";
 import {
   DEFAULT_CODEX_CONFIG,
   mergeCodexOverrides,
@@ -148,8 +147,9 @@ export async function readProjectConfig(
   let value: unknown;
   try {
     if (extension === ".json") {
-      value = JSON.parse(text);
+      value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     } else {
+      const { parseDocument } = await import("yaml");
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
       // Keep YAML's expansion guard while allowing repeated native profiles.

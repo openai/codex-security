@@ -29,6 +29,7 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
+const retryMissingResult = process.env.PACKAGE_DEEP_RETRY !== "false";
 let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
@@ -76,7 +77,9 @@ try {
 
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
-      console.log("Validated installed SDK direct Deep Scan and worker retry."),
+      console.log(
+        `Validated installed SDK direct Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
+      ),
     ),
     runDetachedPlugin(detachedPlugin, executable).then(() =>
       console.log("Validated detached plugin restart and finalization."),
@@ -362,7 +365,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId);
 }
 
 async function workbench(f, args) {
@@ -380,10 +383,12 @@ async function workbench(f, args) {
 
 async function runInstalledSdk(pluginRoot, executable) {
   const f = await fixture("installed", pluginRoot, executable);
-  f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
-    f.directory,
-    "missing-result-completion",
-  );
+  if (retryMissingResult) {
+    f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
+      f.directory,
+      "missing-result-completion",
+    );
+  }
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
   );
@@ -452,7 +457,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 5);
+  await assertExecutions(f, scanId);
 }
 
 async function assertDraft(path) {
@@ -477,7 +482,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId, preflights = 3) {
+async function assertExecutions(f, scanId) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -494,7 +499,7 @@ async function assertExecutions(f, scanId, preflights = 3) {
   assert.equal(reducers.length, 1);
   assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    preflights,
+    4 + incomplete,
   );
   for (const execution of [...workers, ...reducers]) {
     assert.equal(execution.scanId, scanId);

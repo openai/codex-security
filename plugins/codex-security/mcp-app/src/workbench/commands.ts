@@ -27,6 +27,14 @@ export async function workbenchCommand(
   input: string,
   scanId?: string,
 ): Promise<unknown> {
+  if (
+    (command === "store-external-findings" ||
+      command === "list-external-findings") &&
+    process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS !== "1"
+  )
+    throw new Error(
+      "External findings imports are disabled. Set CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1 to enable them.",
+    );
   const request = parseJson(input) as {
     stateDirectory: string;
     payload: unknown;

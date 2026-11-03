@@ -17,7 +17,7 @@ export interface RankRow {
   preview?: string;
 }
 const blank = (value: string) => value.trim().length === 0;
-function compare(left: string, right: string): number {
+export function compare(left: string, right: string): number {
   const a = Array.from(left, (character) => character.codePointAt(0)!);
   const b = Array.from(right, (character) => character.codePointAt(0)!);
   for (let index = 0; index < Math.min(a.length, b.length); index++) {

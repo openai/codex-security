@@ -11,7 +11,7 @@ TIMESTAMP = "2026-01-01T00:00:00Z"
 
 
 def finding(index: int) -> dict:
-    source = Path(__file__).resolve().parents[1] / "examples/completed-scan/findings.json"
+    source = Path(__file__).resolve().parents[1] / "examples/legacy-completed-scan/findings.json"
     result = json.loads(source.read_text())["findings"][0]
     result["findingId"] = f"finding-{index}"
     result["fingerprints"]["primary"] = f"fingerprint-{index}"

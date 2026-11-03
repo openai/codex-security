@@ -7,10 +7,7 @@ import {
   type HostedRemediationInput,
   type RemediationExecutor,
 } from "../src/index.js";
-import {
-  parseFindingPatch,
-  parseFindingVerifications,
-} from "../src/remediation.js";
+import { parseFindingPatch } from "../src/remediation.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
@@ -20,7 +17,6 @@ import { parseJsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import {
   exerciseRemediationProtocol,
-  passedChecks,
   remediationInput,
   remediationReceipt as receipt,
   verificationResult,
@@ -64,7 +60,6 @@ test.each([
     };
     const evidence =
       "guard.ts rejects unauthorized requests before dispatch and preserves authorized callers. Runtime checks were not performed.";
-    const staticChecks = [{ ...passedChecks[1]!, evidence }];
     const run = mock<RemediationExecutor["run"]>(async (request, options) => {
       expect(request).toMatchObject({
         operation,
@@ -84,6 +79,8 @@ test.each([
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
+      if (operation === "verify")
+        expect(request.prompt).not.toContain('"checks"');
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
       expect(request.prompt).toContain("Verification mode: static");
@@ -108,9 +105,7 @@ test.each([
                 ],
               }
             : {
-                results: [
-                  { ...verificationResult, evidence, checks: staticChecks },
-                ],
+                results: [{ ...verificationResult, evidence }],
               },
         ),
       });
@@ -137,10 +132,6 @@ test.each([
     expect(result.patch?.verification ?? result.verification?.evidence).toBe(
       staticVerification ? evidence : verificationResult.evidence,
     );
-    if (operation === "verify")
-      expect(result.verification?.checks).toEqual(
-        staticVerification ? staticChecks : passedChecks,
-      );
     if (!staticVerification) {
       await runHostedRemediation(
         { ...input, verificationMode: "standard" },
@@ -152,59 +143,65 @@ test.each([
 );
 
 test.each([
-  ["still_vulnerable", "failed"],
-  ["inconclusive", "not_run"],
+  {
+    status: "still_vulnerable",
+    evidence: "The alternate route still reaches the unguarded handler.",
+  },
+  {
+    status: "inconclusive",
+    evidence:
+      "The source does not establish whether authorized callers still work.",
+  },
+  { checks: [{ status: "not_run" }] },
 ] as const)(
-  "verification preserves %s with a %s check",
-  (status, checkStatus) => {
-    const verification = {
-      ...verificationResult,
-      status,
-      checks: [{ ...passedChecks[0]!, status: checkStatus }],
+  "hosted static verification preserves the CLI verdict for %p",
+  async (fields) => {
+    const input = {
+      ...(await fixture("verify")),
+      verificationMode: "static" as const,
     };
-    expect(
-      parseFindingVerifications(
-        JSON.stringify({ results: [verification] }),
-        [verification.id],
-        {
-          requireChecks: true,
-        },
-      ),
-    ).toEqual([verification]);
+    const verdict = { ...verificationResult, ...fields };
+    const result = await runHostedRemediation(input, {
+      executor: {
+        run: async (request) =>
+          receipt(request, {
+            finalResponse: JSON.stringify({ results: [verdict] }),
+          }),
+      },
+    });
+    expect(result.status).toBe("completed");
+    const { id, status, evidence } = verdict;
+    expect(result.verification).toEqual({ id, status, evidence });
   },
 );
-
-test("local verification ignores extra hosted checks", () => {
-  const { checks: _, ...verification } = verificationResult;
-  expect(
-    parseFindingVerifications(
-      JSON.stringify({
-        results: [{ ...verification, checks: [{ result: "legacy summary" }] }],
-      }),
-      [verification.id],
-    ),
-  ).toEqual([verification]);
-});
 
 test.each([
-  ["missing", undefined],
-  ["empty", []],
-  ["missing evidence", [{ ...passedChecks[0], evidence: " " }]],
-  ["missing name", [{ ...passedChecks[0], name: " " }]],
-  ["failed", [{ ...passedChecks[0], status: "failed" }]],
-  ["not run", [{ ...passedChecks[0], status: "not_run" }]],
-])(
-  "hosted verification rejects fixed results with %s checks",
-  (_name, checks) => {
-    expect(() =>
-      parseFindingVerifications(
-        JSON.stringify({ results: [{ ...verificationResult, checks }] }),
-        [verificationResult.id],
-        { requireChecks: true },
-      ),
-    ).toThrow();
+  {
+    name: "Replay original request",
+    status: "failed",
+    evidence: "The unauthorized request returned 200.",
+    command: "bun test tests/authorization.test.ts",
   },
-);
+  {
+    name: "Required legitimate-user control",
+    status: "not_run",
+    evidence: "The test runner is unavailable.",
+  },
+])("hosted verification rejects fixed with a $status check", async (check) => {
+  const finalResponse = JSON.stringify({
+    results: [{ ...verificationResult, checks: [check] }],
+  });
+  const result = await runHostedRemediation(await fixture("verify"), {
+    executor: { run: async (request) => receipt(request, { finalResponse }) },
+  });
+  expect(result.status).toBe("failed");
+  expect(result.error?.code).toBe("INVALID_RESULT");
+  expect(result.verification).toBeUndefined();
+  expect(result.execution).toMatchObject({
+    sessionId: "host-session",
+    finalResponse,
+  });
+});
 
 test.each([
   { status: "verified", verification: undefined },

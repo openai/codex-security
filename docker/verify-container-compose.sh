@@ -5,20 +5,20 @@ set -euo pipefail
 # Resolve the environment on the host; these checks need no running container.
 for compose_file in compose.yaml compose.runner.yaml; do
   endpoint="https://embeddings.example.com/custom/v1/embeddings?api-version=synthetic"
-  CODEX_SECURITY_EMBEDDINGS_URL="$endpoint" \
+  CODEX_SECURITY_EMBEDDINGS_URL="$endpoint" CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1 \
     docker compose --env-file /dev/null -f "$compose_file" config --format json |
     jq --exit-status --arg endpoint "$endpoint" \
-      '.services["codex-security"].environment.CODEX_SECURITY_EMBEDDINGS_URL == $endpoint' > /dev/null
+      '.services["codex-security"].environment | .CODEX_SECURITY_EMBEDDINGS_URL == $endpoint and .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS == "1"' > /dev/null
 
-  env -u CODEX_SECURITY_EMBEDDINGS_URL \
+  env -u CODEX_SECURITY_EMBEDDINGS_URL -u CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS \
     docker compose --env-file /dev/null -f "$compose_file" config --format json |
     jq --exit-status \
-      '.services["codex-security"].environment.CODEX_SECURITY_EMBEDDINGS_URL == null' > /dev/null
+      '.services["codex-security"].environment | .CODEX_SECURITY_EMBEDDINGS_URL == null and .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS == null' > /dev/null
 
-  CODEX_SECURITY_EMBEDDINGS_URL="" \
+  CODEX_SECURITY_EMBEDDINGS_URL="" CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS="" \
     docker compose --env-file /dev/null -f "$compose_file" config --format json |
     jq --exit-status \
-      '.services["codex-security"].environment.CODEX_SECURITY_EMBEDDINGS_URL == ""' > /dev/null
+      '.services["codex-security"].environment | .CODEX_SECURITY_EMBEDDINGS_URL == "" and .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS == ""' > /dev/null
 done
 
 mkdir -p results state
