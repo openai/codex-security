@@ -46,6 +46,7 @@ export type {
   ProjectScope,
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
+export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {

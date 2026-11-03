@@ -105,6 +105,7 @@
 - show Git errors for unreadable tracked files ([#2058](https://github.com/openai/codex-security/pull/2058))
 - prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
 - share the host adapter for records commands ([#2259](https://github.com/openai/codex-security/pull/2259))
+- preserve the severity rubric across standalone scan attempts ([#2258](https://github.com/openai/codex-security/pull/2258))
 
 <!-- release-section: highlights:end -->
 

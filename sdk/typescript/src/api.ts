@@ -110,6 +110,13 @@ import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
 import {
+  getDefaultSeverityRubric,
+  readSeverityRubricFile,
+  severityRubricInstructions,
+  severityRubricSchema,
+  type SeverityRubricSnapshot,
+} from "./severity-rubric.js";
+import {
   deepScanOptions,
   resolveDeepScanConfig,
   writeDeepScanConfig,
@@ -337,6 +344,10 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** Explicit policy for the initial scan and its workers. */
+  severityRubric?: SeverityRubricSnapshot;
+  /** Markdown policy file to capture when starting a new scan. */
+  rubricPath?: string;
   /** @internal Reuse captured knowledge inputs for related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
@@ -642,6 +653,7 @@ interface LocalScanInputs extends Omit<
   stateDirectory: string;
   deepScanConfiguration?: ResolvedDeepScanConfig;
   prompts: ScanPromptSettings;
+  retryRecipe?: JsonObject;
 }
 
 export interface CodexSecurityMetadata {
@@ -750,10 +762,14 @@ export class CodexSecurity {
       throw new CodexSecurityError(
         "Use runHostedScan with an executor for hosted execution.",
       );
+    options = {
+      ...options,
+      severityRubric: options.severityRubric && { ...options.severityRubric },
+    };
     return await this.#trackOperation(() =>
       options.workflowId === undefined
-        ? this.#run(repository, { ...options })
-        : this.#runWorkflow(repository, { ...options }, options.workflowId),
+        ? this.#run(repository, options)
+        : this.#runWorkflow(repository, options, options.workflowId),
     );
   }
 
@@ -794,6 +810,8 @@ export class CodexSecurity {
               ? undefined
               : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
+          severityRubric: undefined,
+          rubricPath: undefined,
           signal: undefined,
           auth: undefined,
           archiveExisting: undefined,
@@ -814,7 +832,7 @@ export class CodexSecurity {
       let metadata = state.stages.scan.result as ScanMetadata | undefined;
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
-        const scan = await workflow.registeredScan(state.scanId);
+        const { scan, recipe } = await workflow.registeredScan(state.scanId);
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
@@ -823,6 +841,7 @@ export class CodexSecurity {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
           };
+        else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
       if (completed) {
         const contract = await loadContract(state.scanDir, {
@@ -2592,6 +2611,28 @@ export class CodexSecurity {
       }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
+      let severityRubric: SeverityRubricSnapshot | undefined;
+      if (
+        this.#dependencies.hostedScan === undefined &&
+        options.resumeScanId === undefined
+      ) {
+        if (inputs.retryRecipe !== undefined)
+          severityRubric = severityRubricSchema
+            .optional()
+            .parse(inputs.retryRecipe["severityRubric"]);
+        else if (options.severityRubric !== undefined)
+          severityRubric = severityRubricSchema.parse(options.severityRubric);
+        else if (options.rubricPath !== undefined)
+          severityRubric = await readSeverityRubricFile(
+            resolve(expandHome(options.rubricPath)),
+            protectedRoot,
+          );
+        else
+          severityRubric = await getDefaultSeverityRubric({
+            environment: this.#dependencies.environment,
+            signal,
+          });
+      }
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
@@ -2615,6 +2656,8 @@ export class CodexSecurity {
         };
       }
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
+      if (severityRubric !== undefined)
+        recipe["severityRubric"] = severityRubric;
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,
         scanKnowledge,
@@ -2739,6 +2782,9 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
+        severityRubric = severityRubricSchema
+          .optional()
+          .parse(savedRecipe["severityRubric"]);
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -2913,6 +2959,7 @@ export class CodexSecurity {
         discoveryPrompt,
         modelProvider,
         options.ownerSuggestions,
+        severityRubric,
       );
       checkOpen();
       const feedback = await workbench(
@@ -3163,6 +3210,7 @@ export class CodexSecurity {
               scanId,
               pluginRoot: runtime.plugin.installedRoot,
               prompt: options.validationPrompt,
+              severityRubric,
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
@@ -5432,6 +5480,7 @@ function scanPrompt(
   discoveryPrompt?: string,
   modelProvider?: unknown,
   ownerSuggestions = false,
+  severityRubric?: SeverityRubricSnapshot,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -5514,6 +5563,7 @@ function scanPrompt(
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]),
+    ...(severityRubric ? [severityRubricInstructions(severityRubric)] : []),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
