@@ -90,6 +90,10 @@ import {
   inspectorPackageFinding,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
+import {
+  continuumDetail,
+  continuumRepository,
+} from "./support/continuum-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
 import {
@@ -1490,6 +1494,52 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   }
   return { f, input, project, map, prepare, loseResponse };
 }
+
+test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
+  const detail = continuumDetail();
+  const f = await fixture(detail, continuumRepository);
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]).toMatchObject({
+    source: { provider: "continuum", source_key: selected.sourceKey },
+    items: [
+      {
+        source_finding_id: detail.findingArn,
+        evidence: { source_data: { finding: detail } },
+      },
+    ],
+  });
+  await expect(
+    prepareNormalizedExternalPublication(
+      first.preview,
+      { ...selected, provider: "wiz" },
+      f.deps,
+    ),
+  ).rejects.toThrow(/continuum provider/i);
+  const relabeled = structuredClone(first.preview);
+  relabeled.findings[0]!.source_finding_id = "another-id";
+  await expect(
+    prepareNormalizedExternalPublication(relabeled, selected, f.deps),
+  ).rejects.toThrow(/source finding ID|occurrence|ARN/i);
+
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(0);
+  f.state.repositoryUrl = continuumRepository;
+
+  f.state.loseResponse = true;
+  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+});
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
   const { f, input, prepare } = await inspectorPublicationFixture();

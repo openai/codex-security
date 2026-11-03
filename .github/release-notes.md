@@ -108,6 +108,7 @@
 - preserve the severity rubric across standalone scan attempts ([#2258](https://github.com/openai/codex-security/pull/2258))
 - share bundled severity grading with the SDK ([#2260](https://github.com/openai/codex-security/pull/2260))
 - report the exact rubric used for severity classification ([#2262](https://github.com/openai/codex-security/pull/2262))
+- support AWS Continuum code findings ([#2264](https://github.com/openai/codex-security/pull/2264))
 
 <!-- release-section: highlights:end -->
 
