@@ -1,7 +1,15 @@
 import {
-  normalizeSemgrepPlatformSelection,
-  semgrepSelectionFormat,
+  normalizeSemgrepPlatformFindings,
+  isSemgrepPlatformFormat,
+  semgrepPlatformLegacyFormat,
+  semgrepPlatformFormat,
 } from "./semgrep-platform-findings.js";
+import { isRecord } from "./record.js";
+import {
+  guardianSelectionFormat,
+  normalizeGuardianSelection,
+} from "./semgrep-guardian-findings.js";
+import { parseHostedScannerJson } from "./hosted-scanner-http.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
@@ -41,7 +49,7 @@ export interface SemgrepImportOptions {
   sourceRepositoryUrl: string;
 }
 
-function sourceRepository(options: SemgrepImportOptions): string {
+function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
@@ -156,14 +164,17 @@ function sarifIdentity(
 
 export function normalizeSemgrepFindings(
   input: unknown,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
-  if (document["format"] === semgrepSelectionFormat) {
+  if (document["format"] === guardianSelectionFormat) {
     if (target !== "local")
-      throw new Error("Semgrep Platform selections require a local import.");
-    return normalizeSemgrepPlatformSelection(
+      throw new Error("Import Guardian selections into the local workbench.");
+    return normalizeGuardianSelection(document, options.sourceRepositoryUrl);
+  }
+  if (isSemgrepPlatformFormat(document["format"])) {
+    return normalizeSemgrepPlatformFindings(
       document,
       options?.sourceRepositoryUrl,
       target,
@@ -171,7 +182,11 @@ export function normalizeSemgrepFindings(
     );
   }
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
-    return normalizeSemgrepSarif(document, options, target);
+    return normalizeSemgrepSarif(
+      document,
+      { ...options, sourceRepositoryUrl: options?.sourceRepositoryUrl ?? "" },
+      target,
+    );
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
   if (array(document["errors"] ?? [], "Semgrep errors").length)
@@ -346,8 +361,25 @@ export function normalizeSemgrepSarif(
 
 export async function readSemgrepFindings(
   path: string,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  return normalizeSemgrepFindings(await readScannerJson(path), options, target);
+  const report = await readScannerJson(path, (json) => {
+    // Pick a parser before allocating the findings array. Verify the root:
+    // the member can be nested in a native report or escaped in a Platform one.
+    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v[12]"/u.test(
+      json,
+    )
+      ? parseHostedScannerJson
+      : JSON.parse;
+    const parsed: unknown = parser(json);
+    const requiredParser =
+      isRecord(parsed) &&
+      (parsed["format"] === semgrepPlatformLegacyFormat ||
+        parsed["format"] === semgrepPlatformFormat)
+        ? parseHostedScannerJson
+        : JSON.parse;
+    return parser === requiredParser ? parsed : requiredParser(json);
+  });
+  return normalizeSemgrepFindings(report, options, target);
 }

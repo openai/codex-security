@@ -1340,7 +1340,7 @@ Each guide shows how to preview its input for a local repository. Follow the [sh
 to confirm the import and read the resulting records.
 
 Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `publish findings`,
-`findings imported`, `import sonar`, and `import github-advisories`. Only `1`
+`findings imported`, `import sonar`, `import semgrep`, and `import github-advisories`. Only `1`
 enables these commands in help and schemas. The SDK's corresponding operations
 require the flag in their effective environment. Pure normalizers, file readers,
 and the existing `import github` alert collector remain available independently.
@@ -1359,7 +1359,12 @@ source key and finding ID reports created, updated, or unchanged records.
 Records omitted from the new selection stay stored. An import with exclusions
 exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
 
-Use `--provider semgrep` for a [saved Semgrep Platform selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Use `publish findings FILE --provider semgrep --to local` for a
+[selected Guardian MCP capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings)
+or a [saved Semgrep Web API selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Guardian uses its existing sign-in. Its imported IDs are separate from Web API IDs.
+To [collect a full Semgrep project and branch](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch), use
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`.
 
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).

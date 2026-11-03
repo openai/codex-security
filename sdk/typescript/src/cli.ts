@@ -232,6 +232,12 @@ import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
+import { semgrepPlatformFormat } from "./semgrep-platform-findings.js";
+import {
+  collectSemgrepPlatformFindings,
+  SEMGREP_PLATFORM_PRODUCTS,
+} from "./semgrep-platform-collector.js";
 import {
   GITHUB_ALERT_STATES,
   importGitHubCodeScanningAlerts,
@@ -327,6 +333,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -1340,6 +1347,7 @@ interface CliDependencies {
   linearClient?: LinearClientFactory;
   importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   importGitHubAdvisories?: typeof importGitHubAdvisories;
+  hostedScannerFetch?: HostedScannerHttpOptions["fetch"];
   importScan?: typeof importScan;
   readSavedFindings?: typeof readSavedFindings;
   runWorkbench(
@@ -2120,6 +2128,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
+  let escapeSemgrepOutput = false;
   let batchedVerification = false;
   let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
@@ -3976,7 +3985,7 @@ export async function main(
   });
   const imports = Cli.create("import", {
     description: importsEnabled
-      ? "Import Sonar security issues or read GitHub security findings."
+      ? "Import Sonar security issues or read hosted Semgrep and GitHub findings."
       : "Read GitHub code scanning alerts.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -4058,7 +4067,48 @@ export async function main(
       }
     },
   });
-  function registerGitHubAdvisories() {
+  function registerOptInCollectors() {
+    async function collect<T>(
+      provider: "GitHub advisory" | "Semgrep",
+      fail: (error: {
+        code: string;
+        message: string;
+        exitCode: number;
+      }) => never,
+      run: (signal: AbortSignal) => Promise<T>,
+    ) {
+      const controller = new AbortController();
+      const removeSignals = listenForAbort(dependencies, controller);
+      try {
+        if (!importsEnabled)
+          throw new CodexSecurityError(externalImportsDisabledMessage);
+        return await run(controller.signal);
+      } catch (error) {
+        const interrupted = interruptedExitCode(controller.signal);
+        exitCode = interrupted ?? 2;
+        const message = diagnosticValue(error);
+        const diagnostic = interrupted
+          ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
+          : message;
+        errorOutput.write(
+          `codex-security: ${provider === "Semgrep" ? escapeTerminalText(diagnostic) : diagnostic}\n`,
+        );
+        if (argv.includes("--full-output")) {
+          structuredError = true;
+          return fail({
+            code:
+              provider === "GitHub advisory"
+                ? "GITHUB_IMPORT_FAILED"
+                : "HOSTED_IMPORT_FAILED",
+            message: provider === "Semgrep" ? errorMessage(error) : message,
+            exitCode,
+          });
+        }
+        return undefined;
+      } finally {
+        removeSignals();
+      }
+    }
     imports.command("github-advisories", {
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
@@ -4110,50 +4160,93 @@ export async function main(
           }),
         )
         .optional(),
-      async run({ args, options, error: incurError }) {
-        const controller = new AbortController();
-        const removeSignals = listenForAbort(dependencies, controller);
-        try {
-          if (!importsEnabled)
-            throw new CodexSecurityError(externalImportsDisabledMessage);
-          return await (
-            dependencies.importGitHubAdvisories ?? importGitHubAdvisories
-          )(
+      run: ({ args, options, error }) =>
+        collect("GitHub advisory", error, (signal) =>
+          (dependencies.importGitHubAdvisories ?? importGitHubAdvisories)(
             {
               repository: args.repository,
               advisoryIds: options.githubAdvisory,
               source: options.githubAdvisorySource,
               state: options.githubState,
-              signal: controller.signal,
+              signal,
             },
             {
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory(),
             },
-          );
-        } catch (error) {
-          const signal = controller.signal.reason;
-          if (signal === "SIGINT" || signal === "SIGTERM") {
-            exitCode = signal === "SIGINT" ? 130 : 143;
-            errorOutput.write(
-              `codex-security: GitHub advisory import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
-            );
-          } else {
-            exitCode = 2;
-            errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
-          }
-          if (argv.includes("--full-output")) {
-            structuredError = true;
-            return incurError({
-              code: "GITHUB_IMPORT_FAILED",
-              message: diagnosticValue(error),
-              exitCode,
-            });
-          }
-          return undefined;
-        } finally {
-          removeSignals();
-        }
+          ),
+        ),
+    });
+    const http = {
+      environment: dependencies.environment,
+      fetch: dependencies.hostedScannerFetch,
+    };
+    const semgrepReport = z
+      .object({
+        format: z.literal(semgrepPlatformFormat),
+        deployment: z.string(),
+        nativeProjectUrl: z.string().optional(),
+        sourceRepositoryUrl: z.string().optional(),
+        project: z.object({
+          id: z.string(),
+          name: z.string(),
+          url: z.string(),
+        }),
+        ref: z.string(),
+        product: z.enum(SEMGREP_PLATFORM_PRODUCTS),
+        repositoryAliases: z.array(z.string()),
+        findingCount: z.number().int().nonnegative(),
+        findings: z.array(
+          z.string().describe("JSON text of a native Semgrep finding."),
+        ),
+      })
+      .optional();
+    imports.command("semgrep", {
+      description:
+        "Read a full Semgrep Platform project and ref through the Web API.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output or a selected Guardian MCP capture with publish findings --to local --provider semgrep.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        project: z
+          .string()
+          .min(1)
+          .describe("Exact Semgrep project name, typically owner/repository."),
+      }),
+      options: z.object({
+        semgrepDeployment: optionValue("--semgrep-deployment").describe(
+          "Semgrep deployment slug.",
+        ),
+        semgrepRef: optionValue("--semgrep-ref").describe(
+          "Exact source ref, for example refs/heads/main.",
+        ),
+        semgrepProduct: z
+          .enum(SEMGREP_PLATFORM_PRODUCTS)
+          .default("sast")
+          .describe("Semgrep Findings API issue type."),
+        sourceRepositoryUrl: optionValue("--source-repository-url")
+          .optional()
+          .describe(
+            "Explicit mapping when the Semgrep project has no SCM URL.",
+          ),
+      }),
+      output: semgrepReport,
+      run: ({ args, options, error, format }) => {
+        escapeSemgrepOutput =
+          format === "md" || (format === "toon" && output.isTTY === true);
+        return collect("Semgrep", error, (signal) =>
+          collectSemgrepPlatformFindings(
+            {
+              project: args.project,
+              deployment: options.semgrepDeployment,
+              ref: options.semgrepRef,
+              product: options.semgrepProduct,
+              sourceRepositoryUrl: options.sourceRepositoryUrl,
+              signal,
+            },
+            http,
+          ),
+        );
       },
     });
   }
@@ -4399,7 +4492,7 @@ export async function main(
     });
   }
   if (importsEnabled) {
-    registerGitHubAdvisories();
+    registerOptInCollectors();
     registerSonarImport();
   }
   const infoOutput = z.object({
@@ -7149,9 +7242,12 @@ export async function main(
       command === "publish" ||
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
+    const optInCollector =
+      command === "import" &&
+      ["github-advisories", "semgrep", "sonar"].includes(subcommand ?? "");
     if (
       command === "import" &&
-      (subcommand === "github" || subcommand === "github-advisories") &&
+      subcommand !== "sonar" &&
       frameworkFlags.rawCollector
     ) {
       // Incur's skill-sync notice turns a saved collector array into an object.
@@ -7161,8 +7257,7 @@ export async function main(
       !importsEnabled &&
       ((command === "publish" && subcommand === "findings") ||
         (command === "findings" && subcommand === "imported") ||
-        (command === "import" &&
-          (subcommand === "github-advisories" || subcommand === "sonar")))
+        optInCollector)
     ) {
       if (
         process.env["COMPLETE"] ||
@@ -7183,7 +7278,7 @@ export async function main(
         cliOptions.sync = false;
         if (command === "publish") registerFindingPublication();
         else if (subcommand === "sonar") registerSonarImport();
-        else registerGitHubAdvisories();
+        else registerOptInCollectors();
         valueOptions = cliValueOptions(commands);
       }
     }
@@ -7435,6 +7530,8 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
+  if (escapeSemgrepOutput)
+    frameworkOutput = escapeTerminalText(frameworkOutput, true);
   const writeUpdateNotice = () => {
     if (notice === undefined || batchedVerification) return;
     try {

@@ -703,9 +703,12 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
+[capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
 Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 Use `selectSemgrepPlatformFindings` to [save a selection for the local CLI](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Use `collectSemgrepPlatformFindings` to [collect one project at an explicit ref](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch) for a single product (default `sast`).
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported
