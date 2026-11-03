@@ -48,6 +48,7 @@ import {
   localFindingRepositories,
   semgrepSarifRepositories,
 } from "./external-findings-read.js";
+import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
@@ -64,6 +65,7 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
+import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -704,6 +706,7 @@ async function requireMatchingRepository(
     ));
   const boundProvider =
     provider === "sonar" ||
+    provider === "continuum" ||
     provider === "inspector" ||
     provider === "blackduck" ||
     provider === "veracode";
@@ -883,6 +886,17 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
+  if (
+    options.provider === "semgrep" &&
+    current.report?.["format"] === guardianSelectionFormat
+  ) {
+    const url = declaredScannerRepositoryUrl(
+      current.report["repositoryUrl"],
+      "Guardian",
+      "local",
+    );
+    sources.set(url, { url });
+  }
   const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
     options.provider,
@@ -942,13 +956,18 @@ export async function prepareLocalImport(
     "local",
     sameRepositories,
   );
-  for (const source of veracodeReportRepositories(
-    options.provider,
-    current.findings,
-    "local",
-    sameRepositories,
-  ).values()) {
-    sources.set(source.url, source);
+  for (const repositories of [
+    veracodeReportRepositories,
+    continuumReportRepositories,
+  ]) {
+    for (const source of repositories(
+      options.provider,
+      current.findings,
+      "local",
+      sameRepositories,
+    ).values()) {
+      sources.set(source.url, source);
+    }
   }
   const strictSources = new Map<string, Provider>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
@@ -1008,6 +1027,17 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
     const { evidence } = finding;
+    if (
+      options.provider === "semgrep" &&
+      evidence.source_data?.["format"] === guardianSelectionFormat
+    ) {
+      const url = declaredScannerRepositoryUrl(
+        evidence.source_data["sourceRepositoryUrl"],
+        "Guardian",
+        "local",
+      );
+      sources.set(url, { url });
+    }
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.
     if (!semgrep && url) sources.set(url, { url });

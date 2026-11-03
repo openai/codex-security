@@ -66,7 +66,7 @@ export function declaredScannerRepositoryUrl(
   return source;
 }
 
-/** A native application or project version maps to one source repository per report. */
+/** Check the repository declared for each retained native scope. */
 export function repositoryScopeValidator(
   scanner: { provider: Provider; label: string; scope: string },
   retainedRepository: (
@@ -96,7 +96,7 @@ export function repositoryScopeValidator(
       const { source_finding_id: id, evidence } = finding;
       const retained = retainedRepository(provider, finding, target);
       const declared = evidence.details?.repository?.url;
-      // A Black Duck BOM binds its entire report. A Veracode application binds its native rows.
+      // A Black Duck BOM binds its entire report. Other scopes bind their native rows.
       if (wholeReport || retained?.scope) {
         if (declared) sources.add(declared);
         if (retained) sources.add(retained.url);

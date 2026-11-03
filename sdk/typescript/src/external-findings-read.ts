@@ -20,6 +20,7 @@ import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
+import { readContinuumFindings } from "./continuum-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
@@ -42,6 +43,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   blackduck: "blackduck",
   veracode: "veracode",
   sonar: "sonar",
+  continuum: "continuum",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -197,12 +199,14 @@ export async function readExternalFindings(
     return { findings: await readGitHubFindings(path, target) };
   if (
     options.provider === "inspector" ||
+    options.provider === "continuum" ||
     options.provider === "blackduck" ||
     options.provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
       inspector: readInspectorFindings,
+      continuum: readContinuumFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
     }[options.provider];
