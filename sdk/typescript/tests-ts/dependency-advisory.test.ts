@@ -1,127 +1,199 @@
-import { Octokit } from "@octokit/core";
 import { expect, mock, test } from "bun:test";
 import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
 
 const cve = "CVE-2000-1234";
-const entry = {
-  cve_id: cve,
-  html_url: "https://github.com/advisories/GHSA-2345-6789-cfgh",
-  withdrawn_at: null,
-  summary: "Example advisory",
-  description: "Provider body omitted from the model input.",
-  vulnerabilities: [
-    {
-      package: { ecosystem: "npm", name: "fixture-package" },
-      vulnerable_version_range: "< 2.0.0",
-      first_patched_version: "2.0.0",
-      vulnerable_functions: ["Parser.read"],
-    },
-  ],
-};
+const alias = "GHSA-2345-6789-cfgh";
+const api = "https://api.osv.dev/v1/vulns/";
+const publicUrl = "https://osv.dev/vulnerability/";
 
-test("looks up the exact public CVE anonymously and returns advisory facts", async () => {
-  const requests: URL[] = [];
-  const github = new Octokit({
-    request: {
-      fetch: async (
-        resource: Parameters<typeof fetch>[0],
-        init?: RequestInit,
-      ) => {
-        const url = new URL(
-          resource instanceof Request ? resource.url : resource,
-        );
-        expect(url.origin + url.pathname).toBe(
-          "https://api.github.com/advisories",
-        );
-        expect(url.searchParams.get("cve_id")).toBe(cve);
-        expect(new Headers(init?.headers).has("authorization")).toBe(false);
-        expect(init?.redirect).toBe("error");
-        requests.push(url);
-        return requests.length === 1
-          ? Response.json([{ ...entry, withdrawn_at: "2001-01-01" }], {
-              headers: {
-                link: '<https://example.invalid/elsewhere?after=next>; rel="next"',
-              },
-            })
-          : Response.json([
-              {
-                ...entry,
-                description:
-                  "## Summary\n\nOnly `Parser.read` uses the affected mode.\n\n## Reproduction\n\nExcluded details.",
-              },
-              { ...entry, cve_id: "CVE-2000-9999" },
-            ]);
-      },
-    },
-  });
-  expect(
-    await lookupDependencyAdvisory(cve.toLowerCase(), undefined, github),
-  ).toEqual({
-    cve,
-    advisories: [
+const affected = [
+  {
+    package: { ecosystem: "npm", name: "fixture-package" },
+    ranges: [
       {
-        url: entry.html_url,
-        summary: entry.summary,
-        overview: "Only `Parser.read` uses the affected mode.",
-        packages: [
-          {
-            ecosystem: "npm",
-            name: "fixture-package",
-            vulnerableRange: "< 2.0.0",
-            fixedVersion: "2.0.0",
-            vulnerableFunctions: ["Parser.read"],
-          },
+        type: "SEMVER",
+        events: [
+          { introduced: "0" },
+          { fixed: "1.2.1" },
+          { introduced: "2.0.0" },
+          { last_affected: "2.1.0" },
         ],
       },
     ],
+    versions: ["1.0.0", "2.0.0"],
+  },
+  {
+    ranges: [
+      {
+        type: "GIT",
+        repo: "https://example.invalid/source",
+        events: [{ introduced: "0" }, { limit: "acb1234" }],
+      },
+    ],
+  },
+  {
+    package: { ecosystem: "Go", name: "example.org/decoder" },
+    ecosystem_specific: {
+      imports: [
+        {
+          path: "example.org/decoder/parser",
+          symbols: ["Read"],
+          goos: ["linux"],
+        },
+      ],
+    },
+  },
+];
+
+test("normalizes the CVE and preserves OSV package versions and ranges", async () => {
+  const fetchRecord = mock(async (url: string, init: RequestInit) => {
+    expect(url).toBe(api + cve);
+    expect(init.redirect).toBe("error");
+    expect(new Headers(init.headers).has("authorization")).toBe(false);
+    return Response.json({
+      id: cve,
+      aliases: [],
+      summary: "Example advisory",
+      details:
+        "## Summary\n\nOnly `Parser.read` uses the affected mode.\n\n## Examples\n\nAdditional details.",
+      affected,
+    });
   });
-  expect(requests.map((url) => url.searchParams.get("after"))).toEqual([
-    null,
-    "next",
-  ]);
+  const result = await lookupDependencyAdvisory(
+    cve.toLowerCase(),
+    undefined,
+    fetchRecord,
+  );
+  expect(fetchRecord).toHaveBeenCalledTimes(1);
+  expect(result).toEqual({
+    cve,
+    advisories: [
+      {
+        url: publicUrl + cve,
+        summary: "Example advisory",
+        overview: "Only `Parser.read` uses the affected mode.",
+        affected,
+      },
+    ],
+  });
 });
 
-test("leaves oversized paragraphs and code samples out of the overview", async () => {
-  const records = [
+test("resolves OSV's 404 alias hints and checks each returned record", async () => {
+  const withdrawn = "GO-2000-0001";
+  const unrelated = "PYSEC-2000-1";
+  const requests: string[] = [];
+  const fetchRecord = async (url: string) => {
+    requests.push(url);
+    switch (url) {
+      case api + cve:
+        return Response.json(
+          {
+            code: 5,
+            message: `Vulnerability not found, but the following aliases were: ${alias} ${withdrawn} ${unrelated} ${alias}`,
+          },
+          { status: 404 },
+        );
+      case api + alias:
+        return Response.json({
+          id: alias,
+          aliases: [cve],
+          details: "Only decoder mode is affected.",
+        });
+      case api + withdrawn:
+        return Response.json({
+          id: withdrawn,
+          aliases: [cve],
+          withdrawn: "2021-03-15T00:00:00Z",
+        });
+      case api + unrelated:
+        return Response.json({ id: unrelated, related: [cve] });
+      default:
+        throw new Error(`Unexpected request: ${url}`);
+    }
+  };
+  const result = await lookupDependencyAdvisory(cve, undefined, fetchRecord);
+  expect(result.advisories.map((a) => a.url)).toEqual([publicUrl + alias]);
+  expect(result.advisories[0]).toMatchObject({
+    overview: "Only decoder mode is affected.",
+    affected: [],
+  });
+  expect(requests.sort()).toEqual(
+    [cve, alias, withdrawn, unrelated].map((id) => api + id).sort(),
+  );
+});
+
+test("keeps a canonical CVE and its direct aliases without traversing related records", async () => {
+  const fetchRecord = mock(async (url: string) => {
+    if (url === api + cve)
+      return Response.json({
+        id: cve,
+        aliases: [alias],
+        related: ["GO-2000-0001"],
+      });
+    if (url === api + alias)
+      return Response.json({ id: alias, aliases: [cve, "PYSEC-2000-1"] });
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const result = await lookupDependencyAdvisory(cve, undefined, fetchRecord);
+  expect(result.advisories.map((a) => a.url).sort()).toEqual(
+    [publicUrl + cve, publicUrl + alias].sort(),
+  );
+  expect(fetchRecord).toHaveBeenCalledTimes(2);
+});
+
+test("accepts an OSV record with null aliases and affected entries", async () => {
+  const result = await lookupDependencyAdvisory(cve, undefined, async () =>
+    Response.json({ id: cve, aliases: null, affected: null }),
+  );
+  expect(result.advisories).toEqual([{ url: publicUrl + cve, affected: [] }]);
+});
+
+test("omits code blocks and oversized paragraphs from advisory overviews", async () => {
+  for (const details of [
     "### Impact\n\n" + "Example. ".repeat(100),
     "### Summary\n\n```js\nexample()\n```",
     "### Summary\n\nExample: `call(arg, value)`.",
-  ].map((description) => ({ ...entry, description }));
-  const github = new Octokit({
-    request: { fetch: async () => Response.json(records) },
-  });
-  const result = await lookupDependencyAdvisory(cve, undefined, github);
-  expect(result.advisories.map((record) => record.overview)).toEqual([
-    undefined,
-    undefined,
-    undefined,
-  ]);
+  ]) {
+    const { advisories } = await lookupDependencyAdvisory(
+      cve,
+      undefined,
+      async () => Response.json({ id: cve, details }),
+    );
+    expect(advisories[0]?.overview).toBeUndefined();
+  }
 });
 
-test("public advisories with no package coordinates remain usable", async () => {
-  const github = new Octokit({
-    request: {
-      fetch: async () => Response.json([{ ...entry, vulnerabilities: null }]),
-    },
-  });
-  const result = await lookupDependencyAdvisory(cve, undefined, github);
-  expect(result.advisories).toEqual([
-    { url: entry.html_url, summary: entry.summary, packages: [] },
-  ]);
+test("rejects invalid IDs and cancellation before sending a request", async () => {
+  const fetchRecord = mock(async () => Response.json({ id: cve }));
+  await expect(
+    lookupDependencyAdvisory("path/private-repo", undefined, fetchRecord),
+  ).rejects.toThrow("CVE");
+  await expect(
+    lookupDependencyAdvisory(
+      cve,
+      AbortSignal.abort(new Error("cancelled")),
+      fetchRecord,
+    ),
+  ).rejects.toThrow("cancelled");
+  expect(fetchRecord).not.toHaveBeenCalled();
 });
 
-test("errors for missing records, invalid IDs and cancellation", async () => {
-  const read = mock(async () => Response.json([]));
-  const github = new Octokit({ request: { fetch: read } });
+test("reports missing records, upstream errors, and failed requests", async () => {
+  for (const [status, diagnostic] of [
+    [404, /not found|no active/i],
+    [503, /503/],
+  ] as const) {
+    const fetchRecord = mock(async () =>
+      Response.json({ code: 5, message: "Record unavailable" }, { status }),
+    );
+    await expect(
+      lookupDependencyAdvisory(cve, undefined, fetchRecord),
+    ).rejects.toThrow(diagnostic);
+    expect(fetchRecord).toHaveBeenCalledTimes(1);
+  }
   await expect(
-    lookupDependencyAdvisory("path/private-repo", undefined, github),
-  ).rejects.toThrow("Expected a CVE ID");
-  const signal = AbortSignal.abort(new Error("cancelled"));
-  await expect(lookupDependencyAdvisory(cve, signal, github)).rejects.toThrow(
-    "cancelled",
-  );
-  expect(read).not.toHaveBeenCalled();
-  await expect(
-    lookupDependencyAdvisory(cve, undefined, github),
-  ).rejects.toThrow("No active public GitHub advisory");
+    lookupDependencyAdvisory(cve, undefined, async () => {
+      throw new TypeError("Connection failed");
+    }),
+  ).rejects.toThrow(/connection failed/i);
 });

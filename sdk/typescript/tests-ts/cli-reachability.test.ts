@@ -14,12 +14,12 @@ const advisory = {
     {
       url: "https://example.invalid/advisory",
       summary: "Synthetic decoder advisory",
-      packages: [
+      affected: [
         {
-          ecosystem: "npm",
-          name: "sample-decoder",
-          vulnerableRange: "< 2",
-          fixedVersion: "2",
+          package: { ecosystem: "npm", name: "sample-decoder" },
+          ranges: [
+            { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "2" }] },
+          ],
         },
       ],
     },

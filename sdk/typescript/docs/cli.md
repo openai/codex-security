@@ -2385,7 +2385,7 @@ codex-security exploitability check CVE-2023-4863
 codex-security exploitability check CVE-2023-4863 --json
 ```
 
-The command looks up the CVE in the GitHub Advisory Database, then runs the
+The command looks up the CVE in the Open Source Vulnerabilities (OSV) database, then runs the
 bundled `attack-path-analysis` skill from the worktree root. The skill inspects
 the checkout read-only to identify where the affected dependency is used.
 Each use includes a version when known, a verdict, and source citations.

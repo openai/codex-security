@@ -12,7 +12,7 @@ Two services share an HTTP handler but install different versions of
 `linkify-it`. The command has to discover both uses and distinguish the
 affected service from the fixed one. Compose records which service builds
 use which lockfiles. Whether either service is currently running is unknown.
-[Public advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
+[OSV advisory](https://osv.dev/vulnerability/GHSA-22p9-wv53-3rq4)
 
 ## Run the command eval
 
@@ -24,7 +24,7 @@ pnpm --dir sdk/typescript run build
 ```
 
 Run the live acceptance case with the same model credentials as the CLI.
-It fetches the public advisory and consumes model usage. No upstream clones
+It fetches the public advisory from OSV and consumes model usage. No upstream clones
 or running services are needed.
 
 ```sh

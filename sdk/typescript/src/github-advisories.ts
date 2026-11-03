@@ -45,25 +45,6 @@ export interface ImportedGitHubAdvisory {
   advisory: RepositoryAdvisory | GlobalAdvisory;
 }
 
-export function nextGitHubAdvisoryCursor(
-  linkHeader: string | undefined,
-  seen: Set<string>,
-): string | undefined {
-  const next = linkHeader
-    ?.split(",")
-    .find((link) => /;\s*rel="next"/u.test(link));
-  if (!next) return undefined;
-  // Keep requests on the selected route; only carry over the cursor.
-  const nextUrl = next.match(/<([^>]+)>/u)?.[1];
-  const after = nextUrl && new URL(nextUrl).searchParams.get("after");
-  if (!after || seen.has(after))
-    throw new CodexSecurityError(
-      "GitHub returned invalid advisory pagination.",
-    );
-  seen.add(after);
-  return after;
-}
-
 /** Read repository disclosures or explicitly selected public GHSA records. */
 export async function importGitHubAdvisories(
   options: GitHubAdvisoryImportOptions,
@@ -149,7 +130,19 @@ export async function importGitHubAdvisories(
           },
         );
         advisories.push(...response.data);
-        after = nextGitHubAdvisoryCursor(response.headers.link, cursors);
+        const next = response.headers.link
+          ?.split(",")
+          .find((link) => /;\s*rel="next"/u.test(link));
+        const nextUrl = next?.match(/<([^>]+)>/u)?.[1];
+        // Keep requests on the authenticated route; only carry over the cursor.
+        after = nextUrl
+          ? (new URL(nextUrl).searchParams.get("after") ?? undefined)
+          : undefined;
+        if (next && (!after || cursors.has(after)))
+          throw new CodexSecurityError(
+            "GitHub returned invalid advisory pagination.",
+          );
+        if (after) cursors.add(after);
       } while (after !== undefined);
     }
     return advisories.map((advisory) => ({
