@@ -767,7 +767,8 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
         assert.equal(deepScan.targetPath, await realpath(fixtureTarget));
         assert.equal(deepScan.scope, ".");
         startupErrorWorker = deepScan.workers.find(
-          (worker: { status: string; error?: string }) =>
+          (worker: { kind: string; status: string; error?: string }) =>
+            worker.kind === "discovery" &&
             worker.error?.includes("missing-deep-scan-codex"),
         );
         if (startupErrorWorker) break;
