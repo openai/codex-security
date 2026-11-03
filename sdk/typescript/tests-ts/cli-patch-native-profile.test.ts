@@ -89,10 +89,12 @@ async function resolvePatchProfile(
         join(repository, "cache"),
         process.platform === "win32" ? "junction" : "dir",
       );
+    const selectedConfig = join(home, "selected.gitconfig");
     execFileSync(
       "git",
       [
         "config",
+        ...(optionalStorage === "selected" ? ["--file", selectedConfig] : []),
         "lfs.storage",
         optionalStorage === "selected" ||
         optionalStorage === "direct-administration"
@@ -106,7 +108,15 @@ async function resolvePatchProfile(
     controls = await capturePatchGitControls(
       repository,
       async (_root, checkout, args, options) =>
-        runGitRepositoryCommand("git", args, checkout, options),
+        runGitRepositoryCommand("git", args, checkout, {
+          ...options,
+          environment: {
+            ...(optionalStorage === "selected"
+              ? { GIT_CONFIG_GLOBAL: selectedConfig }
+              : {}),
+            ...options?.environment,
+          },
+        }),
       true,
     );
     expect(controls).toBeDefined();
@@ -154,7 +164,12 @@ exclude_slash_tmp = ${configured}
   );
   await writeFile(
     join(repository, ".codex", "config.toml"),
-    `[permissions.codex_security_patch]
+    `[sandbox_workspace_write]
+network_access = ${!configured}
+writable_roots = ${JSON.stringify([join(root, "project-selected")])}
+exclude_tmpdir_env_var = ${!configured}
+exclude_slash_tmp = ${!configured}
+[permissions.codex_security_patch]
 extends = ":workspace"
 [permissions.codex_security_patch.filesystem]
 glob_scan_max_depth = 8
@@ -305,6 +320,9 @@ glob_scan_max_depth = 8
         ":workspace_roots"
       ],
     ).toEqual({ ".git/hooks": "write" });
+    expect(
+      configuration["config"].sandbox_workspace_write.writable_roots,
+    ).toEqual([join(root, "project-selected")]);
     expect(
       configuration["layers"].some(
         (layer: RpcMessage) =>

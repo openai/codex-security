@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   symlink,
@@ -289,6 +290,7 @@ test
     "missing",
     "symlink",
     "configured-symlink",
+    "external-object-link",
     "selector",
     "selector-include",
     "malformed-selector",
@@ -343,7 +345,14 @@ test
     } else if (mode !== "missing") {
       const target = join(root, "storage-target");
       await mkdir(target);
-      const alias = mode === "symlink" ? storage : join(root, "storage-alias");
+      if (mode === "external-object-link")
+        await mkdir(storage, { recursive: true });
+      const alias =
+        mode === "external-object-link"
+          ? join(storage, "objects")
+          : mode === "symlink"
+            ? storage
+            : join(root, "storage-alias");
       await symlink(
         target,
         alias,
@@ -351,12 +360,20 @@ test
       );
       if (mode === "configured-symlink") {
         storage = join(alias, "storage");
-        git("config", "lfs.storage", storage);
+        environment["GIT_CONFIG_GLOBAL"] = join(root, "user.gitconfig");
+        git(
+          "config",
+          "--file",
+          environment["GIT_CONFIG_GLOBAL"],
+          "lfs.storage",
+          storage,
+        );
       }
     }
-    await expect(lstat(join(storage, "objects"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    if (mode !== "external-object-link")
+      await expect(lstat(join(storage, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     if (
       mode === "selector" ||
       mode === "selector-include" ||
@@ -395,7 +412,8 @@ test
           profile: {
             extends: ":workspace",
             network: { enabled: false },
-            workspace_roots: {},
+            workspace_roots:
+              mode === "symlink" ? { [await realpath(storage)]: true } : {},
             filesystem: {
               ...Object.fromEntries(
                 output!.appServer!.permissions!.readOnlyPaths.map((path) => [
@@ -421,8 +439,18 @@ test
           environment: { ...environment, ...options?.environment },
         }),
     });
+    if (mode === "external-object-link") {
+      expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
+      expect(storagePaths).toEqual([]);
+      expect(await readdir(join(root, "storage-target"))).toEqual([]);
+      expect(await readFile(join(repository, "payload.bin"), "utf8")).toBe(
+        payload,
+      );
+      return;
+    }
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
-    expect(storagePaths).toContain(await realpath(storage));
+    if (mode === "symlink") expect(storagePaths).toEqual([]);
+    else expect(storagePaths).toContain(await realpath(storage));
     if (mode === "malformed-selector") {
       expect(storagePaths).toEqual([await realpath(storage)]);
       await expect(
@@ -877,13 +905,13 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     join(home, "config.toml"),
     windows +
-      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nSNAPSHOT_USER_SET="preserved"\n',
+      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nSNAPSHOT_USER_SET="preserved"\n',
   );
   const script = join(root, "inspect.cjs");
   await writeFile(
     script,
     `const fs=require("node:fs");
-fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET})+"\\n");
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,modelKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
@@ -917,8 +945,11 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
         ...process.env,
         CODEX_HOME: home,
         SNAPSHOT_USER_FILTERED: "excluded",
+        CODEX_API_KEY: "synthetic-model-key",
+        SYNTHETIC_PROVIDER_TOKEN: "synthetic-provider-key",
       },
     ),
+    providerKeyVariable: "SYNTHETIC_PROVIDER_TOKEN",
     gitEnvironment,
     profile: {
       extends: ":workspace",
@@ -955,6 +986,7 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
     dir: null,
     filtered: null,
     set: "preserved",
+    modelKeys: [],
   });
   expect(bytes.subarray(end + 1)).toEqual(input);
   await expect(
@@ -1028,7 +1060,9 @@ test.each([
       mode === "configured"
         ? join(root, "data-cache")
         : join(checkout, ".git", "lfs");
-    if (mode === "configured") initial("config", "lfs.storage", storage);
+    const globalConfig = join(root, "user.gitconfig");
+    if (mode === "configured")
+      initial("config", "--file", globalConfig, "lfs.storage", storage);
     const temporary =
         mode === "absent" || mode === "symlink"
           ? storage
@@ -1126,7 +1160,11 @@ process.stdout.write(input);
     const originalIndex = await readFile(index);
     const environment = patchSnapshotEnvironment(
       await fixtures.create("patch-storage-temp-"),
-      { ...process.env, CODEX_HOME: home },
+      {
+        ...process.env,
+        CODEX_HOME: home,
+        ...(mode === "configured" ? { GIT_CONFIG_GLOBAL: globalConfig } : {}),
+      },
     );
     const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,

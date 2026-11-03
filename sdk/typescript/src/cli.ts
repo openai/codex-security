@@ -1202,6 +1202,7 @@ interface SkillPermissions {
 interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
   readonly environment: NodeJS.ProcessEnv;
+  readonly providerKeyVariable?: string;
   readonly directory: string;
   readonly configuration?: JsonObject;
   readonly gitEnvironment?: NodeJS.ProcessEnv;
@@ -1529,9 +1530,21 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
+    const credentialVariables = [
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      ...(sandbox?.providerKeyVariable ? [sandbox.providerKeyVariable] : []),
+    ];
     if (sandbox !== undefined) {
-      for (const name of Object.keys(environment))
-        if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
+      for (const name of Object.keys(environment)) {
+        if (
+          name.toUpperCase() === "CODEX_HOME" ||
+          credentialVariables.some(
+            (key) => key.toUpperCase() === name.toUpperCase(),
+          )
+        )
+          delete environment[name];
+      }
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
     }
     const bindings =
@@ -1539,9 +1552,14 @@ export async function runRepositoryCommand(
         ? undefined
         : Buffer.from(
             JSON.stringify(
-              Object.entries(sandbox.gitEnvironment ?? {}).map(
-                ([key, value]) => [key, value ?? null],
-              ),
+              // Native shell policy can set variables again. Remove model keys
+              // from Git and its filters after applying that policy as well.
+              Object.entries({
+                ...sandbox.gitEnvironment,
+                ...Object.fromEntries(
+                  credentialVariables.map((key) => [key, null]),
+                ),
+              }).map(([key, value]) => [key, value ?? null]),
             ),
           );
     const execution = spawn(
@@ -2137,6 +2155,9 @@ export async function runCodexSkillCommand(
                           profile,
                           directory: output.appServer!.directory,
                           environment,
+                          ...(authentication?.method === "api_key"
+                            ? { providerKeyVariable: authentication.source }
+                            : {}),
                           snapshotStoragePaths:
                             output.appServer!.snapshotStoragePaths,
                           configuration: Object.fromEntries(
@@ -2144,6 +2165,7 @@ export async function runCodexSkillCommand(
                               ...new Set([
                                 "model_provider",
                                 "model_providers",
+                                "sandbox_workspace_write",
                                 ...Object.keys(output.codexOverrides ?? {}),
                               ]),
                             ].flatMap((key) =>
@@ -9138,6 +9160,60 @@ function isNetworkPatchRemote(remote: string) {
   );
 }
 
+function isSshPatchRemote(remote: string): boolean {
+  return (
+    Boolean(isNetworkPatchRemote(remote)) &&
+    (!remote.includes("://") ||
+      ["ssh:", "git+ssh:", "ssh+git:"].includes(new URL(remote).protocol))
+  );
+}
+
+async function publicationSshCommand(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const environmentCommand = environmentEntry(
+    dependencies.environment,
+    "GIT_SSH_COMMAND",
+  );
+  if (environmentCommand !== undefined) return environmentCommand;
+  const fallback =
+    environmentEntry(dependencies.environment, "GIT_SSH") === undefined
+      ? "ssh"
+      : '"$GIT_SSH"';
+  // Git transport ignores the legacy config-file selector used by git config.
+  const value = await dependencies.runRepositoryCommand(
+    "git",
+    [
+      "config",
+      "--null",
+      "--show-scope",
+      "--show-origin",
+      "--default",
+      fallback,
+      "--get",
+      "core.sshCommand",
+    ],
+    repository,
+    { trim: false, environment: { GIT_CONFIG: undefined } },
+  );
+  const [scope, origin, command] = value.split("\0");
+  if (
+    (scope !== "system" && scope !== "global" && scope !== "command") ||
+    (origin?.startsWith("file:") &&
+      !isOutsidePath(
+        relative(
+          await realpath(repository),
+          await realpath(resolve(repository, origin.slice(5))),
+        ),
+      ))
+  )
+    throw new CodexSecurityError(
+      "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
+    );
+  return command!;
+}
+
 async function githubPatchRepository(
   pushRemote: string,
   requestUrl: URL,
@@ -9158,7 +9234,7 @@ async function githubPatchRepository(
     const url = uri ? new URL(pushRemote) : patchScpRemote(pushRemote)!;
     if (url.protocol === "https:" && url.port !== requestUrl.port)
       return undefined;
-    const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+    const ssh = isSshPatchRemote(pushRemote);
     let hostname =
       url.hostname.toLowerCase() === "ssh.github.com"
         ? "github.com"
@@ -9166,17 +9242,10 @@ async function githubPatchRepository(
     if (ssh && patchApiHostname(hostname) !== requestUrl.hostname) {
       const sshHost = hostname.replace(/^\[|\]$/gu, "");
       const username = uri ? decodeURIComponent(url.username) : url.username;
-      const sshCommand =
-        dependencies.environment["GIT_SSH_COMMAND"] ??
-        (await run("git", ["config", "--get", "core.sshCommand"]).catch(
-          (error: unknown) => {
-            if (isJsonObject(error) && error["code"] === 1) return undefined;
-            throw error;
-          },
-        ));
+      const sshCommand = await publicationSshCommand(repository, dependencies);
       const settings = await run("git", [
         "-c",
-        `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
+        `alias.codex-security-ssh-config=!${sshCommand} -G`,
         "codex-security-ssh-config",
         ...(url.port ? ["-p", url.port] : []),
         username ? `${username}@${sshHost}` : sshHost,
@@ -9761,6 +9830,14 @@ async function preparePatchPublication(
               {
                 environment: {
                   ...environment,
+                  ...(isSshPatchRemote(remote)
+                    ? {
+                        GIT_SSH_COMMAND: await publicationSshCommand(
+                          repository,
+                          dependencies,
+                        ),
+                      }
+                    : {}),
                   GIT_CONFIG_PARAMETERS: [
                     dependencies.environment["GIT_CONFIG_PARAMETERS"],
                     config,
@@ -12507,6 +12584,10 @@ async function runSkill(
             dependencies.environment,
             "XDG_CONFIG_HOME",
           ),
+          objectDirectory: environmentEntry(
+            dependencies.environment,
+            "GIT_OBJECT_DIRECTORY",
+          ),
           alternateObjectDirectories: environmentEntry(
             dependencies.environment,
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -12885,7 +12966,10 @@ export async function readSkillCommandOutput(
                 appServer.permissions !== undefined,
             },
           });
-        } else if (value["id"] === 4) {
+        } else if (
+          value["id"] === 4 ||
+          value["id"] === "patch-permissions-config"
+        ) {
           const result = value["result"];
           if (
             appServer.permissions !== undefined &&
@@ -12896,14 +12980,50 @@ export async function readSkillCommandOutput(
             appServer.input.end();
             continue;
           }
-          config =
+          const resolvedConfig =
             isJsonObject(result) && isJsonObject(result["config"])
               ? (result["config"] as JsonObject)
               : {};
+          if (value["id"] === 4) config = resolvedConfig;
           if (appServer.permissions !== undefined) {
-            const workspace = isJsonObject(config["sandbox_workspace_write"])
-              ? config["sandbox_workspace_write"]
+            if (
+              value["id"] === 4 &&
+              isJsonObject(result) &&
+              Array.isArray(result["layers"]) &&
+              result["layers"].some(
+                (layer) =>
+                  isJsonObject(layer) &&
+                  isJsonObject(layer["name"]) &&
+                  layer["name"]["type"] === "project" &&
+                  layer["disabledReason"] == null,
+              )
+            ) {
+              // Omitting cwd asks Codex for the effective operator settings
+              // without loading project layers. Keep project model settings.
+              send({
+                id: "patch-permissions-config",
+                method: "config/read",
+                params: {},
+              });
+              continue;
+            }
+            const workspace = isJsonObject(
+              resolvedConfig["sandbox_workspace_write"],
+            )
+              ? resolvedConfig["sandbox_workspace_write"]
               : {};
+            const workspaceOverride: JsonObject =
+              value["id"] === "patch-permissions-config"
+                ? {
+                    sandbox_workspace_write: {
+                      writable_roots: [],
+                      network_access: false,
+                      exclude_tmpdir_env_var: false,
+                      exclude_slash_tmp: false,
+                      ...workspace,
+                    },
+                  }
+                : {};
             const filesystem = Object.fromEntries(
               appServer.permissions.readOnlyPaths.map((path) => [
                 path,
@@ -12930,9 +13050,13 @@ export async function readSkillCommandOutput(
                   : {}),
               },
             };
-            appServer.onPermissions?.(profile, config);
+            appServer.onPermissions?.(profile, {
+              ...config,
+              ...workspaceOverride,
+            });
             // Cache restrictions for the model do not change snapshot access.
             startThread({
+              ...workspaceOverride,
               default_permissions: permissionProfile!,
               permissions: {
                 [permissionProfile!]: {
