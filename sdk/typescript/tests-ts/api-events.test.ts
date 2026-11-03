@@ -952,7 +952,7 @@ test("preserves the reason a required scan artifact cannot be read", async () =>
   await rm(artifact);
   await mkdir(artifact);
   await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
-    "expected a regular non-symlink file",
+    /findings\.json:.*Expected a regular non-(?:symlink|reparse) scan file/u,
   );
 });
 
