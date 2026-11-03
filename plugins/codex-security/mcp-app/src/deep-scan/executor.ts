@@ -57,6 +57,7 @@ import type {
 export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
+  serviceTier?: string;
   deepScanConfig?: DeepScanConfig;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
@@ -174,6 +175,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...(this.modelSettings.reasoningEffort
           ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
           : {}),
+        ...(this.modelSettings.serviceTier === undefined
+          ? {}
+          : { service_tier: this.modelSettings.serviceTier }),
         mcp_servers: {
           // A disabled server still needs a valid transport during native resolution.
           "codex-security": { command: "node", enabled: false },
