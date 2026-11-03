@@ -401,6 +401,30 @@ Deep discovery retains its enforced deadline, with a default and maximum of
 
 ### Progress and cost
 
+Use `onLifecycle` to observe the saved state of a top-level scan in your own
+application:
+
+```ts
+await security.run(repository, {
+  onLifecycle(scan) {
+    console.log(scan.scanId, scan.status, scan.hasReportableFindings);
+  },
+});
+```
+
+Group observations by `scanId`. A completed scan with
+`hasReportableFindings: false` finished with zero reportable findings.
+The field is `null` until that outcome is known. Saved scan history retains
+the lifecycle snapshot after the originating process exits. The snapshot
+includes the launch surface, package and plugin versions when available,
+and whether the scan used a mock. Offline imports appear in history with
+lifecycle mode `import`. Exclude imports and mock scans when counting executed
+scans. For older records, saved recipes identify known imports, mock scans,
+and the plugin version used at launch. Missing fields stay unknown.
+
+If `run()` rejects before you receive a registration, record the error separately
+from saved scan outcomes. The caller may have missed the registration receipt.
+
 Use `onProgress` for scan progress and `onCost` for cost updates.
 Use `onUsageObservation` for the last reported token measurement time
 (`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).

@@ -977,6 +977,15 @@ The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
 patching and verification preserve ambient project trust.
 
+For scan outcomes, the workbench saves a separate, local `lifecycle` record
+with the scan ID, launch surface, available release versions, mode, timestamps,
+and committed status. A completed scan indicates whether it produced reportable
+findings. Use `codex-security scans list --json` for the current repository.
+To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
+with its output directory. Imported scans have lifecycle mode `import`. The SDK
+exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Applications can choose how to collect and export these observations.
+
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
 
@@ -1252,6 +1261,11 @@ failed or interrupted attempt:
   workers, artifacts, settings, and accumulated cost.
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
+
+If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
+a string task ID, the command reports its line number and leaves the ledger untouched.
+Restore a complete ledger backup that includes every committed attempt, or start
+a separate campaign in a new `--output-dir`.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
