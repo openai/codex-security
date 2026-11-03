@@ -1,5 +1,12 @@
 [
   [
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (58, 59) AND name = 'record classification rubric provenance';"
+  ],
+  [
     "-- Move checkpoint previews before source-scope history checks.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
@@ -50,8 +57,10 @@
     "        (0, 33, 40, 'index finding identity and comparison history'),",
     "        (1, 25, 26, 'persist scan completion warnings'),",
     "        (2, 12, 20, 'phase-specific scan progress'),",
-    "        (3, 54, 58, 'save scan target Git positions'),",
-    "        (4, 55, 59, 'save scan Git repository identities')",
+    "        (3, 54, 61, 'save scan target Git positions'),",
+    "        (4, 55, 62, 'save scan Git repository identities'),",
+    "        (5, 58, 61, 'save scan target Git positions'),",
+    "        (6, 59, 62, 'save scan Git repository identities')",
     ")",
     "SELECT 0 AS position, 'error' AS operation,",
     "        'The Codex Security database has an unsupported mirror migration history.' AS value",
@@ -67,6 +76,23 @@
     "        ' WHERE version = ' || version || ' AND name = ' || quote(name)",
     "    FROM moves JOIN schema_migrations USING (version, name)",
     "ORDER BY position;"
+  ],
+  [
+    "-- A released reader can add its columns while a Git preview still owns the version.",
+    "WITH released(version, table_name, column_name) AS (",
+    "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
+    "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
+    "        (58, 'deep_scan_runs', 'terminal_reviewed_surface_count'),",
+    "        (59, 'deep_scan_runs', 'service_tier')",
+    ")",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (' ||",
+    "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
+    "FROM released JOIN json_each(:history) AS history",
+    "    ON json_extract(history.value, '$.version') = released.version",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'save scan target Git positions')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
   ],
   [
     "-- A main-branch reader may have added discovery context under the old checkpoint number.",

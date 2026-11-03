@@ -17,6 +17,10 @@ import {
 } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
+import {
+  inspectorReport,
+  inspectorRepositoryUrl,
+} from "./support/inspector-import-fixtures.js";
 
 const dependencies: typeof cliDependencies = (options = {}) => {
   const result = cliDependencies(options);
@@ -201,6 +205,66 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
   });
   expect(result.findings[0].evidence.code_revision).toBeNull();
   expect(result.findings[0].evidence.confidence).toBeUndefined();
+});
+
+test("Inspector CLI binds an opaque project to the operator's ARN and repository URL", async () => {
+  const f = await fixture();
+  const report = inspectorReport();
+  const finding = report.findings[0]!;
+  const resource = finding.resources[0]!;
+  const source = ["--source-repository-url", inspectorRepositoryUrl];
+  const arn = ["--inspector-project-arn", resource.id];
+  const run = async (args: string[], provider = "inspector") => {
+    const cli = createCliTest(main);
+    const code = await cli.runCli(
+      [
+        ...f.command.map((value) => (value === "wiz" ? provider : value)),
+        "--dry-run",
+        ...args,
+      ],
+      f.deps,
+    );
+    return { code, stdout: cli.stdout.text(), stderr: cli.stderr.text() };
+  };
+
+  await writeFile(f.file, JSON.stringify(report));
+  expect((await run(source)).code).toBe(0);
+  expect(
+    (
+      await run([
+        "--source-repository-url",
+        "https://other.invalid/example/project",
+        ...arn,
+      ])
+    ).stderr,
+  ).toMatch(/does not match|disagree/iu);
+
+  resource.details.codeRepository.projectName = "example/project";
+  await writeFile(f.file, JSON.stringify(report));
+  const preview = await run([...source, ...arn]);
+  expect(preview.code).toBe(0);
+  expect(JSON.parse(preview.stdout).findings[0].source_finding_id).toBe(
+    finding.findingArn,
+  );
+  expect((await run(source)).code).not.toBe(0);
+  expect(
+    (
+      await run([
+        ...source,
+        "--inspector-project-arn",
+        resource.id.replace("project-2", "project-3"),
+      ])
+    ).stderr,
+  ).toMatch(/project (?:map|ARN)|mapping/iu);
+  expect((await run(arn, "wiz")).stderr).toContain(
+    "requires --provider inspector",
+  );
+
+  await writeFile(f.file, JSON.stringify({ findings: [] }));
+  expect((await run(arn)).stderr).toContain("--source-repository-url");
+  expect(
+    (await run([...source, "--inspector-project-arn", "not-an-arn"])).stderr,
+  ).toContain("full Inspector repository project ARN");
 });
 
 test("CLI imports OpenGrep evidence locally without assessing it", async () => {

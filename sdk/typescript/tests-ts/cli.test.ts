@@ -30,9 +30,11 @@ import {
   PluginBootstrapError,
   DiffTarget,
   InvalidTargetError,
+  IncompleteScanError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
+  SandboxUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
   ScanResult,
@@ -53,6 +55,7 @@ import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
+  mergedCodexConfig,
 } from "../src/config.js";
 import {
   warningResult,
@@ -68,7 +71,10 @@ import {
   fakeInterval,
 } from "./cli-fixtures.js";
 import { runCommand } from "./support/shell.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import {
+  scopedTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { fail, throwing } from "./support/errors.js";
 import {
@@ -225,6 +231,47 @@ describe("CLI", () => {
       }
     }
   });
+
+  test.each([
+    ["--auth", "chatgpt"],
+    ["--auth", "api-key"],
+    ["--codex", 'model_provider="amazon-bedrock"'],
+  ])(
+    "reports plugin installation permission errors with %s %s",
+    async (flag, value) => {
+      const message =
+        "Codex plugin bootstrap failed: failed to create plugin cache directory: Permission denied (os error 13)";
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-key" },
+        onRun: () => {
+          throw new PluginBootstrapError(message);
+        },
+      });
+      for (const json of [false, true]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "scan",
+              ".",
+              flag,
+              value,
+              "--verbose",
+              ...(json ? ["--json"] : []),
+            ],
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain(message);
+        expect(stderr.text()).toContain(
+          'scan.failed classification="plugin_bootstrap"',
+        );
+        expect(stderr.text()).not.toContain("cannot access the configured");
+        if (json) expect(JSON.parse(stdout.text()).message).toBe(message);
+        else expect(stdout.text()).toBe("");
+      }
+    },
+  );
 
   test("passes the safety identifier as a per-scan option", async () => {
     const onTurn = mock<(repository: string, options: unknown) => void>();
@@ -617,12 +664,15 @@ describe("CLI", () => {
         ).toBe(exitCode);
         expect(validations).toBe(2);
         expect(commands).toBe(0);
+        expect(stderr.text()).toContain(
+          `Validation report opened at ${join(scanDir, "validation.md")}`,
+        );
         const output = JSON.parse(stdout.text());
         if (fullOutput) {
           expect(output.ok).toBe(false);
           const message = validationFailed
             ? failureMessage
-            : `Validation interrupted. Completed scan output was kept at ${scanDir}.`;
+            : `Validation interrupted. Original output directory: ${scanDir}. Run codex-security scans show scan to inspect the completed scan.`;
           expect(output.error).toEqual({ code: "SCAN_FAILED", message });
           expect(stderr.text()).toContain(message);
         }
@@ -1524,98 +1574,90 @@ describe("CLI", () => {
   ] as const)(
     "routes bulk scans through %s",
     async (_name, provider, model, providerConfig) => {
-      const root = await temporaryDirectory(`codex-security-${provider}-`);
-      try {
-        await multiscanInventory(root);
-        let config: CodexSecurityConfig | undefined;
-        const missingModelError = captureCli(main, "stderr");
-        expect(
-          await missingModelError.run(
-            [
-              "bulk-scan",
-              "repositories.csv",
-              "--output-dir",
-              "results",
-              "--provider",
-              provider,
-            ],
-            dependencies({
-              currentDirectory: root,
-              onConfig: (value) => (config = value),
-            }),
-          ),
-        ).toBe(2);
-        expect(missingModelError.text()).toContain(
-          `--model is required when using --provider ${provider}`,
-        );
-        expect(config).toBeUndefined();
-        expect(
-          await runCapturedCli(
-            main,
-            [
-              "bulk-scan",
-              "repositories.csv",
-              "--output-dir",
-              "results",
-              "--provider",
-              provider,
-              "--model",
-              model,
-              "--json",
-            ],
-            dependencies({
-              currentDirectory: root,
-              onConfig: (value) => (config = value),
-            }),
-          ),
-        ).toBe(0);
-        expect(config?.codexOverrides).toMatchObject({
-          model,
-          model_provider: provider,
-          model_providers: { [provider]: providerConfig },
-        });
-      } finally {
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test("preserves diagnostic text in bulk-scan failures and progress", async () => {
-    const root = await temporaryDirectory("codex-security-cli-multiscan-");
-    try {
+      await using temp = await scopedTemporaryDirectory(
+        `codex-security-${provider}-`,
+      );
+      const root = temp.path;
       await multiscanInventory(root);
-      const { stdout, stderr, runCli } = createCliTest(main);
-
+      let config: CodexSecurityConfig | undefined;
+      const missingModelError = captureCli(main, "stderr");
       expect(
-        await runCli(
+        await missingModelError.run(
           [
             "bulk-scan",
             "repositories.csv",
             "--output-dir",
             "results",
+            "--provider",
+            provider,
+          ],
+          dependencies({
+            currentDirectory: root,
+            onConfig: (value) => (config = value),
+          }),
+        ),
+      ).toBe(2);
+      expect(missingModelError.text()).toContain(
+        `--model is required when using --provider ${provider}`,
+      );
+      expect(config).toBeUndefined();
+      expect(
+        await runCapturedCli(
+          main,
+          [
+            "bulk-scan",
+            "repositories.csv",
+            "--output-dir",
+            "results",
+            "--provider",
+            provider,
+            "--model",
+            model,
             "--json",
           ],
           dependencies({
             currentDirectory: root,
-            onRun: () => {
-              throw new CodexSecurityError(
-                "scan failed sk-proj-SYNTHETIC_KEY_123",
-              );
-            },
+            onConfig: (value) => (config = value),
           }),
         ),
-      ).toBe(2);
-      expect(JSON.parse(stdout.text())).toMatchObject({
-        total: 1,
-        completed: 0,
-        failed: 1,
-        skipped: 0,
+      ).toBe(0);
+      expect(config?.codexOverrides).toMatchObject({
+        model,
+        model_provider: provider,
+        model_providers: { [provider]: providerConfig },
       });
-      expect(stderr.text()).toContain("sample failed (attempt 1)");
-      expect(stderr.text()).toContain("scan failed sk-proj-SYNTHETIC_KEY_123");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    },
+  );
+
+  test("preserves diagnostic text in bulk-scan failures and progress", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "codex-security-cli-multiscan-",
+    );
+    const root = temp.path;
+    await multiscanInventory(root);
+    const { stdout, stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["bulk-scan", "repositories.csv", "--output-dir", "results", "--json"],
+        dependencies({
+          currentDirectory: root,
+          onRun: () => {
+            throw new CodexSecurityError(
+              "scan failed sk-proj-SYNTHETIC_KEY_123",
+            );
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      total: 1,
+      completed: 0,
+      failed: 1,
+      skipped: 0,
+    });
+    expect(stderr.text()).toContain("sample failed (attempt 1)");
+    expect(stderr.text()).toContain("scan failed sk-proj-SYNTHETIC_KEY_123");
   });
 
   test("requires a terminal for interactive bulk scans", async () => {
@@ -2151,37 +2193,36 @@ describe("CLI", () => {
   );
 
   test("registers the scoped package as the MCP command", async () => {
-    const home = await temporaryDirectory("codex-security-mcp-home-");
-    try {
-      const child = await runCommand(
-        process.execPath,
-        [
-          join(import.meta.dir, "../src/cli.ts"),
-          "mcp",
-          "add",
-          "--agent",
-          "amp",
-          "--full-output",
-        ],
-        {
-          env: { ...process.env, HOME: home, USERPROFILE: home },
-          timeout: 30_000,
-        },
-      );
-      expect(child.status).toBe(0);
-      expect(child.stdout).toContain(
-        "command: npx --yes @openai/codex-security --mcp",
-      );
-      const config = JSON.parse(
-        await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
-      );
-      expect(config["amp.mcpServers"]["codex-security"]).toEqual({
-        command: "npx",
-        args: ["--yes", "@openai/codex-security", "--mcp"],
-      });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    await using temp = await scopedTemporaryDirectory(
+      "codex-security-mcp-home-",
+    );
+    const home = temp.path;
+    const child = await runCommand(
+      process.execPath,
+      [
+        join(import.meta.dir, "../src/cli.ts"),
+        "mcp",
+        "add",
+        "--agent",
+        "amp",
+        "--full-output",
+      ],
+      {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        timeout: 30_000,
+      },
+    );
+    expect(child.status).toBe(0);
+    expect(child.stdout).toContain(
+      "command: npx --yes @openai/codex-security --mcp",
+    );
+    const config = JSON.parse(
+      await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
+    );
+    expect(config["amp.mcpServers"]["codex-security"]).toEqual({
+      command: "npx",
+      args: ["--yes", "@openai/codex-security", "--mcp"],
+    });
   }, 30_000);
 
   test("prints non-TTY progress stages once without starting a timer", () => {
@@ -2662,6 +2703,34 @@ describe("CLI", () => {
     expect(signals.listeners.get("SIGINT")?.size).toBe(0);
     expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
+
+  test.each([
+    [undefined, "repository"],
+    [".", "repository"],
+    ["./", "repository"],
+    ["..", "workspace"],
+    ["./child", "child"],
+    ["./child/.", "child"],
+    ["./child/..", "repository"],
+    ["~/example-project/.", "example-project"],
+  ] as const)(
+    "shows the resolved directory name in the scan title for %p",
+    async (repository, name) => {
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
+      expect(
+        await runCli(
+          ["scan", ...(repository === undefined ? [] : [repository])],
+          dependencies({
+            currentDirectory: resolve("/workspace/repository"),
+            environment: { NO_COLOR: "1" },
+          }),
+        ),
+      ).toBe(0);
+      expect(stripVTControlCharacters(stderr.text())).toContain(
+        `CODEX SECURITY  ·  ${name}  ·  `,
+      );
+    },
+  );
 
   test("keeps terminal scans in one live dashboard", async () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
@@ -3841,6 +3910,227 @@ describe("CLI", () => {
     }
   });
 
+  test("reports settings from a selected Codex file profile", async () => {
+    const home = await temporaryDirectory("codex-security-profile-");
+    try {
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "native-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan", ".", "--codex", 'profile="review"', "--verbose", "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ environment: { CODEX_HOME: home } }),
+        ),
+      ).toBe(0);
+      const configuration = stderr
+        .text()
+        .split("\n")
+        .find((line) =>
+          line.startsWith("codex-security: debug: scan.configuration"),
+        );
+      expect(configuration).toContain('model="native-model"');
+      expect(configuration).toContain('reasoning_effort="high"');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["amazon-bedrock", "openrouter", "fireworks"])(
+    "uses the selected file-profile model before validating --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-provider-profile-");
+      const stderr = capture();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model = "file-profile-model"\nmodel_reasoning_effort = "high"\n',
+      );
+      for (const model of [undefined, "explicit-model"]) {
+        const selected = model ?? "file-profile-model";
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--verbose",
+          "--json",
+          ...(model === undefined ? [] : ["--model", model]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(stderr.text()).toContain(`model=${JSON.stringify(selected)}`);
+      }
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_reasoning_effort = "high"\n',
+      );
+      for (const profile of ["review", "missing"]) {
+        const missingModel = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              `profile="${profile}"`,
+              "--json",
+            ],
+            capture().stream,
+            missingModel.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(missingModel.text()).toContain(
+          `--model is required when using --provider ${provider}`,
+        );
+      }
+    },
+  );
+
+  test.each(["openrouter", "fireworks"])(
+    "keeps file-profile command authentication with --provider %s",
+    async (provider) => {
+      const home = await temporaryDirectory("codex-security-auth-profile-");
+      await writeFile(
+        join(home, "review.config.toml"),
+        `model="synthetic-model"\n[model_providers.${provider}]\nname="Synthetic"\nwire_api="responses"\nbase_url="http://127.0.0.1:1/v1"\n[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n`,
+      );
+      for (const explicit of [undefined, 4321]) {
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        const args = [
+          "scan",
+          ".",
+          "--provider",
+          provider,
+          "--codex",
+          'profile="review"',
+          "--json",
+          ...(explicit === undefined
+            ? []
+            : [
+                "--codex",
+                `model_providers.${provider}.auth.refresh_interval_ms=${explicit}`,
+              ]),
+        ];
+        expect(
+          await main(
+            args,
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: { CODEX_HOME: home },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        const effective = await mergedCodexConfig(selected!, home);
+        expect(effective["model_providers"]).toEqual({
+          [provider]: {
+            name: "Synthetic",
+            wire_api: "responses",
+            base_url: "http://127.0.0.1:1/v1",
+            auth: {
+              command: "synthetic-auth",
+              ...(explicit === undefined
+                ? {}
+                : { refresh_interval_ms: explicit }),
+            },
+          },
+        });
+        expect(selected!.codexOverrides?.["model_provider"]).toBe(provider);
+      }
+    },
+  );
+
+  test.each([
+    ["openrouter", OPENROUTER_CODEX_PROVIDER],
+    ["fireworks", FIREWORKS_CODEX_PROVIDER],
+  ] as const)(
+    "fills missing file-profile %s defaults without replacing refinements",
+    async (provider, defaults) => {
+      const home = await temporaryDirectory("codex-security-partial-provider-");
+      for (const refinement of [
+        { request_max_retries: 4 },
+        {
+          request_max_retries: 4,
+          base_url: "http://127.0.0.1:1/v1",
+          env_key: "SYNTHETIC_FILE_PROVIDER_KEY",
+        },
+      ]) {
+        await writeFile(
+          join(home, "review.config.toml"),
+          `model="synthetic-model"\n[model_providers.${provider}]\n` +
+            Object.entries(refinement)
+              .map(([key, value]) => `${key}=${JSON.stringify(value)}\n`)
+              .join(""),
+        );
+        let selected: CodexSecurityConfig | undefined;
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--provider",
+              provider,
+              "--codex",
+              'profile="review"',
+              "--json",
+            ],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              environment: {
+                CODEX_HOME: home,
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+                SYNTHETIC_FILE_PROVIDER_KEY: "synthetic-file-provider-key",
+              },
+              onConfig: (config) => {
+                selected = config;
+              },
+            }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(
+          (await mergedCodexConfig(selected!, home))["model_providers"],
+        ).toEqual({
+          [provider]: { ...defaults, ...refinement },
+        });
+      }
+    },
+  );
+
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -4131,7 +4421,7 @@ describe("CLI", () => {
 
     expect(failureDiagnostic).toBeDefined();
     expect(failureDiagnostic).toContain('classification="unknown"');
-    expect(failureDiagnostic).toContain("partial_output=false");
+    expect(failureDiagnostic).not.toContain("partial_output=");
     expect(failureDiagnostic).not.toContain("tenant-private");
     expect(failureDiagnostic).not.toContain("req-internal");
     expect(stderr.text()).toContain("Provider failed for");
@@ -4551,7 +4841,7 @@ describe("CLI", () => {
       [
         "output directory rejected",
         new OutputDirectoryError(
-          "Scan output directory must not be accessible to other users (chmod 700): /out",
+          "Scan output directory must be owned by the current user: /out",
         ),
       ],
       [
@@ -4566,6 +4856,23 @@ describe("CLI", () => {
         "python interpreter unavailable",
         new PluginPythonUnavailableError(
           "The configured plugin Python interpreter is unavailable or unusable: /usr/bin/python3",
+        ),
+      ],
+      [
+        "sandbox startup denied",
+        new SandboxUnavailableError(
+          "bwrap: setting up uid map: Permission denied",
+        ),
+      ],
+      [
+        "incomplete scan caused by sandbox startup denial",
+        new IncompleteScanError(
+          "Scan did not complete: bwrap: setting up uid map: Permission denied",
+          {
+            cause: new SandboxUnavailableError(
+              "bwrap: setting up uid map: Permission denied",
+            ),
+          },
         ),
       ],
     ];
@@ -5226,13 +5533,13 @@ describe("CLI", () => {
       message: expect.stringContaining("estimated cost"),
     });
     expect(stderr.text()).toContain(
-      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
+      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: /tmp/scan.",
     );
     expect(stderr.text()).toMatch(
       /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
     );
     expect(stderr.text()).toContain(
-      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.004 estimated_usd=0.00488',
+      'scan.failed classification="cost_limit_exceeded" max_cost_usd=0.004 estimated_usd=0.00488',
     );
   });
 
@@ -5693,7 +6000,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves partial-output guidance for a late protected-root failure", async () => {
+  test("identifies the output directory for a late protected-root failure", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
     const partial = "/tmp/codex-security-partial";
@@ -5711,7 +6018,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
     );
-    expect(stderr.text()).toContain(`Partial output was kept at ${partial}.`);
+    expect(stderr.text()).toContain(`Output directory: ${partial}`);
     expect(stderr.text()).not.toContain("codex-security:");
   });
 
@@ -5781,7 +6088,7 @@ describe("CLI", () => {
 
       expect(await runCli(["scan", "."], deps)).toBe(expectedExit);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
+      expect(stderr.text()).toContain(`Output directory: ${path}`);
     }
   }, 30_000);
 
@@ -5807,7 +6114,7 @@ describe("CLI", () => {
         expect(stdout.text()).toBe("");
       }
       expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
-      expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
+      expect(stderr.text()).toContain("Output directory: /tmp/scan");
     }
   });
 

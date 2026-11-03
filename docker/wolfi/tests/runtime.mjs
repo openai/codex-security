@@ -33,11 +33,12 @@ run(process.env.PYTHON, ["-c",
 console.log("PASS non-root account, state directories, Python SQLite and CA trust");
 
 const info = cli("info");
-assert.equal(info.cliVersion, "0.7.0");
-assert.equal(info.codexVersion, "0.164.0");
 const launcher = realpathSync(run("/bin/sh", ["-c", "command -v codex-security"]));
 const pkg = dirname(dirname(launcher));
-assert.equal(read(join(pkg, "package.json")).name, "@openai/codex-security");
+const manifest = read(join(pkg, "package.json"));
+assert.equal(manifest.name, "@openai/codex-security");
+assert.equal(info.cliVersion, manifest.version);
+assert.equal(info.codexVersion, manifest.dependencies["@openai/codex"]);
 const { resolveCodexCommand } = await import(pathToFileURL(join(pkg, "dist/index.js")));
 const { command: codex } = resolveCodexCommand({});
 assert.equal(run(codex, ["--version"]), `codex-cli ${info.codexVersion}`);

@@ -4,6 +4,12 @@ export {
   parseCanonicalScanDraft,
   parseCurrentFindings,
 } from "./src/artifact-scan-draft.js";
+export {
+  loadSealedContract,
+  readSealedScanFile,
+  requireSealedScanFile,
+} from "./src/sealed-contract.js";
+export { validateTrackingSource } from "./src/helpers/validate-tracking-source.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -13,11 +19,15 @@ import {
   normalizeCandidateBatch,
   normalizeCandidatesCommand,
 } from "./src/helpers/normalize-candidates";
-import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
+import { validateTrackingSourceCommand } from "./src/helpers/validate-tracking-source.js";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
-import { escapeControls, stringifyJson } from "./src/helpers/json";
+import {
+  escapeControls,
+  requireFiniteNumbers,
+  stringifyJson,
+} from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
 // Importing the bundled parser does not invoke its CLI adapter.
@@ -62,6 +72,8 @@ function runHelper(): void {
   const workbenchUsage: Record<string, string> = {
     "database-info":
       "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+    "local-dedupe":
+      "Usage: local-dedupe\nReads a JSON object from stdin with an absolute stateDirectory and a prepare or embed payload.",
     "store-findings":
       "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
     "list-stored-findings":
@@ -88,6 +100,7 @@ function runHelper(): void {
   if (
     command === "generate-in-scope-files" ||
     command === "make-repo-scope-input" ||
+    command === "make-hosted-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
     void inventoryCommand(command, args).then((code) => {
@@ -98,7 +111,15 @@ function runHelper(): void {
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else if (command === "validate-patch-risk-assessment") {
-    process.exitCode = validatePatchRiskAssessmentCommand(args);
+    void import("./src/helpers/validate-patch-risk-assessment").then(
+      ({ validatePatchRiskAssessmentCommand }) => {
+        process.exitCode = validatePatchRiskAssessmentCommand(args);
+      },
+    );
+  } else if (command === "validate-tracking-source") {
+    void validateTrackingSourceCommand(args, posixHome).then((status) => {
+      process.exitCode = status;
+    });
   } else if (command === "copy-deep-review-input") {
     process.exitCode = deepReviewInputCommand(args, posixHome);
   } else if (command === "bind-repo-scopes") {
@@ -130,6 +151,8 @@ function runHelper(): void {
           values["scan-id"] as string | undefined,
         );
       }
+      // Preparation commits before response serialization, as other workbench writes do.
+      if (command === "local-dedupe") requireFiniteNumbers(result);
       console.log(
         stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
           character
@@ -149,7 +172,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | validate-tracking-source | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }

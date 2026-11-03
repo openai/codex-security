@@ -472,11 +472,30 @@
   },
   {
     "version": 58,
+    "name": "record the final Deep Scan reviewed surface count",
+    "statements": [
+      "ALTER TABLE deep_scan_runs ADD COLUMN terminal_reviewed_surface_count INTEGER CHECK (terminal_reviewed_surface_count >= 0);"
+    ]
+  },
+  {
+    "version": 59,
+    "name": "retain the launching Deep Scan service tier",
+    "statements": ["ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"]
+  },
+  {
+    "version": 60,
+    "name": "record classification rubric provenance",
+    "statements": [
+      "ALTER TABLE scan_severity_classifications ADD COLUMN rubric_binding_json TEXT;"
+    ]
+  },
+  {
+    "version": 61,
     "name": "save scan target Git positions",
     "statements": ["ALTER TABLE scans ADD COLUMN target_git_prefix TEXT;"]
   },
   {
-    "version": 59,
+    "version": 62,
     "name": "save scan Git repository identities",
     "statements": ["ALTER TABLE scans ADD COLUMN target_git_identity_json TEXT;"]
   }

@@ -2,7 +2,7 @@ import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   Codex,
   type McpToolCallItem,
@@ -1002,11 +1002,18 @@ test.skipIf(process.platform === "win32")(
   "preserves unsafe scan-root diagnostics instead of reporting missing files",
   async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
-    await chmod(scanDir, 0o755);
-    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
-      name: ContractValidationError.name,
-      message: expect.stringContaining("chmod 700"),
-      cause: expect.any(Error),
-    });
+    const parent = dirname(scanDir);
+    await chmod(parent, 0o777);
+    try {
+      await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject(
+        {
+          name: ContractValidationError.name,
+          message: expect.stringContaining("sticky bit"),
+          cause: expect.any(Error),
+        },
+      );
+    } finally {
+      await chmod(parent, 0o700);
+    }
   },
 );

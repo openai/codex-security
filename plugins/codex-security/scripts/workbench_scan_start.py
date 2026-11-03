@@ -271,7 +271,7 @@ def insert_running_scan(
                 serialize_filesystem_identity(git_directory_metadata.st_dev),
                 serialize_filesystem_identity(git_directory_metadata.st_ino),
             ],
-            "origin": repository_origin(target),
+            "origin": repository_origin(git_output(target, "remote", "get-url", "origin")),
         }
     connection.execute(
         """

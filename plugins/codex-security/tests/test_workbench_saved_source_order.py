@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_workbench_checkpoint_heads import drafts, select
+from test_workbench_checkpoint_heads import drafts
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     deep_scan_fixture,
@@ -22,8 +22,9 @@ from workbench_test_support import (
     saved_discovery_worker,
     saved_draft,
     scan_command,
-    set_fixture_mtime,
+    select_checkpoint,
     write_checkpoint,
+    write_result_draft,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -75,11 +76,9 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     old, latest = (closed, pending) if latest_pending else (pending, closed)
-    result.write_text(json.dumps(old))
-    set_fixture_mtime(result, 100)
-    checkpoint = write_checkpoint(result.parent / "checkpoints", latest)
-    set_fixture_mtime(checkpoint, 200)
-    select(result.parent, checkpoint, 200)
+    write_result_draft(result, old, mtime_ns=100)
+    checkpoint = write_checkpoint(result.parent / "checkpoints", latest, mtime_ns=200)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=200)
 
     def fail_publication(*args, **kwargs):
         raise OSError("injected publication failure")
@@ -145,7 +144,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
             )
 
     result.write_bytes(result.read_bytes())
-    set_fixture_mtime(result, 300)
+    os.utime(result, ns=(300, 300))
     call_workbench(
         monkeypatch,
         state,
@@ -194,16 +193,14 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
-    result.write_text(json.dumps(closed))
-    set_fixture_mtime(result, 100)
+    write_result_draft(result, closed, mtime_ns=100)
     output = scan_dir if layout == "parent" else result.parent
-    original = write_checkpoint(output / "checkpoints", closed)
-    set_fixture_mtime(original, 100)
-    select(output, original, 100)
+    original = write_checkpoint(output / "checkpoints", closed, mtime_ns=100)
+    select_checkpoint(output, original, mtime_ns=100)
     if explicit_recovery:
         fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
         result.write_bytes(result.read_bytes())
-        set_fixture_mtime(result, 300)
+        os.utime(result, ns=(300, 300))
     directory = (output / "checkpoints").relative_to(scan_dir).as_posix()
     children = saved_sources._children
     published = []
@@ -211,9 +208,8 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
     def publish_after_listing(root, relative):
         names = children(root, relative)
         if relative == directory and not published:
-            checkpoint = write_checkpoint(output / "checkpoints", pending)
-            set_fixture_mtime(checkpoint, 200)
-            select(output, checkpoint, 200)
+            checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=200)
+            select_checkpoint(output, checkpoint, mtime_ns=200)
             published.append(checkpoint)
         return names
 
@@ -263,10 +259,8 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     output = tmp_path / "worker"
     output.mkdir()
     result = output / "result.json"
-    result.write_text(json.dumps(closed))
-    set_fixture_mtime(result, 100)
-    checkpoint = write_checkpoint(output / "checkpoints", pending)
-    set_fixture_mtime(checkpoint, 200)
+    write_result_draft(result, closed, mtime_ns=100)
+    checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=200)
     workers = [saved_discovery_worker(output, "worker", 1)]
     binding = saved_binding("deep_repository", repository="synthetic")
 
@@ -287,7 +281,7 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
     path, observed = (result, 300) if rewritten == "result" else (checkpoint, 50)
     path.write_bytes(path.read_bytes())
-    set_fixture_mtime(path, observed)
+    os.utime(path, ns=(observed, observed))
     assert merge(frozen)[2] == first[2]
     record_path = next(path for path in frozen if path.startswith("source-order/"))
     record = json.loads((tmp_path / record_path).read_text())
@@ -351,13 +345,12 @@ def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: 
         write_checkpoint(output / "checkpoints", draft) for draft in (rejected, reported)
     ]
     for checkpoint, observed in zip(checkpoints, (300, 400)):
-        set_fixture_mtime(checkpoint, 50)
-        select(output, checkpoint, observed)
+        os.utime(checkpoint, ns=(50, 50))
+        select_checkpoint(output, checkpoint, mtime_ns=observed)
         saved._capture_saved_source(tmp_path, "worker/checkpoint-head.json", scan_id)
     result = output / "result.json"
-    result.write_text(json.dumps(reported))
-    set_fixture_mtime(result, 200)
-    select(output, checkpoints[0], head_time)
+    write_result_draft(result, reported, mtime_ns=200)
+    select_checkpoint(output, checkpoints[0], mtime_ns=head_time)
     original = {path: path.read_bytes() for path in (result, *checkpoints)}
     workers = [saved_discovery_worker(output)]
     binding = saved_binding("deep_repository", repository="synthetic")
@@ -403,10 +396,9 @@ def test_first_stop_freezes_sources_before_report_preparation(
             }
         ],
     )
-    result.write_text(json.dumps(reported))
-    set_fixture_mtime(result, 100)
+    write_result_draft(result, reported, mtime_ns=100)
     checkpoint = write_checkpoint(result.parent / "checkpoints", reported)
-    select(result.parent, checkpoint, 100)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=100)
     report = scan_dir / "report.md"
     report.mkdir()
     environment = {"CODEX_HOME": str(codex_home)}
@@ -436,7 +428,7 @@ def test_first_stop_freezes_sources_before_report_preparation(
         complete=True,
     )
     latest = write_checkpoint(result.parent / "checkpoints", rejection)
-    select(result.parent, latest, 300)
+    select_checkpoint(result.parent, latest, mtime_ns=300)
     preserved = preserve_scan_results(
         state, scan_id, "standard-worker-thread", environment=environment
     )["scan"]
@@ -452,9 +444,9 @@ def test_invalid_explicit_recovery_does_not_replace_first_selection(tmp_path: Pa
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     initial = json.loads(result.read_text())
-    set_fixture_mtime(result, 100)
+    os.utime(result, ns=(100, 100))
     checkpoint = write_checkpoint(result.parent / "checkpoints", initial)
-    select(result.parent, checkpoint, 100)
+    select_checkpoint(result.parent, checkpoint, mtime_ns=100)
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
     artifacts = {
         name: (scan_dir / name).read_bytes()
@@ -470,7 +462,7 @@ def test_invalid_explicit_recovery_does_not_replace_first_selection(tmp_path: Pa
     checkpoint.write_text(json.dumps({**initial, "scanId": "other-scan"}))
     valid = {**initial, "complete": True, "threatModel": {"summary": "Completed review."}}
     later = write_checkpoint(result.parent / "checkpoints", valid)
-    select(result.parent, later, 200)
+    select_checkpoint(result.parent, later, mtime_ns=200)
     environment = {"CODEX_HOME": str(codex_home)}
     failed = scan_command(
         state, "recover-scan-results", scan_id, environment=environment, check=False

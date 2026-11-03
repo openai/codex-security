@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,6 @@ from workbench_test_support import (
     read_review_state,
     saved_draft,
     scan_command,
-    set_fixture_mtime,
     write_checkpoint,
 )
 
@@ -64,15 +64,14 @@ def test_stopped_publication_recovers_after_unicode_reviews_are_closed(tmp_path:
         scan_id,
         deferred=[{"reason": reason, "paths": ["src/example.py"]} for reason, _ in SURROGATE_IDS],
     )
-    checkpoint = write_checkpoint(result.parent / "checkpoints", pending)
-    set_fixture_mtime(checkpoint, 100)
+    write_checkpoint(result.parent / "checkpoints", pending, mtime_ns=100)
     closed = saved_draft(
         scan_id,
         closures=[{"id": identity, "reason": "Review completed."} for _, identity in SURROGATE_IDS],
         complete=True,
     )
     result.write_text(json.dumps(closed), encoding="utf-8")
-    set_fixture_mtime(result, 200)
+    os.utime(result, ns=(200, 200))
     environment = {"CODEX_HOME": str(codex_home)}
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
     coverage = read_review_state(state, scan_dir)

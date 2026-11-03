@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import codecs
 import hashlib
 import os
 import re
@@ -13,7 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 from urllib.parse import urlsplit
@@ -65,8 +64,11 @@ def git_output(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> str | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     output = os.fsdecode(completed.stdout)
     if sys.platform == "win32" and output.endswith("\r\n"):
         output = output[:-2]
@@ -75,8 +77,7 @@ def git_output(
     return output if completed.returncode == 0 and output else None
 
 
-def repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
+def repository_origin(remote: str | None) -> tuple[str, str] | None:
     if remote is None:
         return None
     account = None
@@ -122,112 +123,6 @@ def git_bytes(
 ) -> bytes | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
     return completed.stdout if completed.returncode == 0 else None
-
-
-def git_blob_samples(
-    target: Path,
-    object_names: list[str],
-    *,
-    git_dir: Path | None = None,
-    work_tree: Path | None = None,
-) -> list[tuple[bytes, bool] | None]:
-    """Sample ordered blobs and classify all their bytes without buffering the batch."""
-    if not object_names:
-        return []
-
-    # Git before 2.38 rejects -z, so only names with line breaks need it.
-    nul_input = any("\n" in name or "\r" in name for name in object_names)
-    separator = b"\0" if nul_input else b"\n"
-    request = separator.join(os.fsencode(name) for name in object_names) + separator
-    read_fd, write_fd = os.pipe()
-    with (
-        ThreadPoolExecutor(max_workers=1) as reader,
-        os.fdopen(read_fd, "rb") as output,
-        os.fdopen(write_fd, "wb") as sink,
-    ):
-
-        def read_samples() -> list[tuple[bytes, bool] | None]:
-            # Closing the reader also unblocks Git if framing is invalid.
-            with output:
-                return _read_git_batch_samples(output, object_names)
-
-        samples = reader.submit(read_samples)
-        try:
-            completed = git_command(
-                target,
-                "cat-file",
-                "--batch",
-                *(["-z"] if nul_input else []),
-                text=False,
-                input_data=request,
-                git_dir=git_dir,
-                work_tree=work_tree,
-                stdout_file=sink,
-            )
-        finally:
-            # Git may fail before producing all requested records.
-            sink.close()
-        if completed.returncode != 0:
-            return [None] * len(object_names)
-        try:
-            return samples.result()
-        except ValueError:
-            return [None] * len(object_names)
-
-
-def _read_git_batch_samples(
-    output: BinaryIO, object_names: list[str]
-) -> list[tuple[bytes, bool] | None]:
-    """Read the older-Git-compatible -z protocol without buffering blob bodies."""
-    samples: list[tuple[bytes, bool] | None] = []
-    for name in object_names:
-        header = output.readline()
-        raw_name = os.fsencode(name)
-        # Missing lookups echo the whole request, including any embedded newlines.
-        if header and raw_name.startswith(header):
-            header += output.read(len(raw_name) - len(header)) + output.readline()
-        if header in (raw_name + b" missing\n", raw_name + b" ambiguous\n"):
-            samples.append(None)
-            continue
-        fields = header.split(b" ")
-        if len(fields) != 3 or not header.endswith(b"\n"):
-            raise ValueError("invalid batch header")
-        size = int(fields[2])
-        if size < 0:
-            raise ValueError("invalid blob size")
-        # Consume non-blob objects too, so subsequent records stay aligned.
-        sample = _read_git_blob_sample(output, size)
-        samples.append(sample if fields[1] == b"blob" else None)
-    return samples
-
-
-def _is_binary_sample(data: bytes) -> bool:
-    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return "\0" in data.decode("utf-16", errors="ignore")
-    return b"\0" in data
-
-
-def _read_git_blob_sample(output: BinaryIO, size: int) -> tuple[bytes, bool]:
-    read_size = 64 * 1024
-    sample_size = min(size, read_size)
-    sample = output.read(sample_size)
-    if len(sample) != sample_size:
-        raise ValueError("truncated blob")
-    binary = _is_binary_sample(sample)
-    bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
-    remaining = size - sample_size
-    while remaining:
-        chunk_size = min(remaining, read_size)
-        chunk = output.read(chunk_size)
-        if len(chunk) != chunk_size:
-            raise ValueError("truncated blob")
-        # Even-sized reads keep UTF-16 code units aligned; preserve the original byte order.
-        if not binary:
-            binary = _is_binary_sample(bom + chunk) if bom else b"\0" in chunk
-        remaining -= chunk_size
-    if output.read(1) != b"\n":
-        raise ValueError("missing blob terminator")
-    return (b"", True) if binary else (sample, False)
 
 
 def _protected_repository_root(target: Path) -> Path:
@@ -307,6 +202,7 @@ def git_command(
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
     pathspec_environment: dict[str, str] | None = None,
+    offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -316,6 +212,9 @@ def git_command(
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     if pathspec_environment is not None:
         environment.update(pathspec_environment)
+    if offline:
+        # Deny transports even on Git versions that do not honor GIT_NO_LAZY_FETCH.
+        environment.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="", GIT_NO_REPLACE_OBJECTS="1")
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -504,6 +403,14 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _visible_git_character(char: str) -> str:
+    if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
+        return char
+    if ord(char) <= 0xFF:
+        return f"\\x{ord(char):02x}"
+    return ascii(char)[1:-1]
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -511,7 +418,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> bool:
+) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
             target,
@@ -522,14 +429,19 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            return False
+            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
+                "\r\n", "\n"
+            )
+            detail = "".join(map(_visible_git_character, detail))
+            raise SystemExit(
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
+            )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
         for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
-    return True
 
 
 def worktree_content_digest(target: Path) -> str:
@@ -611,7 +523,7 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    tracked_ok = _update_digest_field_from_git(
+    _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
@@ -640,7 +552,7 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if not tracked_ok or untracked is None:
+    if untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)
@@ -1166,7 +1078,7 @@ def copy_git_worktree_files(
             source_path = _directory_link_boundary(repository, source_path, linked_prefixes)
             relative = source_path.relative_to(repository)
             metadata = source_path.lstat()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         if relative in copied:
             continue
