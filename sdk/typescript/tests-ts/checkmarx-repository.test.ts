@@ -5,18 +5,12 @@ import { prepareNormalizedLocalImport } from "../src/external-findings-local.js"
 import type { ExternalFindings } from "../src/external-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
-test("normalized Checkmarx replay binds the retained occurrence to its repository and provider", async () => {
-  const source = "https://github.com/example/project";
-  await using fixture = await localFindingsFixture({ remote: source });
-  const options = {
-    provider: "checkmarx" as const,
-    repository: fixture.repository,
-    sourceKey: "example/project/main",
-  };
-  const dependencies = { environment: fixture.environment };
-  const normal = normalizeCheckmarxOne(
+const source = "https://github.com/example/project";
+
+const one = (scanID: string, resultHash: string) =>
+  normalizeCheckmarxOne(
     JSON.stringify({
-      scanID: "scan-a",
+      scanID,
       totalCount: 1,
       results: [
         {
@@ -24,7 +18,7 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
           severity: "LOW",
           similarityId: "7",
           data: {
-            resultHash: "abc",
+            resultHash,
             queryName: "Example_Query",
           },
         },
@@ -33,12 +27,53 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
     source,
     "local",
   );
-  const xml = (projectId: string) =>
-    normalizeCheckmarxXml(
-      `<CxXMLResults ScanId="1" ProjectId="${projectId}"><Query id="3" name="Example_Query"><Result Severity="Low" FileName="src/read.ts" Line="3"><Path SimilarityId="7"><PathNode><FileName>src/read.ts</FileName><Line>3</Line></PathNode></Path></Result></Query></CxXMLResults>`,
-      source,
-      "local",
+const xml = (projectId: string, scanId = "1", similarity = "7") =>
+  normalizeCheckmarxXml(
+    `<CxXMLResults ScanId="${scanId}" ProjectId="${projectId}"><Query id="3" name="Example_Query"><Result Severity="Low" FileName="src/read.ts" Line="3"><Path SimilarityId="${similarity}"><PathNode><FileName>src/read.ts</FileName><Line>3</Line></PathNode></Path></Result></Query></CxXMLResults>`,
+    source,
+    "local",
+  );
+
+test("native Checkmarx batches without report metadata belong to one scan", async () => {
+  await using fixture = await localFindingsFixture({ remote: source });
+  const bind = (...findings: ExternalFindings["findings"]) =>
+    prepareNormalizedLocalImport(
+      { findings, read: findings.length, excluded: [] },
+      {
+        provider: "checkmarx",
+        repository: fixture.repository,
+        sourceKey: "example/project/main",
+      },
+      { environment: fixture.environment },
     );
+  for (const make of [one, (scan: string, id: string) => xml("1", scan, id)]) {
+    const first = make("1", "7").findings[0]!;
+    const second = make("2", "8").findings[0]!;
+    expect(first.source_finding_id).not.toBe(second.source_finding_id);
+    await expect(bind(first, second)).rejects.toThrow(
+      /same product, project and scan/i,
+    );
+    expect(
+      (await bind(first, make("1", "8").findings[0]!)).preview.findings,
+    ).toHaveLength(2);
+    const later = make("2", "7").findings[0]!;
+    expect(later.source_finding_id).toBe(first.source_finding_id);
+    expect((await bind(later)).preview.findings).toHaveLength(1);
+    const missing = structuredClone(first);
+    delete missing.evidence.source_scan_id;
+    await expect(bind(missing)).rejects.toThrow(/source scan ID/i);
+  }
+});
+
+test("normalized Checkmarx replay binds the retained occurrence to its repository and provider", async () => {
+  await using fixture = await localFindingsFixture({ remote: source });
+  const options = {
+    provider: "checkmarx" as const,
+    repository: fixture.repository,
+    sourceKey: "example/project/main",
+  };
+  const dependencies = { environment: fixture.environment };
+  const normal = one("scan-a", "abc");
   const prepare = (input: ExternalFindings) =>
     prepareNormalizedLocalImport(input, options, dependencies);
   for (const input of [normal, xml("1")]) {
@@ -69,6 +104,15 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
         dependencies,
       );
     await expect(relabeled()).rejects.toThrow(/checkmarx provider/i);
+    unmarked.findings[0]!.source_finding_id = "custom-key";
+    await expect(relabeled()).rejects.toThrow(/checkmarx provider/i);
+    await expect(prepare(unmarked)).rejects.toThrow(/source finding ID/i);
+    unmarked.findings[0]!.source_finding_id =
+      input.findings[0]!.source_finding_id;
+    unmarked.findings[0]!.evidence.source_data = {
+      sourceRepositoryUrl: source + "-other",
+    };
+    await expect(relabeled()).rejects.toThrow(/retained scanner repository/i);
     delete unmarked.findings[0]!.evidence.source_data;
     expect((await relabeled()).preview.findings).toHaveLength(1);
 
@@ -104,6 +148,18 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
   await expect(prepare({ ...typed, report: normal.report })).rejects.toThrow(
     /retained report/i,
   );
+  await expect(
+    prepare({ ...normal, report: { sourceRepositoryUrl: source + "-other" } }),
+  ).rejects.toThrow(/retained Checkmarx report/i);
+  const conflict = xml("1");
+  delete conflict.report;
+  const attrs = conflict.findings[0]!.evidence.source_data!["result"] as Record<
+    string,
+    unknown
+  >;
+  attrs["DeepLink"] =
+    "https://sast.example/CxWebClient/ViewerMain.aspx?scanid=2&projectid=1";
+  await expect(prepare(conflict)).rejects.toThrow(/scan/i);
   const firstXml = xml("1");
   await expect(
     prepare({ ...firstXml, report: { ...firstXml.report, projectId: "2" } }),
@@ -124,5 +180,5 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
   const combined = [...xml("1").findings, ...xml("2").findings];
   await expect(
     prepare({ findings: combined, read: combined.length, excluded: [] }),
-  ).rejects.toThrow(/same product and project/i);
+  ).rejects.toThrow(/same product, project and scan/i);
 });

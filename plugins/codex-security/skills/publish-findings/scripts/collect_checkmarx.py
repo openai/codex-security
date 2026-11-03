@@ -11,25 +11,50 @@ from pathlib import Path
 from xml.parsers import expat
 
 
+def source_root() -> Path:
+    source = Path.cwd().resolve()
+    for parent in (source, *source.parents):
+        if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
+            return parent
+    return source
+
+
+def in_source(path: Path, source: Path) -> bool:
+    invocation = path.parent.resolve() / path.name
+    return any(candidate.is_relative_to(source) for candidate in (path, invocation, path.resolve()))
+
+
 def installed_file(value: str) -> Path:
     path = Path(value)
     if not path.is_absolute() or not path.is_file():
         raise argparse.ArgumentTypeError("expected an absolute path to an existing file")
-    return path
+    if in_source(path, source_root()):
+        raise argparse.ArgumentTypeError("use an installed file outside the source checkout")
+    # Invoke the selected name for multicall shims.
+    return path.parent.resolve() / path.name
 
 
 def installed_launcher(value: str) -> Path:
-    selected = installed_file(value)
-    source = Path.cwd().resolve()
-    for parent in (source, *source.parents):
-        if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
-            source = parent
-            break
-    # Inspect the resolved target, but invoke the selected name for multicall shims.
-    launcher = selected.parent.resolve() / selected.name
-    if any(path.is_relative_to(source) for path in (selected, launcher, launcher.resolve())):
-        raise argparse.ArgumentTypeError("use an installed launcher outside the source checkout")
-    return launcher
+    path = installed_file(value)
+    if sys.platform == "win32" and (
+        path.suffix.lower() not in {".exe", ".com"}
+        or path.resolve().suffix.lower() in {".bat", ".cmd"}
+    ):
+        raise argparse.ArgumentTypeError("use a native Windows executable (.exe or .com)")
+    return path
+
+
+def vendor_environment(source: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    entries = []
+    for entry in os.get_exec_path(env):
+        if os.name == "nt" and entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
+        path = Path(entry)
+        if path.is_absolute() and path.is_dir() and not in_source(path, source):
+            entries.append(str(path.resolve()))
+    env["PATH"] = os.pathsep.join(entries)
+    return env
 
 
 def verify_one(report: Path, scan_id: str) -> None:
@@ -62,14 +87,21 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
 
 
 def collect(args: argparse.Namespace) -> Path:
-    output = Path(tempfile.mkdtemp(prefix="checkmarx-report-")).resolve()
+    source = source_root()
+    temp = Path(tempfile.gettempdir())
+    if in_source(temp, source):
+        raise ValueError(
+            "Select a temporary directory outside the source checkout (TMPDIR or TEMP)."
+        )
+    env = vendor_environment(source)
+    output = Path(tempfile.mkdtemp(prefix="checkmarx-report-", dir=temp)).resolve()
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
             if args.product == "one":
-                config = os.environ.get("CX_CONFIG_FILE_PATH")
-                if config and not Path(config).is_absolute():
+                config = env.get("CX_CONFIG_FILE_PATH")
+                if config and (not Path(config).is_absolute() or in_source(Path(config), source)):
                     raise ValueError(
-                        "Set CX_CONFIG_FILE_PATH to a trusted absolute path. "
+                        "Set CX_CONFIG_FILE_PATH to a trusted absolute path outside the source checkout. "
                         "The collector runs Checkmarx One from a private directory."
                     )
                 report = Path(work, "cx_result.json")
@@ -114,7 +146,9 @@ def collect(args: argparse.Namespace) -> Path:
                     "--cx-xml.file-name-format=checkmarx-results.xml",
                 ]
             # Reserve stdout for the report path and pass vendor diagnostics to stderr.
-            result = subprocess.run(command, cwd=work, stdin=subprocess.DEVNULL, stdout=sys.stderr)
+            result = subprocess.run(
+                command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr
+            )
             if result.returncode:
                 raise ValueError(f"The Checkmarx tool exited with status {result.returncode}.")
             if report.is_symlink() or not report.is_file():

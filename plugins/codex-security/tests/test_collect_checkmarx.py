@@ -1,6 +1,7 @@
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,15 +50,36 @@ def executable(directory, name):
     return str(path)
 
 
-@pytest.mark.parametrize("product", ["one", "cxsast"])
-def test_refuses_launchers_inside_the_scan_source(
-    product, capture_dir, monkeypatch, tmp_path, capsys
+@pytest.fixture
+def cxsast_args(tmp_path):
+    jar, config = tmp_path / "cx-flow.jar", tmp_path / "application.yml"
+    jar.touch()
+    config.touch()
+    return [
+        "cxsast",
+        "1234",
+        "--team",
+        "/CxServer",
+        "--project",
+        "R&D",
+        "--jar",
+        str(jar),
+        "--config",
+        str(config),
+        "--java",
+        executable(tmp_path, "java"),
+    ]
+
+
+@pytest.mark.parametrize("option", ["--cx", "--java", "--jar", "--config"])
+def test_refuses_vendor_files_inside_the_scan_source(
+    option, capture_dir, cxsast_args, monkeypatch, tmp_path, capsys
 ):
     source = Path.cwd()
     tools = source / "tools"
     tools.mkdir()
-    if product == "one":
-        request = ["one", ONE_SCAN, "--cx", executable(tools, "cx")]
+    if option == "--cx":
+        request = ["one", ONE_SCAN, "--cx", executable(tmp_path, "cx")]
     else:
         # A checkout may be entered from a subdirectory, with its tool elsewhere in the tree.
         (source / ".git").mkdir()
@@ -65,16 +87,95 @@ def test_refuses_launchers_inside_the_scan_source(
         subdir = source / "src"
         subdir.mkdir()
         monkeypatch.chdir(subdir)
-        request = ["cxsast", "1234", "--java", executable(tools, "java")]
+        request = cxsast_args
+    index = request.index(option) + 1
+    checkout_file = tools / Path(request[index]).name
+    checkout_file.touch()
+    request[index] = str(checkout_file)
     assert invoke(monkeypatch, *request) != 0
     assert "outside the source checkout" in capsys.readouterr().err
     if os.name != "nt":
-        alias = tmp_path / "configured-launcher"
-        alias.symlink_to(request[-1])
-        request[-1] = str(alias)
+        alias = tmp_path / "configured-file"
+        alias.symlink_to(checkout_file)
+        request[index] = str(alias)
         assert invoke(monkeypatch, *request) != 0
         assert "outside the source checkout" in capsys.readouterr().err
     assert not list(capture_dir.iterdir())
+
+
+@pytest.mark.parametrize("suffix", [".cmd", ".BAT"])
+def test_refuses_windows_batch_launchers(
+    suffix, capture_dir, cxsast_args, monkeypatch, tmp_path, capsys
+):
+    launcher = tmp_path / f"java{suffix}"
+    launcher.touch()
+    monkeypatch.setattr(sys, "platform", "win32")
+    paths = [launcher]
+    if os.name != "nt":
+        alias = tmp_path / "java.exe"
+        alias.symlink_to(launcher)
+        paths.append(alias)
+    for path in paths:
+        cxsast_args[cxsast_args.index("--java") + 1] = str(path)
+        assert invoke(monkeypatch, *cxsast_args) != 0
+        assert "native Windows executable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("setting", ["CX_CONFIG_FILE_PATH", "TMPDIR"])
+def test_refuses_vendor_paths_that_resolve_into_source(
+    setting, capture_dir, monkeypatch, tmp_path, capsys
+):
+    source = Path.cwd() / "private"
+    if setting == "TMPDIR":
+        source.mkdir()
+    else:
+        source.touch()
+    paths = [source]
+    if os.name != "nt":
+        alias = tmp_path / "external-alias"
+        alias.symlink_to(source, target_is_directory=source.is_dir())
+        paths.append(alias)
+    cx = executable(tmp_path, "cx")
+    for path in paths:
+        monkeypatch.setenv(setting, str(path))
+        if setting == "TMPDIR":
+            monkeypatch.setattr(tempfile, "tempdir", None)  # Read the actual TMPDIR.
+        assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", cx) != 0
+        assert "outside the source checkout" in capsys.readouterr().err
+    assert not list(capture_dir.iterdir())
+    if source.is_dir():
+        assert not list(source.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exercises Unix env shebang lookup")
+def test_env_shim_cannot_use_the_scanned_repository_on_path(
+    capture_dir, cxsast_args, monkeypatch, tmp_path
+):
+    tools = Path.cwd() / "bin"
+    tools.mkdir()
+    bash = tools / "bash"
+    bash.write_text("#!/bin/sh\nexit 47\n")
+    bash.chmod(0o755)
+    alias = tmp_path / "external-bin"
+    alias.symlink_to(tools, target_is_directory=True)
+    java = Path(cxsast_args[cxsast_args.index("--java") + 1])
+    xml = '<CxXMLResults ScanId="1234" ProjectId="2" ProjectName="R&amp;D" TeamFullPathOnReportDate="CxServer" />'
+    java.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$PATH\" >&2\n"
+        f"printf '%s\\n' '{xml}' >checkmarx-results.xml\n"
+    )
+    trusted = Path(shutil.which("bash")).resolve().parent
+    monkeypatch.setenv("PATH", os.pathsep.join(["bin", str(tools), str(alias), str(trusted)]))
+    monkeypatch.setenv("TMPDIR", str(capture_dir))
+    result = subprocess.run(
+        [sys.executable, "-I", str(SCRIPT), *cxsast_args],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == str(trusted)
+    assert Path(result.stdout.strip()).is_file()
 
 
 def test_one_collects_exact_scan_to_a_fresh_private_path(

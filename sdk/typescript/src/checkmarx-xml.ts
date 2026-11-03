@@ -45,6 +45,31 @@ interface Row extends Record<string, unknown> {
   nodes: Record<string, unknown>[];
 }
 
+function requireDeepLinkScope(
+  value: unknown,
+  scanId: string,
+  projectId: string,
+) {
+  const url = typeof value === "string" ? URL.parse(value) : null;
+  if (
+    !url ||
+    !/^https?:$/u.test(url.protocol) ||
+    !url.pathname.toLowerCase().endsWith("/cxwebclient/viewermain.aspx")
+  )
+    return;
+  for (const [name, id] of url.searchParams) {
+    const key = name.toLowerCase();
+    if (
+      id &&
+      ((key === "scanid" && id !== scanId) ||
+        (key === "projectid" && id !== projectId))
+    )
+      throw new Error(
+        "CxSAST DeepLink scan or project does not match the report.",
+      );
+  }
+}
+
 function readReport(contents: string) {
   const rows: Row[] = [];
   const stack: Element[] = [];
@@ -58,6 +83,7 @@ function readReport(contents: string) {
         throw new Error("Expected a Checkmarx CxSAST CxXMLResults report.");
       projectId = requiredText(attributes["ProjectId"], "CxSAST ProjectId");
       scanId = requiredText(attributes["ScanId"], "CxSAST ScanId");
+      requireDeepLinkScope(attributes["DeepLink"], scanId, projectId);
     } else if (
       (stack.length === 1 && name !== "Query") ||
       (stack.length === 2 && name !== "Result")
@@ -96,9 +122,14 @@ function readReport(contents: string) {
 }
 
 /** SimilarityId groups paths, including paths with different intermediate nodes. */
-export function checkmarxXmlId(source: Record<string, unknown>): string {
+export function checkmarxXmlId(
+  source: Record<string, unknown>,
+  scanId: string,
+): string {
+  const projectId = requiredText(source["projectId"], "CxSAST ProjectId");
   const query = record(source["query"], "CxSAST Query");
   const result = record(source["result"], "CxSAST Result");
+  requireDeepLinkScope(result["DeepLink"], scanId, projectId);
   const path = record(source["path"], "CxSAST Path");
   const nodes = array(source["nodes"], "CxSAST Path nodes");
   const route = (nodes.length ? nodes : [result]).map((value) => {
@@ -112,7 +143,7 @@ export function checkmarxXmlId(source: Record<string, unknown>): string {
     ];
   });
   return stableId("checkmarx-cxsast", [
-    requiredText(source["projectId"], "CxSAST ProjectId"),
+    projectId,
     requiredText(query["id"], "CxSAST Query id"),
     requiredText(path["SimilarityId"], "CxSAST SimilarityId"),
     route,
@@ -149,7 +180,7 @@ export function normalizeCheckmarxXml(
         target,
       );
     },
-    checkmarxXmlId,
+    (row) => checkmarxXmlId(row, scanId),
     target,
     {
       report: {

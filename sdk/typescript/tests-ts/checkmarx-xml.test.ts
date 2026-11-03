@@ -57,6 +57,41 @@ test("retains native triage and ordered flow with snippets for each CxSAST resul
   expect(JSON.stringify(evidence)).not.toContain("report owner");
 });
 
+test("checks explicit scan and project IDs in native viewer links", () => {
+  const viewer = "https://sast.example/CxWebClient/ViewerMain.aspx";
+  const matching = viewer + "?pathid=17&projectid=8&scanid=100";
+  const withLink = (xml: string, tag: string, link: string) =>
+    xml.replace(
+      `<${tag} `,
+      `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
+    );
+  const rows = [matching, viewer + "?scanid=101", viewer + "?projectid=9"].map(
+    (link) => withLink(result(13), "Result", link),
+  );
+  const output = normalize(
+    withLink(
+      report(rows.join("")),
+      "CxXMLResults",
+      viewer + "?scanid=100&projectid=8",
+    ),
+  );
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]!.evidence.source_data).toMatchObject({
+    result: { DeepLink: matching },
+  });
+  expect(output.excluded).toMatchObject([
+    { position: 2, reason: expect.stringContaining("DeepLink") },
+    { position: 3, reason: expect.stringContaining("DeepLink") },
+  ]);
+  const unrelated = "https://sast.example/issue?scanid=101";
+  expect(
+    normalize(report(withLink(result(13), "Result", unrelated))).excluded,
+  ).toEqual([]);
+  expect(() =>
+    normalize(withLink(report(""), "CxXMLResults", viewer + "?scanid=101")),
+  ).toThrow(/DeepLink/u);
+});
+
 test("retains distinct intermediate paths and replays their identity across scans", () => {
   const first = result(13);
   const other = result(19);

@@ -682,7 +682,8 @@ with parsed JSON. Verify the repository for the selected findings before passing
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
 To prepare a local import, pass `provider: "checkmarx"` and the verified
-`sourceRepositoryUrl` to `prepareLocalExternalImport`.
+`sourceRepositoryUrl` to `prepareLocalExternalImport`. Keep each batch of normalized
+Checkmarx findings scoped to one scan and its repository.
 [Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
 
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved

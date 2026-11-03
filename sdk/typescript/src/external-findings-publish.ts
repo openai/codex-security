@@ -58,6 +58,7 @@ import {
 import {
   checkmarxReportRepositories,
   checkmarxReportRepository,
+  projectedCheckmarxRepositoryUrl,
 } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
@@ -1761,18 +1762,26 @@ async function preparePublicationInput(
     }
     requireDestination(
       "Checkmarx source",
-      checkmarxReportRepository(options.provider, findings, report, "cloud"),
+      checkmarxReportRepository(
+        options.provider,
+        findings,
+        report,
+        "cloud",
+        Boolean(saved),
+      ),
     );
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
+    const checkmarx =
+      saved && options.provider !== "checkmarx"
+        ? undefined
+        : checkmarxReportRepositories(options.provider, findings, "cloud");
     for (const [provider, repositories] of [
       ["veracode", veracodeReportRepositories],
-      ["checkmarx", checkmarxReportRepositories],
       ["continuum", continuumReportRepositories],
     ] as const) {
-      if (saved && options.provider !== provider && provider !== "checkmarx")
-        continue;
+      if (saved && options.provider !== provider) continue;
       for (const [id, source] of repositories(
         options.provider,
         findings,
@@ -1798,9 +1807,13 @@ async function preparePublicationInput(
       const projected = repositories
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
+      const checkmarxUrl = checkmarx
+        ? checkmarx.get(id)?.url
+        : projectedCheckmarxRepositoryUrl(finding, "cloud");
       if (
         replay &&
         !projected &&
+        !checkmarxUrl &&
         options.provider !== "inspector" &&
         options.provider !== "veracode" &&
         options.provider !== "checkmarx" &&
@@ -1810,9 +1823,10 @@ async function preparePublicationInput(
         continue;
       const urls = [
         projected,
+        checkmarxUrl,
         evidence.details?.repository?.url,
         options.provider === "wiz"
-          ? projected
+          ? projected || checkmarxUrl
             ? wizFindingRepository(evidence, "cloud")?.url
             : wizCsvRepositoryUrl(evidence)
           : undefined,

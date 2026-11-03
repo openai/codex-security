@@ -21,6 +21,7 @@ import {
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
+import { normalizeCheckmarxOne } from "../src/checkmarx-one.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
@@ -1514,6 +1515,26 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
     source: { provider: "checkmarx", source_key: selected.sourceKey },
     items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
   });
+  const otherScan = normalizeCheckmarxOne(
+    JSON.stringify({
+      scanID: "scan-b",
+      totalCount: 1,
+      results: [{ ...row, similarityId: "18" }],
+    }),
+    selected.sourceRepositoryUrl,
+    "cloud",
+  );
+  await expect(
+    prepareNormalizedExternalPublication(
+      {
+        read: 2,
+        excluded: [],
+        findings: [...first.preview.findings, ...otherScan.findings],
+      },
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow(/same product, project and scan/i);
   const replayWithReport = (change: Record<string, unknown>) =>
     prepareNormalizedExternalPublication(
       { ...first.preview, report: { ...first.preview.report, ...change } },
@@ -1788,6 +1809,14 @@ const savedDependabotData = {
 
 test.each([
   {
+    data: { format: "cxsast-xml" },
+    selected: options,
+    requiredProvider: "checkmarx",
+    filename:
+      "61dd30e93a03bf006171270e361d860fc8641071d09d075c57d8f048d5376d5d.pending.json",
+    digest: "0f79d391b698f841e2736f1260852e9265e835c7adfc94ce447bd7d5566db878",
+  },
+  {
     ...savedBlackDuckEvidence,
     selected: options,
     filename:
@@ -1932,6 +1961,44 @@ test.each(["wiz", "inspector"] as const)(
     expect(f.posts[1]).toBe(f.posts[0]);
   },
 );
+
+test("binds a projected Checkmarx source when a different provider retries", async () => {
+  const f = await fixture();
+  const source = f.state.repositoryUrl;
+  const input = {
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: "checkmarx-one:" + "a".repeat(64),
+        evidence: {
+          title: "Example",
+          severity: "low" as const,
+          source_data: { sourceRepositoryUrl: source },
+        },
+      },
+    ],
+  };
+  const prepare = () =>
+    prepareNormalizedExternalPublication(input, options, f.deps);
+  f.state.repositoryUrl = "https://github.com/example/different";
+  await expect(prepare()).rejects.toThrow(
+    /does not match the selected Cloud repository/,
+  );
+  f.state.repositoryUrl = source;
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  f.state.repositoryUrl = "https://github.com/example/different";
+  await expect(prepare()).rejects.toThrow(
+    /does not match the selected Cloud repository/,
+  );
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = source;
+  expect((await (await prepare()).publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {

@@ -32,8 +32,9 @@ Codex checks the scan ID in the exported file. For CxSAST, it also checks the
 team and project. Review the preview for the requested repository before
 confirming the import.
 Codex reuses the same file after confirmation. The helper creates a private
-temporary directory for its report. Remove that directory after readback and
-any retries, or ask Codex to keep it for later use.
+temporary directory for its report. If your build sets `TMPDIR` or `TEMP`,
+point it outside the scanned source tree. Remove the report directory after
+readback and any retries, or ask Codex to keep it for later use.
 
 ## Export one scan manually
 

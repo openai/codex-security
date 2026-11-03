@@ -40,6 +40,7 @@ import {
 import {
   checkmarxReportRepositories,
   checkmarxReportRepository,
+  projectedCheckmarxRepositoryUrl,
 } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
@@ -707,12 +708,13 @@ export async function prepareLocalImport(
     "local",
     options.inspectorProjectMap,
   );
-  const projected =
-    options.provider === "blackduck"
-      ? []
-      : current.findings.filter((finding) =>
-          projectedBlackDuckRepositoryUrl(finding, "local"),
-        );
+  const projected = current.findings.filter(
+    (finding) =>
+      (options.provider !== "blackduck" &&
+        projectedBlackDuckRepositoryUrl(finding, "local")) ||
+      (options.provider !== "checkmarx" &&
+        projectedCheckmarxRepositoryUrl(finding, "local")),
+  );
   const mixed = projected.length > 0 && readerSources.length > 0;
   const nativeSources = new Map(
     (mixed ? current.findings : projected)
@@ -759,9 +761,14 @@ export async function prepareLocalImport(
     "local",
     sameRepositories,
   );
+  const checkmarxRows = checkmarxReportRepositories(
+    options.provider,
+    current.findings,
+    "local",
+    sameRepositories,
+  );
   for (const repositories of [
     veracodeReportRepositories,
-    checkmarxReportRepositories,
     continuumReportRepositories,
   ]) {
     for (const source of repositories(
@@ -779,7 +786,7 @@ export async function prepareLocalImport(
     const { evidence, source_finding_id: id } = finding;
     const url = evidence.details?.repository?.url;
     if (url) sources.set(url, { url });
-    const retained = bound.get(id);
+    const retained = bound.get(id) ?? checkmarxRows.get(id);
     const native = nativeSources.get(finding) ?? [];
     if (retained) {
       const claims = [
