@@ -135,6 +135,7 @@ async function run() {
     existsSync(process.env.PACKAGE_DEEP_HOLD)
   ) {
     await trace({ phase: "held", scanId: env.CODEX_SECURITY_SCAN_ID });
+    await writeFile(process.env.PACKAGE_DEEP_HOLD, "held");
     await new Promise(() => setInterval(() => {}, 1_000));
   }
   const server = await startRpc(artifacts.command, artifacts.args, {
@@ -147,7 +148,7 @@ async function run() {
       const draft = {
         scanId: env.CODEX_SECURITY_SCAN_ID,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [],

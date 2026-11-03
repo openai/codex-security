@@ -22,14 +22,15 @@ DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
 DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
 DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
-CONFIG_KEYS = {
-    "workers",
-    "subagents",
-    "stop_after_no_new",
-    "stop_after_consecutive_errors",
-    "max_discovery_runs",
-    "max_time_hours",
+CONFIG_FIELDS = {
+    "workers": "workers",
+    "subagents": "subagents",
+    "stopAfterNoNew": "stop_after_no_new",
+    "stopAfterConsecutiveErrors": "stop_after_consecutive_errors",
+    "maxDiscoveryRuns": "max_discovery_runs",
+    "maxTimeHours": "max_time_hours",
 }
+CONFIG_KEYS = set(CONFIG_FIELDS.values())
 
 
 def codex_home() -> Path:
@@ -46,11 +47,23 @@ def config_path() -> Path:
 
 
 def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float]:
+    return resolve_deep_scan_setup(available_parallelism)["settings"]
+
+
+def resolve_deep_scan_setup(
+    available_parallelism: int, project_json: str | None = None
+) -> dict[str, Any]:
+    project = json.loads(project_json) if project_json is not None else None
+    overrides = project["settings"] if project is not None else {}
+    unknown = sorted(set(overrides) - set(CONFIG_FIELDS))
+    if unknown:
+        raise SystemExit(f"Unknown Deep Scan project settings: {', '.join(unknown)}.")
     if isinstance(available_parallelism, bool) or available_parallelism < 1:
         raise SystemExit("Available parallelism must be a positive integer.")
     path = config_path()
     configured: dict[str, Any] = {}
-    if path.exists():
+    exists = path.exists()
+    if exists and not all(name in overrides for name in CONFIG_FIELDS):
         try:
             with path.open("rb") as source:
                 document: object = tomllib.load(source)
@@ -70,38 +83,25 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
             )
         configured = deep_scan
 
-    workers: object = configured.get("workers", DEFAULT_WORKERS)
-    if workers == "auto":
-        resolved_workers = DEFAULT_WORKERS
-    else:
-        resolved_workers = require_integer(workers, "deep_scan.workers", minimum=1)
-    stop_after_no_new = require_integer(
-        configured.get("stop_after_no_new", DEFAULT_STOP_AFTER_NO_NEW),
-        "deep_scan.stop_after_no_new",
-        minimum=1,
-    )
+    settings: dict[str, int | float] = {}
+    sources: dict[str, str] = {}
+    for name, key in CONFIG_FIELDS.items():
+        value = overrides.get(name, configured.get(key, DEFAULTS[name]))
+        sources[name] = (
+            "project" if name in overrides else "legacy" if key in configured else "default"
+        )
+        if name == "workers" and value == "auto":
+            value = DEFAULT_WORKERS
+        settings[name] = (
+            require_positive_number(value, "deep_scan.max_time_hours")
+            if name == "maxTimeHours"
+            else require_integer(value, f"deep_scan.{key}", minimum=0 if name == "subagents" else 1)
+        )
     return {
-        "workers": resolved_workers,
-        "subagents": require_integer(
-            configured.get("subagents", DEFAULT_SUBAGENTS),
-            "deep_scan.subagents",
-            minimum=0,
-        ),
-        "stopAfterNoNew": stop_after_no_new,
-        "stopAfterConsecutiveErrors": require_integer(
-            configured.get("stop_after_consecutive_errors", DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS),
-            "deep_scan.stop_after_consecutive_errors",
-            minimum=1,
-        ),
-        "maxDiscoveryRuns": require_integer(
-            configured.get("max_discovery_runs", DEFAULT_MAX_DISCOVERY_RUNS),
-            "deep_scan.max_discovery_runs",
-            minimum=1,
-        ),
-        "maxTimeHours": require_positive_number(
-            configured.get("max_time_hours", DEFAULT_MAX_TIME_HOURS),
-            "deep_scan.max_time_hours",
-        ),
+        "settings": settings,
+        "sources": sources,
+        **({"legacyConfigPath": str(path)} if exists else {}),
+        **({"projectConfigPath": project["path"]} if project is not None else {}),
     }
 
 

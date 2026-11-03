@@ -6,6 +6,7 @@ from argparse import Namespace
 from contextlib import closing
 from functools import partial
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from workbench_test_support import stable_target_id
@@ -349,28 +350,29 @@ def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, in
     assert "findings" not in scans[0]
 
 
+@pytest.mark.parametrize(
+    "simulate_windows",
+    [
+        pytest.param(False, id="native", marks=pytest.mark.cross_platform),
+        pytest.param(True, id="ntpath"),
+    ],
+)
 def test_scan_root_filter_matches_windows_path_aliases(
-    workbench_api, indexed_collections, tmp_path, monkeypatch
+    workbench_api, indexed_collections, tmp_path, monkeypatch, simulate_windows
 ):
     connection, _ = indexed_collections
+    history = workbench_api["scan_history"]
+    if simulate_windows:
+        monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
     root = tmp_path / "Scan Results"
+    root.mkdir()
     for scan_id, directory in zip(
-        SCAN_IDS, (root / "first", tmp_path / "Scan Results Other", tmp_path / "unrelated")
+        SCAN_IDS, (f"{root}/first", tmp_path / "Scan Results Other", history.os.path.normpath(root))
     ):
         connection.execute("UPDATE scans SET scan_dir = ? WHERE id = ?", (str(directory), scan_id))
-    history = workbench_api["scan_history"]
-    monkeypatch.setattr(history, "os", SimpleNamespace(name="nt", path=ntpath, sep="\\"))
-    args = query_args(scan_root=str(root).upper(), limit=None)
-
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
-    connection.execute(
-        "UPDATE scans SET scan_dir = ? WHERE id = ?", (ntpath.normpath(str(root)), SCAN_IDS[0])
-    )
-    assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
-        SCAN_IDS[0]
-    ]
+    scan_root = str(root).upper() if history.os.name == "nt" else str(root)
+    scans = history.list_scans(connection, query_args(scan_root=scan_root, limit=None))["scans"]
+    assert {scan["scanId"] for scan in scans} == {SCAN_IDS[0], SCAN_IDS[2]}
 
 
 def test_scan_list_probes_requested_repository_once(
@@ -379,11 +381,12 @@ def test_scan_list_probes_requested_repository_once(
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
-    git_output = history.git_output
 
     def record_git_output(target, *arguments):
         probes.append((target, arguments))
-        return git_output(target, *arguments)
+        if arguments[0] == "rev-parse":
+            return str(target / ".git")
+        return f"https://example.test/{target.name}.git"
 
     monkeypatch.setattr(history, "git_output", record_git_output)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
@@ -391,7 +394,36 @@ def test_scan_list_probes_requested_repository_once(
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
         ("rev-parse", "--show-toplevel"),
+        ("rev-parse", "--path-format=absolute", "--git-common-dir"),
     ]
+
+
+def test_unscanned_repositories_follow_scanned_rows_and_paginate(
+    workbench_api, indexed_collections, tmp_path, monkeypatch
+):
+    connection, _ = indexed_collections
+    indexes = workbench_api["native_indexes"]
+    query = partial(
+        indexes.list_repositories, read_coverage=workbench_api["coverage_for_comparison"]
+    )
+    scanned = query(connection)["repositories"]
+    unscanned = sorted(
+        workbench_api["ensure_security_target"](connection, str(tmp_path / name))
+        for name in ("needle-cedar", "needle-oak")
+    )
+    repositories = query(connection)["repositories"]
+    assert repositories[: len(scanned)] == scanned
+    assert [row["targetId"] for row in repositories[len(scanned) :]] == unscanned
+    probe = Mock(wraps=indexes.os.path.isdir)
+    monkeypatch.setattr(indexes.os.path, "isdir", probe)
+    for offset, target_id in enumerate(unscanned):
+        page = query(
+            connection, query_args(status="not_scanned", query="NeEdLe", limit=1, offset=offset)
+        )
+        assert [row["targetId"] for row in page["repositories"]] == [target_id]
+        assert page["nextOffset"] == (1 if offset == 0 else None)
+        probe.assert_called_once_with(page["repositories"][0]["targetPath"])
+        probe.reset_mock()
 
 
 @pytest.mark.parametrize(
@@ -721,6 +753,20 @@ def test_repository_index_keeps_one_scan_cohort(
     indexes = workbench_api["native_indexes"]
     database = tmp_path / "history.sqlite"
     new_id = "00000000-0000-4000-8000-999999999999"
+    # Hold one target's first completed scan and finding for the concurrent publication.
+    with source:
+        pending = [
+            (
+                table,
+                source.execute(f"SELECT * FROM {table} WHERE {key} = ?", (SCAN_IDS[1],)).fetchone(),
+            )
+            for table, key in (
+                ("scans", "id"),
+                ("scan_progress", "scan_id"),
+                ("finding_occurrences", "scan_id"),
+            )
+        ]
+        source.execute("DELETE FROM scans WHERE id = ?", (SCAN_IDS[1],))
     with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as writer:
         source.backup(reader)
         reader.row_factory = sqlite3.Row
@@ -733,10 +779,14 @@ def test_repository_index_keeps_one_scan_cohort(
 
         def execute(sql, parameters=()):
             cursor = reader.execute(sql, parameters)
-            if "JOIN scan_progress AS progress" not in sql:
+            if "FROM security_targets AS targets" not in sql:
                 return cursor
-            rows = cursor.fetchall()
             with writer:
+                writer.execute(
+                    "UPDATE security_targets SET display_name = 'renamed' "
+                    "WHERE id = (SELECT target_id FROM scans WHERE id = ?)",
+                    (SCAN_IDS[0],),
+                )
                 writer.execute(
                     "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, "
                     "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
@@ -750,7 +800,11 @@ def test_repository_index_keeps_one_scan_cohort(
                     "SELECT ?, updated_at FROM scan_progress WHERE scan_id = ?",
                     (new_id, SCAN_IDS[0]),
                 )
-            return SimpleNamespace(fetchall=lambda: rows)
+                for table, row in pending:
+                    writer.execute(
+                        f"INSERT INTO {table} VALUES ({','.join('?' for _ in row)})", row
+                    )
+            return cursor
 
         proxy = SimpleNamespace(execute=execute, create_function=reader.create_function)
         assert (
@@ -762,8 +816,11 @@ def test_repository_index_keeps_one_scan_cohort(
         after = indexes.list_repositories(
             reader, read_coverage=workbench_api["coverage_for_comparison"]
         )["repositories"]
-        assert after[0]["latestScan"]["scanId"] == new_id
-        assert after[0]["scanCount"] == 2
+        renamed = next(row for row in after if row["displayName"] == "renamed")
+        assert renamed["latestScan"]["scanId"] == new_id
+        assert renamed["scanCount"] == 2
+        first = next(row for row in after if row["latestScan"]["scanId"] == SCAN_IDS[1])
+        assert (first["scanCount"], first["openFindingsCount"]) == (1, 1)
 
 
 def test_repository_latest_preserves_admission_order_with_submillisecond_timestamps(
@@ -795,11 +852,18 @@ def test_repository_summary_excludes_scans_without_progress(workbench_api, index
     target_id = stable_target_id(targets[0])
     connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (target_id, SCAN_IDS[1]))
     connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[1],))
-    repositories = workbench_api["native_indexes"].list_repositories(
-        connection,
-        query_args(target_id=target_id),
+    query = partial(
+        workbench_api["native_indexes"].list_repositories,
         read_coverage=workbench_api["coverage_for_comparison"],
-    )["repositories"]
+    )
+    repositories = query(connection, query_args(target_id=target_id))["repositories"]
     assert len(repositories) == 1
     assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]
     assert repositories[0]["scanCount"] == 1
+    connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[0],))
+    (unscanned,) = query(connection, query_args(target_id=target_id, status="not_scanned"))[
+        "repositories"
+    ]
+    assert unscanned["targetId"] == target_id
+    assert unscanned["scanCount"] == unscanned["openFindingsCount"] == 0
+    assert unscanned["latestScan"] is None

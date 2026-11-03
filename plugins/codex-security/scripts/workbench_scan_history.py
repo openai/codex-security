@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -24,6 +25,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
@@ -149,7 +151,7 @@ def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
-    coverage_ref = ARTIFACTS["coverage"]
+    coverage_ref = "coverage.json"
     try:
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
@@ -159,7 +161,7 @@ def coverage_summary_for_history(
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:
             # Completion already validated the full scan. History only needs the
-            # pinned manifest and its coverage artifact, not findings or receipts.
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
             manifest, manifest_bytes = _read_scan_local_json_bytes(
                 scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
             )
@@ -169,11 +171,15 @@ def coverage_summary_for_history(
             ):
                 raise ContractError("The sealed scan manifest changed after completion.")
             sealed_scan = manifest["scan"]
-            if (
-                sealed_scan["id"] != scan["id"]
-                or not sealed_scan.get("sealedAt")
-                or sealed_scan["coverageRef"] != coverage_ref
-            ):
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
                 raise ContractError("The sealed coverage does not belong to this scan.")
             coverage, coverage_bytes = _read_scan_local_json_bytes(
                 scan_dir, coverage_ref, coverage_ref
@@ -214,9 +220,10 @@ def _same_repository(
     *,
     before_target_path: str | None = None,
     after_target_path: str | None = None,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
     require_ownership: bool = False,
+    probe_git: Callable[..., str | None] | None = None,
 ) -> bool:
+    probe_git = probe_git or git_output
     before_target_id = before["target_id"]
     after_target_id = after["target_id"]
     for scan in (before, after):
@@ -260,17 +267,15 @@ def _same_repository(
     after_target = Path(after["target_path"] if after_target_path is None else after_target_path)
     if before_target.resolve() == after_target.resolve():
         return not before_target_id and not after_target_id
-    before_git_dir = git_output(
+    before_git_dir = probe_git(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
+    probe_git_dir = probe_git(
+        after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    if before_git_dir is None or after_git_dir is None:
+    if before_git_dir is None or probe_git_dir is None:
         return False
-    if Path(before_git_dir).resolve() != Path(after_git_dir).resolve():
+    if Path(before_git_dir).resolve() != Path(probe_git_dir).resolve():
         if not before_target_id or not after_target_id:
             return False
         if not all(
@@ -279,13 +284,13 @@ def _same_repository(
             for field in ("target_device", "target_inode")
         ):
             return False
-        before_origin = _repository_origin(before_target)
-        return before_origin is not None and before_origin == (
-            _repository_origin(after_target) if after_identity is None else after_identity[1]
+        before_origin = _repository_origin(probe_git(before_target, "remote", "get-url", "origin"))
+        return before_origin is not None and before_origin == _repository_origin(
+            probe_git(after_target, "remote", "get-url", "origin")
         )
-    before_worktree = git_output(before_target, "rev-parse", "--show-toplevel")
-    after_worktree = git_output(after_target, "rev-parse", "--show-toplevel")
-    registered_worktrees = git_output(before_target, "worktree", "list", "--porcelain", "-z")
+    before_worktree = probe_git(before_target, "rev-parse", "--show-toplevel")
+    after_worktree = probe_git(after_target, "rev-parse", "--show-toplevel")
+    registered_worktrees = probe_git(before_target, "worktree", "list", "--porcelain", "-z")
     if before_worktree is None or after_worktree is None or registered_worktrees is None:
         return False
     before_worktree_path = Path(before_worktree).resolve()
@@ -307,8 +312,7 @@ def _same_repository(
     )
 
 
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
+def _repository_origin(remote: str | None) -> tuple[str, str] | None:
     if remote is None:
         return None
     account = None
@@ -346,8 +350,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host, path) if host and path else None
 
 
-SCAN_SUMMARY_QUERY = """
-SELECT
+SCAN_SUMMARY_COLUMNS = """
     scans.*,
     targets.current_path AS current_target_path,
     progress.reportable_findings_count,
@@ -360,6 +363,9 @@ SELECT
         FROM finding_occurrences AS occurrences
         WHERE occurrences.scan_id = scans.id
     ) AS finding_count
+"""
+SCAN_SUMMARY_QUERY = f"""
+SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
 LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
@@ -592,7 +598,8 @@ def repository_scan_scope(
             else:
                 related_target_ids.append(requested_target_id)
                 verified_targets[requested_target_id] = requested_metadata
-        repository_root = git_output(repository, "rev-parse", "--show-toplevel")
+        requested_git = cache(git_output)
+        repository_root = requested_git(repository, "rev-parse", "--show-toplevel")
         checkout_boundary = Path(repository_root).resolve() if repository_root is not None else None
         if checkout_boundary is None:
             for candidate in (repository, *repository.parents):
@@ -601,13 +608,9 @@ def repository_scan_scope(
                     checkout_boundary = candidate
                     break
         requested_git_directory = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            requested_git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
             if checkout_boundary is not None
             else None
-        )
-        requested_identity = (
-            requested_git_directory,
-            _repository_origin(repository) if requested_git_directory is not None else None,
         )
         repository_paths = [str(repository)]
         registered_repository = (
@@ -685,7 +688,7 @@ def repository_scan_scope(
                     continue
                 if requested_git_directory is not None:
                     if scan["target_id"] is not None or not _same_repository(
-                        scan, requested_repository, after_identity=requested_identity
+                        scan, requested_repository, probe_git=requested_git
                     ):
                         continue
                 elif checkout_boundary is not None:
@@ -760,7 +763,7 @@ def repository_scan_scope(
                 if not _same_repository(
                     verified_target,
                     comparison_repository,
-                    after_identity=requested_identity,
+                    probe_git=requested_git,
                 ):
                     continue
                 related_target_ids.append(target["target_id"])
@@ -983,21 +986,28 @@ def list_unmatched_scan_pairs(
             and (epoch_start is None or scan["ownership_sequence"] > epoch_start)
         )
 
-    selected = [
-        scan
-        for scan in connection.execute(
-            "SELECT scans.*, scans.rowid AS ownership_sequence, "
-            "targets.current_path AS current_target_path "
-            "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
-            "WHERE scans.status = 'complete' ORDER BY scans.rowid"
-        )
-        if metadata is not None
-        and (
-            scan["target_id"] == requested["target_id"]
-            or _same_repository(scan, requested, before_target_path=scan["current_target_path"])
-        )
-        and belongs_to_current_owner(scan)
-    ]
+    selected = []
+    requested_git = cache(git_output)
+    for scan in connection.execute(
+        "SELECT scans.*, scans.rowid AS ownership_sequence, "
+        "targets.current_path AS current_target_path "
+        "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
+        "WHERE scans.status = 'complete' ORDER BY scans.rowid"
+    ):
+        if (
+            metadata is not None
+            and belongs_to_current_owner(scan)
+            and (
+                scan["target_id"] == requested["target_id"]
+                or _same_repository(
+                    scan,
+                    requested,
+                    before_target_path=scan["current_target_path"],
+                    probe_git=requested_git,
+                )
+            )
+        ):
+            selected.append(scan)
 
     available = []
     for scan in selected:
@@ -1015,12 +1025,19 @@ def list_unmatched_scan_pairs(
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
+    checkout_relationships = {}
     for index, after in enumerate(available):
         previous = [
             before
             for before in available[:index]
             if (args.force or (before["id"], after["id"]) not in saved_pairs)
-            and _same_registered_repository(connection, before, after)
+            and _same_registered_repository(
+                connection,
+                before,
+                after,
+                checkout_relationships=checkout_relationships,
+                probe_git=requested_git,
+            )
         ]
         skipped += index - len(previous)
         if not previous:
@@ -1074,6 +1091,7 @@ def _same_registered_repository(
     after: sqlite3.Row,
     *,
     checkout_relationships: dict[tuple[str, ...], bool] | None = None,
+    probe_git: Callable[..., str | None] | None = None,
 ) -> bool:
     if before["target_id"] is None and after["target_id"] is None:
         for scan in (before, after):
@@ -1086,7 +1104,7 @@ def _same_registered_repository(
                 for candidate in (path, *path.parents)
             ):
                 return False
-        return _same_repository(before, after)
+        return _same_repository(before, after, probe_git=probe_git)
     paths = []
     verified_scans = []
     missing_checkout = False
@@ -1179,6 +1197,7 @@ def _same_registered_repository(
         before_target_path=paths[0],
         after_target_path=paths[1],
         require_ownership=True,
+        probe_git=probe_git,
     )
     if checkout_relationships is not None and relationship_key is not None:
         checkout_relationships[relationship_key] = related

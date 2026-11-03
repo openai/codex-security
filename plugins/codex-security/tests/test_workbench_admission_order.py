@@ -159,7 +159,7 @@ def test_admission_migration_preserves_legacy_boundaries_and_first_admissions():
         connection.execute("PRAGMA foreign_keys = ON")
         schema.apply_migrations(
             connection,
-            tuple(item for item in schema.MIGRATIONS if item[0] <= 55),
+            tuple(item for item in schema.MIGRATIONS if item[0] <= 62),
             lambda: "2026-01-01T00:00:00Z",
             lambda _connection: None,
         )

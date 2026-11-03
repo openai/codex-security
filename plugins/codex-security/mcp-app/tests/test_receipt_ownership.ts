@@ -66,8 +66,8 @@ async function fixture() {
 
 function draft(receiptRefs: string[], extra = {}) {
   return workerDraft([], {
-    coverage: {
-      ...workerDraft([]).coverage,
+    reviewState: {
+      ...workerDraft([]).reviewState,
       surfaces: [
         {
           id: "reviewed-route",
@@ -133,24 +133,26 @@ def capture(*args, **kwargs):
     return captured
 saved._capture_saved_source = capture
 retained._capture_saved_source = capture
-frozen = None
+frozen = heads = None
 if sys.argv[9] == "true":
     db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
     connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchall=lambda: [worker]))
-    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
-    frozen, _ = saved._recovery_source_digests(db, connection, scan)
-merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
+    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "retained_checkpoint_heads_json": None, "seal_manifest_digest": None}
+    frozen, _, heads = saved._recovery_source_digests(db, connection, scan)
+merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen, checkpoint_heads=heads)
 saved._capture_saved_source = original_capture
 retained._capture_saved_source = original_retained_capture
-replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
-assert merged[2] == replay[2]
+snapshot = merged[0]["scan"]
+def replay():
+    return merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=snapshot["preservedSources"], checkpoint_heads=snapshot["preservedCheckpointHeads"])
+assert merged[2] == replay()[2]
 rejects_changed_checkpoint = None
 if published:
     checkpoint = root / published[-1]
     original = checkpoint.read_bytes()
     checkpoint.write_text("{}")
     try:
-        merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
+        replay()
     except saved.ContractError:
         rejects_changed_checkpoint = True
     else:
@@ -161,7 +163,7 @@ refs = merged[2]["surfaces"][0]["receiptRefs"]
 warnings = []
 coverage = merged[2]
 _recover_unsealed_coverage(coverage, plugin / "schemas", root, warnings, [])
-print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings, "published": published, "captured": merged[0]["scan"]["preservedSources"], "rejectsChangedCheckpoint": rejects_changed_checkpoint}))
+print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings, "published": published, "captured": snapshot["preservedSources"], "rejectsChangedCheckpoint": rejects_changed_checkpoint}))
 `,
         path.resolve(import.meta.dirname, "../.."),
         f.root,
@@ -269,7 +271,7 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
       const resultPath = path.join(f.workerRoot, "result.json");
       if (changed === "result provenance") {
         const saved = JSON.parse(await readFile(resultPath, "utf8"));
-        saved.coverage.surfaces[0].provenance.extra =
+        saved.reviewState.surfaces[0].provenance.extra =
           "Directly authored extension";
         await writeFile(resultPath, JSON.stringify(saved));
       } else {
@@ -277,7 +279,7 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
         for (const name of await readdir(checkpointRoot)) {
           const checkpoint = path.join(checkpointRoot, name);
           const saved = JSON.parse(await readFile(checkpoint, "utf8"));
-          saved.coverage.surfaces[0].provenance.extra = "Changed checkpoint";
+          saved.reviewState.surfaces[0].provenance.extra = "Changed checkpoint";
           await writeFile(checkpoint, JSON.stringify(saved));
         }
       }
@@ -588,7 +590,7 @@ for (const fileScope of [false, true])
               onComplete: async (draft) => {
                 receiptRefs.push(
                   ...(
-                    draft.coverage.surfaces as { receiptRefs: string[] }[]
+                    draft.reviewState.surfaces as { receiptRefs: string[] }[]
                   ).flatMap((surface) => surface.receiptRefs),
                 );
               },
@@ -626,9 +628,10 @@ test("a retained surface keeps only retained shared references and resolves new 
       f.worker,
       draft([retained, added], { notes: "Updated review." }),
     );
-    assert.deepEqual(result.coverage.surfaces[0].provenance.scanReceiptRefs, [
-      retained,
-    ]);
+    assert.deepEqual(
+      result.reviewState.surfaces[0].provenance.scanReceiptRefs,
+      [retained],
+    );
     const sources = await readDeepReductionSources(f.reducer);
     assert.deepEqual(sources.discoveries[0].coverage.surfaces[0].receiptRefs, [
       retained,
@@ -647,8 +650,8 @@ test("ambiguous saved surface IDs do not transfer shared ownership to an edited 
     await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
     const resultPath = path.join(f.workerRoot, "result.json");
     const previous = JSON.parse(await readFile(resultPath, "utf8"));
-    previous.coverage.surfaces.push({
-      ...previous.coverage.surfaces[0],
+    previous.reviewState.surfaces.push({
+      ...previous.reviewState.surfaces[0],
       label: "Separate review with a reused ID",
     });
     await writeFile(resultPath, JSON.stringify(previous));
@@ -831,7 +834,7 @@ for (const spelling of ["original", "returned"] as const) {
             const submitted =
               spelling === "original"
                 ? ref
-                : first.coverage.surfaces[0].receiptRefs[0];
+                : first.reviewState.surfaces[0].receiptRefs[0];
             let ownedRef = `${f.prefix}/${ref}`;
             let contents = "Original local evidence\n";
             for (const attempt of [1, 2]) {
@@ -942,7 +945,7 @@ for (const spelling of ["original", "returned"] as const) {
         draft([
           spelling === "original"
             ? ref
-            : first.coverage.surfaces[0].receiptRefs[0],
+            : first.reviewState.surfaces[0].receiptRefs[0],
         ]),
       );
       const expected = `${path.relative(f.root, archive).split(path.sep).join("/")}/${ref}`;
@@ -998,8 +1001,8 @@ for (const disposition of ["rejected", "not_applicable"]) {
           const input = draft([ref], { disposition: next, candidateId });
           const result = await recordCodexSecurityWorkerScanDraft(f.worker, {
             ...input,
-            coverage: {
-              ...input.coverage,
+            reviewState: {
+              ...input.reviewState,
               ...(next === "needs_follow_up"
                 ? {
                     completeness: "partial",
@@ -1014,7 +1017,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
                 : {}),
             },
           });
-          assert.deepEqual(result.coverage.surfaces[0].receiptRefs, [
+          assert.deepEqual(result.reviewState.surfaces[0].receiptRefs, [
             `${f.prefix}/${ref}`,
           ]);
         }
