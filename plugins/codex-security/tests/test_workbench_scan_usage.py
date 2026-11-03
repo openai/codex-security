@@ -20,6 +20,7 @@ from workbench_test_support import (
     initialize_git_repository,
     mark_deep_aggregate_ready,
     private_directory,
+    published_artifacts,
     register,
     run_workbench,
     scan_command,
@@ -1841,10 +1842,7 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
             "completion": completion,
         }.items()
     )
-    sealed_files = {
-        name: (fixture.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
-    }
+    sealed_files = published_artifacts(fixture.scan_dir)
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
         stopped_at = connection.execute(
             "SELECT completed_at FROM scans WHERE id = ?", (fixture.scan_id,)
@@ -1930,7 +1928,7 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
         )["scan"]["usage"]
         == finalized["usage"]
     )
-    assert {name: (fixture.scan_dir / name).read_bytes() for name in sealed_files} == sealed_files
+    assert published_artifacts(fixture.scan_dir) == sealed_files
 
 
 @pytest.mark.parametrize("turn_status", ["completed", "interrupted", "failed"])
@@ -2388,10 +2386,7 @@ def test_completion_marks_retained_usage_partial_when_final_measurement_is_unava
         }
     assert completed["usage"].items() >= expected_usage.items()
     assert completed["cost"] == current_cost
-    documents = {
-        name: (fixture.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
-    }
+    documents = published_artifacts(fixture.scan_dir)
     for command in ("get-scan", "complete-scan"):
         repeated = run_workbench(
             fixture.state_dir,
@@ -2407,7 +2402,7 @@ def test_completion_marks_retained_usage_partial_when_final_measurement_is_unava
             "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
         ).fetchone()[0]
     assert json.loads(stored) == {"cost": current_cost, "usage": completed["usage"]}
-    assert documents == {name: (fixture.scan_dir / name).read_bytes() for name in documents}
+    assert published_artifacts(fixture.scan_dir) == documents
 
 
 @pytest.mark.parametrize("mode", ["standard", "diff"])
@@ -2510,10 +2505,7 @@ def test_completion_retains_known_usage_when_only_some_rollouts_remain(
         }.items()
     )
     assert completed["cost"] == current_cost
-    documents = {
-        name: (fixture.scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
-    }
+    documents = published_artifacts(fixture.scan_dir)
     repeated = run_workbench(
         fixture.state_dir,
         "complete-scan",
@@ -2523,7 +2515,7 @@ def test_completion_retains_known_usage_when_only_some_rollouts_remain(
     )["scan"]
     assert repeated["usage"] == completed["usage"]
     assert repeated["cost"] == current_cost
-    assert documents == {name: (fixture.scan_dir / name).read_bytes() for name in documents}
+    assert published_artifacts(fixture.scan_dir) == documents
 
 
 @pytest.mark.parametrize("readable_usage", [False, True])
