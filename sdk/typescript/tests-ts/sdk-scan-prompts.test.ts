@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { captureCli } from "./support/cli-run.js";
@@ -28,6 +27,7 @@ import {
   saveScanKnowledge,
   scanInputIdentity,
 } from "../src/scan-inputs.js";
+import { execNodePython } from "./support/python-probe.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -56,6 +56,7 @@ test("SDK registration measures the shell-visible instructions separately from u
     });
   }
   runtime.plugin.installedRoot = installed;
+  const python = Bun.which("python3") ?? Bun.which("python")!;
   const register = async (
     options: { scanPrompt?: string; validationPrompt?: string },
     beforeRegistration?: () => Promise<void>,
@@ -68,25 +69,31 @@ test("SDK registration measures the shell-visible instructions separately from u
         _CODEX_SECURITY_INSTRUCTION_ROOT: PLUGIN_ROOT,
       },
       prepareRuntime: async () => runtime,
-      resolvePluginPython: async () =>
-        Bun.which("python3") ?? Bun.which("python")!,
+      resolvePluginPython: async () => python,
       prepareOutputDir: async () => scanDir,
       runWorkbench: async (workbench, args, input) => {
         if (args[0] !== "register-cli-scan") return mockWorkbench(args, input);
         await beforeRegistration?.();
         const { scanId } = await runWorkbench(workbench, args, input);
-        const db = new Database(join(state, "workbench.sqlite3"), {
-          readonly: true,
-        });
-        try {
-          digest = db
-            .query<{ instruction_digest: string | null }, [string]>(
-              "SELECT instruction_digest FROM scans WHERE id = ?",
-            )
-            .get(String(scanId))!.instruction_digest;
-        } finally {
-          db.close();
-        }
+        digest = JSON.parse(
+          execNodePython(
+            python,
+            [
+              "-c",
+              [
+                "import json, sqlite3, sys",
+                "sys.path.insert(0, sys.argv[1])",
+                "from workbench_db import database_path",
+                "with sqlite3.connect(database_path().as_uri() + '?mode=ro', uri=True) as db:",
+                "    row = db.execute('SELECT instruction_digest FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+                "    print(json.dumps(row[0]))",
+              ].join("\n"),
+              join(workbench.pluginRoot, "scripts"),
+              String(scanId),
+            ],
+            workbench.environment,
+          ),
+        );
         throw new Error("registration recorded");
       },
     });

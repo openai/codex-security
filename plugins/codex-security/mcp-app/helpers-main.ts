@@ -23,7 +23,11 @@ import { validateTrackingSourceCommand } from "./src/helpers/validate-tracking-s
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
 import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
-import { escapeControls, stringifyJson } from "./src/helpers/json";
+import {
+  escapeControls,
+  requireFiniteNumbers,
+  stringifyJson,
+} from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
 // Importing the bundled parser does not invoke its CLI adapter.
@@ -68,6 +72,8 @@ function runHelper(): void {
   const workbenchUsage: Record<string, string> = {
     "database-info":
       "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+    "local-dedupe":
+      "Usage: local-dedupe\nReads a JSON object from stdin with an absolute stateDirectory and a prepare or embed payload.",
     "store-findings":
       "Usage: store-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.entries containing finding and embedding records; payload.repositoryId is optional.",
     "list-stored-findings":
@@ -145,6 +151,8 @@ function runHelper(): void {
           values["scan-id"] as string | undefined,
         );
       }
+      // Preparation commits before response serialization, as other workbench writes do.
+      if (command === "local-dedupe") requireFiniteNumbers(result);
       console.log(
         stringifyJson(result, 0).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
           character
