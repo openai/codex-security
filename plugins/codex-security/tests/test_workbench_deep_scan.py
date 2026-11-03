@@ -95,6 +95,12 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )
@@ -596,6 +602,8 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         handoff_claim_token,
         environment=deep_environment(codex_home),
     )["scan"]
+    assert parent["lifecycle"] == paused["lifecycle"]
+    assert parent["lifecycle"]["scanId"] == scan_id
     assert (
         parent["progress"]["status"],
         parent["progress"]["phase"],

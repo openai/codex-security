@@ -8,6 +8,7 @@ import {
   prepareNormalizedLocalImport,
 } from "../src/external-findings-local.js";
 import {
+  normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
 } from "../src/semgrep-findings.js";
@@ -19,6 +20,11 @@ import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
+import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
+import {
+  opengrepJson,
+  opengrepTraceJson,
+} from "./support/opengrep-import-fixtures.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
@@ -62,6 +68,40 @@ function report(
   }
   return input;
 }
+
+test("a marked Platform report accepts the Semgrep and OpenGrep readers' ordinary findings", async () => {
+  await using fixture = await localReportFixture(
+    "report.json",
+    {
+      provider: "semgrep",
+      sourceKey: "example/topic",
+    },
+    { remote: repositoryUrl, isolatedGit: true },
+  );
+  const options = { sourceRepositoryUrl: repositoryUrl };
+  for (const ordinary of [
+    normalizeSemgrepFindings(semgrepJson(), options, "local"),
+    normalizeSemgrepFindings(semgrepSarif(), options, "local"),
+    normalizeOpenGrepFindings(opengrepJson(), options, "local"),
+    normalizeOpenGrepFindings(opengrepTraceJson(), options, "local"),
+  ]) {
+    expect(ordinary.findings.length).toBeGreaterThan(0);
+    const input = {
+      ...ordinary,
+      ...options,
+      sourceFormat: "semgrep-platform-findings/v1",
+      semgrepPlatformScope: {
+        deployment: "example",
+        projectId: "14",
+        ref: "refs/heads/topic",
+        product: "sast",
+      },
+    };
+    expect((await fixture.prepareNormalized(input)).preview.findings).toEqual(
+      ordinary.findings,
+    );
+  }
+});
 
 test("Semgrep file reader rejects malformed SARIF repository provenance", async () => {
   const directory = await temporaryDirectory("semgrep-reader-");
