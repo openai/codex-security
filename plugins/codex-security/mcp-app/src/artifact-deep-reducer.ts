@@ -7,6 +7,7 @@ import {
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -27,7 +28,9 @@ import {
 
 const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
 export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
-export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  reducerDefinitions.reductionSubmission,
+);
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
@@ -72,7 +75,7 @@ export async function readDeepReductionSources(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        await recoverWorkerCandidateReceipts(result.coverage, {
+        await recoverWorkerCandidateReceipts(result.reviewState, {
           root: dirname(worker.resultPath),
           repoRoot: context.repoRoot,
           layout: "worker",
@@ -81,7 +84,7 @@ export async function readDeepReductionSources(
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
         }
-        const { coverage } = result;
+        const { reviewState: coverage } = result;
         const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
         for (const [index, surface] of (
           coverage.surfaces as Record<string, unknown>[]
@@ -164,7 +167,9 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    let reduction = parseDeepReduction(input);
+    const { retainedFindingRefs = [], ...submission } =
+      deepReductionInputSchema.parse(input);
+    let reduction = parseDeepReduction(submission);
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
@@ -183,6 +188,7 @@ export async function recordCodexSecurityDeepReduction(
       reduction,
       inputs.discoveries,
       inputs.previous,
+      retainedFindingRefs,
     );
 
     const persisted = deepReductionForPersistence(reduction);

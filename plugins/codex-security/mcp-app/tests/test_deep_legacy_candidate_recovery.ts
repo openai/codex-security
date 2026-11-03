@@ -69,7 +69,7 @@ for (const continueReduction of [false, true]) {
               "result.json",
             );
             const result = await readJson(resultPath);
-            result.coverage.surfaces.push({
+            result.reviewState.surfaces.push({
               id: "legacy-decision",
               label: "Earlier worker decision",
               disposition: "rejected",
@@ -123,7 +123,7 @@ for (const continueReduction of [false, true]) {
             assert.equal(result.unresolvedCandidates.length, 2);
           }
         } else {
-          assert.equal(result.coverage.completeness, undefined);
+          assert.equal(result.reviewState.completeness, undefined);
           if (missingReceipt) {
             // The worker was accepted before this historical receipt disappeared.
             await rm(
@@ -169,7 +169,7 @@ for (const continueReduction of [false, true]) {
       });
       assert.equal(terminal?.status, "succeeded", terminal?.error);
       assert.equal(published.length, 1);
-      const retained = published[0].coverage.deferred.filter(
+      const retained = published[0].reviewState.deferred.filter(
         (row) => asRecord(row.provenance)?.candidateId === pending.candidateId,
       );
       assert.deepEqual(
@@ -186,7 +186,7 @@ for (const continueReduction of [false, true]) {
       assert.equal(replacement.dedupCalls, Number(continueReduction));
       if (reducerVersion === "current") {
         assert.deepEqual(
-          published[0].coverage.deferred
+          published[0].reviewState.deferred
             .filter(
               (row) =>
                 asRecord(row.provenance)?.candidateId ===
@@ -230,7 +230,7 @@ for (const receipt of ["artifacts/missing.txt", "artifacts/../outside.txt"]) {
     const result: ScanDraftInput = {
       scanId: fixture.run.scanId,
       findings: [],
-      coverage: {
+      reviewState: {
         surfaces: [
           {
             label: "Generic review evidence",

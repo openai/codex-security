@@ -115,14 +115,16 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
             "Synthetic worker-local evidence.\n",
           );
         }
-        (draft.coverage.surfaces as JsonObject[])[0].receiptRefs = [ref];
+        (draft.reviewState.surfaces as JsonObject[])[0].receiptRefs = [ref];
         await recordCodexSecurityWorkerScanDraft(context, draft);
         const saved = await readJson(
           path.join(request.workingDirectory, "result.json"),
         );
         if (receipt !== "worker local") {
           assert.ok(
-            saved.coverage.surfaces[0].provenance.scanReceiptRefs.includes(ref),
+            saved.reviewState.surfaces[0].provenance.scanReceiptRefs.includes(
+              ref,
+            ),
           );
         }
         if (++recordedCount === 2) recorded.resolve();

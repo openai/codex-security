@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     initialize_git_repository,
+    read_review_state,
     run_workbench,
     start_delivered_scan,
     write_checkpoint,
     write_completed_contract,
+    write_provisional_review_state,
 )
 
 
@@ -43,9 +45,7 @@ def saved_diff_candidate(
         "--diff-head-revision",
         revision,
     )
-    started = start_delivered_scan(
-        state_dir, "--workspace-id", workspace_id, "--scan-root", str(tmp_path / "scans")
-    )["results"]
+    started = start_delivered_scan(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     scan_id, scan_dir = started["scanId"], Path(started["scanDir"])
     candidate = {
         "candidate_id": "candidate-synthetic",
@@ -188,15 +188,14 @@ def test_stopped_diff_reopens_legacy_terminal_rationale(
         if authored
         else candidate["attack_path"]["counterevidence"],
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[surface], deferred=[])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     candidate["validation"] = {"disposition": "deferred"}
     ledger.write_text(json.dumps(candidate) + "\n")
 
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     pending = [
         row for row in recovered["deferred"] if row.get("candidateId") == candidate["candidate_id"]
     ]
@@ -245,7 +244,7 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
     def assert_retained() -> None:
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["progress"]["candidates"]["unresolved"] == expected_count
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         candidate_surfaces = [
             item
             for item in coverage["surfaces"]
@@ -284,7 +283,7 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
         assert_retained()
         assert any(
             item.get("id") == "late-review"
-            for item in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+            for item in read_review_state(state_dir, scan_dir)["deferred"]
         )
 
 
@@ -304,8 +303,7 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
     candidate_id = candidate["candidate_id"]
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(
         deferred=[],
         surfaces=[
@@ -320,7 +318,7 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
             }
         ],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if resolution == "finding":
         finding = saved_candidate_finding(tmp_path, scan_id, candidate_id)
         if owner:
@@ -341,7 +339,7 @@ def test_stopped_diff_keeps_current_resolutions_over_historical_ledger_decisions
         result = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert result["findingCount"] == int(resolution == "finding")
         assert result["progress"]["candidates"]["unresolved"] == 0
-        recovered = json.loads(coverage_path.read_text())
+        recovered = read_review_state(state_dir, scan_dir)
         decisions = [
             item for item in recovered["surfaces"] if item.get("candidateId") == candidate_id
         ]
@@ -403,8 +401,7 @@ def test_stopped_diff_freezes_current_candidate_state_over_history(
     terminal_checkpoint = copy.deepcopy(checkpoint)
     terminal_checkpoint["coverage"].update(surfaces=[old_decision], deferred=[])
     write_checkpoint(scan_dir / "checkpoints", terminal_checkpoint)
-    coverage_path = scan_dir / "coverage.json"
-    current = json.loads(coverage_path.read_text())
+    current = read_review_state(state_dir, scan_dir)
     if transition == "current-generated-decision":
         current.update(
             surfaces=[{**old_decision, "id": candidate_id, "receiptRefs": []}], deferred=[]
@@ -428,7 +425,7 @@ def test_stopped_diff_freezes_current_candidate_state_over_history(
         "receiptRefs": [],
     }
     current["surfaces"].append(other_owner)
-    coverage_path.write_text(json.dumps(current))
+    write_provisional_review_state(scan_dir, current)
     candidate["validation"] = {
         "disposition": "suppressed" if historical_finding else "deferred",
         "counterevidence_or_proof_gap": "Current saved review evidence.",
@@ -444,7 +441,7 @@ def test_stopped_diff_freezes_current_candidate_state_over_history(
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["findingCount"] == 0
         assert scan["progress"]["candidates"]["unresolved"] == int(historical_finding is None)
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         assert other_owner in coverage["surfaces"]
         root_surfaces = [
             item
@@ -516,10 +513,9 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
         modified = terminal_time if path == closed else 200
         os.utime(path, ns=(modified, modified))
     originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], deferred=[])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     ledger.unlink()
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
 
@@ -529,7 +525,7 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
         assert scan["progress"]["candidates"]["unresolved"] == 0
         assert any(
             item.get("disposition") == "rejected"
-            for item in json.loads(coverage_path.read_text())["surfaces"]
+            for item in read_review_state(state_dir, scan_dir)["surfaces"]
         )
         assert all(path.read_bytes() == content for path, content in originals.items())
 
@@ -610,14 +606,13 @@ def test_stopped_diff_retains_every_reopened_sibling_finding(
         [first, sibling],
     )
     assert len({finding["findingId"] for finding in siblings}) == 2
-    coverage_path = scan_dir / "coverage.json"
     if finding_source == "canonical":
         (scan_dir / "findings.json").write_text(
             json.dumps({"scanId": scan_id, "findings": siblings})
         )
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         coverage.update(surfaces=[], deferred=[])
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
     else:
         override = copy.deepcopy(checkpoint)
         override["findings"] = siblings
@@ -633,7 +628,7 @@ def test_stopped_diff_retains_every_reopened_sibling_finding(
     run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
 
     def assert_retained() -> None:
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         if ledger_state == "deferred":
             row = next(item for item in coverage["deferred"] if item.get("candidateId"))
             retained = list(workbench_api["saved_results"]._retained_findings(row["finding"]))
@@ -665,10 +660,9 @@ def test_stopped_diff_retains_distinct_saved_proof_gaps(
     second = copy.deepcopy(first)
     second.update(id="second-gap", reason="Second independent proof gap.", paths=["second.py"])
     second["candidate"]["evidence"] = "Second saved evidence."
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["deferred"] = [first, second]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     checkpoint["coverage"]["deferred"] = [first, second]
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
     if resolved:
@@ -679,7 +673,7 @@ def test_stopped_diff_retains_distinct_saved_proof_gaps(
     run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
 
     def assert_gaps() -> None:
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         pending = [row for row in coverage["deferred"] if row.get("candidateId")]
         current_gaps = [row for row in pending if row["id"] in {"first-gap", "second-gap"}]
         assert {row["id"] for row in current_gaps} == (
@@ -720,14 +714,13 @@ def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
     }
     finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
     finding["provenance"]["diffCandidateDecision"] = copy.deepcopy(phases)
-    coverage_path = scan_dir / "coverage.json"
     if finding_source == "canonical":
         (scan_dir / "findings.json").write_text(
             json.dumps({"scanId": scan_id, "findings": [finding]})
         )
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         coverage.update(surfaces=[], deferred=[])
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
     else:
         # The finding checkpoint was saved, but publication left the older
         # unresolved canonical draft in place.
@@ -757,7 +750,7 @@ def test_stopped_diff_orders_marked_finding_override_by_saved_phase_snapshot(
         assert scan["findingCount"] == int(ledger_state in {"unchanged", "missing", "malformed"})
         assert scan["progress"]["candidates"]["unresolved"] == int(ledger_state == "deferred")
         findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
-        recovered = json.loads(coverage_path.read_text())
+        recovered = read_review_state(state_dir, scan_dir)
         if findings:
             assert findings[0]["provenance"]["diffCandidateDecision"] == phases
         elif ledger_state == "deferred":
@@ -802,9 +795,8 @@ def test_stopped_diff_scopes_checkpoint_override_and_preserves_current_authored_
     override["coverage"].update(surfaces=[], deferred=[])
     saved = write_checkpoint(scan_dir / "checkpoints", override)
     original = saved.read_bytes()
-    coverage_path = scan_dir / "coverage.json"
     if resolution == "authored-terminal":
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         authored = {
             "id": "authored-decision",
             "candidateId": candidate["candidate_id"],
@@ -814,14 +806,14 @@ def test_stopped_diff_scopes_checkpoint_override_and_preserves_current_authored_
             "receiptRefs": [],
         }
         coverage.update(surfaces=[authored], deferred=[])
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
 
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
 
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert scan["findingCount"] == int(resolution == "other-owner-finding")
     assert scan["progress"]["candidates"]["unresolved"] == 0
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     if resolution == "authored-terminal":
         retained = next(row for row in recovered["surfaces"] if row["id"] == authored["id"])
         assert {key: retained[key] for key in authored} == authored
@@ -909,10 +901,9 @@ def test_stopped_diff_keeps_saved_terminal_snapshot_over_stale_checkpoint(
         current["validation"]["counterevidence_or_proof_gap"] = "Newer saved terminal review."
     decision = workbench_api["saved_results"]._diff_candidate_decision(current)
     decision.update(id="current-terminal", receiptRefs=[])
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[decision], deferred=[])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if ledger_state == "missing":
         ledger.unlink()
     elif ledger_state == "malformed":
@@ -929,7 +920,7 @@ def test_stopped_diff_keeps_saved_terminal_snapshot_over_stale_checkpoint(
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["findingCount"] == int(reported)
         assert scan["progress"]["candidates"]["unresolved"] == 0
-        recovered = json.loads(coverage_path.read_text())
+        recovered = read_review_state(state_dir, scan_dir)
         terminal = [
             row
             for row in recovered["surfaces"]
@@ -985,10 +976,9 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
         "finding": finding,
         "reason": "Reopened after newer review.",
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], deferred=[reopened])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if ledger_state == "missing":
         ledger.unlink()
     else:
@@ -1002,7 +992,7 @@ def test_stopped_diff_preserves_reopened_candidate_over_historical_finding_check
         assert scan["progress"]["candidates"]["unresolved"] == 1
         pending = next(
             item
-            for item in json.loads(coverage_path.read_text())["deferred"]
+            for item in read_review_state(state_dir, scan_dir)["deferred"]
             if item.get("candidateId") == candidate["candidate_id"]
         )
         assert pending["candidate"] == candidate
@@ -1031,7 +1021,7 @@ def test_stopped_diff_preserves_canonical_reopened_candidate_state(
         checkpoint["findings"] = [finding]
         write_checkpoint(scan_dir / "checkpoints", checkpoint)
     ledger.unlink()
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], deferred=[coverage["deferred"][0]])
     staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
 
@@ -1075,7 +1065,7 @@ def test_stopped_diff_preserves_canonical_reopened_candidate_state(
     def assert_saved_state() -> None:
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["progress"]["candidates"]["unresolved"] == int(outcome == "pending")
-        saved_coverage = json.loads((scan_dir / "coverage.json").read_text())
+        saved_coverage = read_review_state(state_dir, scan_dir)
         saved_findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
         if outcome == "pending":
             pending = next(
@@ -1125,8 +1115,7 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
     candidate_id = checkpoint["coverage"]["deferred"][0]["candidateId"]
     original = saved_candidate_finding(tmp_path, scan_id, candidate_id)
     original["provenance"]["diffCandidateDecision"] = {"validation": {"disposition": "deferred"}}
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], deferred=[])
     staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
 
@@ -1166,7 +1155,7 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
         document = json.loads(findings_path.read_text())
         document["findings"] = [reopened]
         findings_path.write_text(json.dumps(document))
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
     else:
         publish(reopened)
     if ledger_state == "missing":
@@ -1190,7 +1179,7 @@ def test_stopped_diff_ignores_old_checkpoint_for_canonical_reopening(
         assert scan["progress"]["candidates"]["unresolved"] == 1
         pending = next(
             row
-            for row in json.loads(coverage_path.read_text())["deferred"]
+            for row in read_review_state(state_dir, scan_dir)["deferred"]
             if row.get("candidateId") == candidate_id
         )
         assert pending["finding"]["summary"] == reopened["summary"]
@@ -1245,8 +1234,7 @@ def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_adm
         "candidate": current,
         "reason": "Current review remains unresolved.",
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], deferred=[pending])
     if evidence_location == "surface":
         # The writer carries pending.finding onto the terminal surface when a
@@ -1273,7 +1261,7 @@ def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_adm
         )
     else:
         pending["finding"] = finding
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if ledger_state == "missing":
         ledger.unlink()
     elif ledger_state == "malformed":
@@ -1290,7 +1278,7 @@ def test_stopped_diff_checks_all_current_demotion_evidence_before_checkpoint_adm
             evidence_location == "other-owner"
             or (evidence_location != "surface" and ledger_state != "matching")
         )
-        recovered = json.loads(coverage_path.read_text())
+        recovered = read_review_state(state_dir, scan_dir)
         if evidence_location != "other-owner" and (
             evidence_location == "surface" or ledger_state == "matching"
         ):
@@ -1329,14 +1317,14 @@ def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
     draft = _stopped_diff_candidate_decisions(
         tmp_path,
         "synthetic-scan",
-        [{"coverage": coverage}],
+        [{"reviewState": coverage}],
         [],
         current_coverage=coverage,
         current_findings=[],
         checkpoint_findings=[],
         receipt_reopened=set(),
     )
-    assert draft["coverage"]["deferred"] == coverage["deferred"]
+    assert draft["reviewState"]["deferred"] == coverage["deferred"]
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
@@ -1346,8 +1334,7 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
     tmp_path: Path, termination: str, reopened: bool, interrupted: bool
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
-    coverage_path = scan_dir / "coverage.json"
-    original = json.loads(coverage_path.read_text())
+    original = read_review_state(state_dir, scan_dir)
     terminal = {
         "id": "authored-decision",
         "candidateId": "candidate-synthetic",
@@ -1358,7 +1345,7 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
     }
     rejected = {**original, "surfaces": [terminal], "deferred": []}
     previous, current = (rejected, original) if reopened else (original, rejected)
-    coverage_path.write_text(json.dumps(previous))
+    write_provisional_review_state(scan_dir, previous)
     staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     staged.write_text(
         json.dumps(
@@ -1378,7 +1365,7 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
             "import workbench_db\nimport workbench_saved_results\n"
             "original = workbench_saved_results.write_scan_local_bytes\n"
             "def interrupt(scan_dir, relative, payload, **kwargs):\n"
-            "    if relative == 'coverage.json':\n"
+            "    if relative == 'scan-manifest.json':\n"
             "        raise OSError('synthetic interrupted canonical publication')\n"
             "    return original(scan_dir, relative, payload, **kwargs)\n"
             "workbench_saved_results.write_scan_local_bytes = interrupt\n"
@@ -1392,13 +1379,13 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
         )
         assert publication.returncode != 0
         assert "synthetic interrupted canonical publication" in publication.stderr
-        assert json.loads(coverage_path.read_text()) == previous
+        assert read_review_state(state_dir, scan_dir) == previous
     else:
         run_workbench(state_dir, *arguments)
     head = json.loads((scan_dir / "checkpoint-head.json").read_text())
     accepted = scan_dir / "checkpoints" / head["checkpoint"]
     accepted_bytes = accepted.read_bytes()
-    assert json.loads(accepted_bytes)["coverage"]["deferred"] == current["deferred"]
+    assert json.loads(accepted_bytes)["reviewState"]["deferred"] == current["deferred"]
     ledger.unlink()
     extra = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
     run_workbench(state_dir, termination, "--scan-id", scan_id, *extra)
@@ -1406,7 +1393,7 @@ def test_stopped_diff_freezes_the_accepted_parent_head(
     def assert_accepted() -> None:
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["progress"]["candidates"]["unresolved"] == int(reopened)
-        coverage = json.loads(coverage_path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         matching = [row for row in coverage["surfaces"] if row.get("id") == terminal["id"]]
         assert bool(matching) is (not reopened)
         if matching:
@@ -1474,7 +1461,7 @@ def test_stopped_diff_keeps_decision_evidence_when_parent_supersedes_checkpoints
     candidate["validation"] = {"disposition": "suppressed"}
     ledger.write_text(json.dumps(candidate) + "\n")
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert not any(item.get("candidateId") for item in coverage["deferred"])
     assert {item["disposition"] for item in coverage["surfaces"]} == {"rejected"}
 
@@ -1529,9 +1516,12 @@ def test_stopped_diff_without_saved_candidates_does_not_consult_ledger(tmp_path:
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert scan["progress"]["candidates"]["unresolved"] == 0
     assert not any("Diff candidates" in warning for warning in scan["warnings"])
+    checkpoints = (
+        json.loads(path.read_text()) for path in (scan_dir / "checkpoints").glob("*.json")
+    )
     assert not any(
-        json.loads(path.read_text())["coverage"].get("stoppedDiffCandidateDecisions")
-        for path in (scan_dir / "checkpoints").glob("*.json")
+        draft.get("reviewState", draft.get("coverage", {})).get("stoppedDiffCandidateDecisions")
+        for draft in checkpoints
     )
 
 
@@ -1549,10 +1539,9 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
         "notes": "Retain the imported ownership metadata.",
         "receiptRefs": [],
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(imported_surface)
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     candidate = json.loads(ledger.read_text())
     candidate["validation"] = {"disposition": "suppressed"}
     ledger.write_text(json.dumps(candidate) + "\n")
@@ -1569,7 +1558,7 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
         in json.loads((scan_dir / path).read_text()).get("coverage", {}).get("surfaces", [])
         for path in sources
     )
-    assert imported_surface in json.loads(coverage_path.read_text())["surfaces"]
+    assert imported_surface in read_review_state(state_dir, scan_dir)["surfaces"]
     assert not any(
         "Skipped malformed coverage surface" in warning for warning in stopped["warnings"]
     )
@@ -1643,7 +1632,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
     checkpoint_path = write_checkpoint(scan_dir / "checkpoints", checkpoint)
     checkpoint_bytes = checkpoint_path.read_bytes()
     if source == "checkpoint":
-        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        for name in ("scan-manifest.json", "findings.json"):
             (scan_dir / name).unlink()
     first["validation"] = {"disposition": "suppressed"}
     second["validation"] = {
@@ -1660,7 +1649,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
         assert scan["progress"]["candidates"]["unresolved"] == int(
             scenario not in {"all-resolved", "linked-all-resolved"}
         )
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         pending = [row for row in coverage["deferred"] if row.get("candidateId")]
         assert [row["candidateId"] for row in pending] == (
             [] if scenario in {"all-resolved", "linked-all-resolved"} else [second["candidate_id"]]
@@ -1697,7 +1686,7 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
         run_workbench(state_dir, "recover-scan-results", "--scan-id", scan_id)
         assert any(
             row.get("id") == "late-review"
-            for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+            for row in read_review_state(state_dir, scan_dir)["deferred"]
         )
     else:
         run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
@@ -1721,16 +1710,15 @@ def test_stopped_diff_retains_generic_exclusion_extensions(
     }
     if authored_id is not None:
         exclusion["id"] = authored_id
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["explicitExclusions"].append(exclusion)
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
     run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert stopped["progress"]["status"] == ("failed" if termination == "fail-scan" else "canceled")
     assert stopped["progress"]["candidates"]["unresolved"] == 1
-    retained = json.loads(coverage_path.read_text())["explicitExclusions"]
+    retained = read_review_state(state_dir, scan_dir)["explicitExclusions"]
     assert len(retained) == 1
     # Recovery may assign an ID to an imported row, but every authored field
     # (including extension values and an explicit ID) must remain unchanged.
@@ -1739,7 +1727,7 @@ def test_stopped_diff_retains_generic_exclusion_extensions(
     if "id" in retained[0]:
         assert isinstance(retained[0]["id"], str) and retained[0]["id"]
     run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
-    assert json.loads(coverage_path.read_text())["explicitExclusions"] == retained
+    assert read_review_state(state_dir, scan_dir)["explicitExclusions"] == retained
     assert (scan_dir / "report.md").is_file()
     assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
 
@@ -1757,8 +1745,7 @@ def test_stopped_diff_recovers_nullable_authored_finding_history(
     saved = write_checkpoint(scan_dir / "checkpoints", checkpoint)
     original = saved.read_bytes()
     value = None if saved_shape == "null" else "Legacy annotation."
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(surfaces=[], explicitExclusions=[], deferred=[])
     if decision == "deferred":
         coverage["deferred"] = [
@@ -1781,7 +1768,7 @@ def test_stopped_diff_recovers_nullable_authored_finding_history(
                 "previousFindings": [finding] if saved_shape == "canonical" else value,
             }
         ]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     ledger.unlink()
 
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
@@ -1789,7 +1776,7 @@ def test_stopped_diff_recovers_nullable_authored_finding_history(
         scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
         assert scan["findingCount"] == 0
         assert scan["progress"]["candidates"]["unresolved"] == int(decision == "deferred")
-        restored = json.loads(coverage_path.read_text())
+        restored = read_review_state(state_dir, scan_dir)
         rows = restored["deferred" if decision == "deferred" else "surfaces"]
         row = next(item for item in rows if item.get("candidateId") == candidate["candidate_id"])
         if decision == "deferred":
@@ -1809,8 +1796,7 @@ def test_stopped_diff_dismissal_resolves_unique_cross_owner_linked_surface(
     tmp_path: Path, shared: bool
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     candidate = json.loads(ledger.read_text())
     linked = {
         "id": "cross-owner-proof",
@@ -1824,13 +1810,13 @@ def test_stopped_diff_dismissal_resolves_unique_cross_owner_linked_surface(
     coverage["deferred"][0]["surfaceIds"] = [linked["id"]]
     if shared:
         coverage["deferred"][1]["surfaceIds"] = [linked["id"]]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     candidate["validation"] = {"disposition": "suppressed"}
     ledger.write_text(json.dumps(candidate) + "\n")
     run_workbench(
         state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped after review."
     )
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state_dir, scan_dir)
     assert (
         any(row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"])
         is False
@@ -1845,18 +1831,17 @@ def test_stopped_diff_dismissal_recovers_nonarray_saved_surfaces(
     tmp_path: Path, surfaces, termination: str
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"] = surfaces
     coverage["deferred"][0]["surfaceIds"] = ["saved-proof"]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     candidate = json.loads(ledger.read_text())
     candidate["validation"] = {"disposition": "suppressed"}
     ledger.write_text(json.dumps(candidate) + "\n")
     arguments = ["--message", "Stopped after review."] if termination == "fail-scan" else []
     run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
     for attempt in range(2):
-        saved = json.loads(coverage_path.read_text())
+        saved = read_review_state(state_dir, scan_dir)
         assert not any(
             row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"]
         )
@@ -1880,8 +1865,7 @@ def test_stopped_diff_retains_opaque_embedded_finding_provenance(
     embedded = {"title": "Earlier authored evidence"}
     if provenance != "absent":
         embedded["provenance"] = provenance
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(
         surfaces=[],
         explicitExclusions=[],
@@ -1894,11 +1878,11 @@ def test_stopped_diff_retains_opaque_embedded_finding_provenance(
             }
         ],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     ledger.unlink()
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
     for attempt in range(2):
-        restored = json.loads(coverage_path.read_text())
+        restored = read_review_state(state_dir, scan_dir)
         row = next(
             item
             for item in restored["deferred"]
@@ -1938,10 +1922,10 @@ def test_stopped_diff_retains_historical_exclusion_extensions(
     historical["coverage"].update(surfaces=[], deferred=[], explicitExclusions=[exclusion])
     saved = write_checkpoint(scan_dir / "checkpoints", historical)
     original = saved.read_bytes()
-    coverage_path = scan_dir / "coverage.json"
-    current = coverage_path.read_bytes()
-    coverage_path.write_bytes(current)
-    observed = coverage_path.stat().st_mtime_ns
+    manifest_path = scan_dir / "scan-manifest.json"
+    current = manifest_path.read_bytes()
+    manifest_path.write_bytes(current)
+    observed = manifest_path.stat().st_mtime_ns
     os.utime(saved, ns=(observed - 1_000_000_000, observed - 1_000_000_000))
     arguments = ["--message", "Synthetic stop."] if termination == "fail-scan" else []
     run_workbench(state_dir, termination, "--scan-id", scan_id, *arguments)
@@ -1952,7 +1936,7 @@ def test_stopped_diff_retains_historical_exclusion_extensions(
             "failed" if termination == "fail-scan" else "canceled"
         )
         assert stopped["progress"]["candidates"]["unresolved"] == 1
-        assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+        assert exclusion in read_review_state(state_dir, scan_dir)["explicitExclusions"]
         assert (scan_dir / "report.md").is_file()
         assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
         assert saved.read_bytes() == original
@@ -1969,8 +1953,7 @@ def test_stopped_diff_recovers_receipts_before_freezing_authored_gap(
 ) -> None:
     state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     pending = next(row for row in coverage["deferred"] if row.get("candidateId"))
     pending.update(
         reason="Original authored proof gap and diagnostic text.",
@@ -1980,10 +1963,10 @@ def test_stopped_diff_recovers_receipts_before_freezing_authored_gap(
     original_pending = copy.deepcopy(pending)
     surface = next(row for row in coverage["surfaces"] if row.get("candidateId"))
     surface.update(disposition="rejected", receiptRefs=None if malformed_receipts else [])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     arguments = ["--message", "Synthetic interruption."] if termination == "fail-scan" else []
     run_workbench(state, termination, "--scan-id", scan_id, *arguments)
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state, scan_dir)
     rows = [row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]]
     assert bool(rows) is malformed_receipts
     assert run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["candidates"][
@@ -2004,8 +1987,7 @@ def test_stopped_diff_archives_every_deferred_payload_before_resolution(
     state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
     history = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     original = next(row for row in coverage["deferred"] if row.get("candidateId"))
     rows = []
     for index in range(2):
@@ -2047,7 +2029,7 @@ def test_stopped_diff_archives_every_deferred_payload_before_resolution(
         return value == expected
 
     def assert_retained() -> None:
-        saved = json.loads(coverage_path.read_text())
+        saved = read_review_state(state, scan_dir)
         for row in rows:
             assert contains(saved, {"savedEvidence": row["candidate"]["savedEvidence"]})
             assert contains(saved, row["finding"])
@@ -2085,8 +2067,7 @@ def test_stopped_diff_archives_deferred_evidence_on_authored_resolution(
     state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
     finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     original = next(row for row in coverage["deferred"] if row.get("candidateId"))
     payloads = []
     for index in range(2):
@@ -2133,7 +2114,7 @@ def test_stopped_diff_archives_deferred_evidence_on_authored_resolution(
         return isinstance(value, dict) and any(contains(item, expected) for item in value.values())
 
     def assert_retained() -> None:
-        saved = json.loads(coverage_path.read_text())
+        saved = read_review_state(state, scan_dir)
         values = [saved, json.loads((scan_dir / "findings.json").read_text())]
         for row in payloads:
             for expected in [row["candidate"], row["finding"], *row["previousFindings"]]:
@@ -2160,8 +2141,7 @@ def test_stopped_diff_replacement_archives_prior_terminal_payload(
     state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
     finding = saved_candidate_finding(tmp_path, scan_id, candidate["candidate_id"])
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     historical = {
         "id": "historical-terminal",
         "candidateId": candidate["candidate_id"],
@@ -2214,7 +2194,7 @@ def test_stopped_diff_replacement_archives_prior_terminal_payload(
         return isinstance(value, dict) and any(contains(item, expected) for item in value.values())
 
     def assert_retained() -> None:
-        saved = json.loads(coverage_path.read_text())
+        saved = read_review_state(state, scan_dir)
         for payload in [
             historical["candidate"],
             historical["finding"],
@@ -2243,8 +2223,7 @@ def test_stopped_diff_preserves_type_distinct_opaque_candidate_history(
     tmp_path: Path, payload: str, archive: str, comparison: str
 ) -> None:
     state, scan_dir, scan_id, ledger, _ = saved_diff_candidate(tmp_path)
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     pending = next(row for row in coverage["deferred"] if row.get("candidateId"))
     boolean = {"opaque": [True, {"value": False}]}
     numeric = {"opaque": [1, {"value": 0}]}
@@ -2270,7 +2249,7 @@ def test_stopped_diff_preserves_type_distinct_opaque_candidate_history(
     run_workbench(state, "fail-scan", "--scan-id", scan_id, "--message", "Synthetic stop.")
 
     def assert_retained() -> None:
-        saved = json.loads(coverage_path.read_text())
+        saved = read_review_state(state, scan_dir)
         terminal = next(row for row in saved["surfaces"] if row.get("candidateId"))
         values = ([terminal[payload]] if payload in terminal else []) + terminal.get(archive, [])
         encoded = [json.dumps(value, sort_keys=True) for value in values]

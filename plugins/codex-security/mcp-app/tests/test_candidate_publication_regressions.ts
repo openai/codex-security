@@ -63,7 +63,7 @@ test("a resolved legacy candidate preserves a surface shared with pending work",
       findings: [
         { provenance: { candidateId: "accepted", workerId: "legacy-worker" } },
       ],
-      coverage: {
+      reviewState: {
         surfaces: [surface],
         explicitExclusions: [],
         deferred: [pending],
@@ -71,10 +71,10 @@ test("a resolved legacy candidate preserves a surface shared with pending work",
     },
     [],
   );
-  assert.deepEqual(result.coverage.surfaces, [
+  assert.deepEqual(result.reviewState.surfaces, [
     { ...surface, disposition: "reported" },
   ]);
-  assert.deepEqual(result.coverage.deferred, [pending]);
+  assert.deepEqual(result.reviewState.deferred, [pending]);
 });
 
 for (const layout of ["standard", "deep"] as const) {
@@ -372,7 +372,7 @@ for (const mode of ["standard", "diff", "worker"] as const) {
               mode === "worker" ? "result.json" : "coverage.json",
             );
             const saved = JSON.parse(await readFile(file, "utf8"));
-            const coverage = mode === "worker" ? saved.coverage : saved;
+            const coverage = mode === "worker" ? saved.reviewState : saved;
             coverage[field][0].sourceWorkerId = owner;
             const earlierFiles = [
               path.join(f.root, "checkpoint-head.json"),
@@ -456,7 +456,7 @@ for (const field of ["surfaces", "deferred"] as const) {
       });
       const resultPath = path.join(f.root, "result.json");
       const saved = JSON.parse(await readFile(resultPath, "utf8"));
-      saved.coverage[field][0].sourceWorkerId = owner;
+      saved.reviewState[field][0].sourceWorkerId = owner;
       const contents = JSON.stringify(saved, null, 2) + "\n";
       await writeFile(resultPath, contents);
       const restored = await validateDiscoveryArtifacts(
@@ -468,10 +468,10 @@ for (const field of ["surfaces", "deferred"] as const) {
         resultPath,
         f.context.scanId,
       );
-      assert.deepEqual(restored.coverage[field][0].sourceWorkerId, owner);
+      assert.deepEqual(restored.reviewState[field][0].sourceWorkerId, owner);
       assert.deepEqual(
         discoveryReductionInput(restored, "actual-worker").unresolvedCandidates,
-        [{ ...saved.coverage.deferred[0], sourceWorkerId: "actual-worker" }],
+        [{ ...saved.reviewState.deferred[0], sourceWorkerId: "actual-worker" }],
       );
       assert.equal(await readFile(resultPath, "utf8"), contents);
     });
@@ -512,8 +512,8 @@ for (const candidateId of ["legacy-candidate", "review/auth"]) {
             await f.write({
               ...f.draft(),
               findings: outcome === "reported" ? [resolved] : [],
-              coverage: {
-                ...f.draft().coverage,
+              reviewState: {
+                ...f.draft().reviewState,
                 surfaces:
                   outcome === "rejected"
                     ? [
@@ -582,7 +582,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
       result: discoveryReductionInput(
         workerDraft([], {
           scanId: context.scanId,
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [],
             explicitExclusions: [],
@@ -615,7 +615,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
       const draft = JSON.parse(
         await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
       );
-      const rows = draft.coverage.deferred;
+      const rows = draft.reviewState.deferred;
       assert.equal(new Set(rows.map((row: { id: string }) => row.id)).size, 3);
       assert.equal(rows[2].id, "candidate-review-2");
       for (let index = 0; index < rows.length; index++) {
@@ -1422,7 +1422,7 @@ test("Deep reducer clears historical reopening after the same worker accepts the
     ...worker,
     complete: true,
     findings: [accepted],
-    coverage: {
+    reviewState: {
       completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
@@ -1521,7 +1521,7 @@ for (const mode of ["standard", "diff"] as const) {
           (saved) =>
             JSON.stringify(saved.findings) ===
               JSON.stringify(savedFindings.findings) &&
-            JSON.stringify(saved.coverage.deferred) ===
+            JSON.stringify(saved.reviewState.deferred) ===
               JSON.stringify(coverage.deferred),
         );
         assert.ok(
@@ -1534,14 +1534,14 @@ for (const mode of ["standard", "diff"] as const) {
           current.provenance.candidateId,
         );
         for (const document of [
-          { findings: savedFindings.findings, coverage },
+          { findings: savedFindings.findings, reviewState: coverage },
           checkpoint,
         ]) {
           if (transition === "reopened")
-            assert.deepEqual(document.coverage.deferred, [pending]);
+            assert.deepEqual(document.reviewState.deferred, [pending]);
           else {
             assert.equal(
-              document.coverage.deferred.length,
+              document.reviewState.deferred.length,
               0,
               "The previously reported candidate stays resolved.",
             );

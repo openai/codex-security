@@ -1,4 +1,5 @@
-import { importDiscoverySource } from "../../../plugins/codex-security/mcp-app/tests/support/discovery.ts";
+import { readReviewState } from "./support/review-state.js";
+import { importModule } from "../../../plugins/codex-security/mcp-app/tests/import-module.ts";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
@@ -16,19 +17,31 @@ const sourcePlugin = fileURLToPath(
 );
 type Row = Record<string, any>;
 
+const artifactApi = importModule({
+  stdin: {
+    resolveDir: join(sourcePlugin, "mcp-app/src"),
+    contents: `
+      export * as context from "./artifact-context.ts";
+      export * as draft from "./artifact-scan-draft.ts";
+      export * as reducer from "./artifact-deep-reducer.ts";
+      export * as validation from "./deep-scan/artifact-validation.ts";
+      export * as artifacts from "./deep-scan/artifacts.ts";
+      export * as discovery from "./artifact-discovery.ts";
+      export * as validate from "./artifact-candidate-ledger.ts";
+      export * as inventory from "./artifact-inventory.ts";
+    `,
+  },
+  define: {
+    "process.execPath": JSON.stringify(Bun.which("node")!),
+    "import.meta.url": JSON.stringify(
+      pathToFileURL(join(PLUGIN_ROOT, "mcp/server.mjs")).href,
+    ),
+  },
+});
+
 async function fixture(diff = false) {
   const directory = await temporaryDirectory("worker-candidate-lifecycle-");
-  const load = (name: string) =>
-    import(pathToFileURL(join(sourcePlugin, "mcp-app/src", `${name}.ts`)).href);
-  const api = {
-    context: await load("artifact-context"),
-    draft: await load("artifact-scan-draft"),
-    reducer: await load("artifact-deep-reducer"),
-    validation: await load("deep-scan/artifact-validation"),
-    artifacts: await load("deep-scan/artifacts"),
-    discovery: await importDiscoverySource(),
-    validate: await load("artifact-candidate-ledger"),
-  };
+  const api = await artifactApi;
   const repoRoot = join(directory, "repository"),
     home = join(directory, "home");
   await mkdir(repoRoot);
@@ -102,8 +115,7 @@ async function fixture(diff = false) {
     scanId: scan.scanId,
     complete,
     findings,
-    coverage: {
-      completeness: "partial",
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -213,7 +225,7 @@ for (const scenario of [
     const write = (input: Row) =>
       f.api.draft.recordCodexSecurityWorkerScanDraft(context, input);
     if (scenario.startsWith("confirmation")) {
-      await write(f.draft({ completeness: "complete" }, [finding()]));
+      await write(f.draft({}, [finding()]));
       const pending = {
         id: "reopened-gap",
         candidateId: "candidate-one",
@@ -228,8 +240,6 @@ for (const scenario of [
       await write(
         f.draft(
           {
-            completeness:
-              scenario === "confirmation-pending" ? "partial" : "complete",
             deferred: scenario === "confirmation-pending" ? [pending] : [],
           },
           [saved],
@@ -270,7 +280,7 @@ for (const scenario of [
       await f.remember(archive);
       await write(
         f.draft(
-          { completeness: "complete" },
+          {},
           scenario.startsWith("archive-confirmed")
             ? [
                 {
@@ -302,7 +312,6 @@ for (const scenario of [
       );
       await write(
         f.draft({
-          completeness: "complete",
           surfaces: [
             {
               id: "new-decision",
@@ -321,8 +330,8 @@ for (const scenario of [
       await f.remember(archive);
     }
     if (scenario.endsWith("repeat")) {
-      await write(f.draft({ completeness: "complete" }));
-      await write(f.draft({ completeness: "complete" }));
+      await write(f.draft({}));
+      await write(f.draft({}));
     }
     await f.remember(workerRoot);
     const validated = await f.api.validation.validateDiscoveryArtifacts(
@@ -479,14 +488,13 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
         notes: "Authored decision with receipt.",
         receiptRefs: [ref],
       };
-      await f.publish(
-        f.draft({ completeness: "complete", surfaces: [surface] }),
-      );
+      await f.publish(f.draft({ surfaces: [surface] }));
       await unlink(join(f.parent.root, ref));
       await f.remember(join(f.parent.root, "checkpoints"));
       await f.workbench(["prepare-scan-completion", "--scan-id", f.scanId]);
       expect(
-        (await f.json(join(f.parent.root, "coverage.json"))).deferred.length,
+        (await f.json(join(f.parent.root, "scan-manifest.json"))).scan.review
+          .unresolvedCandidates.length,
       ).toBeGreaterThan(0);
       if (resolution === "validation")
         await f.api.validate.recordCodexSecurityCandidateValidations(f.parent, {
@@ -514,7 +522,6 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
         );
       await f.publish(
         f.draft({
-          completeness: "complete",
           surfaces: replacement
             ? [{ ...surface, receiptRefs: [replaced] }]
             : [],
@@ -524,11 +531,8 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
       expect(sdk.unresolvedCandidates.length).toBe(
         Number(resolution === "none"),
       );
-      expect(
-        sdk.coverage.surfaces.some(
-          (row) => row.disposition === "needs_follow_up",
-        ),
-      ).toBe(resolution === "none");
+      if (resolution === "none")
+        expect(sdk.unresolvedCandidates[0]?.candidateId).toBe(candidateId);
       await f.unchanged();
     });
   }
@@ -579,15 +583,15 @@ for (const candidateId of ["", "   ", "candidate-one"]) {
       if (missing) await unlink(join(archive, "artifacts/proof/decision.txt"));
       await f.remember(archive);
       for (let attempt = 0; attempt < 2; attempt++) {
-        await write(f.draft({ completeness: "complete" }));
+        await write(f.draft({}));
         const output = await f.json(join(workerRoot, "result.json"));
         expect(
-          output.coverage.surfaces.some(
+          output.reviewState.surfaces.some(
             (surface: Row) => surface["candidateId"] === candidateId,
           ),
         ).toBe(true);
         expect(
-          output.coverage.surfaces.some(
+          output.reviewState.surfaces.some(
             (surface: Row) => surface["disposition"] === "needs_follow_up",
           ),
         ).toBe(missing);
@@ -697,9 +701,7 @@ for (const decision of ["suppressed", "not_applicable"]) {
         disposition: decision === "suppressed" ? "rejected" : "not_applicable",
         receiptRefs: [ref],
       };
-      await f.publish(
-        f.draft({ completeness: "complete", surfaces: [surface] }),
-      );
+      await f.publish(f.draft({ surfaces: [surface] }));
       const candidate = JSON.parse(
         (await readFile(join(discovery, "candidate_ledger.jsonl"), "utf8"))
           .trim()
@@ -718,14 +720,13 @@ for (const decision of ["suppressed", "not_applicable"]) {
         }),
       );
       expect(
-        (await f.json(join(f.parent.root, "coverage.json"))).deferred.some(
+        (await readReviewState(f.parent.root)).deferred.some(
           (row: Row) => row["candidateId"] === candidateId,
         ),
       ).toBe(true);
       if (resolution === "receipt")
         await f.publish(
           f.draft({
-            completeness: "complete",
             surfaces: [
               { ...surface, notes: "New independent authored decision." },
             ],
@@ -791,11 +792,7 @@ for (const publication of ["writer", "file-authored"]) {
   ]) {
     test(`stopped Diff retains shared terminal evidence: ${publication}, ${reference}`, async () => {
       const f = await fixture(true);
-      const inventory = await import(
-        pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-inventory.ts"))
-          .href
-      );
-      await inventory.prepareCodexSecurityReviewItems(f.parent);
+      await f.api.inventory.prepareCodexSecurityReviewItems(f.parent);
       await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
         {
           candidates: [
@@ -885,13 +882,17 @@ for (const publication of ["writer", "file-authored"]) {
       const next = f.draft({ surfaces, deferred: [pending] }, [], false);
       if (publication === "writer") await f.publish(next);
       else {
-        const coverage = await f.json(join(f.parent.root, "coverage.json"));
+        const coverage = await readReviewState(f.parent.root);
         const findings = await f.json(join(f.parent.root, "findings.json"));
-        Object.assign(coverage, next.coverage);
+        Object.assign(coverage, next.reviewState);
         findings.findings = [];
+        const manifest = await f.json(
+          join(f.parent.root, "scan-manifest.json"),
+        );
+        manifest.scan.reviewState = coverage;
         await writeFile(
-          join(f.parent.root, "coverage.json"),
-          JSON.stringify(coverage),
+          join(f.parent.root, "scan-manifest.json"),
+          JSON.stringify(manifest),
         );
         await writeFile(
           join(f.parent.root, "findings.json"),
@@ -926,13 +927,17 @@ for (const publication of ["writer", "file-authored"]) {
         });
         expect(result.unresolvedCandidateCount).toBe(1);
         expect(scan.progress.candidates.unresolved).toBe(1);
-        const retained = (result.coverage.deferred as Row[]).find(
+        const retained = result.unresolvedCandidates.find(
           (row) => row["candidateId"] === "candidate-b",
         )!;
         expect(retained["reason"]).toBe(pending.reason);
         expect(retained["sourceWorkerId"]).toEqual(pending.sourceWorkerId);
-        for (const id of retained["surfaceIds"]) {
-          const linked = (result.coverage.surfaces as Row[]).find(
+        const { surfaces: restoredSurfaces } = await readReviewState(
+          result.scanDir,
+          join(f.directory, "state"),
+        );
+        for (const id of retained.surfaceIds ?? []) {
+          const linked = (restoredSurfaces as Row[]).find(
             (row) => row["id"] === id,
           )!;
           expect(linked).toBeDefined();
@@ -947,7 +952,7 @@ for (const publication of ["writer", "file-authored"]) {
         }
         if (publication === "file-authored") {
           expect(result.findings.findings.length).toBe(1);
-          const first = (result.coverage.surfaces as Row[]).find(
+          const first = (restoredSurfaces as Row[]).find(
             (row) => row["candidateId"] === candidateId,
           );
           expect(Boolean(first)).toBe(
@@ -990,7 +995,7 @@ for (const mode of ["standard", "diff"] as const) {
         reason: "Synthetic reachability needs another check.",
         ...(owner === undefined ? {} : { sourceWorkerId: owner }),
       };
-      await f.publish(f.draft({ completeness: "complete" }, [initial]));
+      await f.publish(f.draft({}, [initial]));
       await f.publish(f.draft({ deferred: [pending] }));
       const reopened = (await f.json(join(f.parent.root, "findings.json")))
         .findings[0];
@@ -1007,7 +1012,6 @@ for (const mode of ["standard", "diff"] as const) {
       const explicitPending = matchingGap || submission === "other-owner-gap";
       const update: Row = f.draft(
         {
-          completeness: explicitPending ? "partial" : "complete",
           deferred: explicitPending ? [currentGap] : [],
         },
         submission === "history-only" ? [] : [confirmed],
@@ -1021,7 +1025,7 @@ for (const mode of ["standard", "diff"] as const) {
       const expectedPending = stillReopened || submission === "other-owner-gap";
       for (let repeat = 0; repeat < 2; repeat++) {
         await f.publish(update);
-        const coverage = await f.json(join(f.parent.root, "coverage.json"));
+        const coverage = await readReviewState(f.parent.root);
         const current = (await f.json(join(f.parent.root, "findings.json")))
           .findings;
         expect(current).toHaveLength(1);
@@ -1079,7 +1083,9 @@ for (const mode of ["standard", "diff"] as const) {
         .scan;
       expect(result.unresolvedCandidateCount).toBe(Number(expectedPending));
       expect(scan.progress.candidates.unresolved).toBe(Number(expectedPending));
-      expect(result.coverage["completeness"]).toBe(undefined);
+      expect((await readReviewState(result.scanDir))["completeness"]).toBe(
+        undefined,
+      );
       if (submission === "incomplete") {
         expect(result.unresolvedCandidates[0]).toMatchObject({
           candidateId: pending.candidateId,

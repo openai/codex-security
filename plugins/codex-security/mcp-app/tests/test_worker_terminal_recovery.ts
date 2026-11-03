@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
 import { draftApi, fixture } from "./scan-draft-recovery-fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
-import { readJson } from "./support/json.ts";
+import { readSavedReviewState, readJson } from "./support/json.ts";
 
 const execFileAsync = promisify(execFile);
 const { validateDiscoveryArtifacts } = await importSource(
@@ -110,7 +110,7 @@ for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
           scanId,
           complete: true,
           findings: outcome === "reported" ? [current] : [],
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces:
               outcome === "reported"
@@ -134,8 +134,8 @@ for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
           await draftApi.recordCodexSecurityWorkerScanDraft(context, {
             ...draft,
             findings: [],
-            coverage: {
-              ...draft.coverage,
+            reviewState: {
+              ...draft.reviewState,
               surfaces: [],
               deferred: [
                 {
@@ -187,7 +187,7 @@ for (const outcome of ["reported", "rejected", "not_applicable"] as const) {
         for (let replay = 0; replay < 2; replay++) {
           const { scan } = await workbench("get-scan", "--scan-id", scanId);
           assert.equal(scan.progress.candidates.unresolved, reopened ? 1 : 0);
-          const coverage = await readJson(deepScan.scanDir, "coverage.json");
+          const coverage = await readSavedReviewState(deepScan.scanDir, state);
           const findings = await readJson(deepScan.scanDir, "findings.json");
           const deferred = coverage.deferred.filter(isWorkerCandidate);
           assert.equal(deferred.length, reopened ? 1 : 0);

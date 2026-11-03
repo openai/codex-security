@@ -1,3 +1,4 @@
+import { readSavedReviewState } from "./support/json.ts";
 import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -154,7 +155,7 @@ for (const shared of [false, true]) {
               provenance: { source: "local_plugin", candidateId: acceptedId },
             },
           ],
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [surface],
             explicitExclusions: [],
@@ -171,8 +172,9 @@ for (const shared of [false, true]) {
         workbench,
       );
       const snapshot = async () => ({
-        coverage: JSON.parse(
-          await readFile(path.join(context.root, "coverage.json"), "utf8"),
+        reviewState: await readSavedReviewState(
+          context.root,
+          path.join(directory, "state"),
         ),
         findings: JSON.parse(
           await readFile(path.join(context.root, "findings.json"), "utf8"),
@@ -197,7 +199,10 @@ for (const shared of [false, true]) {
         ]);
         snapshots.push(await snapshot());
       }
-      for (const [index, { coverage, findings }] of snapshots.entries()) {
+      for (const [
+        index,
+        { reviewState: coverage, findings },
+      ] of snapshots.entries()) {
         const stage = ["publication", "fail-scan", "preserve-scan-results"][
           index
         ];

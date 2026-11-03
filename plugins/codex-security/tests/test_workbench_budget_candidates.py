@@ -6,17 +6,32 @@ import os
 import sqlite3
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 from test_workbench_db import budget_scan_fixture, complete_budget_scan
-from workbench_test_support import BUDGET_COST, SCRIPT, run_workbench, write_completed_contract
+from workbench_test_support import (
+    BUDGET_COST,
+    SCRIPT,
+    load_script,
+    read_review_state,
+    run_workbench,
+    write_completed_contract,
+    write_provisional_review_state,
+)
+
+
+@pytest.fixture(scope="module")
+def budget_draft():
+    db = load_script("workbench_db")
+    return partial(db.saved_results.budget_exhausted_draft, db)
 
 
 @pytest.mark.parametrize("variant", ["deduplicated", "distinct", "invalid"])
 def test_budget_completion_retains_each_confirmed_candidate_identity(
-    tmp_path: Path, workbench_api: dict[str, Any], variant: str
+    tmp_path: Path, budget_draft, variant: str
 ) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     first_candidate = json.loads(ledger.read_text())
@@ -44,10 +59,8 @@ def test_budget_completion_retains_each_confirmed_candidate_identity(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-    workbench_api["budget_exhausted_draft"](
-        scan, scan_dir, [first_candidate, second_candidate], "Synthetic budget stop."
-    )
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    budget_draft(scan, scan_dir, [first_candidate, second_candidate], "Synthetic budget stop.")
+    coverage = read_review_state(state_dir, scan_dir)
     assert {row["candidateId"] for row in coverage["deferred"] if row.get("candidateId")} == (
         {second_candidate["candidate_id"]} if variant == "invalid" else set()
     )
@@ -100,18 +113,17 @@ def test_budget_completion_uses_current_candidate_state_after_finding_reopens(
         "reason": "Independent proof gap for another worker.",
         "surfaceIds": [other_surface["id"]],
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(
         completeness="partial",
         surfaces=[surface, other_surface],
         deferred=[pending, other_pending],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state_dir, scan_dir)
     still_pending = expected_disposition == "needs_follow_up"
     assert (pending in saved["deferred"]) is still_pending
     retained = next(row for row in saved["surfaces"] if row["id"] == surface["id"])
@@ -189,8 +201,7 @@ def test_budget_exhaustion_reconciles_saved_candidate_rows_without_losing_other_
         "reason": "A different worker's unfinished review.",
         "surfaceIds": [other_owner["id"]],
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"] = [surface, shared, other_owner]
     coverage["deferred"] = [
         {
@@ -203,11 +214,11 @@ def test_budget_exhaustion_reconciles_saved_candidate_rows_without_losing_other_
         generic,
         independent,
     ]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert generic in preserved["deferred"]
     assert independent in preserved["deferred"]
     assert shared in preserved["surfaces"]
@@ -261,8 +272,7 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
     else:
         findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["deferred"] = [
         {
             "id": "pending-candidate",
@@ -272,7 +282,7 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
             "reason": "Authored review gap.",
         }
     ]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     if newer_phase:
         candidate["validation"]["counterevidence_or_proof_gap"] = "Later review resolved the gap."
@@ -282,7 +292,7 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
     assert completed["progress"]["status"] == "complete"
     still_pending = decision != "reported" and not newer_phase
     assert completed["progress"]["candidates"]["unresolved"] == int(still_pending)
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     pending = [
         row for row in preserved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
     ]
@@ -306,8 +316,7 @@ def test_budget_exhaustion_preserves_shared_reported_surface(tmp_path: Path, dec
     write_completed_contract(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     shared = {
         "id": "shared-reported",
         "candidateId": candidate["candidate_id"],
@@ -317,12 +326,12 @@ def test_budget_exhaustion_preserves_shared_reported_surface(tmp_path: Path, dec
         "receiptRefs": [],
     }
     coverage.update(surfaces=[shared], deferred=[])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert shared in preserved["surfaces"]
     candidate_surfaces = [
         row
@@ -344,11 +353,10 @@ def test_budget_exhaustion_keeps_failure_recovery_for_malformed_coverage(
     write_completed_contract(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     invalid = {"id": "malformed-review", "reason": "Unrelated saved review.", **malformed}
     coverage["deferred"] = [invalid]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     result = complete_budget_scan(state_dir, scan_id, check=False)
 
@@ -357,7 +365,7 @@ def test_budget_exhaustion_keeps_failure_recovery_for_malformed_coverage(
     assert scan["progress"]["status"] == "failed"
     assert scan["findingCount"] == 1
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
-    assert invalid not in json.loads(coverage_path.read_text())["deferred"]
+    assert invalid not in read_review_state(state_dir, scan_dir)["deferred"]
 
 
 @pytest.mark.parametrize("disposition", [{}, []])
@@ -368,21 +376,20 @@ def test_budget_exhaustion_preserves_structured_exclusion_extensions(
     write_completed_contract(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     exclusion = {
         "pattern": "synthetic-exclusion/**",
         "reason": "Unrelated scope exclusion.",
         "disposition": disposition,
     }
     coverage["explicitExclusions"] = [exclusion]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 1
-    assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+    assert exclusion in read_review_state(state_dir, scan_dir)["explicitExclusions"]
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
 
 
@@ -394,8 +401,7 @@ def test_budget_exhaustion_retains_ledger_candidate_when_recovering_nonobject_su
     write_completed_contract(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(None)
     generic = {
         "id": "general-review",
@@ -403,7 +409,7 @@ def test_budget_exhaustion_retains_ledger_candidate_when_recovering_nonobject_su
         "surfaceIds": [coverage["surfaces"][0]["id"]],
     }
     coverage["deferred"] = [generic]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     result = complete_budget_scan(state_dir, scan_id, check=False)
 
@@ -412,7 +418,7 @@ def test_budget_exhaustion_retains_ledger_candidate_when_recovering_nonobject_su
     assert scan["progress"]["status"] == "failed"
     assert scan["findingCount"] == 1
     assert scan["progress"]["candidates"]["unresolved"] == 1
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     assert generic in recovered["deferred"]
     pending = next(row for row in recovered["deferred"] if row.get("candidateId"))
     assert pending["candidate"] == candidate
@@ -467,14 +473,13 @@ def test_budget_completion_links_existing_pending_candidate_to_follow_up_surface
                 "receiptRefs": [],
             }
         )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(completeness="partial", surfaces=surfaces, deferred=[pending, generic])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state_dir, scan_dir)
     assert completed["progress"]["status"] == "complete"
     assert completed["progress"]["candidates"]["unresolved"] == 1
     assert generic in saved["deferred"]
@@ -556,8 +561,7 @@ def test_budget_exhaustion_retains_candidate_when_saved_surface_has_no_usable_id
     write_completed_contract(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"] = [
         {
             "candidateId": candidate["candidate_id"],
@@ -569,7 +573,7 @@ def test_budget_exhaustion_retains_candidate_when_saved_surface_has_no_usable_id
         }
     ]
     coverage["deferred"] = []
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     result = complete_budget_scan(state_dir, scan_id, check=False)
 
@@ -578,7 +582,7 @@ def test_budget_exhaustion_retains_candidate_when_saved_surface_has_no_usable_id
     assert scan["progress"]["status"] == "failed"
     assert scan["findingCount"] == 1
     assert scan["progress"]["candidates"]["unresolved"] == 1
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     pending = next(row for row in recovered["deferred"] if row.get("candidateId"))
     assert pending["candidate"] == candidate
     assert pending["surfaceIds"]
@@ -610,10 +614,9 @@ def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
         "candidate": candidate,
         "reason": "Saved validation gap.",
     }
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["deferred"] = [pending]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     result = complete_budget_scan(state_dir, scan_id, check=False)
 
@@ -635,7 +638,7 @@ def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
     assert scan["progress"]["status"] == "failed"
     assert scan["findingCount"] == int(not missing_rule_id)
     assert scan["progress"]["candidates"]["unresolved"] == int(missing_rule_id)
-    recovered = json.loads(coverage_path.read_text())
+    recovered = read_review_state(state_dir, scan_dir)
     if missing_rule_id:
         surface = next(
             row
@@ -698,8 +701,7 @@ def test_budget_exhaustion_preserves_authored_terminal_decisions(
     }
     if saved_kind == "other-owner":
         authored["sourceWorkerId"] = "worker-other"
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"] = [pending_surface]
     if saved_kind == "exclusion":
         authored = {
@@ -729,14 +731,14 @@ def test_budget_exhaustion_preserves_authored_terminal_decisions(
             "surfaceIds": [pending_surface["id"]],
         }
     ]
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
     assert completed["progress"]["candidates"]["unresolved"] == 0
     assert completed["findingCount"] == 1
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert not any(
         row.get("candidateId") == candidate["candidate_id"] for row in preserved["deferred"]
     )
@@ -763,7 +765,7 @@ def test_budget_exhaustion_preserves_authored_terminal_decisions(
 @pytest.mark.parametrize("started_pending", [False, True])
 def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     tmp_path: Path,
-    workbench_api: dict[str, Any],
+    budget_draft,
     decision: str,
     saved_pending: bool,
     started_pending: bool,
@@ -777,7 +779,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+        budget_draft(scan, scan_dir, [original], "Cost limit reached.")
         if started_pending:
             assert (
                 run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"][
@@ -795,9 +797,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
                 "evidence": "Updated terminal evidence.",
                 "validation": {"disposition": "suppressed"},
             }
-            workbench_api["budget_exhausted_draft"](
-                scan, scan_dir, [original], "Cost limit reached."
-            )
+            budget_draft(scan, scan_dir, [original], "Cost limit reached.")
             assert (
                 run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"][
                     "candidates"
@@ -818,8 +818,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     if decision == "reportable":
         candidate["attack_path"] = {"decision": "reportable"}
     ledger.write_text(json.dumps(candidate) + "\n")
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     surface = coverage["surfaces"][0]
     surface["reviewContext"] = "Keep this independent annotation."
     other_owner = {**surface, "id": "other-owner-review", "sourceWorkerId": "worker-other"}
@@ -840,7 +839,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
                 "surfaceIds": [surface["id"]],
             }
         )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
@@ -848,7 +847,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     assert completed["findingCount"] == 0
     still_pending = saved_pending or decision != "not_applicable"
     assert completed["progress"]["candidates"]["unresolved"] == int(still_pending)
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert generic in preserved["deferred"]
     assert other_owner in preserved["surfaces"]
     refreshed = next(row for row in preserved["surfaces"] if row["id"] == surface["id"])
@@ -865,7 +864,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
 
 @pytest.mark.parametrize("edited_field", [None, "reason", "paths", "surfaceIds", "candidate"])
 def test_budget_exhaustion_refreshes_generated_pending_evidence_after_resume(
-    tmp_path: Path, workbench_api: dict[str, Any], edited_field: str | None
+    tmp_path: Path, budget_draft, edited_field: str | None
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
         tmp_path,
@@ -883,12 +882,11 @@ def test_budget_exhaustion_refreshes_generated_pending_evidence_after_resume(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+        budget_draft(scan, scan_dir, [original], "Cost limit reached.")
     assert (
         run_workbench(state_dir, "get-cli-scan-resume", "--scan-id", scan_id)["scanId"] == scan_id
     )
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     pending = coverage["deferred"][0]
     original_id = pending["id"]
     independent = {
@@ -918,7 +916,7 @@ def test_budget_exhaustion_refreshes_generated_pending_evidence_after_resume(
             "candidate": {**original, "evidence": "Authored evidence."},
         }[edited_field]
     saved_pending = json.loads(json.dumps(pending))
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     current = {
         **original,
         "summary": "Current candidate review",
@@ -936,7 +934,7 @@ def test_budget_exhaustion_refreshes_generated_pending_evidence_after_resume(
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    preserved = json.loads(coverage_path.read_text())
+    preserved = read_review_state(state_dir, scan_dir)
     assert independent in preserved["deferred"]
     assert generic in preserved["deferred"]
     refreshed = next(row for row in preserved["deferred"] if row["id"] == original_id)
@@ -1042,22 +1040,21 @@ def test_legacy_budget_surface_reconciles_generated_identity(
 
 @pytest.mark.parametrize("snapshot", ["authored-partial", "generated-complete"])
 def test_budget_completion_preserves_authored_partial_candidate_snapshot(
-    tmp_path: Path, workbench_api: dict[str, Any], snapshot: str
+    tmp_path: Path, budget_draft, snapshot: str
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     original = json.loads(ledger.read_text())
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+        budget_draft(scan, scan_dir, [original], "Cost limit reached.")
+    coverage = read_review_state(state_dir, scan_dir)
     partial = {field: original[field] for field in ("candidate_id", "summary", "evidence")}
     if snapshot == "authored-partial":
         for field in ("surfaces", "deferred"):
             coverage[field][0]["candidate"] = partial
         coverage["deferred"][0]["reason"] = "Keep the authored proof gap."
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
     current = {**original, "summary": "Updated review", "evidence": "Updated source evidence."}
     ledger.write_text(json.dumps(current) + "\n")
 
@@ -1065,7 +1062,7 @@ def test_budget_completion_preserves_authored_partial_candidate_snapshot(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["progress"]["candidates"]["unresolved"] == 1
-    restored = json.loads(coverage_path.read_text())
+    restored = read_review_state(state_dir, scan_dir)
     pending = next(
         row for row in restored["deferred"] if row.get("candidateId") == original["candidate_id"]
     )
@@ -1098,8 +1095,7 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
         scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     receipt_file = scan_dir / "artifacts/review/receipt.txt"
     receipt_file.parent.mkdir(parents=True, exist_ok=True)
     if receipt == "valid":
@@ -1128,7 +1124,7 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
         "surfaceIds": [surface["id"]],
     }
     coverage.update(surfaces=[surface], deferred=[pending, generic])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     completion = complete_budget_scan(state, scan_id, check=False)
     if completion["returncode"]:
         run_workbench(
@@ -1140,7 +1136,7 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
             "Synthetic budget recovery failure.",
         )
     completed = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state, scan_dir)
     assert generic in saved["deferred"]
     rows = [row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]]
     assert bool(rows) is (receipt != "valid")
@@ -1167,7 +1163,7 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
 
 @pytest.mark.parametrize("edited_field", [None, "reason", "paths", "surfaceIds", "candidate"])
 def test_budget_generated_dedicated_surface_refresh_keeps_saved_reference_context(
-    tmp_path: Path, workbench_api: dict[str, Any], edited_field: str | None
+    tmp_path: Path, budget_draft, edited_field: str | None
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
         tmp_path,
@@ -1175,22 +1171,21 @@ def test_budget_generated_dedicated_surface_refresh_keeps_saved_reference_contex
     )
     original = {**json.loads(ledger.read_text()), "validation": {"disposition": "suppressed"}}
     run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
-    coverage_path = scan_dir / "coverage.json"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
-        coverage = json.loads(coverage_path.read_text())
+        budget_draft(scan, scan_dir, [original], "Cost limit reached.")
+        coverage = read_review_state(state_dir, scan_dir)
         generic = {
             "id": "independent-review",
             "reason": "Keep independent unfinished work.",
             "surfaceIds": [coverage["surfaces"][0]["id"]],
         }
         coverage["deferred"].append(generic)
-        coverage_path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
         reopened = {**original, "validation": {"disposition": "deferred"}}
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [reopened], "Cost limit reached.")
-    coverage = json.loads(coverage_path.read_text())
+        budget_draft(scan, scan_dir, [reopened], "Cost limit reached.")
+    coverage = read_review_state(state_dir, scan_dir)
     pending = next(
         row for row in coverage["deferred"] if row.get("candidateId") == original["candidate_id"]
     )
@@ -1217,7 +1212,7 @@ def test_budget_generated_dedicated_surface_refresh_keeps_saved_reference_contex
             "candidate": {**reopened, "evidence": "Authored source evidence."},
         }[edited_field]
     saved = json.loads(json.dumps(pending))
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     current = {
         **reopened,
         "summary": "Current reopened review",
@@ -1226,7 +1221,7 @@ def test_budget_generated_dedicated_surface_refresh_keeps_saved_reference_contex
     }
     ledger.write_text(json.dumps(current) + "\n")
     complete_budget_scan(state_dir, scan_id)
-    published = json.loads(coverage_path.read_text())
+    published = read_review_state(state_dir, scan_dir)
     assert generic in published["deferred"]
     actual = next(row for row in published["deferred"] if row.get("id") == saved["id"])
     if edited_field is not None:
@@ -1285,12 +1280,11 @@ def test_budget_legacy_saved_pending_surface_refresh_uses_original_evidence(
     manifest["scan"].pop("sealedAt", None)
     manifest["scan"].pop("artifacts", None)
     manifest_path.write_text(json.dumps(manifest))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(completeness="partial", surfaces=[surface], deferred=[pending])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     complete_budget_scan(state_dir, scan_id)
-    published = json.loads(coverage_path.read_text())
+    published = read_review_state(state_dir, scan_dir)
     retained = next(row for row in published["surfaces"] if row["id"] == surface["id"])
     if edited_field is not None:
         assert retained == saved_surface
@@ -1307,7 +1301,7 @@ def test_budget_legacy_saved_pending_surface_refresh_uses_original_evidence(
 @pytest.mark.parametrize("decision", ["suppressed", "not_applicable", "deferred"])
 @pytest.mark.parametrize("authored", [False, True, "string", "array", "null"])
 def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
-    tmp_path: Path, workbench_api, decision: str, authored: bool | str
+    tmp_path: Path, budget_draft, decision: str, authored: bool | str
 ) -> None:
     state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
         tmp_path, extra_files={"updated.py": "# updated evidence\n"}
@@ -1317,7 +1311,7 @@ def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+        budget_draft(scan, scan_dir, [original], "Cost limit reached.")
     current = {
         **original,
         "summary": "Current review",
@@ -1326,8 +1320,7 @@ def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
         "validation": {"disposition": decision},
     }
     if authored:
-        path = scan_dir / "coverage.json"
-        coverage = json.loads(path.read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         surface = next(
             row
             for row in coverage["surfaces"]
@@ -1341,10 +1334,10 @@ def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
                 "null": None,
             }[authored]
             surface["candidate"] = original
-        path.write_text(json.dumps(coverage))
+        write_provisional_review_state(scan_dir, coverage)
     ledger.write_text(json.dumps(current) + "\n")
     complete_budget_scan(state_dir, scan_id)
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     surface = next(
         row for row in coverage["surfaces"] if row.get("candidateId") == current["candidate_id"]
     )
@@ -1386,10 +1379,9 @@ def test_legacy_budget_pending_refresh_keeps_authored_fields(
     findings = json.loads(findings_path.read_text())
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     coverage.update(completeness="partial", surfaces=[surface], deferred=[pending])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     current = {
         **original,
         "summary": "Current unresolved review",
@@ -1398,7 +1390,7 @@ def test_legacy_budget_pending_refresh_keeps_authored_fields(
     }
     ledger.write_text(json.dumps(current) + "\n")
     complete_budget_scan(state_dir, scan_id)
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     actual = next(
         row for row in coverage["deferred"] if row.get("candidateId") == current["candidate_id"]
     )
@@ -1426,16 +1418,15 @@ def test_budget_candidate_allocation_preserves_generic_closure(
     findings = json.loads(findings_path.read_text())
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     closure = {
         "id": candidate["candidate_id"] if collision else "general-review",
         "reason": "Independent generic review finished.",
     }
     coverage.update(surfaces=[], explicitExclusions=[], deferred=[], resolvedDeferred=[closure])
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     complete_budget_scan(state_dir, scan_id)
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state_dir, scan_dir)
     assert saved["resolvedDeferred"] == [closure]
     pending = [
         row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
@@ -1478,8 +1469,7 @@ def test_public_budget_completion_keeps_receipt_reopened_work(
         path = path.with_name("replacement.txt")
         path.write_text("Synthetic independently replaced decision evidence.\n")
         refs = ["artifacts/proof/replacement.txt"]
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     coverage.update(
         completeness="complete",
         surfaces=[
@@ -1493,7 +1483,7 @@ def test_public_budget_completion_keeps_receipt_reopened_work(
         ],
         deferred=[],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if modern:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute(
@@ -1501,7 +1491,7 @@ def test_public_budget_completion_keeps_receipt_reopened_work(
                 (str(scan_dir / "scan-manifest.json"), scan_id),
             )
     completed = complete_budget_scan(state, scan_id)["scan"]
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state, scan_dir)
     active = json.loads(findings_path.read_text())["findings"]
     assert len(active) == int(receipt == "reported")
     assert completed["progress"]["candidates"]["unresolved"] == int(receipt == "missing")
@@ -1545,8 +1535,7 @@ def test_public_budget_dismissal_archives_reopened_findings(
     old = findings["findings"][0]
     old["provenance"].update(candidateId=candidate["candidate_id"], candidateReopened=True)
     findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     coverage.update(
         completeness="partial",
         surfaces=[
@@ -1568,7 +1557,7 @@ def test_public_budget_dismissal_archives_reopened_findings(
             }
         ],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     if modern:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute(
@@ -1576,7 +1565,7 @@ def test_public_budget_dismissal_archives_reopened_findings(
                 (str(scan_dir / "scan-manifest.json"), scan_id),
             )
     completed = complete_budget_scan(state, scan_id)["scan"]
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state, scan_dir)
     active = json.loads(findings_path.read_text())["findings"]
     assert len(active) == int(modern)
     assert completed["progress"]["candidates"]["unresolved"] == int(modern)
@@ -1620,8 +1609,7 @@ def test_public_budget_retry_retains_receipt_reopening(
     finding["provenance"]["candidateId"] = candidate["candidate_id"]
     findings["findings"] = []
     findings_path.write_text(json.dumps(findings))
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state, scan_dir)
     disposition = "rejected" if decision == "suppressed" else "not_applicable"
     coverage.update(
         completeness="complete",
@@ -1636,7 +1624,7 @@ def test_public_budget_retry_retains_receipt_reopening(
         ],
         deferred=[],
     )
-    coverage_path.write_text(json.dumps(coverage))
+    write_provisional_review_state(scan_dir, coverage)
     # Interrupt the public command after its real draft writes, before sealing.
     wrapper = (
         "import os, runpy, sys\n"
@@ -1667,7 +1655,7 @@ def test_public_budget_retry_retains_receipt_reopening(
             check=False,
         )
         assert interrupted.returncode == 75, interrupted.stderr
-        pending = json.loads(coverage_path.read_text())
+        pending = read_review_state(state, scan_dir)
         assert pending["surfaces"][0]["disposition"] == "needs_follow_up"
         assert any(
             row.get("candidateId") == candidate["candidate_id"] for row in pending["deferred"]
@@ -1682,13 +1670,13 @@ def test_public_budget_retry_retains_receipt_reopening(
         pending["surfaces"][0].update(
             disposition=disposition, receiptRefs=["artifacts/proof/replacement.txt"]
         )
-        coverage_path.write_text(json.dumps(pending))
+        write_provisional_review_state(scan_dir, pending)
     elif retry_evidence == "finding":
         findings["findings"] = [finding]
         findings_path.write_text(json.dumps(findings))
     original_ledger = ledger.read_bytes()
     completed = complete_budget_scan(state, scan_id)["scan"]
-    saved = json.loads(coverage_path.read_text())
+    saved = read_review_state(state, scan_dir)
     assert completed["progress"]["candidates"]["unresolved"] == int(retry_evidence == "unchanged")
     assert completed["findingCount"] == int(retry_evidence == "finding")
     assert bool(

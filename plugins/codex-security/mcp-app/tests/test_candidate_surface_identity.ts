@@ -1,3 +1,4 @@
+import { readSavedReviewState } from "./support/json.ts";
 import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -108,7 +109,7 @@ for (const collision of [false, true]) {
         handoffClaimToken: context.handoffClaimToken,
         complete: false,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [surface],
           explicitExclusions: [],
@@ -163,8 +164,8 @@ for (const collision of [false, true]) {
         {
           ...draft,
           complete: true,
-          coverage: {
-            ...draft.coverage,
+          reviewState: {
+            ...draft.reviewState,
             completeness: "complete",
             surfaces: [],
           },
@@ -172,9 +173,7 @@ for (const collision of [false, true]) {
         workbench,
       );
       const snapshot = async () =>
-        JSON.parse(
-          await readFile(path.join(context.root, "coverage.json"), "utf8"),
-        );
+        await readSavedReviewState(context.root, path.join(directory, "state"));
       const snapshots = [await snapshot()];
       const checkpoints = path.join(context.root, "checkpoints");
       const originals = await Promise.all(

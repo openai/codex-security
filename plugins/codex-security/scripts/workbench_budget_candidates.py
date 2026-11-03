@@ -34,9 +34,9 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
-from workbench.saved_coverage import _coverage_rows, _deferred_rows
+from workbench.saved_coverage import _coverage_rows
 from workbench.saved_sources import _digest, _encoded
-from workbench_coverage_receipts import _deferred_candidate_id, resolve_coverage_receipts
+from workbench_coverage_receipts import resolve_coverage_receipts
 
 
 def recover_candidate_receipts(
@@ -56,7 +56,7 @@ def recover_candidate_receipts(
         warnings.extend(receipt_state["warnings"])
         if reopened is not None:
             reopened.update(tuple(key) for key in receipt_state["reopened"])
-        return {**parent, "coverage": copy.deepcopy(receipt_state["coverage"])}
+        return {**parent, "reviewState": copy.deepcopy(receipt_state["coverage"])}
     recovered_keys: set[tuple[str | None, str]] = set()
     warning_start = len(warnings)
     result = _recover_candidate_receipts(
@@ -70,7 +70,7 @@ def recover_candidate_receipts(
     )
     if receipt_state is not None and result is not parent:
         receipt_state.update(
-            coverage=copy.deepcopy(result["coverage"]),
+            coverage=copy.deepcopy(result["reviewState"]),
             warnings=warnings[warning_start:],
             reopened=sorted(recovered_keys, key=repr),
         )
@@ -680,7 +680,7 @@ def copied_report_has_later_pending(
         for path, draft in drafts.items()
         if any(
             isinstance(row, dict) and coverage_candidate_key(row, owner) == key
-            for row in _coverage_rows(draft["coverage"], "deferred")
+            for row in _coverage_rows(draft["reviewState"], "deferred")
         )
         and not any(
             valid_finding(finding)
@@ -693,7 +693,7 @@ def copied_report_has_later_pending(
             and coverage_candidate_key(row, owner) == key
             and row.get("disposition") in {"rejected", "not_applicable"}
             for field in ("surfaces", "explicitExclusions")
-            for row in _coverage_rows(draft["coverage"], field)
+            for row in _coverage_rows(draft["reviewState"], field)
         )
     ]
     return bool(pending_orders) and all(
@@ -716,7 +716,7 @@ def current_report(
     if not selected or owner is None or draft.get("complete") is False:
         return False
     key = finding_candidate_key(finding, owner)
-    deferred = draft["coverage"].get("deferred")
+    deferred = draft["reviewState"].get("deferred")
     return not any(
         isinstance(row, dict) and coverage_candidate_key(row, owner) == key
         for row in (deferred if isinstance(deferred, list) else [])
@@ -726,9 +726,9 @@ def current_report(
 def reuse_candidate_task_ids(sources: list[tuple[str, dict[str, Any], str | None]]) -> None:
     """Reuse a unique saved ID for identical candidate evidence with an omitted task ID."""
     entries = [
-        (draft["coverage"]["deferred"], owner)
+        (draft["reviewState"]["deferred"], owner)
         for _, draft, owner in sources
-        if isinstance(draft["coverage"].get("deferred"), list)
+        if isinstance(draft["reviewState"].get("deferred"), list)
     ]
     named: dict[Any, set[str]] = {}
     for rows, owner in entries:
@@ -767,7 +767,7 @@ def deferred_identity_collisions(sources, deferred_rows, record_source):
             and (key := finding_candidate_key(finding, owner)) is not None
         }
         for field in ("surfaces", "explicitExclusions"):
-            rows = draft["coverage"].get(field)
+            rows = draft["reviewState"].get(field)
             for row in rows if isinstance(rows, list) else []:
                 if isinstance(row, dict):
                     source_owner, original = record_source(field, owner, row)
@@ -898,7 +898,7 @@ def _stopped_diff_candidate_decisions(
                         if finding_candidate_key(retained) == key:
                             demoted_findings.setdefault(key, []).append(retained)
     for draft in drafts:
-        items = draft["coverage"].get("deferred", [])
+        items = draft["reviewState"].get("deferred", [])
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and (key := coverage_candidate_key(item)) and key[0] is None:
                 rows = pending.setdefault(key[1], [])
@@ -1108,7 +1108,7 @@ def _stopped_diff_candidate_decisions(
         "scanId": scan_id,
         "complete": False,
         "findings": copy.deepcopy(findings),
-        "coverage": coverage,
+        "reviewState": coverage,
     }
 
 
@@ -1123,14 +1123,14 @@ def _reconcile_stopped_diff_sources(
         for finding in draft["findings"]:
             states[finding_candidate_key(finding)] = ("reported", finding)
         for field in ("surfaces", "explicitExclusions"):
-            for item in draft["coverage"][field]:
+            for item in draft["reviewState"][field]:
                 if item.get("disposition") in {"rejected", "not_applicable"}:
                     states[coverage_candidate_key(item)] = (item["disposition"], item)
-        for item in unresolved_candidates(draft["coverage"], draft["findings"]):
+        for item in unresolved_candidates(draft["reviewState"], draft["findings"]):
             states[coverage_candidate_key(item)] = ("deferred", item)
 
     def project(draft: dict[str, Any], owner: str | None) -> dict[str, Any]:
-        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True:
+        if draft["reviewState"].get("stoppedDiffCandidateDecisions") is True:
             return draft
         result = copy.deepcopy(draft)
         retained = []
@@ -1173,18 +1173,18 @@ def _reconcile_stopped_diff_sources(
         pending = [
             item
             for decision in decisions
-            for item in decision["coverage"]["deferred"]
+            for item in decision["reviewState"]["deferred"]
             if states.get(coverage_candidate_key(item), (None, None))[0] == "deferred"
         ]
         pending.extend(
             item
-            for item in _deferred_rows(result["coverage"])
+            for item in _coverage_rows(result["reviewState"], "deferred")
             if isinstance(item, dict) and coverage_candidate_key(item, owner) not in states
         )
         for field in ("surfaces", "explicitExclusions", "deferred"):
-            items = result["coverage"].get(field)
+            items = result["reviewState"].get(field)
             if isinstance(items, list):
-                result["coverage"][field] = project_resolved_candidate_rows(
+                result["reviewState"][field] = project_resolved_candidate_rows(
                     items, field, owner, states, pending=pending
                 )
         return result
@@ -1251,7 +1251,7 @@ def reconcile_diff_candidate_sources(
     decision_drafts = [
         draft
         for _, draft, _ in sources
-        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True
+        if draft["reviewState"].get("stoppedDiffCandidateDecisions") is True
     ]
     if (
         stopped
@@ -1265,7 +1265,7 @@ def reconcile_diff_candidate_sources(
             ([parent] if parent else []) + [draft for _, draft, owner in sources if owner is None],
             warnings,
             receipt_reopened=receipt_reopened,
-            current_coverage=parent["coverage"] if parent else {},
+            current_coverage=parent["reviewState"] if parent else {},
             current_findings=decision_findings(parent) if parent else [],
             # A writer checkpoint and its parent projection can describe the same finding.
             checkpoint_findings=list(
@@ -1292,7 +1292,7 @@ def reconcile_diff_candidate_sources(
         key: item["disposition"]
         for draft in decision_drafts
         for field in ("surfaces", "explicitExclusions")
-        for item in draft["coverage"][field]
+        for item in draft["reviewState"][field]
         if item.get("disposition") in ("rejected", "not_applicable")
         and (key := coverage_candidate_key(item)) is not None
     }
@@ -1442,7 +1442,7 @@ def bind_legacy_candidate_rows(parent, sources, legacy_parent):
     legacy = ([parent] if parent and legacy_parent else []) + [
         draft
         for _, draft, owner in sources
-        if owner is None and draft["coverage"].get("legacyUnscopedParentCandidates") is True
+        if owner is None and draft["reviewState"].get("legacyUnscopedParentCandidates") is True
     ]
     if not legacy:
         return
@@ -1450,7 +1450,7 @@ def bind_legacy_candidate_rows(parent, sources, legacy_parent):
         copies = [
             row
             for draft in legacy
-            for rows in (draft["coverage"].get(field),)
+            for rows in (draft["reviewState"].get(field),)
             if isinstance(rows, list)
             for row in rows
             if isinstance(row, dict)
@@ -1458,7 +1458,7 @@ def bind_legacy_candidate_rows(parent, sources, legacy_parent):
             and coverage_owner(row) is None
         ]
         for _, draft, owner in sources:
-            rows = draft["coverage"].get(field)
+            rows = draft["reviewState"].get(field)
             if owner is None or not isinstance(rows, list):
                 continue
             for row in rows:
@@ -1475,166 +1475,3 @@ def bind_legacy_candidate_rows(parent, sources, legacy_parent):
                     )
                     if _encoded(comparable) == _encoded(expected):
                         existing["sourceWorkerId"] = owner
-
-
-def reconcile_candidate_outcomes(
-    current_drafts,
-    all_sources,
-    resolved,
-    *,
-    active_deferred,
-    reopened_rows,
-    candidate_ids,
-    ambiguous_deferred,
-    pending_surface_orders,
-    selected_observations,
-    current_results,
-    source_digests,
-    source_order,
-    coverage_schema,
-    coverage_candidate,
-    candidate_order,
-    valid_finding,
-):
-    """Order accepted reports, dismissals, and reopened proof gaps by their actual source."""
-
-    source_owners = {relative: owner for relative, _, owner in all_sources}
-    inactive_outcomes = set()
-    ordered_candidates = {
-        (owner, identity)
-        for owner, row in reopened_rows
-        if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
-        and (owner, identity) in candidate_ids
-    }
-    ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
-
-    pending_candidate_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
-    outcomes: list[tuple[str, str | None, str, str, tuple[int, int]]] = []
-    accepted_in_source = set()
-    for relative, draft, owner in current_drafts:
-        reported_candidates = {
-            key
-            for finding in draft["findings"]
-            if isinstance(finding, dict)
-            and valid_finding(finding)
-            and (key := finding_candidate_key(finding, owner)) is not None
-            and current_report(finding, draft, owner, relative in selected_observations)
-        }
-        terminal_candidates = {
-            key
-            for field in ("surfaces", "explicitExclusions")
-            for row in _coverage_rows(draft["coverage"], field)
-            if (owner is None or draft.get("complete") is not False)
-            and isinstance(row, dict)
-            and row.get("disposition") in ("rejected", "not_applicable")
-            and (
-                valid_exclusion(row, coverage_schema[field]["items"])
-                if field == "explicitExclusions"
-                else isinstance(row.get("label"), str) and row["label"].strip()
-            )
-            and (key := coverage_candidate(owner, row)) is not None
-        }
-        accepted_in_source.update(
-            (relative, key) for key in reported_candidates | terminal_candidates
-        )
-        pending_candidates = set()
-        for field in ("deferred", "surfaces"):
-            items = draft["coverage"].get(field, [])
-            for item in items if isinstance(items, list) else []:
-                if isinstance(item, dict) and (
-                    field == "deferred" or item.get("disposition") == "needs_follow_up"
-                ):
-                    if (pending := coverage_candidate(owner, item)) is not None:
-                        if (relative, pending) in accepted_in_source:
-                            continue
-                        pending_candidates.add(pending)
-                        order = candidate_order(relative, pending[0], item)
-                        pending_candidate_orders[pending] = max(
-                            pending_candidate_orders.get(pending, order), order
-                        )
-        for key in reported_candidates:
-            outcomes.append((relative, key[0], key[1], "reported", source_order[relative]))
-        for field in ("surfaces", "explicitExclusions"):
-            for item in _coverage_rows(draft["coverage"], field):
-                if (
-                    isinstance(item, dict)
-                    and isinstance(item.get("candidateId"), str)
-                    and item.get("disposition") in ("reported", "rejected", "not_applicable")
-                    and (
-                        field != "explicitExclusions"
-                        or valid_exclusion(item, coverage_schema[field]["items"])
-                    )
-                    and (candidate := coverage_candidate(owner, item)) is not None
-                    and (item["disposition"] != "reported" or candidate in reported_candidates)
-                    and (candidate not in pending_candidates or item["disposition"] == "reported")
-                ):
-                    outcomes.append(
-                        (
-                            relative,
-                            candidate[0],
-                            candidate[1],
-                            item["disposition"],
-                            candidate_order(relative, candidate[0], item),
-                        )
-                    )
-    ordered_candidates.update(pending_candidate_orders)
-    ordered_candidates.update(
-        (owner, candidate_id)
-        for relative, owner, candidate_id, _, _ in outcomes
-        if owner is not None and (relative == "parent" or relative in selected_observations)
-    )
-    # Reopened work and selected checkpoint outcomes follow the saved source order.
-    for relative, owner, candidate_id, disposition, order in outcomes:
-        key = (owner, candidate_id)
-        surface_reopened = pending_surface_orders.get(key, (-1, -1)) >= order
-        if key not in ordered_candidates:
-            if not surface_reopened and (relative == "parent" or relative in current_results):
-                resolved.setdefault(key, disposition)
-            continue
-        if any(
-            (
-                coverage_candidate(saved_owner, row)
-                or (saved_owner, _deferred_candidate_id(row, saved_owner, ambiguous_deferred))
-            )
-            == key
-            and is_candidate_row(row)
-            and not (
-                source_owners[relative] is None
-                and source_owners[saved_relative] is None
-                and saved_order == order
-                and (saved_relative, key) in accepted_in_source
-            )
-            and not (
-                owner is not None
-                and relative != "parent"
-                and source_owners[relative] == owner
-                and source_owners[saved_relative] == owner
-                and saved_order[0] == order[0]
-                and source_digests[relative] == source_digests[saved_relative]
-                and not copied_report_has_later_pending(
-                    relative, owner, candidate_id, all_sources, source_order, valid_finding
-                )
-            )
-            and (
-                saved_order[1] >= order[1]
-                if owner is not None and (relative == "parent" or saved_relative == "parent")
-                else saved_order >= order
-            )
-            for (saved_owner, _), (saved_order, row, saved_relative) in active_deferred.items()
-        ):
-            inactive_outcomes.add((relative, key))
-            continue
-        if surface_reopened or pending_candidate_orders.get(key, (-1, -1)) >= order:
-            # A surface-only retry keeps the earlier dismissal as evidence.
-            if disposition == "reported":
-                inactive_outcomes.add((relative, key))
-            continue
-        previous = ordered_outcomes.get(key)
-        if previous is None or (
-            (order[1], order[0]) > (previous[0][1], previous[0][0])
-            if relative == "parent" or previous[1] == "parent"
-            else order > previous[0]
-        ):
-            resolved[key] = disposition
-            ordered_outcomes[key] = (order, relative)
-    return ordered_outcomes, inactive_outcomes, pending_candidate_orders

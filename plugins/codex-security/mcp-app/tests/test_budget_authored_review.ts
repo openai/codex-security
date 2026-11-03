@@ -1,10 +1,14 @@
+import { readSavedReviewState } from "./support/json.ts";
 import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
-import { importDiscoverySource } from "./support/discovery.ts";
+import {
+  discoveryPluginRoot,
+  importDiscoverySource,
+} from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { importSource } from "./import-module.ts";
 import { finding } from "./scan-draft-fixture.ts";
@@ -143,7 +147,7 @@ for (const withSnapshot of [true, false]) {
           const draft = {
             scanId: scan.scanId,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
@@ -231,12 +235,7 @@ runpy.run_path(script, run_name='__main__')
                 { encoding: "utf8", env },
               );
               assert.equal(result.status, 75, result.stderr);
-              const coverage = JSON.parse(
-                await readFile(
-                  path.join(scan.scanDir, "coverage.json"),
-                  "utf8",
-                ),
-              );
+              const coverage = await readSavedReviewState(scan.scanDir);
               assert.ok(
                 coverage.deferred.some((row: any) => row.reason === reason),
               );
@@ -269,13 +268,13 @@ runpy.run_path(script, run_name='__main__')
                   },
                 },
               ],
-              coverage: { ...draft.coverage, deferred: [] },
+              reviewState: { ...draft.reviewState, deferred: [] },
             });
           } else if (resolution === "terminal") {
             await writeDraft({
               ...draft,
-              coverage: {
-                ...draft.coverage,
+              reviewState: {
+                ...draft.reviewState,
                 deferred: [],
                 surfaces: [
                   {
@@ -294,9 +293,7 @@ runpy.run_path(script, run_name='__main__')
           const completed = JSON.parse(
             execFileSync(python, args, { encoding: "utf8", env }),
           ).scan;
-          const coverage = JSON.parse(
-            await readFile(path.join(scan.scanDir, "coverage.json"), "utf8"),
-          );
+          const coverage = await readSavedReviewState(scan.scanDir);
           assert.equal(
             completed.progress.candidates.unresolved,
             Number(resolution === "pending"),
@@ -376,7 +373,7 @@ for (const scenario of ["unlinked", "worker-owned", "supplied", "finding"]) {
               },
             ]
           : [],
-      coverage: {
+      reviewState: {
         completeness: "partial",
         surfaces: [],
         explicitExclusions: [],
@@ -387,15 +384,20 @@ for (const scenario of ["unlinked", "worker-owned", "supplied", "finding"]) {
       await readFile(ledger, "utf8"),
       "incomplete unrelated artifact",
     );
-    const coverage = JSON.parse(
-      await readFile(path.join(scan.scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readSavedReviewState(scan.scanDir);
     assert.deepEqual(coverage.deferred[0], pending);
   });
 }
 
 const { prepareCodexSecurityReviewItems } = await importSource(
   new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        pathToFileURL(path.join(discoveryPluginRoot, "mcp/helpers.mjs")).href,
+      ),
+    },
+  },
 );
 const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
   await importDiscoverySource();
@@ -467,14 +469,18 @@ for (const disposition of ["rejected", "not_applicable"]) {
         scanId: scan.scanId,
         complete: true,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [],
           explicitExclusions: [],
           deferred: [pending],
         },
       };
-      await recordCodexSecurityScanDraftViaWorkbench(context, draft, workbench);
+      const publication = await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft,
+        workbench,
+      );
       const exclusion: Record<string, unknown> = {
         candidateId: candidate.candidate_id,
         disposition,
@@ -496,16 +502,31 @@ for (const disposition of ["rejected", "not_applicable"]) {
             context,
             {
               ...draft,
-              coverage: { ...draft.coverage, explicitExclusions: [exclusion] },
+              reviewState: {
+                ...draft.reviewState,
+                explicitExclusions: [exclusion],
+              },
             },
             workbench,
           ),
           /pattern|reason/,
         );
-      const file = path.join(scan.scanDir, "coverage.json");
-      const coverage = JSON.parse(await readFile(file, "utf8"));
-      coverage.explicitExclusions = [exclusion];
-      await writeFile(file, JSON.stringify(coverage));
+      // Replay a file-authored legacy exclusion alongside the accepted modern checkpoint.
+      const manifestPath = path.join(scan.scanDir, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      delete manifest.scan.reviewState;
+      manifest.scan.coverageRef = "coverage.json";
+      const coveragePath = path.join(scan.scanDir, manifest.scan.coverageRef);
+      await writeFile(
+        coveragePath,
+        JSON.stringify({
+          ...publication.reviewState,
+          schemaVersion: "1.0",
+          scanId: scan.scanId,
+          explicitExclusions: [exclusion],
+        }),
+      );
+      await writeFile(manifestPath, JSON.stringify(manifest));
       const checkpoints = path.join(scan.scanDir, "checkpoints");
       const before = new Map(
         await Promise.all(
@@ -551,24 +572,15 @@ for (const disposition of ["rejected", "not_applicable"]) {
           saved.progress.candidates.unresolved,
           kind === "valid" ? 0 : 1,
         );
-        const result = JSON.parse(await readFile(file, "utf8"));
-        const retained = result.deferred.filter(
-          (row: any) => row.candidateId === candidate.candidate_id,
+        const { scan: sealed } = JSON.parse(await readFile(manifestPath, "utf8"));
+        const retained = (sealed.review?.unresolvedCandidates ?? []).filter(
+          (row: { candidateId?: string }) => row.candidateId === candidate.candidate_id,
         );
         assert.equal(retained.length, kind === "valid" ? 0 : 1);
-        if (retained.length)
-          assert.deepEqual(retained[0], {
-            ...pending,
-            surfaceIds: [`candidate-${candidate.candidate_id}`],
-          });
-        const terminal = result.surfaces.filter(
-          (row: any) =>
-            row.candidateId === candidate.candidate_id &&
-            ["rejected", "not_applicable"].includes(row.disposition),
-        );
-        assert.equal(terminal.length, kind === "valid" ? 1 : 0);
-        if (kind === "generic-metadata")
-          assert.deepEqual(result.explicitExclusions, [exclusion]);
+        if (retained.length) {
+          assert.equal(retained[0].reason, pending.reason);
+          assert.deepEqual(retained[0].candidate, pending.candidate);
+        }
         assert.deepEqual(await readFile(ledger), originalLedger);
         for (const [name, bytes] of before)
           assert.deepEqual(await readFile(path.join(checkpoints, name)), bytes);

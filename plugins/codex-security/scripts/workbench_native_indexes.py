@@ -1,9 +1,9 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import os
 import sqlite3
 import sys
-from collections import Counter
 from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
@@ -203,82 +203,71 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    rows = connection.execute(
+    by_target: dict[str, dict[str, Any]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT targets.id AS repository_id, targets.display_name, targets.current_path,
+               {scan_history.SCAN_SUMMARY_COLUMNS}
+        FROM security_targets AS targets
+        LEFT JOIN scans ON scans.target_id = targets.id
+            AND scans.id IN (SELECT scan_id FROM scan_progress)
+        LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC, targets.id
         """
-        WITH ranked_scans AS (
-            SELECT scans.*,
-                progress.reportable_findings_count,
-                progress.scope_file_count,
-                progress.review_items_completed,
-                progress.review_items_total,
-                progress.updated_at AS progress_updated_at,
-                COUNT(*) OVER (PARTITION BY scans.target_id) AS scan_count,
-                ROW_NUMBER() OVER (
-                    PARTITION BY scans.target_id
-                    ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
-                ) AS scan_rank
-            FROM scans
-            JOIN scan_progress AS progress ON progress.scan_id = scans.id
-        )
-        SELECT scans.*,
-            (
-                SELECT COUNT(*) FROM finding_occurrences AS occurrences
-                WHERE occurrences.scan_id = scans.id
-            ) AS finding_count,
-            targets.current_path,
-            targets.display_name
-        FROM ranked_scans AS scans
-        JOIN security_targets AS targets ON targets.id = scans.target_id
-        WHERE scans.scan_rank = 1
-        ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
-        """
-    ).fetchall()
-    open_findings_by_target = Counter(
-        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
-    )
-    if args is not None:
-        query = args.query.strip().casefold() if args.query else ""
-        rows = [
-            row
-            for row in rows
-            if (args.target_id is None or row["target_id"] == args.target_id)
-            and args.status != "not_scanned"
-            and (
-                args.status != "open_findings"
-                or open_findings_by_target.get(row["target_id"], 0) > 0
-            )
-            and (
-                not query
-                or query in row["display_name"].casefold()
-                or query in row["current_path"].casefold()
-            )
-        ]
-    pagination = {}
-    if args is not None and (args.limit is not None or args.offset != 0):
-        limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
-        page = rows[args.offset : args.offset + limit]
-        next_offset = args.offset + len(page)
-        pagination = {
-            "limit": limit,
-            "nextOffset": next_offset if next_offset < len(rows) else None,
-            "offset": args.offset,
-        }
-        rows = page
-    return {
-        "repositories": [
-            {
-                "checkoutAvailable": Path(row["current_path"]).is_dir(),
+    ).fetchall():
+        target_id = row["repository_id"]
+        if target_id not in by_target:
+            by_target[target_id] = {
                 "displayName": row["display_name"],
-                "latestScan": scan_history.scan_summary(row),
-                "openFindingsCount": open_findings_by_target.get(row["target_id"], 0),
-                "scanCount": row["scan_count"],
-                "targetId": row["target_id"],
+                "latestScan": scan_history.scan_summary(row) if row["id"] is not None else None,
+                "openFindingsCount": 0,
+                "scanCount": 0,
+                "targetId": target_id,
                 "targetPath": row["current_path"],
             }
-            for row in rows
-        ],
-        **pagination,
-    }
+        if row["id"] is not None:
+            by_target[target_id]["scanCount"] += 1
+
+    # A writer can publish a target or its first scan after the repository query.
+    for finding in _indexed_findings(connection):
+        repository = by_target.get(finding["target_id"])
+        if finding["status"] == "open" and repository is not None and repository["scanCount"]:
+            repository["openFindingsCount"] += 1
+    repositories = list(by_target.values())
+    pagination = {}
+    if args is not None:
+        query = args.query.strip().casefold() if args.query else ""
+        repositories = [
+            repository
+            for repository in repositories
+            if (args.target_id is None or repository["targetId"] == args.target_id)
+            and (args.status != "scanned" or repository["scanCount"] > 0)
+            and (args.status != "not_scanned" or repository["scanCount"] == 0)
+            and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
+            and (
+                not query
+                or query in repository["displayName"].casefold()
+                or query in repository["targetPath"].casefold()
+            )
+        ]
+        if args.limit is not None or args.offset:
+            limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+            end = args.offset + limit
+            pagination = {
+                "limit": limit,
+                "nextOffset": end if end < len(repositories) else None,
+                "offset": args.offset,
+            }
+            repositories = repositories[args.offset : end]
+    for repository in repositories:
+        path = os.path.expanduser(repository["targetPath"])
+        try:
+            repository["checkoutAvailable"] = Path(path).is_absolute() and os.path.isdir(
+                os.path.realpath(path)
+            )
+        except (OSError, RecursionError):
+            repository["checkoutAvailable"] = False
+    return {"repositories": repositories, **pagination}
 
 
 if __name__ == "__main__":

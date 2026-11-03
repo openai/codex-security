@@ -1,3 +1,4 @@
+import { readJson, readSavedReviewState } from "./support/json.ts";
 import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -162,7 +163,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
             handoffClaimToken: context.handoffClaimToken,
             complete: false,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
@@ -217,7 +218,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
             handoffClaimToken: context.handoffClaimToken,
             complete: true,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
@@ -245,8 +246,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
           },
           workbench,
         );
-        const coveragePath = path.join(context.root, "coverage.json");
-        const published = JSON.parse(await readFile(coveragePath, "utf8"));
+        const published = await readSavedReviewState(context.root);
         const publishedGap = published.deferred.find(
           (row: { reason: string }) => row.reason === submittedGap.reason,
         );
@@ -271,7 +271,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
               handoffClaimToken: context.handoffClaimToken,
               complete: true,
               findings: [],
-              coverage: {
+              reviewState: {
                 completeness: "complete",
                 surfaces: [],
                 explicitExclusions: [],
@@ -302,22 +302,14 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
               ? ["--message", "Synthetic interruption."]
               : []),
           ]);
-          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-          const pending = coverage.deferred.filter(
+          const { scan: sealed } = await readJson(
+            context.root,
+            "scan-manifest.json",
+          );
+          const pending = (sealed.review.unresolvedCandidates ?? []).filter(
             (row: { candidateId?: string }) => row.candidateId === candidateId,
           );
           assert.equal(pending.length > 0, missing, command);
-          const surfaces = coverage[section].filter(
-            (row: { candidateId?: string }) => row.candidateId === candidateId,
-          );
-          assert.ok(surfaces.length > 0, command);
-          assert.ok(
-            surfaces.every(
-              (row: { disposition: string }) =>
-                row.disposition === (missing ? "needs_follow_up" : "rejected"),
-            ),
-            command,
-          );
           if (missing) {
             const originalGap = pending.find(
               (row: { reason: string }) => row.reason === submittedGap.reason,
@@ -327,14 +319,6 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
               "The submitted proof gap survives receipt recovery.",
             );
             assert.deepEqual(originalGap.paths, submittedGap.paths);
-            assert.equal(coverage.completeness, undefined, command);
-            assert.ok(
-              surfaces.every(
-                (row: { receiptRefs: string[] }) =>
-                  row.receiptRefs.length === 0,
-              ),
-              command,
-            );
           }
         }
         assert.deepEqual(await readFile(ledger), originalLedger);

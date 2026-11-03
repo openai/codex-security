@@ -26,6 +26,7 @@ from workbench_test_support import (
     get_scan,
     load_script,
     preserve_scan_results,
+    read_review_state,
     replay_saved_results,
     run_workbench,
     saved_binding,
@@ -79,7 +80,8 @@ def test_published_candidate_keeps_boolean_and_numeric_proof_gaps(
     run_workbench(state, "prepare-scan-completion", "--scan-id", scan_id)
     run_workbench(state, "complete-scan", "--scan-id", scan_id)
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    coverage = {"deferred": manifest["scan"]["review"]["unresolvedCandidates"]}
     assert json.dumps(coverage["deferred"], sort_keys=True) == json.dumps(rows, sort_keys=True)
     candidates = load_script("candidate_identity")
     assert len(candidates.unresolved_candidates(coverage, [], sealed=True)) == 1
@@ -88,7 +90,7 @@ def test_published_candidate_keeps_boolean_and_numeric_proof_gaps(
     report = (scan_dir / "report.md").read_text()
     assert "| Unresolved candidates | 1 |" in report
     assert report.count("| candidate-one |") == 2
-    saved = {name: (scan_dir / name).read_bytes() for name in ("coverage.json", "report.md")}
+    saved = {name: (scan_dir / name).read_bytes() for name in ("scan-manifest.json", "report.md")}
     run_workbench(state, "complete-scan", "--scan-id", scan_id)
     assert {name: (scan_dir / name).read_bytes() for name in saved} == saved
 
@@ -162,7 +164,7 @@ def test_legacy_stopped_parent_yields_to_current_worker_resolution(
     )["scan"]
 
     assert recovered["findingCount"] == (0 if same_worker else 1)
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     candidate_digest = hashlib.sha256(b"candidate-one").hexdigest()
     resolution = next(
         item
@@ -214,7 +216,7 @@ def test_stopped_recovery_resolves_reported_candidates_from_findings(
         environment={"CODEX_HOME": str(codex_home)},
     )
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
     assert [item["provenance"]["candidateId"] for item in pending] == (
         ["candidate-one"] if pending_candidate_id == "candidate-one" else []
@@ -260,7 +262,7 @@ def test_stopped_reducer_candidates_without_coverage_preserve_scope(
 
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert stopped["progress"]["candidates"]["unresolved"] == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["inventoryStrategy"] == ("repository" if scope == "." else "scoped_path")
     assert coverage["includePaths"] == [scope]
     assert "completeness" not in coverage
@@ -323,7 +325,7 @@ def test_recovery_keeps_pending_candidate_identity_scoped_to_its_worker(
     )
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
     expected_owners = {workers[1][0]} if resolve_first else {worker[0] for worker in workers}
     assert {item["provenance"]["workerId"] for item in pending} == expected_owners
@@ -501,7 +503,7 @@ def test_recovery_preserves_bound_worker_owner_over_imported_metadata(
                 retained["provenance"]["sourceFindings"]
                 == reduced["findings"][0]["provenance"]["sourceFindings"]
             )
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         pending = [item for item in coverage["deferred"] if item.get("candidateId")]
         assert len(pending) == 1
         assert pending[0]["provenance"]["workerId"] == owner_b
@@ -1210,7 +1212,7 @@ def test_failed_receipt_publication_retries_its_frozen_decision(
         "--thread-id",
         "standard-worker-thread",
     )
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert coverage == attempts[-1]
     assert get_scan(state, scan_id)["scan"]["progress"]["candidates"]["unresolved"] == 1
 
@@ -1479,8 +1481,9 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
             )
         scan = get_scan(state_dir, scan_id)["scan"]
         assert scan["progress"]["candidates"]["unresolved"] == expected
-        _, _, coverage = finalize_scan(scan_dir, expected_coverage_mode="deep_repository")
-        pending = [row for row in coverage["deferred"] if row.get("candidateId")]
+        manifest, _, _ = finalize_scan(scan_dir, expected_coverage_mode="deep_repository")
+        pending = manifest["scan"]["review"].get("unresolvedCandidates", [])
+        coverage = read_review_state(state_dir, scan_dir)
         assert len(pending) == expected
         if archived:
             surface = next(row for row in coverage[field] if row.get("candidateId") == "candidate")
@@ -1693,7 +1696,7 @@ def test_public_generic_metadata_closure_survives_later_progress(
             scan_id,
             *(["--message", "Synthetic interruption."] if command == "fail-scan" else []),
         )
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state, scan_dir)
         assert any(row.get("id") == task["id"] for row in coverage["deferred"]) is (
             candidate and termination != "complete-scan"
         )
@@ -1733,7 +1736,7 @@ def test_public_worker_receipt_recovery_uses_actual_owner(
     original = result_path.read_bytes()
     fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
     scan = get_scan(state, scan_id)["scan"]
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert scan["progress"]["candidates"]["unresolved"] == 1
     assert any(
         row.get("provenance", {}).get("sourceId") == generic["id"]

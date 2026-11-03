@@ -111,8 +111,8 @@ try {
     scanId,
     findings: [fresh],
     scope: { summary: largeText },
-    coverage: {
-      ...workerDraft([]).coverage,
+    reviewState: {
+      ...workerDraft([]).reviewState,
       completeness: "partial",
       deferred: [
         { candidateId: "pending-review", reason: "Review remains pending." },

@@ -52,6 +52,46 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test("counts distinct candidate identities in current sealed review summaries", () => {
+    const pending = {
+      id: "pending",
+      candidateId: "c1",
+      reason: "Inspect the first proof gap.",
+    };
+    const second = {
+      ...pending,
+      id: "second",
+      reason: "Inspect another proof gap.",
+    };
+    const other = { ...pending, sourceWorkerId: "another-worker" };
+    const review = {
+      excludedPaths: [],
+      unresolvedCandidates: [pending, second, other],
+    };
+    const result = new ScanResult({
+      manifest: {
+        ...manifest,
+        scan: { ...manifest.scan, mode: "repository", review },
+      },
+      findings: {
+        documentType: "codex-security.findings",
+        schemaVersion: "1.0",
+        scanId: "scan",
+        findings: [],
+      },
+      scanDir: "/scan",
+      threadId: "",
+      turnResult: {},
+    });
+    expect(result.unresolvedCandidates).toEqual([pending, other]);
+    expect(result.unresolvedCandidateCount).toBe(2);
+    expect(result.manifest.scan.review?.unresolvedCandidates).toEqual([
+      pending,
+      second,
+      other,
+    ]);
+  });
+
   test.each(["candidateId", "reportId", "ledgerRowId"])(
     "recognizes resolved candidates through legacy extensions.%s",
     (field) => {

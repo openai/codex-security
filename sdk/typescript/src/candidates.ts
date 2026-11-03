@@ -103,10 +103,17 @@ export function unresolvedCandidates(
     )
       resolved.add(key);
   }
+  return uniqueCandidateRows(coverage.deferred, resolved);
+}
+
+export function uniqueCandidateRows(
+  rows: readonly DeferredCoverage[],
+  resolved?: ReadonlySet<string>,
+): DeferredCoverage[] {
   const pending = new Map<string, DeferredCoverage>();
-  for (const candidate of coverage.deferred) {
+  for (const candidate of rows) {
     const key = coverageCandidateKey(candidate);
-    if (key !== undefined && !resolved.has(key) && !pending.has(key))
+    if (key !== undefined && !resolved?.has(key) && !pending.has(key))
       pending.set(key, candidate);
   }
   return [...pending.values()];

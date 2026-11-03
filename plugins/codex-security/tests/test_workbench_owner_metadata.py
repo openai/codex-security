@@ -6,8 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from test_workbench_checkpoint_heads import select
-from workbench_test_support import write_checkpoint, write_completed_contract
+from workbench_test_support import select_checkpoint, write_checkpoint, write_completed_contract
 
 
 def saved_parent(tmp_path: Path, scan_id: str) -> tuple[Path, dict, dict, dict]:
@@ -428,7 +427,7 @@ def test_saved_source_owner_finding_follows_parent_worker_observation_order(
     os.utime(result_path, ns=(worker_time, worker_time))
     checkpoint = write_checkpoint(output / "checkpoints", json.loads(result_path.read_text()))
     os.utime(checkpoint, ns=(worker_time, worker_time))
-    select(output, checkpoint, worker_time)
+    select_checkpoint(output, checkpoint, mtime_ns=worker_time)
     workers = [
         {
             "id": "worker-one",

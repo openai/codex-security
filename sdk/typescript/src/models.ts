@@ -69,7 +69,26 @@ export interface ScanManifest {
       portfolioPath: "hardening/hardening.md";
       [k: string]: unknown;
     };
-    coverageRef: "coverage.json";
+    coverageRef?: "coverage.json";
+    mode?:
+      | "repository"
+      | "scoped_path"
+      | "diff"
+      | "commit"
+      | "branch_diff"
+      | "working_tree"
+      | "deep_repository";
+    review?: {
+      excludedPaths: string[];
+      /**
+       * Saved candidate proof gaps. Multiple rows may describe the same candidate.
+       */
+      unresolvedCandidates?: CoverageDocument["deferred"];
+      [k: string]: unknown;
+    };
+    reviewState?: {
+      [k: string]: unknown;
+    };
     findingsRef: "findings.json";
     /**
      * @minItems 1

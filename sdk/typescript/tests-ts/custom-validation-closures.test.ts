@@ -1,13 +1,14 @@
+import type { ScanManifest } from "../src/models.js";
+import { readJson } from "./support/json.js";
+import { readReviewState } from "./support/review-state.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { runCustomValidation } from "../src/custom-validation.js";
-import type { CoverageDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { readJson } from "./support/json.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -107,8 +108,7 @@ for (const stopped of [false, true]) {
           complete: false,
           findings: [],
           scope: { validationMode: "custom_pending" },
-          coverage: {
-            completeness: "partial",
+          reviewState: {
             surfaces: [],
             explicitExclusions: [],
             deferred: closures.map(({ id }) => ({
@@ -137,8 +137,7 @@ for (const stopped of [false, true]) {
             ...draft,
             complete: true,
             findings: [finding],
-            coverage: {
-              completeness: "partial",
+            reviewState: {
               surfaces: [
                 {
                   id: "reviewed",
@@ -203,15 +202,24 @@ for (const stopped of [false, true]) {
               ],
             }),
         });
-        const snapshots: Array<{ stage: string; coverage: CoverageDocument }> =
-          [
-            {
-              stage: "custom validation",
-              coverage: await readJson<CoverageDocument>(
-                join(context.root, "coverage.json"),
-              ),
-            },
-          ];
+        const snapshot = async (stage: string) => {
+          const state = await readReviewState(
+            context.root,
+            join(directory, "state"),
+          );
+          const { scan } = await readJson<ScanManifest>(
+            join(context.root, "scan-manifest.json"),
+          );
+          return {
+            stage,
+            closures: state.resolvedDeferred,
+            deferred:
+              scan.sealedAt && !scan.coverageRef
+                ? (scan.review?.unresolvedCandidates ?? [])
+                : state.deferred,
+          };
+        };
+        const snapshots = [await snapshot("custom validation")];
         for (const command of stopped
           ? ["fail-scan", "preserve-scan-results"]
           : ["prepare-scan-completion", "complete-scan"]) {
@@ -223,21 +231,14 @@ for (const stopped of [false, true]) {
               ? ["--message", "Synthetic interruption after validation"]
               : []),
           ]);
-          snapshots.push({
-            stage: command,
-            coverage: await readJson<CoverageDocument>(
-              join(context.root, "coverage.json"),
-            ),
-          });
+          snapshots.push(await snapshot(command));
         }
-        for (const { stage, coverage } of snapshots) {
-          expect(coverage.resolvedDeferred, stage).toEqual(
+        for (const { stage, closures: savedClosures, deferred } of snapshots) {
+          expect(savedClosures, stage).toEqual(
             expect.arrayContaining(closures),
           );
-          expect(coverage.resolvedDeferred, stage).toHaveLength(
-            closures.length,
-          );
-          const pending = coverage.deferred.filter(
+          expect(savedClosures, stage).toHaveLength(closures.length);
+          const pending = deferred.filter(
             (row) =>
               row.candidateId === candidateId &&
               row.reason === "Additional validation remains necessary.",
@@ -245,7 +246,7 @@ for (const stopped of [false, true]) {
           expect(pending, stage).toHaveLength(1);
           if (existing) expect(pending[0]!.id, stage).toBe(savedId);
           if (existing && stopped && stage !== "custom validation")
-            expect(coverage.deferred, stage).toEqual(
+            expect(deferred, stage).toEqual(
               expect.arrayContaining([
                 expect.objectContaining({
                   candidateId,
@@ -254,8 +255,8 @@ for (const stopped of [false, true]) {
               ]),
             );
         }
-        for (const { stage, coverage } of snapshots) {
-          const pending = coverage.deferred.find(
+        for (const { stage, deferred } of snapshots) {
+          const pending = deferred.find(
             (row) => row.candidateId === candidateId,
           )!;
           expect(

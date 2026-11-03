@@ -6,6 +6,7 @@ Model how the authorized software is used and which boundaries protect its asset
 
 - Identify the product, users, interfaces, components, and supported execution/deployment modes. Separate production, privileged administration/build/release workflows, and tests/examples; include each only within the authorized scope.
 - Follow representative inputs through actual entry points, controls, and sensitive consumers. Establish the actors, transferred data or authority, protected asset, and invariant. Use callers and effective behavior rather than keyword matches or a complete call graph.
+- For library APIs, identify which protections the library enforces by default and which its callers must enable or implement.
 - For workers, extensions, native bindings, and tool APIs, distinguish available operations from enforced caller authority. Trace inherited permissions, brokered writes, ownership claims, and the component enforcing a restriction. Do not invent isolation between actors with the same authority.
 - When configuration or deployment changes a boundary, trace materially different paths from the consumer through helper returns, path derivation, configuration precedence, and mounts. Record effective locations, readers/writers or recipients, controls, and source evidence. A directory name, mount label, or separate setting does not prove isolation. Keep discrepancies between documented and actual behavior, including material platform differences.
 - For authorized mutations or publication, trace how the target, account, revision, audience, and payload stay bound through review and application. Do not infer permission from discovering that workflow.
@@ -51,7 +52,7 @@ Generated models may include `origin: "generated"` and known `scope` (`includePa
 | `securityObjectives` | Enforceable invariants, including user-requested settings and limits |
 | `assumptions` | Prerequisites, exclusions, documentation/implementation discrepancies, and unknowns |
 
-Keep citations with the facts they support and label provided context. Use scenarios to direct investigation. Reconcile material scenarios with findings, source-backed dispositions, or open questions: put resolved control questions and rejections in `coverage.surfaces[].notes` with source anchors, and unresolved prerequisites in `coverage.openQuestions`. Retain established discrepancies even when no finding survives; do not create a separate speculative-finding registry.
+Keep citations with the facts they support and label provided context. Use scenarios to direct investigation. Reconcile material scenarios with findings, source-backed dispositions, or open questions: put resolved control questions and rejections in `reviewState.surfaces[].notes` with source anchors, and unresolved prerequisites in `reviewState.openQuestions`. Retain established discrepancies even when no finding survives; do not create a separate speculative-finding registry.
 
 ## Standalone Model
 

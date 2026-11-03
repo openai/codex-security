@@ -78,11 +78,15 @@ for (const { label, candidateId, receipt, disposition } of cases) {
       scanId,
       complete: true,
       findings: [],
-      coverage: { surfaces: [], explicitExclusions: [exclusion], deferred: [] },
+      reviewState: {
+        surfaces: [],
+        explicitExclusions: [exclusion],
+        deferred: [],
+      },
     });
     const resultPath = path.join(root, "result.json");
     const original = await readFile(resultPath, "utf8");
-    assert.deepEqual(JSON.parse(original).coverage.explicitExclusions, [
+    assert.deepEqual(JSON.parse(original).reviewState.explicitExclusions, [
       exclusion,
     ]);
     const validated = await validateDiscoveryArtifacts(
@@ -101,7 +105,7 @@ for (const { label, candidateId, receipt, disposition } of cases) {
       scanId,
       complete: true,
       findings: [],
-      coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+      reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     });
     const recovered = JSON.parse(await readFile(resultPath, "utf8"));
     assert.equal(
@@ -109,29 +113,29 @@ for (const { label, candidateId, receipt, disposition } of cases) {
       original,
     );
     for (const result of [validated, recovered]) {
-      const row = result.coverage.explicitExclusions[0];
+      const row = result.reviewState.explicitExclusions[0];
       assert.equal(row.reason, exclusion.reason);
       assert.deepEqual(row.historicalNote, exclusion.historicalNote);
       if (label !== "candidate") {
-        assert.deepEqual(result.coverage.explicitExclusions, [exclusion]);
-        assert.deepEqual(result.coverage.deferred, []);
+        assert.deepEqual(result.reviewState.explicitExclusions, [exclusion]);
+        assert.deepEqual(result.reviewState.deferred, []);
       } else if (receipt === "missing" || receipt === "opaque") {
         assert.equal(row.disposition, "needs_follow_up");
         assert.deepEqual(row.receiptRefs, []);
-        assert.equal(result.coverage.deferred.length, 1);
-        assert.equal(result.coverage.deferred[0].candidateId, candidateId);
+        assert.equal(result.reviewState.deferred.length, 1);
+        assert.equal(result.reviewState.deferred[0].candidateId, candidateId);
         assert.equal(
-          result.coverage.deferred[0].reason,
+          result.reviewState.deferred[0].reason,
           receipt === "opaque"
             ? "Worker candidate receipt references must be an array."
             : "Worker candidate receipt: the requested artifact is unavailable.",
         );
       } else {
-        assert.deepEqual(result.coverage.deferred, []);
+        assert.deepEqual(result.reviewState.deferred, []);
       }
     }
     if (label === "candidate" && receipt === "valid") {
-      const retained = recovered.coverage.explicitExclusions[0].receiptRefs;
+      const retained = recovered.reviewState.explicitExclusions[0].receiptRefs;
       assert.equal(retained.length, 1);
       assert.match(retained[0], /^artifacts\/retained-receipts\/[a-f0-9]{64}$/);
       assert.equal(await readFile(path.join(root, retained[0]), "utf8"), proof);

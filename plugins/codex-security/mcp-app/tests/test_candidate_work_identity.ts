@@ -1,3 +1,4 @@
+import { readJson, readSavedReviewState } from "./support/json.ts";
 import { importDiscoverySource } from "./support/discovery.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -81,7 +82,7 @@ for (const collision of [false, true]) {
             handoffClaimToken: context.handoffClaimToken,
             complete: false,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
@@ -92,7 +93,7 @@ for (const collision of [false, true]) {
           },
           workbench,
         );
-        const generalId = first.coverage.deferred[0]!.id;
+        const generalId = first.reviewState.deferred[0]!.id;
         const closure = {
           id: generalId,
           reason: "Independent general review completed.",
@@ -107,7 +108,7 @@ for (const collision of [false, true]) {
             handoffClaimToken: context.handoffClaimToken,
             complete: true,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "complete",
               surfaces: [
                 {
@@ -134,14 +135,19 @@ for (const collision of [false, true]) {
           "--claim-token",
           context.handoffClaimToken!,
         ]);
-        const coveragePath = path.join(context.root, "coverage.json");
-        const saved = await readFile(coveragePath);
-        const coverage = JSON.parse(saved.toString());
-        assert.deepEqual(coverage.resolvedDeferred, [closure]);
-        assert.equal(
-          coverage.surfaces[0].disposition,
-          missingReceipt ? "needs_follow_up" : disposition,
+        const coverage = await readSavedReviewState(
+          context.root,
+          path.join(directory, "state"),
         );
+        assert.deepEqual(coverage.resolvedDeferred, [closure]);
+        const manifest = await readJson(context.root, "scan-manifest.json");
+        const pending = manifest.scan.review.unresolvedCandidates ?? [];
+        assert.equal(pending.length, missingReceipt ? 1 : 0);
+        if (missingReceipt)
+          assert.equal(
+            pending[0].candidateId,
+            collision ? generalId : "candidate-review",
+          );
         await workbench([
           "prepare-scan-completion",
           "--scan-id",
@@ -149,7 +155,13 @@ for (const collision of [false, true]) {
           "--claim-token",
           context.handoffClaimToken!,
         ]);
-        assert.deepEqual(await readFile(coveragePath), saved);
+        assert.deepEqual(
+          await readSavedReviewState(
+            context.root,
+            path.join(directory, "state"),
+          ),
+          coverage,
+        );
       });
     }
   }
@@ -234,7 +246,7 @@ for (const collision of [false, true]) {
       handoffClaimToken: context.handoffClaimToken,
       complete: false,
       findings: [],
-      coverage: {
+      reviewState: {
         completeness: "partial",
         surfaces: [],
         explicitExclusions: [],
@@ -271,8 +283,8 @@ for (const collision of [false, true]) {
       {
         ...draft,
         complete: true,
-        coverage: {
-          ...draft.coverage,
+        reviewState: {
+          ...draft.reviewState,
           completeness: "complete",
           deferred: [],
           resolvedDeferred: [closure],
@@ -281,9 +293,7 @@ for (const collision of [false, true]) {
       workbench,
     );
     const snapshots = [
-      JSON.parse(
-        await readFile(path.join(context.root, "coverage.json"), "utf8"),
-      ),
+      await readSavedReviewState(context.root, path.join(directory, "state")),
     ];
     const checkpoints = path.join(context.root, "checkpoints");
     const originals = await Promise.all(
@@ -302,9 +312,7 @@ for (const collision of [false, true]) {
           : []),
       ]);
       snapshots.push(
-        JSON.parse(
-          await readFile(path.join(context.root, "coverage.json"), "utf8"),
-        ),
+        await readSavedReviewState(context.root, path.join(directory, "state")),
       );
     }
     for (const [stage, coverage] of snapshots.entries()) {

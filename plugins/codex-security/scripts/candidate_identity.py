@@ -254,14 +254,14 @@ def resolved_candidate_surface_keys(
             item,
             [
                 surface
-                for surfaces in [draft["coverage"].get("surfaces")]
+                for surfaces in [draft["reviewState"].get("surfaces")]
                 if isinstance(surfaces, list)
                 for surface in surfaces
                 if isinstance(surface, dict)
             ],
         )
         for _, draft, worker_id in sources
-        for items in [draft["coverage"].get("deferred", [])]
+        for items in [draft["reviewState"].get("deferred", [])]
         if isinstance(items, list)
         for item in items
         if isinstance(item, dict) and coverage_candidate_key(item, worker_id) in candidates

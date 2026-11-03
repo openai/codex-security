@@ -120,7 +120,7 @@ for (const { reference, reopened, owner, currentWorker } of cases) {
               : [],
             {
               complete: true,
-              coverage: {
+              reviewState: {
                 completeness: pending ? "partial" : "complete",
                 surfaces: [],
                 explicitExclusions: [],

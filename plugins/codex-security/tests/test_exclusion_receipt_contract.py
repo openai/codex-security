@@ -11,6 +11,7 @@ import pytest
 from workbench_test_support import (
     empty_target_scan,
     load_script,
+    read_review_state,
     run_workbench,
     write_completed_contract,
 )
@@ -89,9 +90,13 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
 ):
     state, scan_id, scan_dir, pending, decision = exclusion_scan(tmp_path, disposition, receipt)
     publish(state, scan_id, scan_dir, entrypoint)
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     reopened = receipt in {"missing", "unsafe", "malformed"}
-    assert len(IDENTITY.unresolved_candidates(coverage, [])) == int(reopened)
+    candidates = IDENTITY.unresolved_candidates(coverage, [])
+    assert len(candidates) == int(reopened)
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    if entrypoint == "workbench":
+        assert manifest["scan"]["review"].get("unresolvedCandidates", []) == candidates
     assert (
         coverage["explicitExclusions"][0]["futureDecisionMetadata"]
         == decision["futureDecisionMetadata"]
@@ -111,7 +116,7 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
         for name in (
             "scan-manifest.json",
             "findings.json",
-            "coverage.json",
+            *(["coverage.json"] if "coverageRef" in manifest["scan"] else []),
             "report.md",
             "exports/results.sarif",
         )
@@ -134,13 +139,14 @@ def test_generic_exclusion_receipt_metadata_remains_opaque_on_publication(
     coverage_path.write_text(json.dumps(coverage))
 
     publish(state, scan_id, scan_dir, entrypoint)
-    published = json.loads(coverage_path.read_text())
+    published = read_review_state(state, scan_dir)
     assert published["receiptSealVersion"] == 1
     assert published["explicitExclusions"] == [decision]
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert "artifacts/review.bin" not in {row["path"] for row in manifest["scan"]["artifacts"]}
     (scan_dir / "artifacts/review.bin").unlink(missing_ok=True)
-    assert FINALIZER.finalize_scan(scan_dir)[2] == published
+    FINALIZER.finalize_scan(scan_dir)
+    assert read_review_state(state, scan_dir) == published
 
 
 @pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
@@ -211,7 +217,7 @@ def test_exclusion_metadata_does_not_become_task_or_surface_identity(
     coverage["explicitExclusions"][0]["id"] = identity
     path.write_text(json.dumps(coverage))
     publish(state, scan_id, scan_dir, entrypoint)
-    coverage = json.loads(path.read_text())
+    coverage = read_review_state(state, scan_dir)
     assert coverage["explicitExclusions"][0]["id"] == identity
     pending = IDENTITY.unresolved_candidates(coverage, [])
     assert len(pending) == 1
@@ -219,7 +225,8 @@ def test_exclusion_metadata_does_not_become_task_or_surface_identity(
         identity if isinstance(identity, str) and identity.strip() else "candidate-é"
     )
     assert "surfaceIds" not in pending[0]
-    assert FINALIZER.finalize_scan(scan_dir)[2] == coverage
+    FINALIZER.finalize_scan(scan_dir)
+    assert read_review_state(state, scan_dir) == coverage
 
 
 @pytest.mark.parametrize(
@@ -229,7 +236,9 @@ def test_exclusion_metadata_does_not_become_task_or_surface_identity(
 def test_legacy_sealed_exclusion_extensions_remain_opaque(tmp_path: Path, receipt_refs):
     # Legacy coverage was hashed, but exclusion receipts were not inventoried.
     scan_dir = tmp_path / "legacy"
-    shutil.copytree(Path(__file__).resolve().parents[1] / "examples" / "completed-scan", scan_dir)
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "examples" / "legacy-completed-scan", scan_dir
+    )
     scan_dir.chmod(0o700)
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())

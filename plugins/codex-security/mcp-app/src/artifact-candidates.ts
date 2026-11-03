@@ -112,7 +112,7 @@ export function isCurrentCandidateFinding(finding: JsonObject): boolean {
 export function resolvedCandidateKeys(
   input: {
     findings: JsonObject[];
-    coverage: JsonObject;
+    reviewState: JsonObject;
   },
   owner?: string,
 ): Set<string> {
@@ -122,8 +122,8 @@ export function resolvedCandidateKeys(
         .filter(isCurrentCandidateFinding)
         .map((finding) => findingCandidateKey(finding, owner)),
       ...[
-        ...(input.coverage.surfaces as JsonObject[]),
-        ...(input.coverage.explicitExclusions as JsonObject[]),
+        ...(input.reviewState.surfaces as JsonObject[]),
+        ...(input.reviewState.explicitExclusions as JsonObject[]),
       ]
         .filter(isTerminalCandidateDecision)
         .map((item) => coverageCandidateKey(item, owner)),

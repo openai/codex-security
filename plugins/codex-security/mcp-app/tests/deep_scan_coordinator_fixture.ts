@@ -303,7 +303,7 @@ export class FakeStore {
       : {
           scanId: this.run.scanId,
           findings: [],
-          coverage: {
+          reviewState: {
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -316,7 +316,7 @@ export class FakeStore {
         ...(draft.threatModel ? { threatModel: draft.threatModel } : {}),
       },
       findings: draft.findings,
-      coverage: draft.coverage,
+      reviewState: draft.reviewState,
     });
     this.run.status = "succeeded";
     this.run.terminalReason = input.reason;
@@ -377,7 +377,7 @@ interface ExecutorOptions {
   malformedDiscoveryAttempts?: number;
   canonicalCandidateId?: string;
   discoveryCandidateId?: string;
-  discoveryDeferred?: ScanDraftInput["coverage"]["deferred"];
+  discoveryDeferred?: ScanDraftInput["reviewState"]["deferred"];
   discoveryFailureMessage?: string;
   nonRetryableDiscoveryMessage?: string;
   dedupEvidenceByCall?: string[];
@@ -497,7 +497,7 @@ export class FakeExecutor {
             context.workerLabel,
           );
           if (this.options.discoveryDeferred?.length) {
-            draft.coverage.deferred = structuredClone(
+            draft.reviewState.deferred = structuredClone(
               this.options.discoveryDeferred,
             );
           }
@@ -659,7 +659,7 @@ async function writeDedupArtifacts(
     ...(previousDraft?.unresolvedCandidates ?? []),
     ...workerDrafts.flatMap(
       (worker, index) =>
-        worker.coverage?.deferred
+        worker.reviewState?.deferred
           ?.filter(
             (item: Record<string, unknown>) =>
               typeof item.candidateId === "string",
@@ -674,7 +674,7 @@ async function writeDedupArtifacts(
     (
       draft as typeof draft & { unresolvedCandidates: unknown[] }
     ).unresolvedCandidates = unresolvedCandidates;
-  delete (draft as { coverage?: unknown }).coverage;
+  delete (draft as { reviewState?: unknown }).reviewState;
   if (invalidResult) (draft as { findings: unknown }).findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
@@ -716,7 +716,7 @@ export function standardScanDraft(
           },
         ]
       : [],
-    coverage: {
+    reviewState: {
       surfaces: [
         {
           label: "Fixture query",

@@ -110,7 +110,7 @@ for (const archived of [false, true]) {
         };
         const draft = workerDraft([], {
           complete: true,
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [],
             explicitExclusions: [
@@ -128,7 +128,7 @@ for (const archived of [false, true]) {
         });
         for (const parse of [parseScanDraft, parsePersistedScanDraft])
           assert.deepEqual(
-            parse(draft).coverage.explicitExclusions[0].receiptRefs,
+            parse(draft).reviewState.explicitExclusions[0].receiptRefs,
             refs,
           );
         await recordCodexSecurityWorkerScanDraft(f.worker, draft);
@@ -172,7 +172,8 @@ print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovere
           const saved = await readJson(path.join(f.reducerRoot, "result.json"));
           const published = deepReductionToScanDraft(saved);
           assert.equal(
-            unresolvedCandidates(published.coverage, published.findings).length,
+            unresolvedCandidates(published.reviewState, published.findings)
+              .length,
             valid ? 0 : 1,
           );
           if (!valid) {
@@ -180,7 +181,7 @@ print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovere
               saved.unresolvedCandidates[0].candidate,
               candidate,
             );
-            assert.equal(published.coverage.completeness, undefined);
+            assert.equal(published.reviewState.completeness, undefined);
           }
           assert.deepEqual(
             await readFile(path.join(source, "result.json")),
@@ -229,7 +230,7 @@ for (const receipt of [
         f.worker,
         workerDraft([], {
           complete: false,
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [
               {
@@ -280,7 +281,7 @@ for (const receipt of [
       await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
       const current = await readJson(path.join(f.output, "result.json"));
       if (receipt === "original" || receipt === "current-attempt") {
-        const [exclusion] = current.coverage.explicitExclusions;
+        const [exclusion] = current.reviewState.explicitExclusions;
         if (receipt === "original")
           assert.deepEqual(
             await readFile(path.join(f.output, exclusion.receiptRefs[0])),
@@ -300,12 +301,12 @@ for (const receipt of [
       );
       const valid = ["original", "empty"].includes(receipt);
       assert.equal(
-        unresolvedCandidates(published.coverage, published.findings).length,
+        unresolvedCandidates(published.reviewState, published.findings).length,
         valid ? 0 : 1,
       );
-      assert.equal(published.coverage.completeness, undefined);
+      assert.equal(published.reviewState.completeness, undefined);
       if (hasOriginal) {
-        const retainedRef = current.coverage.surfaces.find(
+        const retainedRef = current.reviewState.surfaces.find(
           (row: any) => row.candidateId === "candidate",
         ).receiptRefs[0];
         const retainedPath = path.join(f.root, retainedRef);
@@ -319,7 +320,7 @@ for (const receipt of [
         assert.equal(
           (
             await readJson(path.join(f.output, "result.json"))
-          ).coverage.surfaces.find(
+          ).reviewState.surfaces.find(
             (row: any) => row.candidateId === "candidate",
           ).receiptRefs[0],
           retainedRef,
@@ -331,7 +332,7 @@ for (const receipt of [
         await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
         const retried = await readJson(path.join(f.output, "result.json"));
         assert.equal(
-          retried.coverage.surfaces.find(
+          retried.reviewState.surfaces.find(
             (row: any) => row.candidateId === "candidate",
           ).receiptRefs[0],
           retainedRef,
@@ -358,7 +359,7 @@ for (const savedGap of [false, true]) {
         f.worker,
         workerDraft([], {
           complete: false,
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [],
             explicitExclusions: [],
@@ -376,7 +377,7 @@ for (const savedGap of [false, true]) {
       await recordCodexSecurityWorkerScanDraft(
         f.worker,
         workerDraft([], {
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [
               {
@@ -395,15 +396,15 @@ for (const savedGap of [false, true]) {
       );
       const resultPath = path.join(f.output, "result.json");
       const worker = await readJson(resultPath);
-      assert.deepEqual(worker.coverage.surfaces[0].originalCandidates, [
+      assert.deepEqual(worker.reviewState.surfaces[0].originalCandidates, [
         oldCandidate,
       ]);
-      assert.deepEqual(worker.coverage.surfaces[0].previousFindings, [
+      assert.deepEqual(worker.reviewState.surfaces[0].previousFindings, [
         oldFinding,
       ]);
       if (savedGap) {
-        worker.coverage.completeness = "partial";
-        worker.coverage.deferred = [
+        worker.reviewState.completeness = "partial";
+        worker.reviewState.deferred = [
           {
             candidateId: "candidate",
             reason: "Saved receipt gap",
@@ -436,7 +437,8 @@ for (const savedGap of [false, true]) {
       }
       const publication = deepReductionToScanDraft(saved);
       assert.equal(
-        unresolvedCandidates(publication.coverage, publication.findings).length,
+        unresolvedCandidates(publication.reviewState, publication.findings)
+          .length,
         1,
       );
       assert.deepEqual(await readFile(resultPath), original);
@@ -476,7 +478,7 @@ for (const mode of ["current", "previous", "merged"]) {
         await recordCodexSecurityWorkerScanDraft(
           { ...f.worker, root: otherOutput },
           workerDraft([], {
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
@@ -574,7 +576,8 @@ for (const mode of ["current", "previous", "merged"]) {
         const saved = await readJson(path.join(f.reducerRoot, "result.json"));
         const projection = deepReductionToScanDraft(saved);
         assert.equal(
-          unresolvedCandidates(projection.coverage, projection.findings).length,
+          unresolvedCandidates(projection.reviewState, projection.findings)
+            .length,
           1,
         );
         assert.equal(saved.findings[0].provenance.candidateId, "confirmed");
@@ -618,7 +621,7 @@ for (const archived of [false, true]) {
         await recordCodexSecurityWorkerScanDraft(
           f.worker,
           workerDraft([], {
-            coverage: {
+            reviewState: {
               completeness: "complete",
               surfaces: [
                 {
@@ -649,10 +652,11 @@ for (const archived of [false, true]) {
           await readJson(path.join(f.reducerRoot, "result.json")),
         );
         assert.equal(
-          unresolvedCandidates(published.coverage, published.findings).length,
+          unresolvedCandidates(published.reviewState, published.findings)
+            .length,
           0,
         );
-        assert.equal(published.coverage.completeness, undefined);
+        assert.equal(published.reviewState.completeness, undefined);
         assert.deepEqual(
           await readFile(path.join(source, "result.json")),
           original,
@@ -680,7 +684,7 @@ for (const archived of [false, true]) {
         await recordCodexSecurityWorkerScanDraft(
           f.worker,
           workerDraft([], {
-            coverage: {
+            reviewState: {
               completeness: "complete",
               surfaces: [
                 {
@@ -774,7 +778,7 @@ for (const outcome of [
       }
       const terminal = workerDraft([], {
         complete: true,
-        coverage: {
+        reviewState: {
           completeness: "complete",
           surfaces: [
             {
@@ -830,7 +834,7 @@ for (const outcome of [
         complete: true,
       });
       if (outcome === "decision")
-        (current.coverage.surfaces as Record<string, unknown>[]).push({
+        (current.reviewState.surfaces as Record<string, unknown>[]).push({
           id: "new-review",
           candidateId: "candidate",
           label: "New review",
@@ -857,13 +861,14 @@ for (const outcome of [
         );
         for (const published of [saved, reduced]) {
           assert.equal(
-            unresolvedCandidates(published.coverage, published.findings).length,
+            unresolvedCandidates(published.reviewState, published.findings)
+              .length,
             outcome === "pending" ? 1 : 0,
           );
           if (outcome === "pending") {
             assert.equal(published.findings.length, 0);
             assert.deepEqual(
-              published.coverage.deferred.find(
+              published.reviewState.deferred.find(
                 (row: any) => row.candidateId === "candidate",
               ).finding,
               original,
@@ -872,7 +877,7 @@ for (const outcome of [
           if (outcome === "finding") assert.equal(published.findings.length, 1);
           if (outcome === "decision" && published === saved)
             assert.ok(
-              published.coverage.surfaces.some(
+              published.reviewState.surfaces.some(
                 (row: any) => row.disposition === "not_applicable",
               ),
             );
@@ -895,7 +900,7 @@ for (const id of [7, { opaque: [1, null] }, "", " ", "metadata-id"]) {
       try {
         const draft = workerDraft([], {
           complete: true,
-          coverage: {
+          reviewState: {
             completeness: "partial",
             surfaces: [],
             deferred: [],
@@ -914,7 +919,7 @@ for (const id of [7, { opaque: [1, null] }, "", " ", "metadata-id"]) {
         await recordCodexSecurityWorkerScanDraft(f.worker, draft);
         const original = await readFile(path.join(f.output, "result.json"));
         assert.deepEqual(
-          JSON.parse(original.toString()).coverage.explicitExclusions[0].id,
+          JSON.parse(original.toString()).reviewState.explicitExclusions[0].id,
           id,
         );
         const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);

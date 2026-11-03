@@ -128,7 +128,7 @@ export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
   completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
-): ScanResult {
+): ScanResult & { coverage: CoverageDocument } {
   const manifest = {
     documentType: "codex-security.scan-manifest",
     schemaVersion: "1.0",
@@ -172,19 +172,22 @@ export function fakeResult(
     explicitExclusions: [],
     deferred: [],
   } satisfies CoverageDocument;
-  return new ScanResult({
-    manifest,
-    findings,
-    coverage,
-    scanDir: "/tmp/scan",
-    threadId: "thread-1",
-    turnResult: {
-      status: "completed",
-      model: "gpt-5.6-sol",
-      finalResponse: "done",
-      usage,
-    },
-  });
+  return Object.assign(
+    new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/tmp/scan",
+      threadId: "thread-1",
+      turnResult: {
+        status: "completed",
+        model: "gpt-5.6-sol",
+        finalResponse: "done",
+        usage,
+      },
+    }),
+    { coverage },
+  );
 }
 
 export class FakeSignals {

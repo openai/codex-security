@@ -11,7 +11,7 @@ import {
   recordCodexSecurityScanDraft,
 } from "./scan-draft-recovery-fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
-import { readJson } from "./support/json.ts";
+import { readSavedReviewState, readJson } from "./support/json.ts";
 
 const execFileAsync = promisify(execFile);
 const { createScanArtifactContext } = await importSource(
@@ -106,7 +106,7 @@ for (const mode of ["standard", "worker"] as const) {
         handoffClaimToken: context.handoffClaimToken,
         complete: true,
         findings: [current],
-        coverage,
+        reviewState: coverage,
       };
       const write =
         mode === "standard"
@@ -116,7 +116,11 @@ for (const mode of ["standard", "worker"] as const) {
       const update = {
         ...draft,
         findings: scenario === "same-publication" ? [current] : [],
-        coverage: { ...coverage, completeness: "partial", deferred: [pending] },
+        reviewState: {
+          ...coverage,
+          completeness: "partial",
+          deferred: [pending],
+        },
       };
       await write(context, update);
       await write(context, scenario === "later-resolved" ? draft : update);
@@ -139,7 +143,7 @@ for (const mode of ["standard", "worker"] as const) {
           "--claim-token",
           context.handoffClaimToken,
         ]);
-        const savedCoverage = await readJson(context.root, "coverage.json");
+        const savedCoverage = await readSavedReviewState(context.root);
         const savedFindings = await readJson(context.root, "findings.json");
         assert.equal(savedCoverage.deferred.length, Number(expectedPending));
         if (expectedPending)
@@ -208,7 +212,7 @@ for (const mode of ["standard", "worker"] as const) {
             reopened,
           );
           assert.equal(
-            deepReductionToScanDraft(reduced).coverage.deferred.length,
+            deepReductionToScanDraft(reduced).reviewState.deferred.length,
             Number(expectedPending),
           );
         }

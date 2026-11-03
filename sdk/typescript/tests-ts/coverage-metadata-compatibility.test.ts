@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -99,7 +100,7 @@ for (const stopped of [false, true]) {
           handoffClaimToken: context.handoffClaimToken,
           complete: true,
           findings: [],
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [surface],
             explicitExclusions: [],
@@ -129,20 +130,20 @@ for (const stopped of [false, true]) {
         ]);
         snapshots.push({
           command,
-          coverage: JSON.parse(
-            await readFile(join(context.root, "coverage.json"), "utf8"),
-          ),
+          coverage: await readReviewState(context.root),
         });
       }
       for (const { command, coverage } of snapshots)
         expect(coverage.surfaces, command).toEqual([surface]);
-      const beforeLoad = await readFile(join(context.root, "coverage.json"));
+      const beforeLoad = await readFile(
+        join(context.root, "scan-manifest.json"),
+      );
       const loaded = await loadContract(context.root, {
         pluginRoot: PLUGIN_ROOT,
         expectedScanId: scan.scanId,
       });
-      expect(loaded.coverage.surfaces).toEqual([surface]);
-      expect(await readFile(join(context.root, "coverage.json"))).toEqual(
+      expect(loaded.review.excludedPaths).toEqual([]);
+      expect(await readFile(join(context.root, "scan-manifest.json"))).toEqual(
         beforeLoad,
       );
       for (const [name, bytes] of originals)

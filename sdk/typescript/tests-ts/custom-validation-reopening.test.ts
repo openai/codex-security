@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { runCustomValidation } from "../src/custom-validation.js";
-import type { CoverageDocument, FindingsDocument } from "../src/models.js";
+import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
@@ -127,7 +127,6 @@ for (const disposition of [
       extensions: { customValidationSurfaceIds: ["reviewed"] },
     };
     const coverage = {
-      completeness: "partial",
       surfaces: [
         {
           id: "reviewed",
@@ -144,7 +143,7 @@ for (const disposition of [
       handoffClaimToken: context.handoffClaimToken,
       complete: false,
       findings: [finding],
-      coverage,
+      reviewState: coverage,
       scope: { validationMode: "custom_pending" },
     };
     await recordCodexSecurityScanDraftViaWorkbench(context, draft, workbench);
@@ -160,7 +159,7 @@ for (const disposition of [
         ...draft,
         complete: true,
         findings: [],
-        coverage: { ...coverage, deferred: [pending] },
+        reviewState: { ...coverage, deferred: [pending] },
       },
       workbench,
     );
@@ -227,8 +226,8 @@ for (const disposition of [
       const saved = await readJson<FindingsDocument>(
         join(context.root, "findings.json"),
       );
-      const savedCoverage = await readJson<CoverageDocument>(
-        join(context.root, "coverage.json"),
+      const manifest = await readJson<ScanManifest>(
+        join(context.root, "scan-manifest.json"),
       );
       expect(saved.findings).toHaveLength(expectedFindings);
       if (disposition === "reportable") {
@@ -241,9 +240,9 @@ for (const disposition of [
           ]),
         );
       }
-      const remaining = savedCoverage.deferred.filter(
-        (row) => row.candidateId === candidateId,
-      );
+      const remaining = (
+        manifest.scan.review?.unresolvedCandidates ?? []
+      ).filter((row) => row.candidateId === candidateId);
       if (disposition === "deferred")
         expect(remaining).toEqual(
           expect.arrayContaining([

@@ -62,82 +62,106 @@ const fileScanDraftInputSchema = scanDraftInputSchema.extend({
 });
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
-type DraftCoverage = ScanDraftInput["coverage"];
+type DraftCoverage = ScanDraftInput["reviewState"];
 export type CompletedScanInput = z.infer<typeof completedScanInputSchema>;
 
 function canonicalFieldSchema(schema: object): z.ZodType {
   return z.fromJSONSchema(schema as Parameters<typeof z.fromJSONSchema>[0]);
 }
 
-// Canonical files can retain fields that the compact tool input does not accept.
-const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
-  scope: canonicalFieldSchema({
-    ...scanManifestDocument.properties.scan.properties.scope,
-    $defs: scanManifestDocument.$defs,
-    required:
-      z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ?? [],
-  }).optional(),
-  threatModel: canonicalFieldSchema({
-    ...scanManifestDocument.properties.scan.properties.threatModel,
-    $defs: scanManifestDocument.$defs,
-  }).optional(),
-  findings: canonicalFieldSchema({
-    ...findingsDocument.properties.findings,
-    $defs: findingsDocument.$defs,
+const deferredFields = coverageDocument.properties.deferred.items.properties;
+function provisionalPaths(schema: Record<string, unknown>) {
+  const items = schema.items;
+  if (!isObject(items) || !Array.isArray(items.oneOf)) return schema;
+  return {
+    ...schema,
     items: {
-      ...findingsDocument.properties.findings.items,
-      required: z.toJSONSchema(draftDefinitions.finding, { io: "input" })
-        .required,
+      ...items,
+      oneOf: items.oneOf.map((branch) =>
+        isObject(branch) && branch.$comment === "invalidSealedDeferredPath"
+          ? false
+          : branch,
+      ),
     },
-  }),
-  coverage: draftDefinitions.coverage.extend({
-    surfaces: canonicalFieldSchema({
-      ...coverageDocument.properties.surfaces,
-      items: {
-        ...coverageDocument.properties.surfaces.items,
-        required: z.toJSONSchema(draftDefinitions.surface, { io: "input" })
-          .required,
-      },
-    }),
-    deferred: canonicalFieldSchema({
-      ...coverageDocument.properties.deferred,
-      items: {
-        ...coverageDocument.properties.deferred.items,
-        required: z.toJSONSchema(
-          draftDefinitions.coverage.shape.deferred.element,
-          { io: "input" },
-        ).required,
-      },
-    }),
-    openQuestions: z
-      .array(
-        z.union([
-          z.string(),
-          canonicalFieldSchema(coverageDocument.properties.openQuestions.items),
-        ]),
-      )
-      .optional(),
-  }),
-}) as z.ZodType<ScanDraftInput>;
+  };
+}
+
+// Canonical files can retain fields that the compact tool input does not accept.
+const canonicalScanDraftInputSchema = z.lazy(
+  () =>
+    fileScanDraftInputSchema.extend({
+      scope: canonicalFieldSchema({
+        ...scanManifestDocument.properties.scan.properties.scope,
+        $defs: scanManifestDocument.$defs,
+        required:
+          z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ??
+          [],
+      }).optional(),
+      threatModel: canonicalFieldSchema({
+        ...scanManifestDocument.properties.scan.properties.threatModel,
+        $defs: scanManifestDocument.$defs,
+      }).optional(),
+      findings: canonicalFieldSchema({
+        ...findingsDocument.properties.findings,
+        $defs: findingsDocument.$defs,
+        items: {
+          ...findingsDocument.properties.findings.items,
+          required: z.toJSONSchema(draftDefinitions.finding, { io: "input" })
+            .required,
+        },
+      }),
+      reviewState: draftDefinitions.reviewState.extend({
+        surfaces: canonicalFieldSchema({
+          ...coverageDocument.properties.surfaces,
+          items: {
+            ...coverageDocument.properties.surfaces.items,
+            required: z.toJSONSchema(draftDefinitions.surface, { io: "input" })
+              .required,
+          },
+        }),
+        deferred: canonicalFieldSchema({
+          ...coverageDocument.properties.deferred,
+          items: {
+            ...coverageDocument.properties.deferred.items,
+            properties: {
+              ...deferredFields,
+              paths: provisionalPaths(deferredFields.paths),
+            },
+            required: z.toJSONSchema(
+              draftDefinitions.reviewState.shape.deferred.element,
+              { io: "input" },
+            ).required,
+          },
+        }),
+        openQuestions: z
+          .array(
+            z.union([
+              z.string(),
+              canonicalFieldSchema(
+                coverageDocument.properties.openQuestions.items,
+              ),
+            ]),
+          )
+          .optional(),
+      }),
+    }) as z.ZodType<ScanDraftInput>,
+);
 
 export interface ScanDraftResult {
   scanId: string;
   findingCount: number;
   surfaceCount: number;
-  coverage: JsonObject;
+  reviewState: JsonObject;
   operation: "replace";
   status: "draft_written";
   warnings?: string[];
 }
 
-export interface CompletedScanResult extends PreparedScanDraft {
+export interface CompletedScanResult {
   scanId: string;
-}
-
-interface PreparedScanDraft {
   manifest: JsonObject;
   findings: JsonObject;
-  coverage: JsonObject;
+  review: JsonObject;
 }
 
 /** Host-selected Deep aggregate, separate from model-authored draft fields. */
@@ -167,7 +191,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
 ): Promise<ScanDraftResult> {
   const parsed = parseScanDraft(input);
   if (context.mode === "diff")
-    parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
+    parsed.reviewState = normalizeCheckpointCoverage(parsed.reviewState);
   requireBoundScan(context, parsed, true);
   if (context.mode === "standard" || context.mode === "diff")
     parsed.findings = confirmTerminalFindings(parsed);
@@ -175,7 +199,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   if (
     finalDeepDraft &&
     publication === undefined &&
-    resolvedDeferred(parsed.coverage).length > 0
+    resolvedDeferred(parsed.reviewState).length > 0
   ) {
     throw new Error(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
@@ -200,7 +224,8 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       };
       const snapshotCandidates =
         candidates ??
-        (context.mode === "deep" && parsed.coverage.deferred.some(needsSnapshot)
+        (context.mode === "deep" &&
+        parsed.reviewState.deferred.some(needsSnapshot)
           ? await readCandidateLedger(context)
           : undefined);
       const ledger = new Map(
@@ -211,9 +236,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       );
       submitted = {
         ...parsed,
-        coverage: {
-          ...parsed.coverage,
-          deferred: parsed.coverage.deferred.map((pending) => {
+        reviewState: {
+          ...parsed.reviewState,
+          deferred: parsed.reviewState.deferred.map((pending) => {
             const key = coverageCandidateKey(pending);
             const candidate = ledger.get(key ?? "");
             return candidate && needsSnapshot(pending)
@@ -277,10 +302,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     if (finalDeepDraft && publication === undefined)
       requireFiniteNumbers({ ...parsed, findings: scopedFindings });
     const findings = buildFindings(scopedFindings, context.mode);
-    const coverage = buildCoverage(
+    const reviewState = buildCoverage(
       context,
       contract,
-      reconciled.coverage,
+      reconciled.reviewState,
       scope,
       target,
     );
@@ -297,7 +322,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
 
     const draft = {
       findings: { findings },
-      coverage,
+      reviewState,
       manifest: { scan: manifestScan },
     };
     const publicationCheckpoint = finalDeepDraft
@@ -395,8 +420,8 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     return {
       scanId: reconciled.scanId,
       findingCount: findings.length,
-      surfaceCount: (coverage.surfaces as unknown[]).length,
-      coverage,
+      surfaceCount: (reviewState.surfaces as unknown[]).length,
+      reviewState,
       operation: "replace",
       status: "draft_written",
       ...(warnings.length ? { warnings } : {}),
@@ -410,7 +435,7 @@ function confirmTerminalFindings(
 ): ScanDraftInput["findings"] {
   if (input.complete === false) return input.findings;
   const pending = new Set(
-    input.coverage.deferred.map((row) => coverageCandidateKey(row, owner)),
+    input.reviewState.deferred.map((row) => coverageCandidateKey(row, owner)),
   );
   return input.findings.map((finding) => {
     const key = findingCandidateKey(finding, owner);
@@ -443,8 +468,8 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  validateRetainedCoverage(parsed.coverage);
-  for (const surface of parsed.coverage.surfaces as JsonObject[]) {
+  validateRetainedCoverage(parsed.reviewState);
+  for (const surface of parsed.reviewState.surfaces as JsonObject[]) {
     if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
   }
   const previous = pendingWorkerDrafts.get(context.root) ?? Promise.resolve();
@@ -501,8 +526,8 @@ export async function recordCodexSecurityWorkerScanDraft(
   return {
     scanId: parsed.scanId,
     findingCount: scoped.findings.length,
-    surfaceCount: (scoped.coverage.surfaces as unknown[]).length,
-    coverage: scoped.coverage,
+    surfaceCount: (scoped.reviewState.surfaces as unknown[]).length,
+    reviewState: scoped.reviewState,
     operation: "replace",
     status: "draft_written",
     ...(warnings.length === 0 ? {} : { warnings }),
@@ -541,7 +566,7 @@ export function findingsWithinScope<Finding extends JsonObject>(
 /** Keep the semantic input before any replaceable worker or canonical artifact. */
 export async function saveScanDraftCheckpoint(
   context: ArtifactContext,
-  input: Omit<ScanDraftInput, "coverage">,
+  input: Omit<ScanDraftInput, "reviewState">,
   updateHead = true,
 ): Promise<void> {
   const { handoffClaimToken: _claim, ...raw } = input;
@@ -634,7 +659,7 @@ export async function retainRecordedReceiptOwnership(
   input: JsonObject,
 ): Promise<void> {
   if (await hasScanDraftCheckpoint(context, input)) return;
-  const coverage = input.coverage;
+  const coverage = input.reviewState ?? input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
   for (const surface of coverage.surfaces) {
     if (isObject(surface) && isObject(surface.provenance))
@@ -678,7 +703,7 @@ async function qualifyWorkerReceipts(
   const activePrefix = `${workerPrefix}output/`;
   const archivePrefix = `${workerPrefix}attempts/`;
   const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
-  for (const surface of input.coverage.surfaces as JsonObject[]) {
+  for (const surface of input.reviewState.surfaces as JsonObject[]) {
     if (!Array.isArray(surface.receiptRefs)) continue;
     const previous = retainedSurface?.(surface);
     const previousRefs = (
@@ -773,7 +798,8 @@ async function preserveScanDraft(
 }> {
   requireFiniteNumbers(input);
   const warnings: string[] = [];
-  const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
+  const requiresClosureValidation =
+    resolvedDeferred(input.reviewState).length > 0;
   const saveObservation = saveCheckpoint && !requiresClosureValidation;
   if (saveObservation && context.layout !== "worker")
     await saveScanDraftCheckpoint(context, input, false);
@@ -788,7 +814,7 @@ async function preserveScanDraft(
     owner,
   );
   const reopenedCandidates = new Set(
-    input.coverage.deferred
+    input.reviewState.deferred
       .map(coverageKey)
       .filter(
         (key): key is string => key !== undefined && !currentOutcomes.has(key),
@@ -838,16 +864,16 @@ async function preserveScanDraft(
   >();
   const authoredArchiveRows = new Map<SavedScanDraft, number>();
   for (const source of archived) {
-    authoredArchiveRows.set(source, source.input.coverage.deferred.length);
+    authoredArchiveRows.set(source, source.input.reviewState.deferred.length);
     const recovered = await recoverWorkerCandidateReceipts(
-      source.input.coverage,
+      source.input.reviewState,
       {
         ...context,
         root: join(dirname(context.root), "attempts", source.attempt!),
       },
       context,
     );
-    for (const pending of source.input.coverage.deferred) {
+    for (const pending of source.input.reviewState.deferred) {
       const key = coverageKey(pending);
       if (
         key !== undefined &&
@@ -876,7 +902,7 @@ async function preserveScanDraft(
   const activePrefix = `${workerPrefix}output/`;
   const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
   for (const source of archived) {
-    for (const row of source.input.coverage.surfaces as JsonObject[]) {
+    for (const row of source.input.reviewState.surfaces as JsonObject[]) {
       if (!Array.isArray(row.receiptRefs)) continue;
       const shared = isObject(row.provenance)
         ? ((row.provenance.scanReceiptRefs as string[] | undefined) ?? [])
@@ -898,7 +924,7 @@ async function preserveScanDraft(
     }
   }
   for (const draft of [result, ...current.map((source) => source.input)]) {
-    for (const row of draft.coverage.surfaces as JsonObject[]) {
+    for (const row of draft.reviewState.surfaces as JsonObject[]) {
       if (Array.isArray(row.receiptRefs))
         row.receiptRefs = (row.receiptRefs as string[]).map(
           (ref) => copiedArchiveRefs.get(ref) ?? ref,
@@ -912,7 +938,7 @@ async function preserveScanDraft(
   }
   const currentReceipts = new Set(
     current.flatMap(({ input }) =>
-      input.coverage.surfaces.flatMap((row) =>
+      input.reviewState.surfaces.flatMap((row) =>
         Array.isArray(row.receiptRefs) ? row.receiptRefs : [],
       ),
     ),
@@ -928,7 +954,7 @@ async function preserveScanDraft(
   const ambiguousSurfaceIds = new Set<string>();
   for (const draft of [result, ...sources]) {
     const seen = new Set<string>();
-    for (const surface of draft.coverage.surfaces as JsonObject[]) {
+    for (const surface of draft.reviewState.surfaces as JsonObject[]) {
       if (typeof surface.id !== "string") continue;
       if (seen.has(surface.id)) ambiguousSurfaceIds.add(surface.id);
       seen.add(surface.id);
@@ -945,7 +971,7 @@ async function preserveScanDraft(
     // Retained observations keep saved ownership; fresh observations use this worker.
     await qualifyWorkerReceipts(context, result, (surface) => {
       const previous = sources
-        .flatMap((source) => source.coverage.surfaces as JsonObject[])
+        .flatMap((source) => source.reviewState.surfaces as JsonObject[])
         .find(
           (saved) =>
             (typeof surface.id === "string" &&
@@ -962,15 +988,19 @@ async function preserveScanDraft(
     if (saveObservation) await saveScanDraftCheckpoint(context, input, false);
   }
   // Older checkpoints can omit IDs already assigned in their published output.
-  const savedDeferred = sources.flatMap((source) => source.coverage.deferred);
-  const savedSurfaces = sources.flatMap((source) => source.coverage.surfaces);
+  const savedDeferred = sources.flatMap(
+    (source) => source.reviewState.deferred,
+  );
+  const savedSurfaces = sources.flatMap(
+    (source) => source.reviewState.surfaces,
+  );
   for (const source of sources) {
     const reservedSurfaceIds = new Set(
-      source.coverage.surfaces.flatMap((row) =>
+      source.reviewState.surfaces.flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
       ),
     );
-    const surfaces = source.coverage.surfaces.map((row) => {
+    const surfaces = source.reviewState.surfaces.map((row) => {
       if (typeof row.id === "string") return row;
       const matching = savedSurfaces.find(
         ({ id, ...content }) =>
@@ -988,18 +1018,18 @@ async function preserveScanDraft(
     });
     const normalizedSurfaces = normalizeSurfaces(surfaces);
     // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
-    source.coverage.surfaces = surfaces.map((row, index) =>
+    source.reviewState.surfaces = surfaces.map((row, index) =>
       typeof row.id === "string" ? row : normalizedSurfaces[index]!,
     );
     const reservedIds = new Set(
-      source.coverage.deferred.flatMap((row) =>
+      source.reviewState.deferred.flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
       ),
     );
-    const deferred = source.coverage.deferred.map((row) => {
+    const deferred = source.reviewState.deferred.map((row) => {
       const { id: rawId, ...rawContent } = row;
       // Publication can rename a colliding candidate ID already owned by another row.
-      const published = previous?.coverage.deferred ?? [];
+      const published = previous?.reviewState.deferred ?? [];
       const renamed =
         typeof rawId === "string" &&
         typeof row.candidateId === "string" &&
@@ -1024,10 +1054,10 @@ async function preserveScanDraft(
     });
     const normalizedDeferred = normalizeDeferred(
       deferred,
-      resolvedDeferred(source.coverage),
+      resolvedDeferred(source.reviewState),
     );
     // Historical explicit IDs still identify ambiguous generic work.
-    source.coverage.deferred = deferred.map((row, index) =>
+    source.reviewState.deferred = deferred.map((row, index) =>
       typeof row.id === "string" ? row : normalizedDeferred[index]!,
     );
   }
@@ -1055,7 +1085,7 @@ async function preserveScanDraft(
   const reopenedSurfaces = new Set<JsonObject>();
   if (retainedFinal) {
     const terminalOutcomeIds = completedCandidateIds(retainedFinal.input);
-    for (const surface of result.coverage.surfaces) {
+    for (const surface of result.reviewState.surfaces) {
       if (
         terminalOutcomeIds.has((surface.candidateId ?? surface.id) as string) &&
         typeof surface.id === "string"
@@ -1063,7 +1093,7 @@ async function preserveScanDraft(
         terminalOutcomeIds.add(surface.id);
     }
     const closedIds = new Set(
-      resolvedDeferred(result.coverage).map((row) => row.id as string),
+      resolvedDeferred(result.reviewState).map((row) => row.id as string),
     );
     const retainedIndex = savedSources.indexOf(retainedFinal);
     const progressSources = savedSources
@@ -1079,16 +1109,16 @@ async function preserveScanDraft(
     progressSources.push(input);
     const progressCoverage =
       diffCandidates === undefined
-        ? result.coverage
+        ? result.reviewState
         : {
-            ...result.coverage,
-            deferred: result.coverage.deferred.filter(genericDeferred),
-            surfaces: result.coverage.surfaces.filter(
+            ...result.reviewState,
+            deferred: result.reviewState.deferred.filter(genericDeferred),
+            surfaces: result.reviewState.surfaces.filter(
               (surface) => coverageKey(surface) === undefined,
             ),
           };
     const terminalSurfaceIds = new Set(
-      (result.coverage.surfaces as JsonObject[])
+      (result.reviewState.surfaces as JsonObject[])
         .filter((row) => row.disposition !== "needs_follow_up")
         .flatMap((row) =>
           [row.id, row.candidateId].filter(
@@ -1100,7 +1130,7 @@ async function preserveScanDraft(
       ...terminalSurfaceIds,
       ...closedIds,
       ...terminalOutcomeIds,
-      ...(result.coverage.deferred as JsonObject[]).flatMap((row) =>
+      ...(result.reviewState.deferred as JsonObject[]).flatMap((row) =>
         [row.id, row.candidateId].filter(
           (id): id is string => typeof id === "string",
         ),
@@ -1111,7 +1141,7 @@ async function preserveScanDraft(
     let acceptProgress = retainedHasOutstandingWork;
     for (const observation of progressSources) {
       const progress = structuredClone(observation);
-      const deferred = progress.coverage.deferred.filter(
+      const deferred = progress.reviewState.deferred.filter(
         (row) =>
           keepsGenericWork(row) ||
           !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
@@ -1122,10 +1152,10 @@ async function preserveScanDraft(
         ((row.surfaceIds as string[] | undefined) ?? []).includes(
           surface.id as string,
         );
-      progress.coverage.surfaces = progress.coverage.surfaces.filter(
+      progress.reviewState.surfaces = progress.reviewState.surfaces.filter(
         (surface) =>
           surface.disposition !== "needs_follow_up" ||
-          !progress.coverage.deferred.some(
+          !progress.reviewState.deferred.some(
             (row) => !pending.has(row) && linked(row, surface),
           ) ||
           deferred.some((row) => linked(row, surface)),
@@ -1140,8 +1170,8 @@ async function preserveScanDraft(
         ),
       );
       const newWork = [
-        ...progress.coverage.deferred,
-        ...progress.coverage.surfaces.filter(
+        ...progress.reviewState.deferred,
+        ...progress.reviewState.surfaces.filter(
           (row) => row.disposition === "needs_follow_up",
         ),
       ].some(
@@ -1151,7 +1181,7 @@ async function preserveScanDraft(
       if (!acceptProgress) continue;
       result.complete = false;
       const resolved = reconcileDeferredSurfaces(
-        progress.coverage,
+        progress.reviewState,
         sources,
         reopenedIds,
         new Set(),
@@ -1159,11 +1189,11 @@ async function preserveScanDraft(
         [],
       );
       for (const surface of resolved) reopenedSurfaces.add(surface);
-      result.coverage = preserveScanCoverage(
+      result.reviewState = preserveScanCoverage(
         {
-          ...result.coverage,
+          ...result.reviewState,
           deferred,
-          surfaces: progress.coverage.surfaces.filter(
+          surfaces: progress.reviewState.surfaces.filter(
             (surface) =>
               (keepsGenericWork(surface) ||
                 (!terminalOutcomeIds.has(surface.id as string) &&
@@ -1179,7 +1209,7 @@ async function preserveScanDraft(
                 deferred.some((row) => linked(row, surface))),
           ),
         },
-        [result.coverage],
+        [result.reviewState],
         ambiguousDeferredIds,
       );
       sources.unshift(progress);
@@ -1187,7 +1217,7 @@ async function preserveScanDraft(
   }
   const selectedReceiptsBySurface = new Map<string, Set<string>>();
   for (const selected of [result, ...sources]) {
-    const rows = (selected.coverage.surfaces as JsonObject[]).filter(
+    const rows = (selected.reviewState.surfaces as JsonObject[]).filter(
       (row) =>
         typeof row.id === "string" && !selectedReceiptsBySurface.has(row.id),
     );
@@ -1200,7 +1230,7 @@ async function preserveScanDraft(
   const resolvedCandidateIds = completedCandidateIds(result, sources);
   const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
     result,
-    resolvedDeferred(input.coverage),
+    resolvedDeferred(input.reviewState),
     sources,
     savedSources,
     resolvedCandidateIds,
@@ -1218,11 +1248,11 @@ async function preserveScanDraft(
       owner,
     );
     for (const section of ["surfaces", "explicitExclusions"]) {
-      result.coverage[section] = [
-        ...(input.coverage[section] as JsonObject[]).filter(
+      result.reviewState[section] = [
+        ...(input.reviewState[section] as JsonObject[]).filter(
           isTerminalCandidateDecision,
         ),
-        ...(result.coverage[section] as JsonObject[]).filter(
+        ...(result.reviewState[section] as JsonObject[]).filter(
           (item) =>
             !isTerminalCandidateDecision(item) ||
             !currentDecisionKeys.has(coverageKey(item)!),
@@ -1236,7 +1266,7 @@ async function preserveScanDraft(
       ...result.findings
         .filter(isCurrentCandidateFinding)
         .map((finding) => findingKey(finding)),
-      ...result.coverage.surfaces
+      ...result.reviewState.surfaces
         .filter(isTerminalCandidateDecision)
         .map((surface) => coverageKey(surface)),
     ].filter((value): value is string => typeof value === "string"),
@@ -1253,7 +1283,7 @@ async function preserveScanDraft(
   const pendingSurfaceCandidates = new Map<string, Set<string | undefined>>();
   const pendingCandidateKeys = new Set<string>();
   for (const source of [result, ...sources]) {
-    for (const item of source.coverage.deferred) {
+    for (const item of source.reviewState.deferred) {
       const candidateId = coverageKey(item);
       const resolved =
         typeof candidateId === "string" &&
@@ -1265,7 +1295,7 @@ async function preserveScanDraft(
         const reference = surfaceReferenceKey(
           id,
           item,
-          source.coverage.surfaces,
+          source.reviewState.surfaces,
           owner,
         )!;
         if (resolved) {
@@ -1282,7 +1312,7 @@ async function preserveScanDraft(
     }
   }
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
-    const pending = source.coverage.deferred;
+    const pending = source.reviewState.deferred;
     if (
       pending.length === 0 ||
       pending.some((item) => {
@@ -1295,7 +1325,7 @@ async function preserveScanDraft(
       })
     )
       return [];
-    return source.coverage.surfaces.filter(
+    return source.reviewState.surfaces.filter(
       (surface) => surface.disposition === "needs_follow_up",
     );
   });
@@ -1315,8 +1345,8 @@ async function preserveScanDraft(
   };
 
   for (const [sourceIndex, source] of sources.entries()) {
-    for (const previous of source.coverage.surfaces as JsonObject[]) {
-      const current = (result.coverage.surfaces as JsonObject[]).find(
+    for (const previous of source.reviewState.surfaces as JsonObject[]) {
+      const current = (result.reviewState.surfaces as JsonObject[]).find(
         (surface) =>
           coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
           (sameSavedSurface(surface, previous) ||
@@ -1345,16 +1375,18 @@ async function preserveScanDraft(
         ),
       };
     }
-    const deferred = result.coverage.deferred;
+    const deferred = result.reviewState.deferred;
     const dispositions = [
-      ...result.coverage.surfaces,
-      ...result.coverage.explicitExclusions,
+      ...result.reviewState.surfaces,
+      ...result.reviewState.explicitExclusions,
     ].filter(isTerminalCandidateDecision);
     const candidateRows = [...dispositions, ...deferred];
     const candidateHistory = [
-      ...source.coverage.deferred,
-      ...source.coverage.surfaces.filter(isTerminalCandidateDecision),
-      ...source.coverage.explicitExclusions.filter(isTerminalCandidateDecision),
+      ...source.reviewState.deferred,
+      ...source.reviewState.surfaces.filter(isTerminalCandidateDecision),
+      ...source.reviewState.explicitExclusions.filter(
+        isTerminalCandidateDecision,
+      ),
     ];
     for (const pending of candidateHistory) {
       const candidateId = coverageKey(pending);
@@ -1570,9 +1602,9 @@ async function preserveScanDraft(
           .map((item) => coverageKey(item)),
       ].filter((value): value is string => typeof value === "string"),
     );
-    const currentSurfaces = result.coverage.surfaces;
+    const currentSurfaces = result.reviewState.surfaces;
     // A shared surface keeps its own identity beside the candidate's terminal decision.
-    for (const surface of source.coverage.surfaces) {
+    for (const surface of source.reviewState.surfaces) {
       if (
         surface.disposition === "needs_follow_up" &&
         typeof surface.id === "string" &&
@@ -1589,8 +1621,8 @@ async function preserveScanDraft(
     }
     const authoredCount = authoredArchiveRows.get(savedSources[sourceIndex]!);
     const previousCoverage = {
-      ...source.coverage,
-      deferred: source.coverage.deferred.filter((item, index) => {
+      ...source.reviewState,
+      deferred: source.reviewState.deferred.filter((item, index) => {
         const candidateId = coverageKey(item);
         const covered =
           authoredCount !== undefined && index >= authoredCount
@@ -1602,18 +1634,18 @@ async function preserveScanDraft(
             !covered.has(candidateId)) &&
           !closedDeferredIds.has(item.id as string) &&
           !coverageEntryPresent(
-            result.coverage.deferred as unknown[],
+            result.reviewState.deferred as unknown[],
             item,
             ambiguousDeferredIds,
           )
         );
       }),
-      surfaces: source.coverage.surfaces.filter((surface) => {
+      surfaces: source.reviewState.surfaces.filter((surface) => {
         if (resolvedSurfaces.has(surface)) return false;
         const candidateId = coverageKey(surface);
         if (
           coverageEntryPresent(
-            result.coverage.surfaces as unknown[],
+            result.reviewState.surfaces as unknown[],
             surface,
             ambiguousDeferredIds,
           )
@@ -1640,7 +1672,7 @@ async function preserveScanDraft(
           )
         );
       }),
-      explicitExclusions: source.coverage.explicitExclusions.filter(
+      explicitExclusions: source.reviewState.explicitExclusions.filter(
         (exclusion) => {
           const candidateId = coverageKey(exclusion);
           return (
@@ -1648,7 +1680,7 @@ async function preserveScanDraft(
               typeof candidateId !== "string" ||
               !representedCandidateKeys.has(candidateId)) &&
             !coverageEntryPresent(
-              result.coverage.explicitExclusions as unknown[],
+              result.reviewState.explicitExclusions as unknown[],
               exclusion,
             )
           );
@@ -1656,32 +1688,32 @@ async function preserveScanDraft(
       ),
       openQuestions:
         result.complete === false
-          ? (source.coverage.openQuestions ?? []).filter(
+          ? (source.reviewState.openQuestions ?? []).filter(
               (question) =>
                 !coverageEntryPresent(
-                  result.coverage.openQuestions ?? [],
+                  result.reviewState.openQuestions ?? [],
                   question,
                 ),
             )
           : [],
     };
-    result.coverage.surfaces = exactUnion(
-      result.coverage.surfaces,
+    result.reviewState.surfaces = exactUnion(
+      result.reviewState.surfaces,
       previousCoverage.surfaces,
     );
-    result.coverage = preserveScanCoverage(
-      result.coverage,
+    result.reviewState = preserveScanCoverage(
+      result.reviewState,
       [previousCoverage],
       ambiguousDeferredIds,
     );
   }
-  result.coverage.deferred = normalizeDeferred(
-    result.coverage.deferred,
-    resolvedDeferred(result.coverage),
+  result.reviewState.deferred = normalizeDeferred(
+    result.reviewState.deferred,
+    resolvedDeferred(result.reviewState),
   );
-  result.coverage = normalizeCoverageEntries(
-    result.coverage,
-    normalizeSurfaces(result.coverage.surfaces),
+  result.reviewState = normalizeCoverageEntries(
+    result.reviewState,
+    normalizeSurfaces(result.reviewState.surfaces),
   );
   if (context.layout === "worker") {
     // Older checkpoints predate the coordinator's requested-path binding.
@@ -1693,7 +1725,7 @@ async function preserveScanDraft(
   }
   const receiptLocation = (ref: string) => {
     const surface = [result, ...sources]
-      .flatMap((draft) => draft.coverage.surfaces as JsonObject[])
+      .flatMap((draft) => draft.reviewState.surfaces as JsonObject[])
       .find(
         (row) =>
           isObject(row.provenance) &&
@@ -1707,7 +1739,7 @@ async function preserveScanDraft(
   // still retained by this draft into its current, independently bound output.
   // Superseded surfaces must not reserve a discarded receipt's spelling.
   for (const ref of new Set(
-    result.coverage.surfaces.flatMap((row) => row.receiptRefs ?? []),
+    result.reviewState.surfaces.flatMap((row) => row.receiptRefs ?? []),
   )) {
     if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
     try {
@@ -1723,7 +1755,7 @@ async function preserveScanDraft(
     }
   }
   const retainedSelectedReceiptRefs = new Set(
-    (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
+    (result.reviewState.surfaces as JsonObject[]).flatMap((row) =>
       ((row.receiptRefs as string[] | undefined) ?? []).filter((ref) =>
         selectedReceiptsBySurface.get(row.id as string)?.has(ref),
       ),
@@ -1751,7 +1783,7 @@ async function preserveScanDraft(
     if (!receiptPaths.has(normalized.toLowerCase()))
       receiptPaths.set(normalized.toLowerCase(), normalized);
   }
-  for (const row of result.coverage.surfaces as JsonObject[]) {
+  for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const normalized = ref
         .split("/")
@@ -1792,7 +1824,7 @@ async function preserveScanDraft(
           (surface.receiptRefs as string[] | undefined)?.includes(ref),
         );
         const unchangedDisposition = sources.some((saved) =>
-          (saved.coverage.surfaces as JsonObject[]).some(
+          (saved.reviewState.surfaces as JsonObject[]).some(
             (surface) =>
               surface.id === row.id &&
               surface.disposition === row.disposition &&
@@ -1816,7 +1848,7 @@ async function preserveScanDraft(
         let repaired = false;
         let replacementError: unknown = error;
         const firstBrokenSource = sources.findIndex((saved) =>
-          (saved.coverage.surfaces as JsonObject[]).some(
+          (saved.reviewState.surfaces as JsonObject[]).some(
             (surface) =>
               surface.id === row.id &&
               (surface.receiptRefs as string[] | undefined)?.includes(ref),
@@ -1829,13 +1861,13 @@ async function preserveScanDraft(
           if (
             candidate.complete === false ||
             (!unchangedDisposition &&
-              !resolvedDeferred(candidate.coverage).some((closure) =>
+              !resolvedDeferred(candidate.reviewState).some((closure) =>
                 closedDeferredIds.has(closure.id as string),
               ))
           )
             continue;
           const replacement = (
-            candidate.coverage.surfaces as JsonObject[]
+            candidate.reviewState.surfaces as JsonObject[]
           ).find(
             (surface) =>
               surface.id === row.id &&
@@ -1926,7 +1958,7 @@ function completedCandidateIds(
       const id = findingCandidateId(finding);
       if (id !== undefined) completed.add(id);
     }
-    const dispositions = source.coverage.surfaces.filter(
+    const dispositions = source.reviewState.surfaces.filter(
       (surface) =>
         surface.disposition === "rejected" ||
         surface.disposition === "not_applicable",
@@ -1935,7 +1967,7 @@ function completedCandidateIds(
       const id = surface.candidateId;
       if (typeof id === "string" && !observed.has(id)) completed.add(id);
     }
-    for (const row of [...source.coverage.deferred, ...dispositions]) {
+    for (const row of [...source.reviewState.deferred, ...dispositions]) {
       const id = row.candidateId ?? row.id;
       if (typeof id === "string") observed.add(id);
     }
@@ -1943,8 +1975,8 @@ function completedCandidateIds(
   return completed;
 }
 
-function resolvedDeferred(coverage: DraftCoverage) {
-  return coverage.resolvedDeferred ?? [];
+function resolvedDeferred(reviewState: DraftCoverage) {
+  return reviewState.resolvedDeferred ?? [];
 }
 
 function genericDeferred(row: JsonObject): boolean {
@@ -1970,7 +2002,7 @@ function ambiguousGenericDeferredIds(
 ): Set<string> {
   const ambiguous = new Set<string>();
   for (const source of sources) {
-    const rows = source.coverage.deferred;
+    const rows = source.reviewState.deferred;
     const candidateIds = new Set(
       rows
         .filter((row) => !genericDeferred(row))
@@ -2005,12 +2037,12 @@ function reconcileResolvedDeferred(
   ambiguousIds: Set<string>,
   retainedFinal?: ScanDraftInput,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
-  const activeDeferred = result.coverage.deferred;
+  const activeDeferred = result.reviewState.deferred;
   const ambiguousTaskIds = ambiguousGenericDeferredIds(sources, false);
   // Legacy aliases cannot identify which independent task was completed.
   // Keep generic work separate from candidate outcomes and ambiguous closures.
   for (const source of sources) {
-    for (const row of source.coverage.deferred) {
+    for (const row of source.reviewState.deferred) {
       if (
         ambiguousGenericEntry(row, ambiguousTaskIds) &&
         !activeDeferred.some((current) => isDeepStrictEqual(current, row))
@@ -2025,13 +2057,13 @@ function reconcileResolvedDeferred(
   for (const source of savedSources) {
     const key = JSON.stringify([source.attempt, source.modifiedMs]);
     const pending = pendingByTime.get(key) ?? new Set<string>();
-    for (const row of source.input.coverage.deferred) {
+    for (const row of source.input.reviewState.deferred) {
       pending.add(row.id as string);
     }
     pendingByTime.set(key, pending);
     tiedPending.set(source.input, pending);
   }
-  const historical = sources.flatMap((source) => source.coverage.deferred);
+  const historical = sources.flatMap((source) => source.reviewState.deferred);
   const candidateRows = historical.filter(
     (row) =>
       typeof row.candidateId === "string" ||
@@ -2058,11 +2090,11 @@ function reconcileResolvedDeferred(
   const closureSources = new Map<string, ScanDraftInput>();
   for (const source of sources) {
     // Keep the first saved state for each ID so reopened work stays pending.
-    for (const row of source.coverage.deferred) {
+    for (const row of source.reviewState.deferred) {
       observedIds.add(row.id as string);
     }
     if (source.complete === false) continue;
-    for (const closure of resolvedDeferred(source.coverage)) {
+    for (const closure of resolvedDeferred(source.reviewState)) {
       const id = closure.id as string;
       previouslyClosed.add(id);
       if (
@@ -2080,14 +2112,16 @@ function reconcileResolvedDeferred(
   for (const closure of requestedClosures) {
     const id = closure.id as string;
     if (requested.has(id))
-      throw new Error(`scan draft: coverage.resolvedDeferred repeats ${id}.`);
+      throw new Error(
+        `scan draft: reviewState.resolvedDeferred repeats ${id}.`,
+      );
     requested.add(id);
     closures.set(id, closure);
   }
   for (const id of closures.keys()) {
     if (ambiguousTaskIds.has(id))
       throw new Error(
-        `scan draft: coverage.resolvedDeferred cannot close ambiguous saved deferred work: ${id}.`,
+        `scan draft: reviewState.resolvedDeferred cannot close ambiguous saved deferred work: ${id}.`,
       );
     if (candidateIds.has(id)) {
       if (
@@ -2102,12 +2136,12 @@ function reconcileResolvedDeferred(
         continue;
       }
       throw new Error(
-        `scan draft: coverage.resolvedDeferred cannot close candidate ${id}; record its finding or disposition.`,
+        `scan draft: reviewState.resolvedDeferred cannot close candidate ${id}; record its finding or disposition.`,
       );
     }
     if (!closureSources.has(id) && !historical.some((row) => row.id === id))
       throw new Error(
-        `scan draft: coverage.resolvedDeferred names no saved generic deferral: ${id}.`,
+        `scan draft: reviewState.resolvedDeferred names no saved generic deferral: ${id}.`,
       );
     if (activeDeferred.some((row) => row.id === id))
       throw new Error(
@@ -2115,11 +2149,11 @@ function reconcileResolvedDeferred(
       );
   }
   if (closures.size > 0) {
-    result.coverage.resolvedDeferred = [...closures.values()].map((closure) =>
-      structuredClone(closure),
+    result.reviewState.resolvedDeferred = [...closures.values()].map(
+      (closure) => structuredClone(closure),
     );
   } else {
-    delete result.coverage.resolvedDeferred;
+    delete result.reviewState.resolvedDeferred;
   }
   const closedDeferredIds = new Set(closures.keys());
   const reopenedIds = new Set(
@@ -2136,14 +2170,14 @@ function reconcileResolvedDeferred(
     ...new Set([
       ...closureSources.values(),
       ...sources.filter((source) =>
-        source.coverage.deferred.some((row) =>
+        source.reviewState.deferred.some((row) =>
           reopenedIds.has(row.id as string),
         ),
       ),
     ]),
   ];
   const resolvedSurfaces = reconcileDeferredSurfaces(
-    result.coverage,
+    result.reviewState,
     sources,
     closedDeferredIds,
     resolvedCandidateIds,
@@ -2157,7 +2191,7 @@ function reconcileResolvedDeferred(
 }
 
 function reconcileDeferredSurfaces(
-  coverage: JsonObject,
+  reviewState: JsonObject,
   sources: ScanDraftInput[],
   closedDeferredIds: Set<string>,
   resolvedCandidateIds: Set<string>,
@@ -2170,9 +2204,9 @@ function reconcileDeferredSurfaces(
   const resolved = new Set<JsonObject>();
   const workIds = new Set([...closedDeferredIds, ...reopenedIds]);
   if (workIds.size === 0) return resolved;
-  const current = coverage.surfaces as JsonObject[];
+  const current = reviewState.surfaces as JsonObject[];
   const inheritedSurfaces = inherited.flatMap((source) =>
-    source.coverage.surfaces.map((surface) => ({
+    source.reviewState.surfaces.map((surface) => ({
       surface,
       source,
     })),
@@ -2182,9 +2216,9 @@ function reconcileDeferredSurfaces(
   );
   const carriesCandidate = (surface: JsonObject) =>
     "candidateId" in surface || "candidate" in surface || "finding" in surface;
-  const latestDeferred = [...(coverage.deferred as JsonObject[])];
+  const latestDeferred = [...(reviewState.deferred as JsonObject[])];
   for (const source of sources) {
-    for (const row of source.coverage.deferred) {
+    for (const row of source.reviewState.deferred) {
       if (!deferredEntryPresent(latestDeferred, row, ambiguousDeferredIds))
         latestDeferred.push(row);
     }
@@ -2212,8 +2246,8 @@ function reconcileDeferredSurfaces(
       continue;
     const matches = sources.map((source) => ({
       source,
-      surfaces: source.coverage.surfaces.filter(sameSurface),
-      deferred: source.coverage.deferred,
+      surfaces: source.reviewState.surfaces.filter(sameSurface),
+      deferred: source.reviewState.deferred,
     }));
     if (
       matches.some(
@@ -2446,7 +2480,7 @@ async function readPreviousScanDraft(
   const { saved, contents, digest } = await readPreviousScanDocuments(context);
   if (contents.every((value) => value === undefined))
     return { digest, modifiedMs: 0 };
-  if (contents.some((value) => value === undefined)) {
+  if (contents.slice(0, 2).some((value) => value === undefined)) {
     throw new Error("previous scan draft: canonical documents are incomplete.");
   }
   const manifest = parseJsonObject(
@@ -2457,22 +2491,35 @@ async function readPreviousScanDraft(
     contents[1]!,
     "previous scan draft findings",
   );
-  const coverage = parseJsonObject(
-    contents[2]!,
-    "previous scan draft coverage",
+  const scan = requireObject(
+    manifest.scan,
+    "previous scan draft manifest.scan",
   );
+  const legacy =
+    scan.coverageRef !== undefined ||
+    (scan.reviewState === undefined && scan.review === undefined);
+  const reviewState = !legacy
+    ? requireObject(
+        scan.reviewState ?? reviewStateFromSummary(scan),
+        "previous scan review state",
+      )
+    : parseJsonObject(contents[2]!, "previous scan draft review state");
   return {
     digest,
-    // File-authored coverage may leave its manifest unchanged; tool writes have a head.
+    // File-authored reviewState may leave its manifest unchanged; tool writes have a head.
     modifiedMs:
       (await readCheckpointHead(context, "current")) === undefined
-        ? saved[2]!.modifiedMs
-        : Math.min(...saved.map((record) => record!.modifiedMs)),
+        ? (legacy ? saved[2] : saved[0])!.modifiedMs
+        : Math.min(
+            ...saved
+              .slice(0, legacy ? 3 : 2)
+              .flatMap((record) => (record ? [record.modifiedMs] : [])),
+          ),
     input: parseCanonicalScanDraft({
       scanId: context.scanId,
       manifest,
       findings,
-      coverage,
+      reviewState,
     }),
   };
 }
@@ -2639,7 +2686,7 @@ async function readArchivedWorkerCheckpoints(
     );
     for (const draft of drafts) {
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
-      for (const surface of draft.input.coverage.surfaces as JsonObject[]) {
+      for (const surface of draft.input.reviewState.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
         surface.receiptRefs = await Promise.all(
           (surface.receiptRefs as string[]).map(async (value) => {
@@ -3077,10 +3124,10 @@ export function preserveScanCoverage(
   return result;
 }
 
-function coverageHasOutstandingWork(coverage: JsonObject): boolean {
+function coverageHasOutstandingWork(reviewState: JsonObject): boolean {
   return (
-    ((coverage.deferred as unknown[] | undefined) ?? []).length > 0 ||
-    ((coverage.surfaces as JsonObject[] | undefined) ?? []).some(
+    ((reviewState.deferred as unknown[] | undefined) ?? []).length > 0 ||
+    ((reviewState.surfaces as JsonObject[] | undefined) ?? []).some(
       (surface) => surface.disposition === "needs_follow_up",
     )
   );
@@ -3136,7 +3183,7 @@ export async function getCodexSecurityCompletedScan(
     );
   }
 
-  const [manifest, findings, coverage] = await Promise.all([
+  const [manifest, findings] = await Promise.all([
     readArtifactJsonObject(
       context,
       ["scan-manifest.json"],
@@ -3147,14 +3194,16 @@ export async function getCodexSecurityCompletedScan(
       ["findings.json"],
       "completed scan findings",
     ),
-    readArtifactJsonObject(
-      context,
-      ["coverage.json"],
-      "completed scan coverage",
-    ),
   ]);
-
   const scan = requireObject(manifest.scan, "completed scan manifest.scan");
+  const reviewState =
+    scan.coverageRef === undefined && scan.review !== undefined
+      ? reviewStateFromSummary(scan)
+      : await readArtifactJsonObject(
+          context,
+          ["coverage.json"],
+          "legacy scan review state",
+        );
   if (
     scan.id !== parsed.scanId ||
     scan.status !== "completed" ||
@@ -3162,14 +3211,27 @@ export async function getCodexSecurityCompletedScan(
     !scan.sealedAt ||
     !Array.isArray(scan.artifacts) ||
     findings.scanId !== parsed.scanId ||
-    coverage.scanId !== parsed.scanId
+    reviewState.scanId !== parsed.scanId
   ) {
     throw new Error(
       "completed scan: canonical documents do not match the sealed workbench scan.",
     );
   }
 
-  return { scanId: parsed.scanId, manifest, findings, coverage };
+  const review =
+    scan.coverageRef === undefined && scan.review !== undefined
+      ? scan.review
+      : {
+          excludedPaths: (reviewState.explicitExclusions as JsonObject[]).map(
+            (item) => item.pattern,
+          ),
+        };
+  return {
+    scanId: parsed.scanId,
+    manifest,
+    findings,
+    review: review as JsonObject,
+  };
 }
 
 function safeRelativePath(value: string, context: string): string {
@@ -3202,13 +3264,13 @@ export function parseCanonicalScanDraft(input: {
   scanId?: string;
   manifest: JsonObject;
   findings: JsonObject;
-  coverage: JsonObject;
+  reviewState: JsonObject;
 }): ScanDraftInput {
   const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
   for (const scanId of [
     scan.id,
     input.findings.scanId,
-    input.coverage.scanId,
+    input.reviewState.scanId,
   ]) {
     if (scanId !== undefined && scanId !== input.scanId) {
       throw new Error(
@@ -3224,7 +3286,7 @@ export function parseCanonicalScanDraft(input: {
       ? {}
       : { threatModel: scan.threatModel }),
     findings: input.findings.findings,
-    coverage: input.coverage,
+    reviewState: input.reviewState,
   });
 }
 
@@ -3251,22 +3313,25 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   const parsed = parsePersistedScanDraft(input);
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed], false);
-  for (const row of parsed.coverage.deferred) {
+  for (const row of parsed.reviewState.deferred) {
     if (typeof row.id !== "string") continue;
     if (deferredIds.has(row.id) || ambiguousIds.has(row.id))
-      throw new Error(`scan draft: coverage.deferred repeats ${row.id}.`);
+      throw new Error(`scan draft: reviewState.deferred repeats ${row.id}.`);
     deferredIds.add(row.id);
   }
-  if (parsed.complete === false && resolvedDeferred(parsed.coverage).length > 0)
+  if (
+    parsed.complete === false &&
+    resolvedDeferred(parsed.reviewState).length > 0
+  )
     throw new Error(
-      "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
+      "scan draft: reviewState.resolvedDeferred is allowed only on a terminal draft.",
     );
-  parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
-  parsed.coverage.deferred = normalizeDeferred(
-    parsed.coverage.deferred,
-    resolvedDeferred(parsed.coverage),
+  parsed.reviewState = normalizeCheckpointCoverage(parsed.reviewState);
+  parsed.reviewState.deferred = normalizeDeferred(
+    parsed.reviewState.deferred,
+    resolvedDeferred(parsed.reviewState),
   );
-  parsed.coverage.surfaces = normalizeSurfaces(parsed.coverage.surfaces);
+  parsed.reviewState.surfaces = normalizeSurfaces(parsed.reviewState.surfaces);
   return parsed;
 }
 
@@ -3283,11 +3348,19 @@ export function parsePersistedScanDraft(
   input: unknown,
   schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
+  if (
+    isObject(input) &&
+    input.reviewState === undefined &&
+    input.coverage !== undefined
+  ) {
+    const { coverage, ...rest } = input;
+    input = { ...rest, reviewState: coverage };
+  }
   const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings);
-  delete parsed.coverage.completeness;
-  delete parsed.coverage.completenessBeforeCandidates;
-  parsed.coverage.deferred = parsed.coverage.deferred.map(
+  delete parsed.reviewState.completeness;
+  delete parsed.reviewState.completenessBeforeCandidates;
+  parsed.reviewState.deferred = parsed.reviewState.deferred.map(
     normalizeLegacyCandidateEntry,
   );
   return parsed;
@@ -3306,7 +3379,8 @@ function parsePersistedCheckpoint(
     delete compatible.scope.excludePaths;
     if (Object.keys(compatible.scope).length === 0) delete compatible.scope;
   }
-  if (isObject(compatible.coverage)) {
+  const reviewState = compatible.reviewState ?? compatible.coverage;
+  if (isObject(reviewState)) {
     for (const field of [
       "documentType",
       "schemaVersion",
@@ -3317,7 +3391,7 @@ function parsePersistedCheckpoint(
       "receiptRefs",
       "inventoryStrategy",
     ])
-      delete compatible.coverage[field];
+      delete reviewState[field];
   }
   if (Array.isArray(compatible.findings)) {
     for (const finding of compatible.findings) {
@@ -3977,4 +4051,17 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[^a-z0-9._/-]+/gu, "-")
     .replace(/^[^a-z0-9]+|-+$/gu, "");
   return identifier || fallback;
+}
+
+function reviewStateFromSummary(scan: JsonObject): JsonObject {
+  const review = requireObject(scan.review, "scan review summary");
+  return {
+    scanId: scan.id,
+    surfaces: [],
+    deferred: review.unresolvedCandidates ?? [],
+    explicitExclusions: (review.excludedPaths as string[]).map((pattern) => ({
+      pattern,
+      reason: "Excluded from review",
+    })),
+  };
 }
