@@ -160,6 +160,25 @@ test("requires all known CxSAST viewer instances to agree", () => {
   }
 });
 
+test("compares retained CxSAST instance URLs without rewriting the evidence", () => {
+  const viewer = "https://sast.example/Team/CxWebClient/ViewerMain.aspx";
+  const row = normalize(report(withLink(result(13), "Result", viewer)))
+    .findings[0]!;
+  const instance = "https://SAST.EXAMPLE:443/Team";
+  const retained = { ...row.evidence.source_data, instance };
+  expect(checkmarxXmlScope(retained).instance).toBe(instance);
+  expect(checkmarxXmlId(retained, "100")).toBe(row.source_finding_id);
+  for (const different of [
+    "https://sast.example/team",
+    "https://sast.example/Team/other",
+    "https://sast.example:8443/Team",
+  ]) {
+    expect(() =>
+      checkmarxXmlScope({ ...retained, instance: different }),
+    ).toThrow(/same instance/u);
+  }
+});
+
 test("excluded results cannot select the instance of a linkless report", () => {
   const unlinked = result(15);
   const viewer = "https://other.example/CxWebClient/ViewerMain.aspx";

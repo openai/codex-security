@@ -103,6 +103,22 @@ test("SDK-only Checkmarx rows compare declared scan IDs, repositories and instan
   };
   const one = withInstance("sdk-host-a", "https://one.example/sast");
   const two = withInstance("sdk-host-b", "https://one.example/other");
+  expect(
+    (
+      await bind([
+        one,
+        withInstance("sdk-host-same", "https://ONE.EXAMPLE:443/sast"),
+      ])
+    ).preview.findings[1]!.evidence.source_data?.["instance"],
+  ).toBe("https://ONE.EXAMPLE:443/sast");
+  expect(
+    (
+      await bind([
+        withInstance("sdk-root", "https://one.example"),
+        withInstance("sdk-root-same", "https://ONE.EXAMPLE:443/"),
+      ])
+    ).preview.findings,
+  ).toHaveLength(2);
   await expect(bind([one, two])).rejects.toThrow(/same instance/i);
   expect(
     (
@@ -131,6 +147,28 @@ test("SDK-only Checkmarx rows compare declared scan IDs, repositories and instan
     (await bind([first, row("sdk-b", "2", source + "-other")], "wiz")).preview
       .findings,
   ).toHaveLength(2);
+});
+
+test("a projected Checkmarx report under Wiz binds the configured Git fetch URL", async () => {
+  await using fixture = await localFindingsFixture({
+    remote: source + "?other=target",
+  });
+  const finding = {
+    source_finding_id: "checkmarx-one:" + "a".repeat(64),
+    evidence: { title: "SDK finding", severity: "low" as const },
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      {
+        read: 1,
+        excluded: [],
+        findings: [finding],
+        report: { sourceRepositoryUrl: source, scanId: "123" },
+      },
+      { provider: "wiz", repository: fixture.repository, sourceKey: "example" },
+      { environment: fixture.environment },
+    ),
+  ).rejects.toThrow("does not match a configured remote");
 });
 
 test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {
@@ -271,6 +309,36 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
     prepareNormalizedLocalImport(input, options, dependencies);
   for (const input of [normal, xml("1")]) {
     expect((await prepare(input)).preview.findings).toHaveLength(1);
+    const matchingReport = structuredClone(input);
+    const data = matchingReport.findings[0]!.evidence.source_data!;
+    delete data["format"];
+    expect((await prepare(matchingReport)).preview.findings).toHaveLength(1);
+    for (const invalid of [null, "other-format"]) {
+      data["format"] = invalid;
+      await expect(prepare(matchingReport)).rejects.toThrow(/retained report/i);
+    }
+    delete data["format"];
+    delete matchingReport.report;
+    delete data["sourceRepositoryUrl"];
+    matchingReport.findings[0]!.source_finding_id = "sdk-key";
+    await expect(
+      prepareNormalizedLocalImport(
+        matchingReport,
+        { ...options, provider: "wiz" },
+        dependencies,
+      ),
+    ).rejects.toThrow(/checkmarx provider/i);
+    await expect(prepare(matchingReport)).rejects.toThrow(/source finding ID/i);
+    delete matchingReport.findings[0]!.evidence.details!.scanner_origin;
+    expect(
+      (
+        await prepareNormalizedLocalImport(
+          matchingReport,
+          { ...options, provider: "wiz" },
+          dependencies,
+        )
+      ).preview.findings,
+    ).toHaveLength(1);
     const otherRepository = structuredClone(input);
     otherRepository.findings[0]!.evidence.details!.repository!.url =
       "https://github.com/example/another";

@@ -886,7 +886,12 @@ export async function prepareLocalImport(
     current.report,
     "local",
   );
-  if (checkmarx) sources.set(checkmarx, { url: checkmarx });
+  if (checkmarx) {
+    const source = sources.get(checkmarx) ?? { url: checkmarx };
+    sources.set(checkmarx, source);
+    if (!strictSources.has(checkmarx))
+      strictSources.set(checkmarx, platformFor(source));
+  }
   if (
     (options.provider === "checkmarx" || checkmarx) &&
     !sameRepositories(sources.keys())

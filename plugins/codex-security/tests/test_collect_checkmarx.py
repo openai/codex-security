@@ -72,6 +72,46 @@ def test_one_default_profile_uses_the_windows_account_home(monkeypatch, tmp_path
     assert profiles == {Path(account.value) / ".checkmarx" / "checkmarxcli.yaml"}
 
 
+@pytest.mark.cross_platform
+def test_refuses_profile_routed_through_the_checkout(capture_dir, tmp_path, monkeypatch, capsys):
+    source = Path.cwd()
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    (installed / "profile.yaml").touch()
+    checkout_link = source / "active"
+    selected = tmp_path / "selected"
+    for link, target in [(checkout_link, installed), (selected, checkout_link)]:
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True)
+        else:
+            link.symlink_to(os.path.relpath(target, link.parent), target_is_directory=True)
+    profile = selected / "profile.yaml"
+    assert profile.samefile(installed / "profile.yaml")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(profile))
+    cx = executable(tmp_path, "cx")
+    assert invoke(monkeypatch, "--source-root", str(source), "one", ONE_SCAN, "--cx", cx) != 0
+    assert "CX_CONFIG_FILE_PATH" in capsys.readouterr().err
+    assert not list(capture_dir.iterdir())
+
+
+@pytest.mark.cross_platform
+def test_skips_inaccessible_vendor_search_directories(capture_dir, tmp_path, monkeypatch):
+    blocked = tmp_path / "protected" / "bin"
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    original_is_dir = Path.is_dir
+
+    def is_dir(path):
+        if path == blocked:
+            raise PermissionError("cannot traverse PATH directory")
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(blocked), str(tools)]))
+    assert runpy.run_path(str(SCRIPT))["vendor_environment"](Path.cwd())["PATH"] == str(tools)
+
+
 @pytest.fixture
 def cxsast_args(tmp_path):
     jar, config = tmp_path / "cx-flow.jar", tmp_path / "application.yml"
@@ -368,17 +408,30 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
     monkeypatch.setenv("PATH", str(tmp_path))
     executable(tmp_path, "java")
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", "unrelated-one-config.yaml")
-    jvm_options = {
+    startup_settings = {
         "JDK_ALTERNATE_VM": str(Path.cwd()),
         "JDK_JAVA_OPTIONS": "-Xmx256m",
         "JAVA_TOOL_OPTIONS": f'-javaagent:"{Path.cwd() / "coverage.jar"}"',
         "_JAVA_OPTIONS": f"-DLOGBACK_ROLLINGPOLICY_FILE_NAME_PATTERN={Path.cwd()}/escape.%i.gz",
         "OPENJ9_JAVA_OPTIONS": "-Dfile.encoding=windows-1252",
         "IBM_JAVA_OPTIONS": "-Xmx256m",
+        "CHECKMARX_BASE_URL": "https://unselected.invalid",
+        "CX_PROBE_IMPORT_ROOT": str(Path.cwd()),
+        "LD_PRELOAD": str(Path.cwd() / "library.so"),
+        "DYLD_INSERT_LIBRARIES": str(Path.cwd() / "library.dylib"),
+        "SPRING_MAIN_SOURCES": "file:/checkout/beans.xml",
+        "spring.main.sources": "file:/checkout/beans.xml",
+        "SPRING_APPLICATION_JSON": '{"spring.main.sources":"file:/checkout/beans.xml"}',
     }
-    for name, value in jvm_options.items():
+    for name, value in startup_settings.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("CX_PROFILE_SECRET", "synthetic-profile-value")
+    credentials = {
+        "CHECKMARX_USERNAME": "synthetic-user",
+        "CHECKMARX_PASSWORD": "synthetic-password",
+        "CHECKMARX_CLIENT_SECRET": "synthetic-client-secret",
+    }
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
     jar = tmp_path / "Cx Flow.jar"
     config = tmp_path / "private config,west.yml"
     jar.touch()
@@ -386,8 +439,13 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
 
     def run(args, *, cwd, **kwargs):
         args = list(map(str, args))
-        assert jvm_options.keys().isdisjoint(kwargs["env"])
-        assert kwargs["env"]["CX_PROFILE_SECRET"] == "synthetic-profile-value"
+        assert {name.lower() for name in startup_settings}.isdisjoint(
+            name.lower() for name in kwargs["env"]
+        )
+        assert {name: kwargs["env"][name] for name in credentials} == credentials
+        assert all(kwargs["env"][name] == str(cwd) for name in ("TMP", "TEMP", "TMPDIR"))
+        if os.name == "nt":
+            assert kwargs["env"]["SystemRoot"] == os.environ["SystemRoot"]
         assert args[:6] == [
             java,
             f"-Djava.io.tmpdir={cwd}",
@@ -454,7 +512,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         "--project",
         "Example Project",
     )
-    assert {name: os.environ[name] for name in jvm_options} == jvm_options
+    assert {name: os.environ[name] for name in startup_settings} == startup_settings
     stdout = capsys.readouterr().out
     if result == "selected":
         assert code == 0
@@ -520,7 +578,10 @@ def test_one_checks_default_profile_from_account_home(
     if sys.platform == "linux":
         passwd = tmp_path / "passwd"
         entry = b"cx:x:%d:1:Example:%s:/bin/sh\n" % (os.getuid(), os.fsencode(account))
-        passwd.write_bytes(entry if lookup == "passwd" else b"")
+        # Go skips a commented record and a NIS/invalid group entry before its UID lookup.
+        inactive = b" #old:x:%d:1:Old:%s:/bin/sh\n" % (os.getuid(), os.fsencode(other))
+        inactive += b"+old:x:%d:invalid:Old:%s:/bin/sh\n" % (os.getuid(), os.fsencode(other))
+        passwd.write_bytes(inactive + (entry if lookup == "passwd" else b""))
         original_open = Path.open
 
         def open_file(path, *args, **kwargs):
@@ -688,3 +749,44 @@ def test_preserves_an_ignored_interrupt(capture_dir, monkeypatch, tmp_path):
         assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory ACLs")
+def test_capture_private_before_vendor_writes_on_legacy_windows_python(
+    capture_dir, monkeypatch, tmp_path, capsys
+):
+    icacls = Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe"
+    subprocess.run([icacls, capture_dir, "/grant", "*S-1-1-0:(OI)(CI)R"], check=True)
+
+    def dacl(path):
+        saved = tmp_path / "acl.txt"
+        subprocess.run([icacls, path, "/save", saved, "/q"], check=True)
+        value = saved.read_text(encoding="utf-16-le").rstrip().splitlines()[-1]
+        assert value.startswith("D:")
+        return value
+
+    shared = capture_dir / "control.txt"
+    shared.touch()
+    assert ";;;WD)" in dacl(shared)
+    # Windows 3.10.11 does not apply a security descriptor for mkdir(0700).
+    mkdir = os.mkdir
+    monkeypatch.setattr(os, "mkdir", lambda path, mode=0o777: mkdir(path))
+    profile = tmp_path / "trusted.yaml"
+    profile.touch()
+    monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(profile))
+
+    def run(_command, *, cwd, **_kwargs):
+        work = Path(cwd)
+        root_acl = dacl(work.parent)
+        assert root_acl.startswith("D:P") and ";;;WD)" not in root_acl
+        assert ";;;WD)" not in dacl(work)
+        report = work / "cx_result.json"
+        report.write_text(json.dumps({"scanID": ONE_SCAN}))
+        assert ";;;WD)" not in dacl(report)
+        return 0
+
+    collector = runpy.run_path(str(SCRIPT))
+    args = SimpleNamespace(product="one", scan_id=ONE_SCAN, cx="unused")
+    collector["collect"](args, None, run)
+    assert ";;;WD)" not in dacl(Path(capsys.readouterr().out.strip()))

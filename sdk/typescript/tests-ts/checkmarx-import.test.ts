@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { readCheckmarxFindings } from "../src/checkmarx-findings.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import {
@@ -9,6 +11,7 @@ import {
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
 import { createCliTest } from "./support/cli-run.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
 
@@ -136,3 +139,43 @@ test.each([
     ).rejects.toThrow(/does not match a configured remote/);
   },
 );
+
+test("reads plain and gzipped UTF-16 CxSAST XML while keeping Checkmarx One JSON UTF-8", async () => {
+  await using dir = await scopedTemporaryDirectory("checkmarx-encodings-");
+  const file = join(dir.path, "report");
+  const read = () => readCheckmarxFindings(file, repositoryUrl, "local");
+  const xml = xmlReport("High").replaceAll("src/query.ts", "src/résumé.ts");
+  await writeFile(file, xml);
+  const expected = await read();
+  expect(expected.findings).toHaveLength(1);
+
+  for (const order of ["LE", "BE"]) {
+    for (const prefix of ["", "\uFEFF"]) {
+      const declaration = prefix ? "UTF-16" : "UTF-16" + order;
+      const bytes = Buffer.from(
+        prefix + xml.replace("UTF-8", declaration),
+        "utf16le",
+      );
+      if (order === "BE") bytes.swap16();
+      for (const report of [bytes, gzipSync(bytes)]) {
+        await writeFile(file, report);
+        expect(await read()).toEqual(expected);
+      }
+    }
+  }
+  await writeFile(file, Buffer.from("\uFEFF" + oneReport("High"), "utf16le"));
+  await expect(read()).rejects.toThrow();
+
+  const malformed = Buffer.from(
+    "\uFEFF" + xml.replace("UTF-8", "UTF-16"),
+    "utf16le",
+  );
+  malformed.writeUInt16LE(
+    0xd800,
+    malformed.indexOf(Buffer.from("résumé.ts", "utf16le")),
+  );
+  await writeFile(file, malformed);
+  await expect(read()).rejects.toMatchObject({
+    code: "ERR_ENCODING_INVALID_ENCODED_DATA",
+  });
+});

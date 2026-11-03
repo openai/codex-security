@@ -62,8 +62,21 @@ function viewerInstance(link: URL | undefined) {
   return link && link.origin + link.pathname.slice(0, -viewerPath.length);
 }
 
-function sameInstance(current: string | undefined, next: string | undefined) {
-  if (current !== undefined && next !== undefined && current !== next)
+function instanceKey(value: string) {
+  const url = URL.parse(value);
+  return url && /^https?:$/u.test(url.protocol) ? url.href : value;
+}
+
+export function checkmarxXmlInstance(
+  current: string | undefined,
+  next: string | undefined,
+) {
+  if (
+    current !== undefined &&
+    next !== undefined &&
+    current !== next &&
+    instanceKey(current) !== instanceKey(next)
+  )
     throw new Error("CxSAST viewer links must identify the same instance.");
   return current ?? next;
 }
@@ -100,7 +113,7 @@ export function checkmarxXmlScope(
   );
   const instance = source["instance"];
   return {
-    instance: sameInstance(
+    instance: checkmarxXmlInstance(
       instance === undefined
         ? undefined
         : requiredText(instance, "CxSAST instance"),
@@ -252,7 +265,7 @@ export function normalizeCheckmarxXml(
   let hasUnboundRows = false;
   for (const { evidence } of result.findings) {
     const rowInstance = text(evidence.source_data?.["instance"]);
-    if (rowInstance) instance = sameInstance(instance, rowInstance);
+    if (rowInstance) instance = checkmarxXmlInstance(instance, rowInstance);
     else hasUnboundRows = true;
   }
   if (instance && !rootInstance) {

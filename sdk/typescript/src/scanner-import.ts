@@ -67,7 +67,9 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string | FileHandle): Promise<Buffer> {
+export async function readScannerBytes(
+  path: string | FileHandle,
+): Promise<Buffer> {
   const bytes = await readFile(path);
   return bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipAsync(bytes) : bytes;
 }

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,11 +28,26 @@ def source_root(target: Path | None) -> Path | None:
 def in_source(path: Path, source: Path | None) -> bool:
     if source is None:
         return False
-    invocation = path.parent.resolve() / path.name
-    for candidate in (path, invocation, path.resolve()):
-        for ancestor in (candidate, *candidate.parents):
-            if ancestor.exists() and ancestor.samefile(source):
+    identity = source.stat()
+    pending = [path, path.parent.resolve(), path.resolve()]
+    checked = set()
+    while pending:
+        candidate = pending.pop()
+        for component in (candidate, *candidate.parents):
+            if component in checked:
+                continue
+            checked.add(component)
+            try:
+                info = component.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if os.path.samestat(info, identity):
                 return True
+            if stat.S_ISLNK(info.st_mode) or (
+                os.name == "nt" and info.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+            ):
+                # A link may point into the checkout before another link leads back out.
+                pending.append(component.parent.resolve() / component.readlink())
     return False
 
 
@@ -85,8 +101,11 @@ def vendor_environment(source: Path | None) -> dict[str, str]:
         if os.name == "nt" and entry.startswith('"') and entry.endswith('"'):
             entry = entry[1:-1]
         path = Path(entry)
-        if path.is_absolute() and path.is_dir() and not in_source(path, source):
-            entries.append(str(path.resolve()))
+        try:
+            if path.is_absolute() and path.is_dir() and not in_source(path, source):
+                entries.append(str(path.resolve()))
+        except OSError:
+            continue
     env["PATH"] = os.pathsep.join(entries)
     return env
 
@@ -112,21 +131,20 @@ def one_default_profiles() -> set[Path]:
         except KeyError:
             homes = {Path.home()}
         if sys.platform == "linux":
-            # Released cx uses pure Go's local passwd lookup. A libc-enabled build may
-            # instead resolve a directory-service account. Leave the choice to cx.
+            # The static CLI also checks local passwd entries, with HOME as its fallback.
+            # Guard candidate homes without deciding which matching record Go accepts.
+            homes.add(Path.home())
             uid = str(os.getuid()).encode()
-            local_home = None
             try:
                 with Path("/etc/passwd").open("rb") as passwd:
                     for row in passwd:
-                        fields = row.rstrip().split(b":")
-                        if len(fields) >= 6 and fields[2] == uid:
-                            local_home = Path(os.fsdecode(fields[5]))
-                            break
+                        if row.lstrip().startswith((b"#", b"+", b"-")):
+                            continue
+                        fields = row.split(b":", 6)
+                        if len(fields) == 7 and fields[2] == uid:
+                            homes.add(Path(os.fsdecode(fields[5])))
             except OSError:
-                # Without a readable passwd file, Go's static lookup falls back to HOME.
-                pass
-            homes.add(local_home if local_home is not None else Path.home())
+                pass  # Go falls back to HOME when passwd is unreadable.
     return {home / ".checkmarx" / "checkmarxcli.yaml" for home in homes}
 
 
@@ -165,17 +183,61 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
         parser.ParseFile(stream)
 
 
+def capture_directory(temp: Path) -> Path:
+    if os.name != "nt":
+        return Path(tempfile.mkdtemp(prefix="checkmarx-report-", dir=temp)).resolve()
+
+    import ctypes.wintypes
+    import secrets
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.wintypes.DWORD),
+            ("descriptor", ctypes.wintypes.LPVOID),
+            ("inherit", ctypes.wintypes.BOOL),
+        ]
+
+    # Older Windows Python releases ignore mkdir's 0700 mode. Apply CPython's
+    # protected, inheritable SYSTEM/Administrators/owner DACL at creation.
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    temp = temp.resolve()
+    volume = ctypes.create_unicode_buffer(32768)
+    flags = ctypes.wintypes.DWORD()
+    if not kernel.GetVolumePathNameW(str(temp), volume, len(volume)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not kernel.GetVolumeInformationW(volume, None, 0, None, None, ctypes.byref(flags), None, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not flags.value & 0x8:  # FILE_PERSISTENT_ACLS
+        raise ValueError("Select a temporary directory on a Windows volume that supports ACLs.")
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    descriptor = ctypes.wintypes.LPVOID()
+    dacl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+    if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        dacl, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        path = temp / f"checkmarx-report-{secrets.token_hex(16)}"
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return path
+    finally:
+        kernel.LocalFree(descriptor)
+
+
 def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
     temp = Path(tempfile.gettempdir())
     if in_source(temp, source):
         raise ValueError(
             "Select a temporary directory outside the source checkout (TMPDIR or TEMP)."
         )
-    env = vendor_environment(source)
-    output = Path(tempfile.mkdtemp(prefix="checkmarx-report-", dir=temp)).resolve()
+    output = capture_directory(temp)
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
             if args.product == "one":
+                env = vendor_environment(source)
                 configured = env.get("CX_CONFIG_FILE_PATH")
                 profiles = {Path(configured)} if configured else one_default_profiles()
                 if any(not path.is_absolute() or in_source(path, source) for path in profiles):
@@ -198,16 +260,13 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                     "cx_result",
                 ]
             else:
-                # Start CxFlow without JVM agents or logging overrides from the build shell.
-                for name in (
-                    "JDK_ALTERNATE_VM",
-                    "JDK_JAVA_OPTIONS",
-                    "JAVA_TOOL_OPTIONS",
-                    "_JAVA_OPTIONS",
-                    "OPENJ9_JAVA_OPTIONS",
-                    "IBM_JAVA_OPTIONS",
-                ):
-                    env.pop(name, None)
+                # CxFlow uses the chosen profile for its server and Spring configuration.
+                env = {name: work for name in ("TEMP", "TMP", "TMPDIR")}
+                if os.name == "nt":
+                    env["SystemRoot"] = os.environ["SystemRoot"]
+                for name in ("CHECKMARX_USERNAME", "CHECKMARX_PASSWORD", "CHECKMARX_CLIENT_SECRET"):
+                    if name in os.environ:
+                        env[name] = os.environ[name]
                 team = args.team.rstrip("/\\")
                 report = Path(work, "checkmarx-results.xml")
                 command = [

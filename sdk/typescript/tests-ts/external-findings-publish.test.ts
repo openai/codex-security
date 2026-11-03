@@ -2012,6 +2012,47 @@ test("binds a projected Checkmarx source when a different provider retries", asy
   expect(f.posts[1]).toBe(f.posts[0]);
 });
 
+test("a projected Checkmarx row binds its unformatted report repository under Wiz", async () => {
+  const f = await fixture();
+  const source = f.state.repositoryUrl;
+  const report = { sourceRepositoryUrl: source, scanId: "123" };
+  const prepare = (id: string) =>
+    prepareNormalizedExternalPublication(
+      {
+        read: 1,
+        excluded: [],
+        report,
+        findings: [
+          {
+            source_finding_id: id,
+            evidence: { title: "SDK finding", severity: "low" },
+          },
+        ],
+      },
+      options,
+      f.deps,
+    );
+  const projected = "checkmarx-one:" + "a".repeat(64);
+  f.state.repositoryUrl = "https://github.com/example/other";
+  expect((await prepare("opaque-sdk-id")).preview.requests).toHaveLength(1);
+  await expect(prepare(projected)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  f.state.repositoryUrl = source;
+  f.state.loseResponse = true;
+  await expect((await prepare(projected)).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare(projected)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = source;
+  expect((await (await prepare(projected)).publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
     ...blackDuckBomRow(),
@@ -8035,13 +8076,15 @@ test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", as
     ...row,
     evidence: validateExternalEvidence({
       ...row.evidence,
-      source_data: {
-        format: "cxsast-xml",
-        sourceRepositoryUrl: originalRepository,
-      },
+      source_data: { format: "cxsast-xml" },
     }),
   };
-  const selection = { read: 1, excluded: [], findings: [finding] };
+  const selection = {
+    read: 1,
+    excluded: [],
+    findings: [finding],
+    report: { sourceRepositoryUrl: originalRepository, scanId: "123" },
+  };
   const source = { provider: options.provider, source_key: options.sourceKey };
   const repository = { id: options.repository, repo_connector_id: "github" };
   const checkpoint = {
@@ -8051,7 +8094,7 @@ test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", as
     contextVersion: "generation-a",
     source,
     repository,
-    sha256: "3c5deaa9e276e613a99de094126172ee45ce2195e363979bb48c323f6ece950a",
+    sha256: "8b0e177506af75c363184d3627fed74325acfcada7e3ee8e9d81041c5db5b2d1",
     uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
     jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
     fileId: "aifile_" + "a".repeat(32),
@@ -8059,7 +8102,7 @@ test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", as
   const directory = join(f.root, "state", "external-finding-publications");
   const path = join(
     directory,
-    "886667c1525fc10ea04e55192ed613b2cabe6ec5163bb12fb13ac8fffe4faef4.private-import.json",
+    "0b6db48e67edf53d39403c9fd1897c34a179edf5b6cce9bffabc9f52f8757f33.private-import.json",
   );
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
