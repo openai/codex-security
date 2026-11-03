@@ -10,6 +10,7 @@
 - skip macOS metadata files in knowledge-base folders ([#2270](https://github.com/openai/codex-security/pull/2270))
 - keep non-breaking hyphens in DOCX text ([#2272](https://github.com/openai/codex-security/pull/2272))
 - expose durable scan lifecycle telemetry ([#2274](https://github.com/openai/codex-security/pull/2274))
+- import saved Semgrep selections through the CLI ([#2166](https://github.com/openai/codex-security/pull/2166))
 
 <!-- release-section: highlights:end -->
 

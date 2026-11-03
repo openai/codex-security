@@ -228,7 +228,7 @@ export const validateSourceReports =
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
 // Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
-export function canonicalNumber(token: string): string {
+export function canonicalNumber(token: string, fixedDigits = 21): string {
   const [, sign = "", integer, fraction = "", exponent = "0"] =
     /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
   const significant = (integer + fraction).replace(/^0+/u, "");
@@ -238,7 +238,7 @@ export function canonicalNumber(token: string): string {
   const digits = significant.slice(0, end);
   const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
   // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
-  if (point > -6n && point <= 21n) {
+  if (point > -6n && point <= BigInt(fixedDigits)) {
     const split = Number(point);
     if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
     if (split >= digits.length) return sign + digits.padEnd(split, "0");

@@ -12,12 +12,22 @@ import { join } from "node:path";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 
 /** Real Git checkout and separate state, shared by normalized and vendor import tests. */
-export async function localFindingsFixture(options: { remote?: string } = {}) {
+type Checkout = {
+  remote?: string;
+  environment?: NodeJS.ProcessEnv;
+  isolatedGit?: boolean;
+};
+
+export async function localFindingsFixture(options: Checkout = {}) {
   const root = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-external-local-"),
   );
   const repository = join(root, "repository");
-  const env = sonarGitTestEnvironment();
+  const env = sonarGitTestEnvironment(options.environment);
+  if (options.isolatedGit) {
+    env.GIT_CONFIG_GLOBAL = join(root, "global.gitconfig");
+    await writeFile(env.GIT_CONFIG_GLOBAL, "");
+  }
   const dispose = () => rm(root, { recursive: true, force: true });
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", repository, ...args], { env, encoding: "utf8" });
@@ -54,7 +64,7 @@ export async function localFindingsFixture(options: { remote?: string } = {}) {
 export async function localReportFixture(
   filename: string,
   source: Omit<ExternalPublicationOptions, "repository">,
-  checkout: { remote?: string } = {},
+  checkout: Checkout = {},
 ) {
   const fixture = await localFindingsFixture(checkout);
   const file = join(fixture.root, filename);

@@ -12,7 +12,12 @@ import {
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { isBoxedPrimitive, isNativeError, isProxy } from "node:util/types";
+import {
+  isBoxedPrimitive,
+  isNativeError,
+  isProxy,
+  isStringObject,
+} from "node:util/types";
 import {
   privateImportClient,
   selectPrivateReport,
@@ -27,6 +32,7 @@ import {
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
+import { isSemgrepSelectionEvidence } from "./semgrep-platform-findings.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -64,6 +70,7 @@ import {
   cloneImportPreview,
   nativeErrorStackGetter,
   snapshotNormalizedFindings,
+  type ExternalFinding,
   type ExternalFindings,
   type ExternalPublicationInput,
 } from "./external-findings.js";
@@ -475,6 +482,48 @@ async function withImportLocks<T>(
   }
 }
 
+// A caller's serializer may deliberately omit an ID accessor. Inspect stored
+// IDs here and check the actual exported rows after normalization.
+function storedFindingId(finding: ExternalFinding): string {
+  const seen = new Set<object>();
+  for (
+    let owner: object | null = finding;
+    owner && !seen.has(owner);
+    owner = Object.getPrototypeOf(owner) as object | null
+  ) {
+    const property = Object.getOwnPropertyDescriptor(
+      owner,
+      "source_finding_id",
+    );
+    if (property) {
+      const id: unknown = property.value;
+      return typeof id === "string" || isStringObject(id)
+        ? String.prototype.valueOf.call(id)
+        : "";
+    }
+    seen.add(owner);
+  }
+  return "";
+}
+
+function rejectLocalSelections(input: ExternalFindings): void {
+  const rows = input?.findings;
+  if (!Array.isArray(rows)) return;
+  if (
+    rows.some(
+      (row) =>
+        row &&
+        isSemgrepSelectionEvidence({
+          source_finding_id: storedFindingId(row),
+          evidence: row.evidence,
+        }),
+    )
+  )
+    throw new CodexSecurityError(
+      "Semgrep Platform selections require a local import.",
+    );
+}
+
 export async function prepareExternalPublication(
   path: string,
   options: ExternalPublicationOptions,
@@ -483,6 +532,7 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
+  rejectLocalSelections(parsed.findings);
   return preparePublicationInput(
     parsed.publication ?? normalizedPublicationInput(parsed.findings),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
@@ -498,6 +548,7 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
+  rejectLocalSelections(input);
   const settings = snapshotImportOptions(options);
   return preparePublicationInput(
     normalizedPublicationInput(input),
@@ -759,6 +810,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
+  if (original) rejectLocalSelections(original.parsed);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -771,6 +823,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
+  rejectLocalSelections(current);
   const identity = publicationIdentity(current);
   return {
     current,
@@ -1117,6 +1170,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalSelections({ ...parsed, findings: saved });
     return content;
   }
 
@@ -1128,7 +1182,8 @@ async function preparePublicationInput(
   ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
-    const savedWire = wireJson(submissionFindings(content.requests));
+    const saved = submissionFindings(content.requests);
+    const savedWire = wireJson(saved);
     const wireDigest = hash("sha256", savedWire);
     if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
@@ -1150,6 +1205,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
+    rejectLocalSelections({ ...parsed, findings: saved });
     content.legacyApproval = true;
     content.inputProjection = {
       identityFormat: 2,
