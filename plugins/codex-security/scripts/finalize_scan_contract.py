@@ -26,8 +26,16 @@ from urllib.parse import quote, urlsplit
 # Keep sibling helpers importable when Python starts in isolated mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
+import servicenow_avit
 import threat_model_projection
 from review_state import checkpoint_review_state, review_state, review_summary
+from scan_contract_fields import (
+    ContractError,
+    _require_dict,
+    _require_list,
+    _require_str,
+    _validate_finding_evidence,
+)
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -78,6 +86,7 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
@@ -92,10 +101,6 @@ WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
     r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
     re.IGNORECASE,
 )
-
-
-class ContractError(ValueError):
-    """Raised when a completed scan does not satisfy the additive contract."""
 
 
 class ScanLocalIOError(ContractError):
@@ -395,27 +400,6 @@ def _require_safe_json_string(value: str, context: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
-
-
-def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
-    value = payload.get(key)
-    if not isinstance(value, dict):
-        raise ContractError(f"{context}.{key}: expected an object")
-    return value
-
-
-def _require_list(payload: dict[str, Any], key: str, context: str) -> list[Any]:
-    value = payload.get(key)
-    if not isinstance(value, list):
-        raise ContractError(f"{context}.{key}: expected an array")
-    return value
-
-
-def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ContractError(f"{context}.{key}: expected a non-empty string")
-    return value
 
 
 def _require_safe_relative_path(value: object, context: str, *, allow_dot: bool = False) -> str:
@@ -1840,6 +1824,18 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     _require_safe_json_value(coverage, "coverage.json")
 
 
+def _require_unique_artifact_path(artifact: Any, context: str, collision_keys: set[str]) -> str:
+    if not isinstance(artifact, dict):
+        raise ContractError(f"{context}: expected an object")
+    value = _require_str(artifact, "path", context)
+    path = _require_portable_relative_path(value, f"{context}.path")
+    collision_key = path.lower()
+    if collision_key in collision_keys:
+        raise ContractError(f"{context}.path: duplicate artifact path")
+    collision_keys.add(collision_key)
+    return path
+
+
 def _validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("documentType") != "codex-security.scan-manifest":
         raise ContractError("manifest.documentType: expected codex-security.scan-manifest")
@@ -1871,16 +1867,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
-        if not isinstance(artifact, dict):
-            raise ContractError(f"{context}: expected an object")
-        path = _require_portable_relative_path(
-            _require_str(artifact, "path", context), f"{context}.path"
-        )
-        collision_key = path.lower()
-        if collision_key in artifact_collision_keys:
-            raise ContractError(f"{context}.path: duplicate artifact path")
+        path = _require_unique_artifact_path(artifact, context, artifact_collision_keys)
         artifact_paths.add(path)
-        artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
     for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
@@ -2147,37 +2135,6 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
-def _validate_finding_evidence(
-    finding: dict[str, Any], index: int = 0, *, source_only: bool = False
-) -> None:
-    context = f"findings.findings[{index}]"
-    if not _require_list(finding, "codeEvidence", context):
-        raise ContractError(f"{context}.codeEvidence: include the source snippets used as proof")
-    root_cause = finding.get("rootCause")
-    if isinstance(root_cause, dict):
-        _require_str(root_cause, "summary", f"{context}.rootCause")
-    else:
-        _require_str(finding, "rootCause", context)
-    attack_path = _require_dict(finding, "attackPath", context)
-    dataflow = attack_path.get("dataflow")
-    if isinstance(dataflow, dict):
-        if not dataflow.get("summary"):
-            _require_str(dataflow, "source", f"{context}.attackPath.dataflow")
-            _require_str(dataflow, "sink", f"{context}.attackPath.dataflow")
-    else:
-        _require_str(attack_path, "dataflow", f"{context}.attackPath")
-    if source_only:
-        return
-    validation = _require_dict(finding, "validation", context)
-    _require_str(validation, "method", f"{context}.validation")
-    if not validation.get("result"):
-        _require_str(validation, "summary", f"{context}.validation")
-    if not any(validation.get(key) for key in ("evidence", "evidenceRefs")):
-        raise ContractError(
-            f"{context}.validation: include observed evidence or evidenceRefs to the source proof"
-        )
-
-
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
     for refs_field in ("evidenceRefs", "evidence_refs"):
         refs = section.get(refs_field)
@@ -2230,17 +2187,9 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
             compatible_legacy_evidence = []
-            for evidence in legacy_evidence:
-                if not isinstance(evidence, dict):
-                    continue
+            for evidence in report_projection.code_evidence_rows(legacy_evidence):
                 evidence_id = evidence.get("id")
-                evidence_code = evidence.get("code")
-                if (
-                    not isinstance(evidence_id, str)
-                    or not evidence_id.strip()
-                    or not isinstance(evidence_code, str)
-                    or not evidence_code.strip()
-                ):
+                if not isinstance(evidence_id, str) or not evidence_id.strip():
                     continue
                 if evidence_id in evidence_ids:
                     continue
@@ -2549,23 +2498,17 @@ def _finding_evidence_strength(finding: dict[str, Any]) -> int:
         section = finding.get(section_name)
         if not isinstance(section, dict):
             continue
-        for evidence_name in ("codeEvidence", "code_evidence"):
-            embedded = section.get(evidence_name)
-            if not isinstance(embedded, list):
+        for item in report_projection.embedded_code_evidence(section):
+            code = item["code"]
+            if code in seen_codes:
                 continue
-            for item in embedded:
-                if not isinstance(item, dict):
+            evidence_id = item.get("id")
+            if isinstance(evidence_id, str) and evidence_id.strip():
+                if evidence_id in seen_ids:
                     continue
-                code = item.get("code")
-                if not isinstance(code, str) or not code.strip() or code in seen_codes:
-                    continue
-                evidence_id = item.get("id")
-                if isinstance(evidence_id, str) and evidence_id.strip():
-                    if evidence_id in seen_ids:
-                        continue
-                    seen_ids.add(evidence_id)
-                seen_codes.add(code)
-                strength += 1
+                seen_ids.add(evidence_id)
+            seen_codes.add(code)
+            strength += 1
         code = section.get("code")
         if isinstance(code, str) and code.strip() and code not in seen_codes:
             seen_codes.add(code)
@@ -2805,15 +2748,7 @@ def _validate_existing_seal(
     artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
-        if not isinstance(artifact, dict):
-            raise ContractError(f"{context}: expected an object")
-        path = _require_portable_relative_path(
-            _require_str(artifact, "path", context), f"{context}.path"
-        )
-        collision_key = path.lower()
-        if collision_key in artifact_collision_keys:
-            raise ContractError(f"{context}.path: duplicate artifact path")
-        artifact_collision_keys.add(collision_key)
+        path = _require_unique_artifact_path(artifact, context, artifact_collision_keys)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (
@@ -3008,11 +2943,21 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     return output.getvalue().encode("utf-8")
 
 
+def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
+    attack_path = dict(finding.get("attackPath") or {})
+    _normalize_legacy_string_list_fields(attack_path, ("steps",))
+    steps = "\n".join(attack_path.get("steps", []))
+    return servicenow_avit.finding_fields(
+        finding, _sarif_primary_location(finding), csv_cell(steps)
+    )
+
+
 def build_findings_export(
     scan_dir: Path,
     export_format: str,
     source_root: Path | None = None,
     schema_dir: Path | None = None,
+    avit_template: Path | None = None,
 ) -> bytes:
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -3025,6 +2970,13 @@ def build_findings_export(
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "servicenow-avit":
+        if avit_template is None:
+            raise ContractError("--export-format servicenow-avit requires --avit-template")
+        try:
+            return servicenow_avit.render(avit_template, map(_avit_fields, findings["findings"]))
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
     return build_csv_projection(findings, coverage)
 
 
@@ -3442,6 +3394,7 @@ def main() -> int:
         "--export-artifact", choices=("findings", "threat-model"), default="findings"
     )
     parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
+    parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
     parser.add_argument("--export-metadata", action="store_true")
     parser.add_argument("--describe-threat-model", action="store_true")
@@ -3449,6 +3402,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         args.scan_dir = args.scan_dir.resolve()
+        if args.avit_template is not None:
+            if args.export_format != "servicenow-avit":
+                parser.error(
+                    "--avit-template is only supported with --export-format servicenow-avit"
+                )
+            if (
+                args.export_output
+                and args.export_output.exists()
+                and args.avit_template.exists()
+                and args.export_output.samefile(args.avit_template)
+            ):
+                parser.error("AVIT export output cannot overwrite the reusable template")
         if args.describe_threat_model:
             sys.stdout.buffer.write(
                 _json_bytes(describe_threat_model(args.scan_dir, args.schema_dir))
@@ -3483,7 +3448,11 @@ def main() -> int:
                 description, contents = saved
             else:
                 contents = build_findings_export(
-                    args.scan_dir, args.export_format, args.source_root, args.schema_dir
+                    args.scan_dir,
+                    args.export_format,
+                    args.source_root,
+                    args.schema_dir,
+                    avit_template=args.avit_template,
                 )
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)

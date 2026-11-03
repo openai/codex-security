@@ -1,5 +1,4 @@
 import { promises as fs } from "node:fs";
-import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
@@ -37,7 +36,7 @@ import type {
 export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
-  result: ScanDraftInput;
+  needsEvidenceRepair?: boolean;
   completionSequence: number;
   attempt?: number;
 }
@@ -133,6 +132,7 @@ export class DeepScanWorkerRunner {
         scope: run.scope,
         includePaths: run.includePaths,
         userContext: run.userContext,
+        severityRubric: run.severityRubric,
         workerLabel,
         subagents: run.config.subagents,
       },
@@ -148,7 +148,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryResult: ScanDraftInput | undefined;
+    let validated = false;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -158,12 +158,13 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
+        await validateDiscoveryArtifacts(
           artifacts,
           resultPath,
           run.scanId,
           run,
         );
+        validated = true;
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -178,7 +179,7 @@ export class DeepScanWorkerRunner {
         outcome.threadId,
       );
     }
-    if (!discoveryResult) {
+    if (!validated) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -227,7 +228,6 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
-        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
         attempt: persisted.attempt,
       },
@@ -253,6 +253,7 @@ export class DeepScanWorkerRunner {
     const basePrompt = renderDedupPrompt(
       reducerLabel,
       workerIds,
+      run.severityRubric,
       request.repairEvidence
         ? {
             targetPath: run.targetPath,
@@ -412,6 +413,10 @@ export class DeepScanWorkerRunner {
         attempt,
       });
       try {
+        const resumePrompt = resumableThreadId
+          ? (continuationPrompt ??
+            transientExecutionContinuation(input.kind, attempt))
+          : undefined;
         const result = await this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
@@ -425,10 +430,10 @@ export class DeepScanWorkerRunner {
           signal,
           onNonRetryableError: this.options.onNonRetryableError,
           resumeThreadId: resumableThreadId,
-          continuationPrompt: resumableThreadId
-            ? (continuationPrompt ??
-              transientExecutionContinuation(input.kind, attempt))
-            : undefined,
+          continuationPrompt:
+            resumePrompt && run.severityRubric
+              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
+              : resumePrompt,
           artifactContext: input.artifactContext,
           onThreadStarted: async (threadId) => {
             activeThreadId = threadId;

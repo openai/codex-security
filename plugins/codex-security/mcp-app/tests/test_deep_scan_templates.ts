@@ -80,10 +80,21 @@ const evidenceRepair = {
   targetPath: "/fixture/repository",
   includePaths: ["src/api", "background jobs/worker.py"],
 };
-const repair = renderDedupPrompt("dedup-0003", [], evidenceRepair);
+const severityRubric = {
+  markdown: "Grade from the demonstrated impact.",
+  revision: 1,
+  sha256: "a".repeat(64),
+};
+const repair = renderDedupPrompt(
+  "dedup-0003",
+  [],
+  severityRubric,
+  evidenceRepair,
+);
 assert.deepEqual(firstJsonBlock(repair), {
   reducerLabel: "dedup-0003",
   claimedWorkerIds: [],
+  severityRubric,
   evidenceRepair,
 });
 assert.match(dedup, /Do not inspect repository code/);

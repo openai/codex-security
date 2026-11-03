@@ -9,7 +9,10 @@ import type { Fixture, SourceCase } from "./fixtures.mts";
 export type SourceLocation = FindingLocation;
 type Finding = Pick<ScanFinding, "title" | "locations"> & {
   taxonomy: Pick<ScanFinding["taxonomy"], "cwe">;
-  codeEvidence?: Pick<FindingCodeEvidence, "path" | "startLine" | "code">[];
+  codeEvidence?: Pick<
+    FindingCodeEvidence,
+    "path" | "startLine" | "endLine" | "code" | "role"
+  >[];
 };
 
 export interface Result {
@@ -23,6 +26,11 @@ interface EvidenceError {
   locationIndex?: number;
   caseId?: string;
   reason: string;
+}
+
+interface EvidenceCitation {
+  declared: SourceLocation;
+  verified?: SourceLocation;
 }
 
 export type GradeReport = ReturnType<typeof gradeResult>;
@@ -43,7 +51,7 @@ function validRange(location: SourceLocation, fixture: Fixture) {
 function overlaps(location: SourceLocation, expected: SourceCase) {
   return (
     posix.normalize(location.path) === expected.path &&
-    location.startLine <= expected.line &&
+    location.startLine <= (expected.endLine ?? expected.line) &&
     (location.endLine ?? location.startLine) >= expected.line
   );
 }
@@ -52,23 +60,61 @@ function matches(
   finding: Finding,
   expected: SourceCase,
   fixture: Fixture,
+  citations: EvidenceCitation[],
   requirePrimaryRole: boolean,
 ) {
-  return (
-    finding.taxonomy.cwe.some((cwe) =>
+  if (
+    !finding.taxonomy.cwe.some((cwe) =>
       expected.cwes.includes(String(cwe).trim().toUpperCase()),
-    ) &&
-    finding.locations.some(
-      (location) =>
-        (requirePrimaryRole
-          ? /^(root_control|sink)$/u.test(location.role ?? "")
-          : !/^(supporting|support|context|consumer|expected_control)$/u.test(
-              location.role ?? "",
-            )) &&
-        validRange(location, fixture) &&
-        overlaps(location, expected),
     )
-  );
+  )
+    return false;
+
+  return finding.locations.some((location) => {
+    if (!validRange(location, fixture) || !overlaps(location, expected))
+      return false;
+    if (location.role) {
+      if (!requirePrimaryRole) {
+        return !/^(supporting|support|context|consumer|expected_control)$/u.test(
+          location.role,
+        );
+      }
+      if (location.role === "root_control" || location.role === "sink")
+        return true;
+      if (
+        location.role !== "entrypoint" &&
+        location.role !== "entrypoint/wrapper"
+      )
+        return false;
+    }
+
+    // The evidence must identify the role on a gold line the location cites.
+    const cited = {
+      ...expected,
+      line: Math.max(expected.line, location.startLine),
+      endLine: Math.min(
+        expected.endLine ?? expected.line,
+        location.endLine ?? location.startLine,
+      ),
+    };
+    const verified = citations.filter(
+      ({ verified }) => verified && overlaps(verified, cited),
+    );
+    if (requirePrimaryRole) {
+      return verified.some(
+        ({ declared: { role } }) =>
+          role === "entrypoint" || role === "root_control" || role === "sink",
+      );
+    }
+    const comparison = verified.some(
+      ({ declared }) => declared.role === "expected_control",
+    );
+    const competing = citations.some(
+      ({ declared }) =>
+        declared.role !== "expected_control" && overlaps(declared, cited),
+    );
+    return !comparison || competing;
+  });
 }
 
 function inspectEvidence(
@@ -78,6 +124,7 @@ function inspectEvidence(
 ) {
   const entries = finding.codeEvidence ?? [];
   const ranges: SourceLocation[] = [];
+  const citations: EvidenceCitation[] = [];
   const errors: EvidenceError[] = [];
   if (!entries.length) {
     errors.push({ findingIndex, reason: "missing code evidence" });
@@ -88,6 +135,10 @@ function inspectEvidence(
       ...entry,
       endLine: entry.startLine + code.split("\n").length - 1,
     };
+    const citation: EvidenceCitation = {
+      declared: { ...entry, endLine: entry.endLine ?? range.endLine },
+    };
+    citations.push(citation);
     const source = fixture.files[posix.normalize(entry.path)];
     if (
       !code.trim() ||
@@ -103,11 +154,21 @@ function inspectEvidence(
         evidenceIndex,
         reason: "code does not match source at the cited lines",
       });
+    } else if (!validRange(entry, fixture)) {
+      errors.push({
+        findingIndex,
+        evidenceIndex,
+        reason: "code evidence range does not exist in the source",
+      });
     } else {
       ranges.push(range);
+      citation.verified = {
+        ...range,
+        endLine: Math.min(range.endLine, entry.endLine ?? range.endLine),
+      };
     }
   }
-  return { ranges, errors };
+  return { ranges, citations, errors };
 }
 
 export function gradeResult(result: Result, fixture: Fixture) {
@@ -131,7 +192,7 @@ export function gradeResult(result: Result, fixture: Fixture) {
     }
     evidenceErrors.push(...evidence.errors);
     const candidates = fixture.positives.filter((expected) =>
-      matches(finding, expected, fixture, true),
+      matches(finding, expected, fixture, evidence.citations, true),
     );
     const matched = candidates.filter((expected) => {
       const grounded = evidence.ranges.some((range) =>
@@ -150,7 +211,7 @@ export function gradeResult(result: Result, fixture: Fixture) {
       matchCounts.set(expected.id, matchCounts.get(expected.id)! + 1);
     }
     const controls = fixture.controls.filter((expected) =>
-      matches(finding, expected, fixture, false),
+      matches(finding, expected, fixture, evidence.citations, false),
     );
     if (controls.length) {
       safeControlDetails.push({

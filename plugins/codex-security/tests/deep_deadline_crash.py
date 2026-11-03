@@ -3,6 +3,7 @@
 import os
 import runpy
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,23 @@ COMMIT_EXIT = 23
 class CrashBeforeCommit(sqlite3.Connection):
     def commit(self):
         os._exit(COMMIT_EXIT)
+
+
+def interrupt_finish_before_commit(database, scan, hash_seed):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            __file__,
+            str(database),
+            scan.scan_id,
+            str(scan.scan_dir),
+        ],
+        env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == COMMIT_EXIT, result.stdout + result.stderr
 
 
 def finish_until_commit(deep_scan, database, scan_id, scan_dir):

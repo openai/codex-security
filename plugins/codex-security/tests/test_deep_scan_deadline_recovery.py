@@ -5,13 +5,11 @@ import hashlib
 import json
 import os
 import sqlite3
-import traceback
 
 import pytest
-from deep_deadline_crash import COMMIT_EXIT, finish_until_commit
+from deep_deadline_crash import interrupt_finish_before_commit
 from test_deep_scan_stop_conditions import (
     canceled_discovery_output,
-    complete,
     finish,
 )
 from test_deep_scan_stop_conditions import (
@@ -23,7 +21,13 @@ from test_deep_scan_stop_conditions import (
 from test_deep_scan_stop_conditions import (
     saturated_scan as saturated_scan,
 )
-from workbench_test_support import read_review_state, saved_draft, write_checkpoint
+from workbench_test_support import (
+    read_review_state,
+    saved_draft,
+    select_checkpoint,
+    write_checkpoint,
+    write_result_draft,
+)
 
 
 def worker_finding(scan, anchor):
@@ -62,7 +66,7 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     original_checkpoint = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     assert completed["progress"]["status"] == "complete"
     assert (
@@ -71,6 +75,14 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     )
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert task in coverage[task_state]
+    assert coverage["surfaces"] == []
+    assert (
+        workbench_db.execute(
+            "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?",
+            (scan.scan_id,),
+        ).fetchone()[0]
+        == 0
+    )
     if task_state == "resolvedDeferred":
         assert coverage[task_state] == [task]
     assert any(
@@ -92,16 +104,33 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     assert checkpoint.read_bytes() == original_checkpoint
 
 
-def interrupt_finish_before_commit(workbench_api, database, scan):
-    child = os.fork()
-    if child == 0:
-        try:
-            finish_until_commit(workbench_api["deep_scan"], database, scan.scan_id, scan.scan_dir)
-        except BaseException:
-            traceback.print_exc()
-        os._exit(1)
-    _, status = os.waitpid(child, 0)
-    assert os.waitstatus_to_exitcode(status) == COMMIT_EXIT
+@pytest.fixture
+def finish_after_crashes(workbench_api, workbench_db, deadline_scan, tmp_path):
+    def run():
+        scan = deadline_scan
+        database = tmp_path / "crash-recovery.db"
+        with sqlite3.connect(database) as connection:
+            workbench_db.backup(connection)
+
+        publications = []
+        for hash_seed in (1, 17, 83):
+            interrupt_finish_before_commit(database, scan, hash_seed)
+            publications.append(read_review_state(workbench_db, scan.scan_dir))
+            with sqlite3.connect(database) as connection:
+                status = connection.execute(
+                    "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+                ).fetchone()[0]
+                assert status == "running"
+        with sqlite3.connect(database) as connection:
+            connection.row_factory = sqlite3.Row
+            finish(workbench_api, connection, scan, terminal_reason="capped")
+            completed = scan.complete(connection)
+        coverage = read_review_state(workbench_db, scan.scan_dir)
+        assert completed["progress"]["status"] == "complete"
+        assert all(publication == coverage for publication in publications)
+        return completed, coverage
+
+    return run
 
 
 @pytest.mark.parametrize("missing_field", ["remediation", "codeEvidence", "validation"])
@@ -138,7 +167,7 @@ def test_discarded_worker_finding_leaves_its_review_pending(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert canonical in coverage["surfaces"]
@@ -194,7 +223,7 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert sorted(
@@ -237,7 +266,7 @@ def test_unlinked_sparse_checkpoint_leaves_earlier_worker_surface_reported(
     original = [path.read_bytes() for path in (earlier, later)]
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert (
         next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)["disposition"]
@@ -292,7 +321,7 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert coverage["resolvedDeferred"] == [closure]
@@ -338,7 +367,7 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(
     originals = write_worker_revisions(scan, output, earlier, latest)
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     (finding,) = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
@@ -386,7 +415,7 @@ def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
     originals = write_worker_revisions(scan, output, earlier, latest)
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
@@ -424,7 +453,7 @@ def test_deadline_uses_the_last_authored_validation(
     originals = write_worker_revisions(scan, output, earlier, latest)
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    assert complete(workbench_api, workbench_db, scan)["progress"]["status"] == "complete"
+    assert scan.complete()["progress"]["status"] == "complete"
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
@@ -450,8 +479,8 @@ def test_terminal_worker_authority_requires_valid_findings(
             findings=[previous],
             deferred=[{"id": "review", "reason": "Review pending."}],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     sibling = worker_finding(scan, "valid-terminal-sibling")
     terminal_findings = [sibling]
     if invalid_terminal:
@@ -459,21 +488,20 @@ def test_terminal_worker_authority_requires_valid_findings(
         invalid.pop("remediation")
         terminal_findings.append(invalid)
     result = output / "result.json"
-    result.write_text(
-        json.dumps(
-            saved_draft(
-                scan.scan_id,
-                complete=True,
-                findings=terminal_findings,
-                closures=[{"id": "review", "reason": "Review completed."}],
-            )
-        )
+    write_result_draft(
+        result,
+        saved_draft(
+            scan.scan_id,
+            complete=True,
+            findings=terminal_findings,
+            closures=[{"id": "review", "reason": "Review completed."}],
+        ),
+        mtime_ns=200,
     )
-    os.utime(result, ns=(200, 200))
     original = {path: path.read_bytes() for path in (checkpoint, result)}
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["title"] == previous["title"] for row in findings) == invalid_terminal
@@ -490,10 +518,11 @@ def test_malformed_worker_finding_preserves_a_valid_sibling_outcome(
     worker_id, output = canceled_discovery_output(workbench_db, scan)
     earlier = worker_finding(scan, "rejected-candidate")
     earlier["provenance"]["candidateId"] = "candidate"
-    checkpoint = write_checkpoint(
-        output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
+    write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, findings=[earlier]),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     invalid = worker_finding(scan, "malformed-sibling")
     invalid.pop("remediation")
     outcome = {
@@ -503,14 +532,14 @@ def test_malformed_worker_finding_preserves_a_valid_sibling_outcome(
         "disposition": "rejected",
         "receiptRefs": [],
     }
-    result = output / "result.json"
-    result.write_text(
-        json.dumps(saved_draft(scan.scan_id, complete=True, findings=[invalid], surfaces=[outcome]))
+    write_result_draft(
+        output / "result.json",
+        saved_draft(scan.scan_id, complete=True, findings=[invalid], surfaces=[outcome]),
+        mtime_ns=200,
     )
-    os.utime(result, ns=(200, 200))
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert all(row["title"] != earlier["title"] for row in findings)
@@ -588,7 +617,7 @@ def test_worker_writeups_remain_bound_to_their_source_directory(
         originals[checkpoint] = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 3
@@ -610,9 +639,6 @@ def test_worker_writeups_remain_bound_to_their_source_directory(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     ("colliding_ids", "parent_closure", "reviewed", "worker_like_id"),
     [
@@ -678,7 +704,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
         ),
     )
     connection.close()
-    interrupt_finish_before_commit(workbench_api, database, scan)
+    interrupt_finish_before_commit(database, scan, 1)
     before = read_review_state(workbench_db, scan.scan_dir)
     findings_before = json.loads((scan.scan_dir / "findings.json").read_text())
     assert len([row for row in before["surfaces"] if row.get("workerId") == worker_id]) == len(
@@ -696,7 +722,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
             == "running"
         )
         finish(workbench_api, connection, scan, terminal_reason="capped")
-        complete(workbench_api, connection, scan)
+        scan.complete(connection)
 
     after = read_review_state(workbench_db, scan.scan_dir)
     findings_after = json.loads((scan.scan_dir / "findings.json").read_text())
@@ -709,9 +735,6 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     assert after == before
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize("revision", ["unchanged", "corrected", "authored-followup"])
 def test_deadline_followup_survives_publication_retries(
     workbench_api, workbench_db, deadline_scan, tmp_path, revision
@@ -737,8 +760,8 @@ def test_deadline_followup_survives_publication_retries(
         workbench_db.backup(connection)
 
     publications = []
-    for _ in range(2):
-        interrupt_finish_before_commit(workbench_api, database, scan)
+    for hash_seed in (1, 17):
+        interrupt_finish_before_commit(database, scan, hash_seed)
         publications.append(read_review_state(workbench_db, scan.scan_dir))
     assert publications[0] == publications[1]
     if revision == "corrected":
@@ -747,7 +770,7 @@ def test_deadline_followup_survives_publication_retries(
             output / "checkpoints",
             saved_draft(scan.scan_id, findings=[finding], surfaces=[surface]),
         )
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": latest.name}))
+        select_checkpoint(output, latest)
     elif revision == "authored-followup":
         write_checkpoint(
             output / "checkpoints",
@@ -756,7 +779,7 @@ def test_deadline_followup_survives_publication_retries(
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         finish(workbench_api, connection, scan, terminal_reason="capped")
-        assert complete(workbench_api, connection, scan)["progress"]["status"] == "complete"
+        assert scan.complete(connection)["progress"]["status"] == "complete"
     coverage = read_review_state(workbench_db, scan.scan_dir)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker]
     assert surfaces[0]["id"] == f"{worker}/entry"
@@ -778,13 +801,10 @@ def test_deadline_followup_survives_publication_retries(
     assert checkpoint.read_bytes() == original
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize("earlier_checkpoint_first", [False, True])
 @pytest.mark.parametrize("colliding_ids", [False, True])
 def test_deadline_rejection_history_is_stable_across_repeated_crashes(
-    workbench_api, workbench_db, deadline_scan, tmp_path, earlier_checkpoint_first, colliding_ids
+    workbench_db, deadline_scan, finish_after_crashes, earlier_checkpoint_first, colliding_ids
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan)
@@ -818,31 +838,10 @@ def test_deadline_rejection_history_is_stable_across_repeated_crashes(
     assert (old_checkpoint.name < checkpoint.name) == earlier_checkpoint_first
     os.utime(old_checkpoint, ns=(100, 100))
     os.utime(checkpoint, ns=(200, 200))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = select_checkpoint(output, checkpoint)
     (output / "result.json").unlink(missing_ok=True)
     originals = {path: path.read_bytes() for path in (old_checkpoint, checkpoint, head)}
-    database = tmp_path / "repeated-crash.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for _ in range(3):
-        interrupt_finish_before_commit(workbench_api, database, scan)
-        publications.append(read_review_state(workbench_db, scan.scan_dir))
-        with sqlite3.connect(database) as connection:
-            assert (
-                connection.execute(
-                    "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-                ).fetchone()[0]
-                == "running"
-            )
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        complete(workbench_api, connection, scan)
-    coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert all(publication == coverage for publication in publications)
+    _, coverage = finish_after_crashes()
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert {row["label"] for row in surfaces} == {row["label"] for row in outcomes}
     assert len(surfaces) == len({row["id"] for row in surfaces}) == len(outcomes)

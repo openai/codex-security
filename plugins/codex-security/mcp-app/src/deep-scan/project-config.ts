@@ -1,11 +1,11 @@
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, resolve } from "node:path";
-import Ajv from "ajv";
+import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
 import schema from "./project-config.schema.json";
 
-const validate = new Ajv({ allErrors: true }).compile(schema);
+let validate: ValidateFunction | undefined;
 const fields = {
   workers: "workers",
   subagents_per_worker: "subagents",
@@ -42,7 +42,7 @@ export async function readDeepScanProjectConfig(
   const text = await readFile(path, "utf8");
   let value: unknown;
   try {
-    if (extension === ".json") value = JSON.parse(text);
+    if (extension === ".json") value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     else {
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
@@ -54,6 +54,7 @@ export async function readDeepScanProjectConfig(
       { cause: error },
     );
   }
+  validate ??= new Ajv({ allErrors: true }).compile(schema);
   if (!validate(value)) {
     throw new Error(
       `Invalid project configuration at ${path}: ${validate.errors!.map((issue) => `${issue.instancePath || "configuration"}: ${issue.keyword === "additionalProperties" ? `Unknown key ${issue.params["additionalProperty"]}.` : issue.message}`).join("; ")}`,

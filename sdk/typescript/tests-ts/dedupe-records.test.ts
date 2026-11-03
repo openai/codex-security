@@ -16,7 +16,7 @@ import {
   type DeduplicateRecordsInput,
 } from "../src/deduplication/records.js";
 import type { DeduplicationReviewRequest } from "../src/deduplication/review.js";
-import { runRecordsProtocol } from "../src/deduplication/records-protocol.js";
+import { runHostRecordsProtocol } from "../src/host-records-protocol.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -121,6 +121,101 @@ function answer(review: DeduplicationReviewRequest): unknown {
         ),
       };
 }
+
+function importedRecord(id: string) {
+  const { finding } = record(id, "shared");
+  const { ruleId, taxonomy, identity, remediation, ...evidence } = finding;
+  return {
+    id,
+    kind: "imported" as const,
+    finding: {
+      ...evidence,
+      locations: [],
+      originalSource: { advisory: "example-advisory" },
+    },
+  };
+}
+
+test("a locationless import with no neighbors returns its original ID without review", async () => {
+  const imported = importedRecord("external");
+  const request: DeduplicateRecordsInput = {
+    version: 1,
+    observations: [imported],
+    candidateRelationships: [
+      { observationId: imported.id, candidateObservationIds: [] },
+    ],
+  };
+  const run = mock(async () => {
+    throw new Error("Unexpected review");
+  });
+  expect(
+    (await deduplicateRecords(request, { reviewRunner: { run } })).groups,
+  ).toEqual([
+    { representativeObservationId: imported.id, observationIds: [imported.id] },
+  ]);
+  expect(run).not.toHaveBeenCalled();
+  // The same evidence must still fail the default native contract.
+  await expect(
+    deduplicateRecords(
+      {
+        ...request,
+        observations: [
+          { id: imported.id, finding: imported.finding as unknown as Finding },
+        ],
+      },
+      { reviewRunner: { run } },
+    ),
+  ).rejects.toThrow("Finding schema");
+});
+
+test.each(["native", "imported"])(
+  "compares a locationless import with a neighbor of kind %s",
+  async (kind) => {
+    const anchor = importedRecord("external");
+    const neighbor =
+      kind === "native"
+        ? record("neighbor", "shared")
+        : importedRecord("neighbor");
+    const request: DeduplicateRecordsInput = {
+      version: 1,
+      observations: [anchor, neighbor],
+      candidateRelationships: [
+        { observationId: anchor.id, candidateObservationIds: [neighbor.id] },
+      ],
+    };
+    let pair = false;
+    const result = await deduplicateRecords(request, {
+      reviewRunner: {
+        async run(review) {
+          if (review.stage === "pair-review") {
+            pair = true;
+            const findings = assigned(review);
+            const validate = new Ajv2020({ strict: false }).compile(
+              review.findingSchema as object,
+            );
+            expect(findings.map((finding) => validate(finding))).toEqual([
+              true,
+              true,
+            ]);
+            expect(validate({ ...findings[1], locations: [] })).toBe(
+              kind === "imported",
+            );
+            expect(findings[0]?.["originalSource"]).toEqual(
+              anchor.finding.originalSource,
+            );
+          }
+          return answer(review);
+        },
+      },
+    });
+    expect(pair).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.groups[0]?.observationIds.sort()).toEqual([
+      "external",
+      "neighbor",
+    ]);
+  },
+);
 
 test("records groups original observations and retrieved neighbors with unique representatives", async () => {
   const original = input();
@@ -420,7 +515,8 @@ function fakeHost(
       messages.push(message);
       if (
         message.method === "review.run" ||
-        message.method === "review.continue"
+        message.method === "review.continue" ||
+        message.method === "review.release"
       )
         queueMicrotask(() => onReview(message, send, stream));
       callback();
@@ -429,6 +525,125 @@ function fakeHost(
   return { stream, output, messages, send };
 }
 const run = { jsonrpc: "2.0", id: "run-1", method: "run", params: input() };
+
+test.each(["corrected", "still-invalid", "release-failed"])(
+  "validates pending screening decisions in the same review (%s)",
+  async (outcome) => {
+    const observations = [record("a"), record("b")];
+    const params = {
+      version: 1,
+      observations,
+      candidateRelationships: [
+        { observationId: "a", candidateObservationIds: ["b"] },
+        { observationId: "b", candidateObservationIds: ["a"] },
+      ],
+    };
+    const wrongSlot = {
+      decisions: { "pair-2": { decision: "DISTINCT", rationale: "Separate." } },
+    };
+    const originals: Message[] = [];
+    const host = fakeHost((message, send) => {
+      const reply = (result: unknown) =>
+        send({ jsonrpc: "2.0", id: message.id, result });
+      if (message.method === "review.run") {
+        originals.push(message);
+        expect(message.params).toHaveProperty(
+          "supportsSubmissionValidation",
+          true,
+        );
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          reviewPending: true,
+          result: originals.length === 1 ? answer(message.params) : wrongSlot,
+        });
+      } else if (message.method === "review.release") {
+        expect(message.params.requestId).toBe(originals[0]!.params.requestId);
+        reply({
+          status: outcome === "release-failed" ? "unknown" : "released",
+        });
+      } else {
+        expect(message.params.requestId).toBe(originals[1]!.params.requestId);
+        expect(message.id).not.toBe(message.params.requestId);
+        expect(message.params.prompt).toContain(
+          "assigned screening pair slots: pair-1.",
+        );
+        reply(
+          outcome === "corrected" ? answer(originals[1]!.params) : wrongSlot,
+        );
+      }
+    });
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
+    host.send({ ...run, params });
+    expect(await done).toBe(outcome === "corrected" ? 0 : 1);
+    expect(originals).toHaveLength(outcome === "release-failed" ? 1 : 2);
+    expect(
+      host.messages.filter((m) => m.method === "review.continue"),
+    ).toHaveLength(outcome === "release-failed" ? 0 : 1);
+    const result = host.messages.at(-1)!.result;
+    if (outcome === "corrected") {
+      expect(result).toMatchObject({
+        status: "completed",
+        groups: [{ observationIds: ["a"] }, { observationIds: ["b"] }],
+        unresolved: [],
+      });
+    } else {
+      expect(result).toMatchObject({
+        status: "unresolved",
+        groups: [],
+        unresolved: [{ observationId: "a" }, { observationId: "b" }],
+      });
+    }
+    host.stream.destroy();
+  },
+);
+
+test("a review that did not advertise pending submissions rejects the envelope flag", async () => {
+  const host = fakeHost((message, send) => {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      reviewPending: true,
+      result: { verdict: "example" },
+    });
+  });
+  const done = runHostRecordsProtocol("validate", host.stream, host.output);
+  host.send({
+    ...run,
+    params: {
+      version: 1,
+      findings: [{ id: "example", finding: { title: "Example" } }],
+      context: "Synthetic context.",
+      outputSchema: { type: "object" },
+    },
+  });
+  expect(await done).toBe(2);
+  expect(host.messages.map((m) => m.method)).toEqual(["review.run", undefined]);
+  expect(host.messages.at(-1)?.error?.code).toBe(-32600);
+  host.stream.destroy();
+});
+
+test("raw tool arguments cannot reopen a legacy host's finished review", async () => {
+  const host = fakeHost((message, send) => {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        status: "pending_submission",
+        submission: answer(message.params),
+      },
+    });
+  });
+  const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
+  host.send(run);
+  expect(await done).toBe(1);
+  expect(host.messages.map((m) => m.method)).toEqual(["review.run", undefined]);
+  expect(host.messages.at(-1)?.result).toMatchObject({
+    status: "unresolved",
+    groups: [],
+  });
+  host.stream.destroy();
+});
 
 test.each([false, true])(
   "a confirmed missing submission gets one correction (missing again: %s)",
@@ -449,7 +664,7 @@ test.each([false, true])(
           : answer(original.params);
       send({ jsonrpc: "2.0", id: message.id, result });
     });
-    const done = runRecordsProtocol(host.stream, host.output);
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
     host.send(run);
     expect(await done).toBe(missingAgain ? 1 : 0);
     const originals = host.messages.filter((m) => m.method === "review.run");
@@ -561,7 +776,7 @@ test.each([
         },
       });
   });
-  const done = runRecordsProtocol(host.stream, host.output);
+  const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
   host.send(run);
   expect(await done).toBe(scenario === "host-error" ? 1 : 2);
   expect(
@@ -687,7 +902,11 @@ test("real CLI pipes exit after a fake-host run without local Codex or state wri
 
 test("disconnect before run and a broken output pipe terminate cleanly", async () => {
   const host = fakeHost(() => {});
-  const disconnected = runRecordsProtocol(host.stream, host.output);
+  const disconnected = runHostRecordsProtocol(
+    "dedupe",
+    host.stream,
+    host.output,
+  );
   host.stream.end();
   expect(await disconnected).toBe(2);
   expect(host.messages).toMatchObject([{ id: null, error: { code: -32000 } }]);
@@ -697,7 +916,7 @@ test("disconnect before run and a broken output pipe terminate cleanly", async (
       callback(new Error("Broken pipe"));
     },
   });
-  const failed = runRecordsProtocol(input, output);
+  const failed = runHostRecordsProtocol("dedupe", input, output);
   input.write(`${JSON.stringify(run)}\n`);
   expect(await failed).toBe(2);
   input.destroy();
@@ -719,7 +938,7 @@ test("a disconnect while flushing the final result does not send a second respon
       setImmediate(callback);
     },
   });
-  const done = runRecordsProtocol(inputStream, output);
+  const done = runHostRecordsProtocol("dedupe", inputStream, output);
   inputStream.write(`${JSON.stringify({ ...run, params: emptyRecords })}\n`);
   expect(await done).toBe(0);
   expect(messages).toMatchObject([
@@ -745,18 +964,16 @@ for (const trigger of ["signal", "notification"]) {
       });
       const writes = spyOn(output, "write");
       let pendingReview: Promise<unknown> | undefined;
-      const dedupe = records.deduplicateRecords;
+      const dedupe = records.runRecords;
       const operation =
         stage === "review request"
-          ? spyOn(records, "deduplicateRecords").mockImplementationOnce(
-              (input, options) =>
-                dedupe(input, {
-                  ...options,
-                  reviewRunner: {
-                    run: (...args) =>
-                      (pendingReview = options.reviewRunner.run(...args)),
-                  },
-                }),
+          ? spyOn(records, "runRecords").mockImplementationOnce(
+              (input, review, signal) =>
+                dedupe(
+                  input,
+                  (...args) => (pendingReview = review(...args)),
+                  signal,
+                ),
             )
           : undefined;
       const controller = new AbortController();
@@ -768,10 +985,12 @@ for (const trigger of ["signal", "notification"]) {
         output.destroy();
         inputStream.destroy();
       });
-      const done = runRecordsProtocol(inputStream, output, controller.signal);
+      const done = runHostRecordsProtocol("dedupe", inputStream, output, {
+        signal: controller.signal,
+      });
       inputStream.write(`${JSON.stringify({ ...run, params })}\n`);
       const flush = await writing.promise;
-      const signal = operation?.mock.calls[0]?.[1].signal;
+      const signal = operation?.mock.calls[0]?.[2];
       const recordsResult = operation?.mock.results[0]?.value;
       if (trigger === "signal") controller.abort("SIGTERM");
       else
