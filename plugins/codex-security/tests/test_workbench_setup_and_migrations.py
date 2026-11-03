@@ -101,6 +101,8 @@ EXPECTED_MIGRATIONS = [
     (56, "recover unfinished legacy headless deep scans"),
     (57, "freeze stopped scan checkpoint selections"),
     (58, "record the final Deep Scan reviewed surface count"),
+    (59, "retain the launching Deep Scan service tier"),
+    (60, "record classification rubric provenance"),
 ]
 
 

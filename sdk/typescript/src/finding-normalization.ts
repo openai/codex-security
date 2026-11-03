@@ -1,17 +1,40 @@
+/* Generated from plugin finding-normalization.ts. Run `pnpm generate:models`. */
 import { isRecord as isObject } from "./record.js";
+import { hasRequiredFindingText } from "./contract-values.js";
 
 type JsonObject = Record<string, unknown>;
 
 /** Compatibility for historical report reads; never use this to admit new writes. */
-export function normalizePersistedFindingDetails(finding: JsonObject): void {
+export function normalizePersistedFindingDetails(
+  finding: JsonObject,
+  profile: "sdk" | "tracking" = "sdk",
+): void {
+  const evidenceIds = new Set<string>();
+  if (profile === "tracking" && Array.isArray(finding["codeEvidence"])) {
+    for (const evidence of finding["codeEvidence"]) {
+      if (isObject(evidence) && isNonEmptyString(evidence["id"]))
+        evidenceIds.add(evidence["id"]);
+    }
+  }
   if (Array.isArray(finding["code_evidence"])) {
-    finding["code_evidence"] = finding["code_evidence"].filter(
-      (evidence) =>
-        isObject(evidence) &&
-        isNonEmptyString(evidence["id"]) &&
-        isNonEmptyString(evidence["code"]),
-    );
-  } else if (finding["code_evidence"] !== null) {
+    finding["code_evidence"] = finding["code_evidence"].filter((evidence) => {
+      if (
+        !isObject(evidence) ||
+        !isNonEmptyString(evidence["id"]) ||
+        !isNonEmptyString(evidence["code"])
+      )
+        return false;
+      if (profile === "sdk") return true;
+      if (
+        !hasRequiredFindingText(evidence["id"]) ||
+        !hasRequiredFindingText(evidence["code"]) ||
+        evidenceIds.has(evidence["id"])
+      )
+        return false;
+      evidenceIds.add(evidence["id"]);
+      return true;
+    });
+  } else if (profile === "tracking" || finding["code_evidence"] !== null) {
     delete finding["code_evidence"];
   }
 
@@ -55,7 +78,11 @@ export function normalizePersistedFindingDetails(finding: JsonObject): void {
       "code",
       "language",
     ]);
-  } else if (legacyRootCause !== null && typeof legacyRootCause !== "string") {
+  } else if (
+    legacyRootCause !== null &&
+    (typeof legacyRootCause !== "string" ||
+      (profile === "tracking" && legacyRootCause === ""))
+  ) {
     delete finding["root_cause"];
   }
 
@@ -65,6 +92,7 @@ export function normalizePersistedFindingDetails(finding: JsonObject): void {
       validation,
       ["method", "status", "summary", "disposition", "result"].filter(
         (field) =>
+          profile === "tracking" ||
           !["status", "disposition", "result"].includes(field) ||
           validation[field] !== null,
       ),
@@ -113,11 +141,26 @@ export function normalizePersistedFindingDetails(finding: JsonObject): void {
   ): void {
     for (const field of fields) {
       const value = section[field];
-      if (isNonEmptyString(value)) {
-        if (field !== "evidence") section[field] = [value];
-      } else if (Array.isArray(value))
-        section[field] = value.filter(isNonEmptyString);
-      else delete section[field];
+      const accepted = (value: unknown): value is string =>
+        isNonEmptyString(value) &&
+        (profile === "sdk" || hasRequiredFindingText(value));
+      if (accepted(value)) {
+        if (profile === "tracking" || field !== "evidence")
+          section[field] = [value];
+      } else if (Array.isArray(value)) {
+        const items = value.filter(accepted);
+        if (profile === "tracking" && items.length === 0) delete section[field];
+        else section[field] = items;
+      } else delete section[field];
+      if (
+        profile === "tracking" &&
+        (field === "evidenceRefs" || field === "evidence_refs") &&
+        Array.isArray(section[field])
+      ) {
+        section[field] = section[field].filter(
+          (ref) => typeof ref === "string" && evidenceIds.has(ref),
+        );
+      }
     }
   }
 
