@@ -879,6 +879,24 @@ explicit saved scan ID. Exact-path `latest` lookup still works without Git.
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
 rejected, including a `--model` or `--effort` flag plus its native equivalent.
+
+To select a Codex file profile, put its settings in
+`$CODEX_HOME/review.config.toml` (or `~/.codex/review.config.toml` when
+`CODEX_HOME` is unset), then run:
+
+```bash
+npx @openai/codex-security scan . --codex 'profile="review"'
+```
+
+In the SDK, set `codexOverrides: { profile: "review" }`. In a project config,
+set `codex.profile: review`. The profile file uses top-level Codex TOML keys.
+Its settings override scanner defaults. Explicit scan settings take precedence.
+Relative file paths, including `model_instructions_file`, resolve from the
+profile directory. Saved launches retain the profile name and reload its settings.
+Include custom provider definitions in the file so the scan
+can use them from its isolated Codex home. An absent file contributes no
+settings. Existing inline `profiles` tables still work.
+
 Choose plugins with `--plugin-path`; native plugin and marketplace overrides are
 rejected. New and resumed Deep Scans require the current plugin's direct engine,
 worker provider snapshot, and isolated worker configuration capabilities. Update
@@ -1406,6 +1424,32 @@ collection and preview commands.
 The [Wiz guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/wiz.md) shows how to preview saved package vulnerabilities,
 SAST findings, repository secrets, or IaC findings. The format reference below
 describes the fields to preserve when preparing those exports.
+
+#### Review the Cloud destination
+
+The preview shows which Cloud destination will receive the selected records.
+When the deployment advertises private import for the scanner, the CLI puts a
+report in the signed-in account’s **private findings inbox**. The preview
+identifies its format and byte count. For complete Endor findings and Wiz
+vulnerability JSON exports, the CLI sends the original bytes when Cloud
+advertises the format and every record matches the reviewed selection. Other
+selections and in-memory collectors use `security.findings.v1`. The CLI
+attaches the selected repository and connector as a suggested assessment
+target. Review the selection, exclusions, source key and destination before
+confirming.
+
+The job receipt contains the file and job identifiers and record counts. To
+share a finding, open it in Cloud, assess it against a pinned repository
+revision, and explicitly publish a reportable assessment. An import can
+finish with record errors. Check the error and unprocessed counts in the
+receipt.
+
+Repeat the same command to recover an interrupted private import. The CLI
+checks the report digest, reuses its saved request IDs, and reads an accepted
+job even when new uploads are disabled. Resetting the inbox requires a new
+preview and confirmation. Deployments and scanners using the repository
+publisher continue to show the repository destination and per-finding receipts.
+An in-flight repository publication resumes on its original protocol.
 
 #### Select findings and a destination
 
