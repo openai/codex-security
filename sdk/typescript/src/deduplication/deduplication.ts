@@ -203,12 +203,14 @@ export function contradictionFreeSubgroups(
 }
 
 /** @internal */
-export class FindingDeduplicator {
+export class FindingDeduplicator<
+  T extends Pick<Finding, "findingId" | "severity"> = Finding,
+> {
   constructor(
     private readonly candidates: {
-      potentialDuplicates(findingId: string): Promise<FindingNeighborhood>;
+      potentialDuplicates(findingId: string): Promise<FindingNeighborhood<T>>;
     },
-    private readonly reviewer: DeduplicationReviewer,
+    private readonly reviewer: DeduplicationReviewer<T>,
     private readonly signal?: AbortSignal,
     private readonly concurrency = DEFAULT_DEDUPE_CONCURRENCY,
   ) {}
@@ -217,7 +219,7 @@ export class FindingDeduplicator {
     this.signal?.throwIfAborted();
     const concurrency = deduplicationConcurrency(this.concurrency);
     const ids = [...new Set(findingIds)];
-    const findings = new Map<string, Finding>();
+    const findings = new Map<string, T>();
     const refusals = new Map<string, DeduplicationRefusal>();
     const recordRefusal = (error: unknown, ids: string[]): void => {
       this.signal?.throwIfAborted();
@@ -235,7 +237,7 @@ export class FindingDeduplicator {
         reason,
       });
     };
-    const neighborhoods = new Array<Finding[]>(ids.length);
+    const neighborhoods = new Array<T[]>(ids.length);
     await runQueued(
       ids.map((id, index) => async () => {
         const result = await this.candidates.potentialDuplicates(id);

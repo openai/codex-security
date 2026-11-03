@@ -32,11 +32,10 @@ def _create_workspace(state_dir: Path, target: Path) -> str:
 def _start_scan(state_dir: Path, workspace_id: str, scan_root: Path) -> dict[str, Any]:
     return start_delivered_scan(
         state_dir,
-        "--workspace-id",
         workspace_id,
         "--scan-root",
         str(scan_root),
-    )["results"]
+    )
 
 
 def _complete_scan(
