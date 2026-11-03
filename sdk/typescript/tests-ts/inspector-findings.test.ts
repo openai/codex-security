@@ -1,3 +1,4 @@
+import { previousReaderSelection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -615,6 +616,64 @@ test("only surviving rows share project proof, independently of input order", ()
     expect(normalize(rows, enterprise, "local").findings).toHaveLength(2);
     known.title = "Restored title";
   }
+});
+
+function scopedProjectRows() {
+  const witness = projectRow("a", enterprise, "GITHUB");
+  const dependent = projectRow("b");
+  const independent = projectRow("c", enterprise, "GITHUB");
+  Object.assign(independent.resources[0]!.details.codeRepository, {
+    integrationArn: undefined,
+  });
+  const rows = [witness, dependent, independent];
+  for (const row of rows) row.resources[0]!.id = "example/project";
+  return { rows, witness, dependent, independent };
+}
+
+test.each([
+  [0.00001, 262_145, false],
+  [1e-7, 262_144, true],
+] as const)(
+  "a size change rechecks provider proof for each selected subset (%d)",
+  (score, bytes, previouslyAccepted) => {
+    const { rows, witness, independent } = scopedProjectRows();
+    Object.assign(witness, { score: new Number(score), pad: "" });
+    const evidence = normalize(rows, enterprise).findings[0]!.evidence;
+    Object.assign(witness, {
+      pad: "p".repeat(bytes - Buffer.byteLength(JSON.stringify(evidence))),
+    });
+    const current = normalize(rows, enterprise);
+    const previous = previousReaderSelection(
+      current,
+      JSON.parse(JSON.stringify(current)),
+    );
+    const all = rows.map((row) => row.findingArn);
+    const onlyIndependent = [independent.findingArn];
+    expect(current.findings.map((row) => row.source_finding_id)).toEqual(
+      previouslyAccepted ? onlyIndependent : all,
+    );
+    expect(
+      previous?.snapshot?.findings.map((row) => row.source_finding_id),
+    ).toEqual(previouslyAccepted ? all : onlyIndependent);
+  },
+);
+
+test("an uncertain Inspector row can obscure the membership of its dependent", () => {
+  const { rows, witness, dependent, independent } = scopedProjectRows();
+  Object.assign(witness, { score: new Number(NaN) });
+  const current = normalize(rows, enterprise);
+  const prior = previousReaderSelection(
+    current,
+    JSON.parse(JSON.stringify(current)),
+  );
+  expect(prior?.uncertainFindingIds).toEqual([
+    witness.findingArn,
+    dependent.findingArn,
+  ]);
+  expect(prior?.knownFindings?.map((row) => row.source_finding_id)).toEqual([
+    independent.findingArn,
+  ]);
+  expect(prior?.snapshot).toBeUndefined();
 });
 
 test("after the only provider hint is excluded, valid local rows still share their native URL", () => {
