@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,17 +64,24 @@ export async function testDeepScanContextSnapshots({
     CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
   };
   try {
+    const markdown = "# Saved policy\n";
+    const policy = {
+      markdown,
+      revision: 17,
+      sha256: createHash("sha256").update(markdown).digest("hex"),
+    };
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
     await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
     const outcomes = await Promise.allSettled(
       ["Review authentication only.", undefined].map(
         async (userContext, index) => {
+          const severityRubric = userContext === undefined ? undefined : policy;
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
           const maxTimeHours = 1.5 + index;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
-            const result = spawnSync(
+            const execution = promisify(execFile)(
               process.env.PYTHON?.trim() || "python3",
               [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
               {
@@ -81,12 +89,11 @@ export async function testDeepScanContextSnapshots({
                   ...environment,
                   CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfig,
                 },
-                input,
-                encoding: "utf8",
               },
             );
-            assert.equal(result.status, 0, result.stderr);
-            return JSON.parse(result.stdout);
+            execution.child.stdin!.on("error", () => {});
+            execution.child.stdin!.end(input);
+            return JSON.parse((await execution).stdout);
           };
           const threadId = `context-owner-${index}`;
           const projectConfigPath = path.join(
@@ -105,12 +112,57 @@ export async function testDeepScanContextSnapshots({
             }),
           );
           let store = new WorkbenchDeepScanStore(command);
+          let registeredScanId: string | undefined;
+          if (userContext !== undefined) {
+            await writeFile(
+              deepConfig,
+              `[deep_scan]\nmax_time_hours = ${maxTimeHours}\nsubagents = ${index}\n`,
+            );
+            const scanDir = path.join(fixture.root, `registered-${index}`);
+            await mkdir(scanDir, { mode: 0o700 });
+            const { scanId } = await command(
+              [
+                "register-cli-scan",
+                "--repository",
+                targetPath,
+                "--scan-dir",
+                scanDir,
+                "--registration-json-stdin",
+              ],
+              JSON.stringify({
+                recipe: {
+                  repository: targetPath,
+                  mode: "deep",
+                  target: { kind: "repository", paths: [] },
+                  config: {},
+                  severityRubric,
+                },
+                userContext: "Original user instructions.",
+              }),
+            );
+            await command([
+              "set-scan-thread",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+            ]);
+            await command([
+              "update-scan-context",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+              "--user-context",
+              userContext,
+            ]);
+            registeredScanId = scanId;
+          }
           let run = await store.begin({
-            targetPath,
-            scope: ".",
+            ...(registeredScanId
+              ? { scanId: registeredScanId }
+              : { targetPath, userContext, projectConfigPath }),
             threadId,
-            userContext,
-            projectConfigPath,
             scanRoot: path.join(fixture.root, "scans"),
           });
           const createdAt = run.createdAt;
@@ -119,7 +171,11 @@ export async function testDeepScanContextSnapshots({
           assert.equal(run.config.subagents, index);
           const invocations: {
             kind: DeepScanWorkerKind;
-            invocation: { argv: string[]; stdin: string; deepConfig: string };
+            invocation: {
+              argv: string[];
+              stdin: string;
+              deepConfig: string;
+            };
           }[] = [];
           let sdk = new CodexSdkWorkerExecutor({
             parentSandbox,
@@ -147,7 +203,7 @@ export async function testDeepScanContextSnapshots({
                     findings: [],
                     ...(request.kind === "discovery"
                       ? {
-                          coverage: {
+                          reviewState: {
                             surfaces: [],
                             explicitExclusions: [],
                             deferred: [],
@@ -242,6 +298,18 @@ export async function testDeepScanContextSnapshots({
             const context = JSON.parse(
               fresh.invocation.stdin.match(/```json\n([\s\S]*?)\n```/)![1],
             );
+            assert.deepEqual(context.severityRubric, severityRubric);
+            if (severityRubric) {
+              assert.ok(
+                resumed.invocation.stdin.includes(
+                  JSON.stringify({ severityRubric }),
+                ),
+              );
+              assert.equal(
+                fresh.invocation.stdin.includes("Original user instructions."),
+                false,
+              );
+            }
             if (fresh.kind === "discovery") {
               assert.equal(context.userContext, userContext ?? null);
               assert.equal(context.scanId, run.scanId);

@@ -1003,7 +1003,8 @@ describe("multiscan", () => {
           const recovered = fakeResult([severity]);
           return {
             manifest: recovered.manifest,
-            coverage: recovered.coverage,
+            review: recovered.review,
+            mode: recovered.mode,
             cost: recovered.cost,
             findings: recovered.findings,
           };

@@ -16,6 +16,7 @@ import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -78,6 +79,15 @@ describe("bundled plugin build", () => {
     }
   });
 
+  test("ships the same default severity rubric in the plugin and SDK", async () => {
+    const path = "references/default-severity-rubric.md";
+    const source = await readFile(
+      new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
+    );
+    expect(await readFile(join(PLUGIN_ROOT, path))).toEqual(source);
+    expect(Buffer.from(defaultSeverityRubric)).toEqual(source);
+  });
+
   test("copies Python contracts and completed examples unchanged from source", async () => {
     const source = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
@@ -89,7 +99,7 @@ describe("bundled plugin build", () => {
       (path) =>
         (path.startsWith("scripts/") && path.endsWith(".py")) ||
         path.startsWith("schemas/") ||
-        path.startsWith("examples/completed-scan/"),
+        path.startsWith("examples/legacy-completed-scan/"),
     )) {
       expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
         await readFile(join(source, path)),
@@ -298,13 +308,13 @@ describe("bundled plugin build", () => {
             scanId: "synthetic-scan",
             manifest: { scan: {} },
             findings: { findings: [] },
-            coverage: {
+            reviewState: {
               surfaces: [], explicitExclusions: [], deferred: [],
             },
           };
           assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
           assert.throws(() => helpers.parseCanonicalScanDraft({
-            ...input, coverage: { ...input.coverage, surfaces: "invalid" },
+            ...input, reviewState: { ...input.reviewState, surfaces: "invalid" },
           }));
           assert.equal(process.exitCode, undefined);
         `,

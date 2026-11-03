@@ -126,6 +126,7 @@ export async function runControlledCodeMode({
     const config = [
       'model_provider="controlled"',
       `model_providers.controlled={name="controlled",base_url="http://127.0.0.1:${port}/v1",wire_api="responses",requires_openai_auth=false,supports_websockets=false}`,
+      "features.plugins=false",
       "mcp_servers.cs_artifacts.required=true",
       "features.code_mode.enabled=true",
       "features.code_mode_host.enabled=true",

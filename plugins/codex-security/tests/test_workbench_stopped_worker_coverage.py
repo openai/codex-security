@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -16,10 +15,13 @@ from workbench_test_support import (
     fail_deep_scan,
     get_scan,
     preserve_scan_results,
+    read_review_state,
     saved_draft,
+    select_checkpoint,
     upsert_deep_worker,
     worker_paths,
     write_checkpoint,
+    write_result_draft,
 )
 
 
@@ -98,7 +100,7 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     stopped = get_scan(state_dir, scan_id)["scan"]
     assert stopped["findingCount"] == 1
     assert not any("coverage receipt" in warning for warning in stopped["warnings"])
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert "completeness" not in coverage
     assert {row["id"] for row in coverage["surfaces"]} == {
         f"{worker_id}-attempt-1-surface-1" if accepted else f"{worker_id}/api"
@@ -135,6 +137,7 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     sealed = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        if (scan_dir / name).is_file()
     }
     replay = preserve_scan_results(
         state_dir, scan_id, "standard-worker-thread", environment=environment
@@ -172,8 +175,7 @@ def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(
 
     fail_deep_scan(state_dir, codex_home, scan_id)
 
-    coverage_path = scan_dir / "coverage.json"
-    surface = json.loads(coverage_path.read_text())["surfaces"][0]
+    surface = read_review_state(state_dir, scan_dir)["surfaces"][0]
     assert surface["id"] == (f"{worker_id}-attempt-1-surface-1" if accepted else f"{worker_id}/api")
     if accepted:
         assert surface["provenance"] == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
@@ -185,11 +187,11 @@ def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(
         "under artifacts/" in warning
         for warning in get_scan(state_dir, scan_id)["scan"]["warnings"]
     )
-    sealed = coverage_path.read_bytes()
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
     preserve_scan_results(
         state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    assert coverage_path.read_bytes() == sealed
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
     assert result.read_bytes() == original
 
 
@@ -215,17 +217,16 @@ def test_stopped_worker_links_follow_explicit_surface_identity_through_collision
 
     fail_deep_scan(state_dir, codex_home, scan_id)
 
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
     assert len(surfaces) == 2
     assert surfaces["Explicit"]["id"] != surfaces["Anonymous"]["id"]
     assert coverage["deferred"][0]["surfaceIds"] == [surfaces["Explicit"]["id"]]
-    sealed = coverage_path.read_bytes()
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
     preserve_scan_results(
         state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    assert coverage_path.read_bytes() == sealed
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
     assert result.read_bytes() == original
 
 
@@ -256,10 +257,11 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
         "receiptRefs": ["artifacts/other.md"],
     }
     task = {"id": "review-api", "reason": "Review remains.", "surfaceIds": ["api"]}
-    result.write_text(
-        json.dumps(saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]))
+    write_result_draft(
+        result,
+        saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]),
+        mtime_ns=100,
     )
-    os.utime(result, ns=(100, 100))
     historical = write_checkpoint(
         output / "checkpoints",
         saved_draft(
@@ -272,15 +274,14 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
                 }
             ],
         ),
+        mtime_ns=50,
     )
-    os.utime(historical, ns=(50, 50))
     selected = write_checkpoint(
-        output / "checkpoints", saved_draft(scan_id, complete=True, surfaces=[writer])
+        output / "checkpoints",
+        saved_draft(scan_id, complete=True, surfaces=[writer]),
+        mtime_ns=300,
     )
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    head = select_checkpoint(output, selected, mtime_ns=400)
     originals = {
         path: path.read_bytes()
         for path in (result, historical, selected, head, current_receipt, historical_receipt)
@@ -289,8 +290,7 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
 
     fail_deep_scan(state_dir, codex_home, scan_id)
 
-    coverage_path = scan_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
     retained = surfaces["API"]
     assert retained["disposition"] == "no_issue_found"
@@ -306,9 +306,9 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
         "Skipped malformed coverage receipt" in warning
         for warning in get_scan(state_dir, scan_id)["scan"]["warnings"]
     )
-    sealed = coverage_path.read_bytes()
+    sealed = (scan_dir / "scan-manifest.json").read_bytes()
     preserve_scan_results(
         state_dir, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    assert coverage_path.read_bytes() == sealed
+    assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
     assert all(path.read_bytes() == content for path, content in originals.items())
