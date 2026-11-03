@@ -855,13 +855,13 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     join(home, "config.toml"),
     windows +
-      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nSNAPSHOT_USER_SET="preserved"\n',
+      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nSNAPSHOT_USER_SET="preserved"\n',
   );
   const script = join(root, "inspect.cjs");
   await writeFile(
     script,
     `const fs=require("node:fs");
-fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET})+"\\n");
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,modelKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
@@ -895,8 +895,11 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
         ...process.env,
         CODEX_HOME: home,
         SNAPSHOT_USER_FILTERED: "excluded",
+        CODEX_API_KEY: "synthetic-model-key",
+        SYNTHETIC_PROVIDER_TOKEN: "synthetic-provider-key",
       },
     ),
+    providerKeyVariable: "SYNTHETIC_PROVIDER_TOKEN",
     gitEnvironment,
     profile: {
       extends: ":workspace",
@@ -933,6 +936,7 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
     dir: null,
     filtered: null,
     set: "preserved",
+    modelKeys: [],
   });
   expect(bytes.subarray(end + 1)).toEqual(input);
   await expect(

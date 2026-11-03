@@ -154,7 +154,12 @@ exclude_slash_tmp = ${configured}
   );
   await writeFile(
     join(repository, ".codex", "config.toml"),
-    `[permissions.codex_security_patch]
+    `[sandbox_workspace_write]
+network_access = ${!configured}
+writable_roots = ${JSON.stringify([join(root, "project-selected")])}
+exclude_tmpdir_env_var = ${!configured}
+exclude_slash_tmp = ${!configured}
+[permissions.codex_security_patch]
 extends = ":workspace"
 [permissions.codex_security_patch.filesystem]
 glob_scan_max_depth = 8
@@ -305,6 +310,9 @@ glob_scan_max_depth = 8
         ":workspace_roots"
       ],
     ).toEqual({ ".git/hooks": "write" });
+    expect(
+      configuration["config"].sandbox_workspace_write.writable_roots,
+    ).toEqual([join(root, "project-selected")]);
     expect(
       configuration["layers"].some(
         (layer: RpcMessage) =>

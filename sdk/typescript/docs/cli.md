@@ -2615,8 +2615,9 @@ output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 The assessment does not change the patch or merge state.
 
-Post-patch Git snapshots, including initialized submodules, use the patch's
-workspace permissions and configured Git filters.
+Git snapshots, including snapshots of initialized submodules, run configured Git
+filters with the workspace permissions from your Codex configuration. Configure
+additional writable roots and network access in your user configuration.
 
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.

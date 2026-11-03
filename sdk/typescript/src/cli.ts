@@ -1197,6 +1197,7 @@ interface SkillPermissions {
 interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
   readonly environment: NodeJS.ProcessEnv;
+  readonly providerKeyVariable?: string;
   readonly directory: string;
   readonly configuration?: JsonObject;
   readonly gitEnvironment?: NodeJS.ProcessEnv;
@@ -1514,9 +1515,21 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
+    const credentialVariables = [
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      ...(sandbox?.providerKeyVariable ? [sandbox.providerKeyVariable] : []),
+    ];
     if (sandbox !== undefined) {
-      for (const name of Object.keys(environment))
-        if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
+      for (const name of Object.keys(environment)) {
+        if (
+          name.toUpperCase() === "CODEX_HOME" ||
+          credentialVariables.some(
+            (key) => key.toUpperCase() === name.toUpperCase(),
+          )
+        )
+          delete environment[name];
+      }
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
     }
     const bindings =
@@ -1524,9 +1537,14 @@ export async function runRepositoryCommand(
         ? undefined
         : Buffer.from(
             JSON.stringify(
-              Object.entries(sandbox.gitEnvironment ?? {}).map(
-                ([key, value]) => [key, value ?? null],
-              ),
+              // Native shell policy can set variables again. Remove model keys
+              // from Git and its filters after applying that policy as well.
+              Object.entries({
+                ...sandbox.gitEnvironment,
+                ...Object.fromEntries(
+                  credentialVariables.map((key) => [key, null]),
+                ),
+              }).map(([key, value]) => [key, value ?? null]),
             ),
           );
     const execution = spawn(
@@ -2122,6 +2140,9 @@ export async function runCodexSkillCommand(
                           profile,
                           directory: output.appServer!.directory,
                           environment,
+                          ...(authentication?.method === "api_key"
+                            ? { providerKeyVariable: authentication.source }
+                            : {}),
                           snapshotStoragePaths:
                             output.appServer!.snapshotStoragePaths,
                           configuration: Object.fromEntries(
@@ -2129,6 +2150,7 @@ export async function runCodexSkillCommand(
                               ...new Set([
                                 "model_provider",
                                 "model_providers",
+                                "sandbox_workspace_write",
                                 ...Object.keys(output.codexOverrides ?? {}),
                               ]),
                             ].flatMap((key) =>
@@ -11981,7 +12003,10 @@ export async function readSkillCommandOutput(
                 appServer.permissions !== undefined,
             },
           });
-        } else if (value["id"] === 4) {
+        } else if (
+          value["id"] === 4 ||
+          value["id"] === "patch-permissions-config"
+        ) {
           const result = value["result"];
           if (
             appServer.permissions !== undefined &&
@@ -11992,14 +12017,50 @@ export async function readSkillCommandOutput(
             appServer.input.end();
             continue;
           }
-          config =
+          const resolvedConfig =
             isJsonObject(result) && isJsonObject(result["config"])
               ? (result["config"] as JsonObject)
               : {};
+          if (value["id"] === 4) config = resolvedConfig;
           if (appServer.permissions !== undefined) {
-            const workspace = isJsonObject(config["sandbox_workspace_write"])
-              ? config["sandbox_workspace_write"]
+            if (
+              value["id"] === 4 &&
+              isJsonObject(result) &&
+              Array.isArray(result["layers"]) &&
+              result["layers"].some(
+                (layer) =>
+                  isJsonObject(layer) &&
+                  isJsonObject(layer["name"]) &&
+                  layer["name"]["type"] === "project" &&
+                  layer["disabledReason"] == null,
+              )
+            ) {
+              // Omitting cwd asks Codex for the effective operator settings
+              // without loading project layers. Keep project model settings.
+              send({
+                id: "patch-permissions-config",
+                method: "config/read",
+                params: {},
+              });
+              continue;
+            }
+            const workspace = isJsonObject(
+              resolvedConfig["sandbox_workspace_write"],
+            )
+              ? resolvedConfig["sandbox_workspace_write"]
               : {};
+            const workspaceOverride: JsonObject =
+              value["id"] === "patch-permissions-config"
+                ? {
+                    sandbox_workspace_write: {
+                      writable_roots: [],
+                      network_access: false,
+                      exclude_tmpdir_env_var: false,
+                      exclude_slash_tmp: false,
+                      ...workspace,
+                    },
+                  }
+                : {};
             const filesystem = Object.fromEntries(
               appServer.permissions.readOnlyPaths.map((path) => [
                 path,
@@ -12026,9 +12087,13 @@ export async function readSkillCommandOutput(
                   : {}),
               },
             };
-            appServer.onPermissions?.(profile, config);
+            appServer.onPermissions?.(profile, {
+              ...config,
+              ...workspaceOverride,
+            });
             // Cache restrictions for the model do not change snapshot access.
             startThread({
+              ...workspaceOverride,
               default_permissions: permissionProfile!,
               permissions: {
                 [permissionProfile!]: {
