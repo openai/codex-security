@@ -16,7 +16,7 @@ import { VERSION } from "../src/version.js";
 
 const example = (
   await readJson<FindingsDocument>(
-    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+    join(PLUGIN_ROOT, "examples/legacy-completed-scan/findings.json"),
   )
 ).findings[0]!;
 const encoding = new Tiktoken(cl100kBase);

@@ -18,6 +18,7 @@ import { main } from "../src/cli.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
 import { DEFAULT_CLOUD_BASE_URL } from "../src/cloud-endpoint.js";
 import { validateExternalEvidence } from "../src/external-import-contract.js";
@@ -30,6 +31,8 @@ import {
   readVendorFindings,
   readVendorFindingsForPublication,
 } from "../src/wiz-findings.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import previewCheckpoint from "./fixtures/wiz-preview-checkpoint.json" with { type: "json" };
@@ -151,6 +154,66 @@ async function parse(payload: unknown) {
   const { file } = await fixture(payload);
   return readVendorFindings(file);
 }
+
+test.each(["local", "cloud"] as const)(
+  "mixed Wiz reports preserve duplicate IDs found only in the historical projection (%s)",
+  async (target) => {
+    const row = { ...sast, repository: { id: repository.id } };
+    const { file } = await fixture({
+      data: {
+        vulnerabilityFindings: {
+          nodes: [
+            {
+              source_finding_id: "package",
+              evidence: { title: "Package", severity: "low" },
+            },
+          ],
+        },
+        sastFindings: { nodes: [row, row] },
+        versionControlResources: {
+          nodes: ["bad\0name", "good"].map((name) => ({
+            platform: "GITHUB",
+            repository: { ...repository, name, url: repositoryUrl },
+          })),
+        },
+      },
+    });
+    const current = await readVendorFindings(file, target);
+    expect(
+      current.findings.map((finding) => finding.source_finding_id),
+    ).toEqual(["package"]);
+    expect(current.excluded.map((finding) => finding.position)).toEqual([2, 3]);
+    if (target === "local") {
+      await using local = await localFindingsFixture();
+      const prepare = () =>
+        prepareLocalExternalImport(
+          file,
+          {
+            repository: local.repository,
+            sourceKey: "synthetic-project",
+            provider: "wiz",
+          },
+          { environment: local.environment },
+        );
+      const prepared = await prepare();
+      expect(prepared.preview.findings).toEqual(current.findings);
+      expect(prepared.preview.excluded).toEqual(current.excluded);
+      expect((await prepared.import()).counts).toEqual({
+        created: 1,
+        updated: 0,
+        unchanged: 0,
+      });
+      expect((await (await prepare()).import()).counts).toEqual({
+        created: 0,
+        updated: 0,
+        unchanged: 1,
+      });
+    }
+    await expect(
+      readVendorFindingsForPublication(file, target),
+    ).rejects.toThrow('Duplicate source finding id "sast:occurrence-1"');
+  },
+);
 
 test("SAST maps source range, CWE, scanner verdict, and repository inventory without changing raw evidence", async () => {
   const { file } = await fixture(envelope("sastFindings", [sast]), true);
@@ -489,6 +552,7 @@ async function cloudFixture(payload: unknown) {
   const f = await fixture(payload);
   const environment = {
     ...process.env,
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(f.root, "login"),
     CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
   };
@@ -1551,6 +1615,51 @@ function legacyCheckpointKey(identity: unknown[]) {
   return hash("sha256", encoded);
 }
 
+test("a normalized Wiz retry requires a known locale to reuse its acknowledged receipt", async () => {
+  const f = await previewCheckpointFixture();
+  const input = await readVendorFindings(f.file);
+  const data = input.findings[0]!.evidence.source_data!;
+  Object.defineProperty(data, "toJSON", { value: () => ({ ...data, Z: 7 }) });
+  const prepare = (selected = input) =>
+    prepareNormalizedExternalPublication(selected, f.options, {
+      ...f.deps,
+      environment: {
+        ...f.environment,
+        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+      },
+    });
+  const early = await prepare();
+  const foreign = join(f.directory, hostedForeignName);
+  await writeFile(foreign, savedPreview);
+  await expect(early.publish()).rejects.toThrow(
+    "original deployment and locale",
+  );
+  await expect(prepare()).rejects.toThrow("original deployment and locale");
+  const opaque = await readVendorFindings(f.file);
+  const getter = opaque.findings[0]!.evidence.source_data!;
+  Object.defineProperty(getter, "Z", { get: () => 1 });
+  Object.defineProperty(getter, "toJSON", { value: () => ({ ...data, Z: 9 }) });
+  await expect(prepare(opaque)).rejects.toThrow("cannot be matched");
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(foreign, "utf8")).toBe(savedPreview);
+  const distinct = await prepare(JSON.parse(JSON.stringify(opaque)));
+  expect(distinct.preview.resumed).toBe(false);
+
+  await rename(foreign, join(f.directory, localPreviewFilename()));
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect<unknown[]>(retry.preview.requests).toEqual(previewCheckpoint.requests);
+  const completed = await retry.publish();
+  expect(completed.verified).toBe(1);
+  expect<unknown[]>(completed.receipts).toEqual(previewCheckpoint.receipts);
+  expect(f.posts).toHaveLength(1); // Only the original import seeded by the fixture.
+  const fresh = await prepare();
+  expect(fresh.preview.resumed).toBe(false);
+  expect(fresh.preview.requests[0]!.items[0]!.evidence.source_data?.["Z"]).toBe(
+    7,
+  );
+});
+
 test.each(["distinct", "duplicate"] as const)(
   "a migrated preview checkpoint completes readback with a %s older file",
   async (kind) => {
@@ -1740,6 +1849,7 @@ test("Node resumes the same uncertain publication across locales and Unicode key
     const prepared = await prepareExternalPublication(
       ${JSON.stringify(f.file)}, ${JSON.stringify(f.options)}, {
         environment: ${JSON.stringify({
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           CODEX_HOME: f.environment.CODEX_HOME,
           CODEX_SECURITY_STATE_DIR: f.environment.CODEX_SECURITY_STATE_DIR,
         })},
@@ -2306,6 +2416,43 @@ test.each(["raw", "normalized"])(
   },
 );
 
+async function prepareLegacyInventoryPublication(
+  sastNodes: unknown[],
+  lastInventoryNode: unknown,
+) {
+  // The earlier mapper used the last inventory row and stripped branch prefixes.
+  const f = await cloudFixture({
+    data: {
+      sastFindings: { nodes: sastNodes },
+      versionControlResources: { nodes: [lastInventoryNode] },
+    },
+  });
+  const deps = {
+    ...f.deps,
+    environment: {
+      ...f.environment,
+      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
+    },
+  };
+  const historical = await readVendorFindingsForPublication(f.file);
+  await writeFile(f.file, JSON.stringify(historical.legacy.findings));
+  const original = await prepareExternalPublication(f.file, f.options, deps);
+  f.state.failReadback = true;
+  return { f, deps, historical, original };
+}
+
+async function savedPathAfterReadbackFailure(
+  publication: Awaited<ReturnType<typeof prepareExternalPublication>>,
+) {
+  try {
+    await publication.publish();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ExternalPublicationError);
+    return (error as ExternalPublicationError).result.savedSubmission!;
+  }
+  throw new Error("Expected publication readback to fail");
+}
+
 test.each([
   "resume",
   "reset",
@@ -2378,34 +2525,12 @@ test.each([
         versionControlResources: { nodes },
       },
     };
-    // The earlier mapper used the last inventory row. This single-row export
-    // stages exactly that historical evidence with real publication receipts.
-    const f = await cloudFixture({
-      data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
-    });
-    const deps = {
-      ...f.deps,
-      environment: {
-        ...f.environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
-      },
-    };
-    // Stage the old branch projection explicitly; new imports retain names.
-    const historical = (await readVendorFindingsForPublication(f.file)).legacy;
-    expect(historical.findings[0]!.evidence.branch).toBe(
+    const { f, deps, historical, original } =
+      await prepareLegacyInventoryPublication(selected, nodes[1]);
+    expect(historical.legacy.findings[0]!.evidence.branch).toBe(
       scenario === "qualifier" ? "component/Feature" : "feature/parser",
     );
-    await writeFile(f.file, JSON.stringify(historical.findings));
-    const original = await prepareExternalPublication(f.file, f.options, deps);
-    f.state.failReadback = true;
-    let originalPath = "";
-    try {
-      await original.publish();
-    } catch (error) {
-      expect(error).toBeInstanceOf(ExternalPublicationError);
-      originalPath = (error as ExternalPublicationError).result
-        .savedSubmission!;
-    }
+    const originalPath = await savedPathAfterReadbackFailure(original);
     const saved = JSON.parse(await readFile(originalPath, "utf8"));
     delete saved.inputProjection;
     await writeFile(originalPath, JSON.stringify(saved));
@@ -2449,14 +2574,7 @@ test.each([
     expect(upgraded.preview.resumed).toBe(true);
     expect(upgraded.preview.requests).toEqual(original.preview.requests);
     expect(upgraded.preview.findings).toEqual(original.preview.findings);
-    let migratedPath = "";
-    try {
-      await upgraded.publish();
-    } catch (error) {
-      expect(error).toBeInstanceOf(ExternalPublicationError);
-      migratedPath = (error as ExternalPublicationError).result
-        .savedSubmission!;
-    }
+    const migratedPath = await savedPathAfterReadbackFailure(upgraded);
     const migrated = await readFile(migratedPath, "utf8");
     const migratedData = JSON.parse(migrated);
     expect(migratedData.requests).toEqual(saved.requests);
@@ -2590,27 +2708,9 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
       versionControlResources: { nodes },
     },
   };
-  const f = await cloudFixture({
-    data: { ...payload.data, versionControlResources: { nodes: [nodes[1]] } },
-  });
-  const deps = {
-    ...f.deps,
-    environment: {
-      ...f.environment,
-      CODEX_SECURITY_CLOUD_BASE_URL: DEFAULT_CLOUD_BASE_URL,
-    },
-  };
-  const historical = await readVendorFindingsForPublication(f.file);
-  await writeFile(f.file, JSON.stringify(historical.legacy.findings));
-  const original = await prepareExternalPublication(f.file, f.options, deps);
-  f.state.failReadback = true;
-  let originalPath = "";
-  try {
-    await original.publish();
-  } catch (error) {
-    expect(error).toBeInstanceOf(ExternalPublicationError);
-    originalPath = (error as ExternalPublicationError).result.savedSubmission!;
-  }
+  const { f, deps, historical, original } =
+    await prepareLegacyInventoryPublication([record], nodes[1]);
+  const originalPath = await savedPathAfterReadbackFailure(original);
   const saved = JSON.parse(await readFile(originalPath, "utf8"));
   expect(saved.receipts).toHaveLength(1);
   const identity = [
@@ -2693,6 +2793,15 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     newer.evidence.description =
       "Newer Cloud evidence after the first resumer completed";
     f.reports.set("sast:occurrence-1", newer);
+    const otherPath = join(
+      directory,
+      `${hash("sha256", "other-deployment")}.pending.json`,
+    );
+    const projectionless = JSON.stringify({
+      accountId: saved.accountId,
+      requests: saved.requests,
+    });
+    await writeFile(otherPath, projectionless, { mode: 0o600 });
     releaseSecond.resolve();
     const trailing = await second;
     const result = await trailing.publish();
@@ -2702,6 +2811,7 @@ test("concurrent legacy inventory resumers retain the acknowledged request after
     expect(result.receipts).toEqual(saved.receipts);
     expect(result.verified).toBe(1);
     expect(f.reports.get("sast:occurrence-1")).toEqual(newer);
+    expect(await readFile(otherPath, "utf8")).toBe(projectionless);
   } finally {
     secondAtLock.resolve();
     releaseSecond.resolve();

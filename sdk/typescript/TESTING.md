@@ -139,12 +139,9 @@ default to 100 cases; filesystem contract properties default to 20.
 
 ## GitHub Actions
 
-`node-ci` reports one `ci` gate for all selected required checks. The existing
-`ubuntu-latest / node-22`, `macos-latest / node-22`, and
-`windows-latest / node-22` check names forward that result while repository
-branch rules migrate. The [CI guide](../../docs/ci.md) describes documentation-only
-routing, platform/version selection, full scheduled qualification, and the gate
-migration.
+`node-ci` reports one `ci` gate for all selected required checks. The
+[CI guide](../../docs/ci.md) describes documentation-only routing,
+platform/version selection, and full scheduled qualification.
 
 For source qualification, CI builds and inspects one package archive, then passes
 that archive to jobs in the same workflow run, using the commit SHA in the
@@ -202,7 +199,8 @@ do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 Each week `test-quality` runs the mutation trial on Linux. On Linux, macOS, and
 Windows it runs the test files that import the shared property options, using
-the workflow run number as the property seed. Each platform uploads its JUnit
+the workflow run number as the property seed. The filesystem properties read
+the plugin's checked-in schemas and example scan. Each platform uploads its JUnit
 report. To replay the weekly jobs, dispatch with `compare-layouts` disabled.
 Ordinary source pull requests run focused contracts for the shard runner, timing
 metadata, report comparator, and Windows test-root helper in the required SDK suite.

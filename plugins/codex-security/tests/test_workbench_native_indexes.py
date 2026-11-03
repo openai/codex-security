@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    create_workspace,
     run_workbench,
     save_workspace,
     scan_command,
@@ -33,9 +34,9 @@ def complete_scan(
         workspace = save_workspace(
             state_dir, str(workspace["id"]), str(target), include_paths[0], "standard"
         )
-    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    started = start_delivered_scan(state_dir, str(workspace["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -189,6 +190,30 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     assert second["status"] == "open"
 
 
+@pytest.mark.parametrize(
+    ("target_path", "available"), [(".", False), ("~/repo", True), ("~/missing/../repo", True)]
+)
+def test_repository_index_probes_draft_checkout(
+    tmp_path: Path, monkeypatch, target_path: str, available: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    create_workspace(
+        state_dir,
+        "20000000-0000-4000-8000-000000000000",
+        "--target-path",
+        target_path,
+        "--scope",
+        "missing-directory",
+    )
+
+    (repository,) = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert repository["targetPath"] == target_path
+    assert repository["checkoutAvailable"] is available
+
+
 def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout(
     tmp_path: Path,
 ) -> None:
@@ -200,7 +225,30 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     second_target.mkdir()
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
+    create_workspace(
+        state_dir, "20000000-0000-4000-8000-000000000000", "--target-path", str(first_target)
+    )
+    (unscanned,) = run_workbench(state_dir, "list-repositories", "--status", "not_scanned")[
+        "repositories"
+    ]
+    assert unscanned == {
+        "checkoutAvailable": True,
+        "displayName": first_target.name,
+        "latestScan": None,
+        "openFindingsCount": 0,
+        "scanCount": 0,
+        "targetId": first_target_id,
+        "targetPath": str(first_target.resolve()),
+    }
+    for status in ("scanned", "open_findings"):
+        assert (
+            run_workbench(state_dir, "list-repositories", "--status", status)["repositories"] == []
+        )
     older_first = complete_scan(state_dir, first_target, identity_anchor="first-finding")
+    assert (
+        run_workbench(state_dir, "list-repositories", "--status", "not_scanned")["repositories"]
+        == []
+    )
     set_triage(
         state_dir,
         str(older_first["findings"][0]["occurrenceId"]),
@@ -211,7 +259,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         "Fixture close decision.",
     )
     running_workspace = create_saved_workspace(state_dir, first_target)
-    older_running = start_delivered_scan(state_dir, "--workspace-id", str(running_workspace["id"]))
+    older_running = start_delivered_scan(state_dir, str(running_workspace["id"]))
     complete_scan(state_dir, first_target, identity_anchor="first-finding")
     distinct_first = complete_scan(
         state_dir,
@@ -221,7 +269,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         relative_path="docs/extract.py",
     )
     latest_second = complete_scan(state_dir, second_target, identity_anchor="second-finding")
-    update_progress(state_dir, str(older_running["results"]["scanId"]), "--phase", "discovery")
+    update_progress(state_dir, str(older_running["scanId"]), "--phase", "discovery")
     second_target.rename(tmp_path / "moved-second-repo")
 
     repositories = run_workbench(state_dir, "list-repositories")["repositories"]

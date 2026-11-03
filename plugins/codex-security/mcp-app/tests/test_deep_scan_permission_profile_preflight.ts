@@ -65,8 +65,6 @@ const unsupportedConfiguration = (error: Error) =>
   error.message.includes("with this Codex configuration");
 
 await testAllowedProfileAndRawArgv();
-await testPreflightStartsInWorkerCwd();
-await testProvidedEnvForwardedWithoutMutation();
 await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
 await testSequentialPaginatedResponsesAcrossChunks();
 await testMalformedStreamFailsClosed();
@@ -260,6 +258,13 @@ async function testDirectScanSession() {
 }
 
 async function testAllowedProfileAndRawArgv() {
+  const codexHome = "/fixture/canonical-codex-home";
+  const env = Object.freeze({
+    ...process.env,
+    CODEX_HOME: codexHome,
+    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
+  });
+
   await withFakeCodex(
     {
       configResult: configReadResult({
@@ -288,8 +293,19 @@ async function testAllowedProfileAndRawArgv() {
         },
       ],
     },
-    async ({ codexPath, cwd, argvPath, callsPath }) => {
+    async ({
+      codexPath,
+      cwd,
+      argvPath,
+      callsPath,
+      envPath,
+      cwdPath,
+      children,
+      terminatedPath,
+    }) => {
+      assert.notEqual(cwd, process.cwd());
       await preflightDeepScanWorkerPermissionProfile({
+        env,
         codexPath,
         cwd,
         configOverrides: [
@@ -323,31 +339,17 @@ async function testAllowedProfileAndRawArgv() {
       assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
       assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
       assert.deepEqual(calls[3].params, { cwd });
-    },
-    { longExecutable: true },
-  );
-}
-
-async function testProvidedEnvForwardedWithoutMutation() {
-  const codexHome = "/fixture/canonical-codex-home";
-  const env = Object.freeze({
-    ...process.env,
-    CODEX_HOME: codexHome,
-    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
-  });
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({ codexPath, cwd, envPath }) => {
-      await preflight(codexPath, cwd, env);
+      assert.equal(
+        await realpath(await readJson(cwdPath)),
+        await realpath(cwd),
+      );
       assert.deepEqual(await readJson(envPath), {
         codexHome,
         sentinel: "same-snapshot",
       });
+      await assertPreflightStopped(children, terminatedPath);
     },
+    { longExecutable: true },
   );
 }
 
@@ -404,44 +406,6 @@ async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
       },
     );
   }
-}
-
-async function testPreflightStartsInWorkerCwd() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({
-      codexPath,
-      cwd,
-      cwdPath,
-      callsPath,
-      terminatedPath,
-      children,
-    }) => {
-      assert.notEqual(cwd, process.cwd());
-      await preflight(codexPath, cwd);
-
-      const childCwd = await readJson(cwdPath);
-      assert.equal(await realpath(childCwd), await realpath(cwd));
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.find((call) => call.method === "config/read").params,
-        {
-          cwd,
-          includeLayers: false,
-        },
-      );
-      assert.deepEqual(
-        calls.find((call) => call.method === "permissionProfile/list").params,
-        {
-          cwd,
-        },
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
 }
 
 async function testSequentialPaginatedResponsesAcrossChunks() {
@@ -1064,17 +1028,12 @@ async function assertPreflightStopped(
   }
 }
 
-function preflight(
-  codexPath: string,
-  cwd: string,
-  env?: Record<string, string>,
-) {
+function preflight(codexPath: string, cwd: string) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
     configOverrides: rawOverrides,
     expectedProfile,
-    ...(env === undefined ? {} : { env }),
     signal: new AbortController().signal,
   });
 }

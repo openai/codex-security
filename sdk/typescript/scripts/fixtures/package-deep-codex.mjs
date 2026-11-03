@@ -147,7 +147,7 @@ async function run() {
       const draft = {
         scanId: env.CODEX_SECURITY_SCAN_ID,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [],

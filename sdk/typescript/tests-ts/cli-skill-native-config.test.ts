@@ -25,6 +25,21 @@ import {
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
 
+const modelCatalog = fileURLToPath(
+  new URL("./fixtures/native-skill-model-catalog.json", import.meta.url),
+);
+
+const nativeConfigArgs = [
+  fileURLToPath(new URL("./fixtures/skill-native-config.mjs", import.meta.url)),
+  "app-server",
+  "--disable",
+  "plugins",
+  "--config",
+  "analytics.enabled=false",
+  "--config",
+  `model_catalog_json=${inlineToml(modelCatalog)}`,
+];
+
 test.each([
   ["codex_security_deep_scan", true, false],
   ["codex_security_deep_scan", true, true],
@@ -215,16 +230,7 @@ test.each([
       const stdout = capture();
       const stderr = capture();
       const status = await runCodexSkillCommand(
-        [
-          fileURLToPath(
-            new URL("./fixtures/skill-native-config.mjs", import.meta.url),
-          ),
-          "app-server",
-          "--disable",
-          "plugins",
-          "--config",
-          "analytics.enabled=false",
-        ],
+        nativeConfigArgs,
         {
           command,
           auth: "chatgpt",
@@ -317,14 +323,7 @@ async function withStoredApiKey(
         const stderr = capture();
         const status = await runCodexSkillCommand(
           [
-            fileURLToPath(
-              new URL("./fixtures/skill-native-config.mjs", import.meta.url),
-            ),
-            "app-server",
-            "--disable",
-            "plugins",
-            "--config",
-            "analytics.enabled=false",
+            ...nativeConfigArgs,
             ...Object.entries(overrides).flatMap(([key, value]) => [
               "--config",
               `${key}=${inlineToml(value)}`,
@@ -494,30 +493,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
           import.meta.url,
         );
-        const catalog = join(root, "catalog.json");
-        await writeFile(
-          catalog,
-          JSON.stringify({
-            models: [
-              {
-                slug: "gpt-test",
-                display_name: "Synthetic",
-                base_instructions: "Synthetic instructions",
-                supported_reasoning_levels: [],
-                shell_type: "disabled",
-                visibility: "list",
-                supported_in_api: true,
-                priority: 0,
-                support_verbosity: false,
-                truncation_policy: { mode: "tokens", limit: 10000 },
-                experimental_supported_tools: [],
-                available_access_programs: {
-                  cyber: ["standard", "daybreak_red", "daybreak_blue"],
-                },
-              },
-            ],
-          }),
-        );
         const child = spawn(
           process.execPath,
           [
@@ -566,7 +541,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
         try {
           const { baseUrl } = await response();
           await writeCodexConfig(join(sharedHome, "config.toml"), {
-            model_catalog_json: catalog,
+            model_catalog_json: modelCatalog,
             openai_base_url: baseUrl,
             cli_auth_credentials_store: "file",
             features: { plugins: false },

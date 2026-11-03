@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -23,6 +24,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
@@ -147,7 +149,7 @@ def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
-    coverage_ref = ARTIFACTS["coverage"]
+    coverage_ref = "coverage.json"
     try:
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
@@ -157,7 +159,7 @@ def coverage_summary_for_history(
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:
             # Completion already validated the full scan. History only needs the
-            # pinned manifest and its coverage artifact, not findings or receipts.
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
             manifest, manifest_bytes = _read_scan_local_json_bytes(
                 scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
             )
@@ -167,11 +169,15 @@ def coverage_summary_for_history(
             ):
                 raise ContractError("The sealed scan manifest changed after completion.")
             sealed_scan = manifest["scan"]
-            if (
-                sealed_scan["id"] != scan["id"]
-                or not sealed_scan.get("sealedAt")
-                or sealed_scan["coverageRef"] != coverage_ref
-            ):
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
                 raise ContractError("The sealed coverage does not belong to this scan.")
             coverage, coverage_bytes = _read_scan_local_json_bytes(
                 scan_dir, coverage_ref, coverage_ref
@@ -210,7 +216,7 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+    after_git: Callable[..., str | None] | None = None,
 ) -> bool:
     if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
@@ -218,28 +224,23 @@ def _same_repository(
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
         return True
-    before_git_dir = git_output(
-        before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
-    )
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    after_git = after_git or git_output
+    before_git_dir = git_output(before_target, *common_dir)
     if (
         before_git_dir is not None
-        and after_git_dir is not None
+        and (after_git_dir := after_git(after_target, *common_dir)) is not None
         and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
     ):
         return True
-    before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    origin = ("remote", "get-url", "origin")
+    before_origin = _repository_origin(git_output(before_target, *origin))
+    return before_origin is not None and before_origin == _repository_origin(
+        after_git(after_target, *origin)
     )
 
 
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
+def _repository_origin(remote: str | None) -> tuple[str, str] | None:
     if remote is None:
         return None
     if "://" in remote:
@@ -265,8 +266,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
-SCAN_SUMMARY_QUERY = """
-SELECT
+SCAN_SUMMARY_COLUMNS = """
     scans.*,
     progress.reportable_findings_count,
     progress.scope_file_count,
@@ -278,6 +278,9 @@ SELECT
         FROM finding_occurrences AS occurrences
         WHERE occurrences.scan_id = scans.id
     ) AS finding_count
+"""
+SCAN_SUMMARY_QUERY = f"""
+SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
 """
@@ -345,16 +348,13 @@ def list_scans(
             """,
             (str(repository), str(repository)),
         ).fetchone()
-        requested_identity = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
-        )
+        requested_git = cache(git_output)
         related_target_ids = [
             target["target_id"]
             for target in connection.execute(
                 "SELECT id AS target_id, current_path AS target_path FROM security_targets"
             )
-            if _same_repository(target, requested_repository, after_identity=requested_identity)
+            if _same_repository(target, requested_repository, after_git=requested_git)
         ]
         repository_clauses = ["scans.target_path = ?"]
         values.append(str(repository))
@@ -445,11 +445,15 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
-    selected = [
-        scan
-        for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
-        if _same_repository(scan, requested)
-    ]
+    selected = []
+    requested_git = cache(git_output)
+    membership: dict[tuple[str | None, str], bool] = {}
+    for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
+        target = (scan["target_id"], scan["target_path"])
+        if target not in membership:
+            membership[target] = _same_repository(scan, requested, after_git=requested_git)
+        if membership[target]:
+            selected.append(scan)
 
     selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 

@@ -46,6 +46,9 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
   const maxTimeHours = num('max-time-hours', false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== undefined && mode !== 'deep') throw new Error('max-time-hours requires mode: deep.');
   const dryRun = bool('dry-run', false);
+  const failOnSeverity = choice('fail-on-severity', ['none','low','medium','high','critical'], 'none');
+  if (dryRun && failOnSeverity !== 'none')
+    throw new Error('dry-run requires fail-on-severity: none. Configuration validation cannot satisfy a required security review.');
   const provider = choice('provider', ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'], 'openai');
   const model = str('model', provider === 'openai' ? 'gpt-5.6-sol' : '');
   const cyberAccessProgram = str('cyber-access-program')
@@ -54,7 +57,7 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
   return {
     repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
     provider, model, effort: str('effort', 'xhigh'),
-    maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity: choice('fail-on-severity', ['none','low','medium','high','critical'], 'none'),
+    maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity,
     verbose: bool('verbose', true), dryRun,
     summary: bool('summary', true), annotations: bool('annotations', true),
     uploadArtifacts: bool('upload-artifacts', false), artifactName: str('artifact-name', 'codex-security'), retentionDays: num('retention-days', true, 1, 90) ?? 7,
