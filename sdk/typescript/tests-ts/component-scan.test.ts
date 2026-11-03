@@ -34,6 +34,7 @@ import {
   type ComponentScanEvent,
   type ComponentScanOptions,
 } from "../src/component-scan.js";
+import * as deepScan from "../src/deep-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import * as runtime from "../src/runtime.js";
@@ -1774,27 +1775,45 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
 );
 
 test.each([
-  ["openrouter", "api-key"],
-  ["openrouter", "chatgpt"],
-  ["fireworks", "api-key"],
-  ["fireworks", "chatgpt"],
+  ["openrouter", "api-key", "inline"],
+  ["openrouter", "chatgpt", "inline"],
+  ["fireworks", "api-key", "inline"],
+  ["fireworks", "chatgpt", "inline"],
+  ["openrouter", "api-key", "CODEX_HOME"],
+  ["openrouter", "api-key", "codex_home"],
 ] as const)(
-  "component planning honors command authentication for %s with %s selection",
-  async (provider, auth) => {
+  "component planning honors command authentication for %s with %s selection via %s",
+  async (provider, auth, homeKey) => {
     const paths = await fixture();
+    const sourceHome =
+      homeKey === "inline" ? undefined : join(paths.root, "home");
+    if (sourceHome !== undefined) {
+      await mkdir(sourceHome);
+      await writeFile(
+        join(sourceHome, "review.config.toml"),
+        `model = "synthetic-component-model"
+model_provider = "${provider}"
+[model_providers.${provider}.auth]
+command = "synthetic-auth-helper"
+`,
+      );
+    }
     const plan = mock(async () => ({ components }));
     const result = await scan(paths, {
       components: undefined,
       auto: true,
       planOnly: true,
-      environment: {},
+      environment: sourceHome === undefined ? {} : { [homeKey]: sourceHome },
       config: {
-        codexOverrides: {
-          model_provider: provider,
-          model_providers: {
-            [provider]: { auth: { command: "synthetic-auth-helper" } },
-          },
-        },
+        codexOverrides:
+          sourceHome === undefined
+            ? {
+                model_provider: provider,
+                model_providers: {
+                  [provider]: { auth: { command: "synthetic-auth-helper" } },
+                },
+              }
+            : { profile: "review" },
       },
       scanOptions: { auth },
       planComponents: plan,
@@ -1852,6 +1871,10 @@ test.each([
         return preparedRuntime("unused").plugin;
       }),
       spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
+      // The Node child below implements only `codex exec`.
+      spyOn(deepScan, "readDeepScanParentConfig").mockImplementation(
+        async ({ codexOptions }) => codexOptions.config ?? {},
+      ),
       spyOn(runtime, "resolvePluginPython").mockResolvedValue(
         "/managed/python",
       ),
@@ -1982,7 +2005,10 @@ test("CLI requires an explicitly selected API key before automatic planning", as
 test("CLI forwards scan settings and accepts legacy scope notes", async () => {
   const paths = await fixture();
   const planFile = join(paths.root, "plan.json");
-  await writeFile(planFile, JSON.stringify({ components: [components[0]] }));
+  await writeFile(
+    planFile,
+    `\uFEFF${JSON.stringify({ components: [components[0]] })}`,
+  );
   const signals = new FakeSignals();
   const createSecurity = mock((_value: unknown) => {
     return client(run)();

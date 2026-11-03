@@ -128,10 +128,16 @@ def require_standard_decisions(scan, findings: dict, coverage: dict) -> None:
     outcomes = claim_outcomes(decisions)
     reported = set()
     for finding in findings.get("findings", []):
-        if root := finding_candidate_id(finding):
-            reported.add(root)
-            if outcomes.get(root, {}).get("disposition") == "reportable":
-                reported.update(finding.get("provenance", {}).get("duplicateCandidateIds", []))
+        root = finding_candidate_id(finding)
+        if root not in outcomes:
+            continue
+        disposition = outcomes[root]["disposition"]
+        if disposition != "reportable":
+            raise RecoverableContractError(
+                f"Standard claim {root} is {disposition} and cannot be a finding."
+            )
+        reported.add(root)
+        reported.update(finding.get("provenance", {}).get("duplicateCandidateIds", []))
     deferred = {row.get("candidateId") for row in coverage.get("deferred", [])}
     rejected = {
         (row.get("candidateId"), row["disposition"])
@@ -145,12 +151,12 @@ def require_standard_decisions(scan, findings: dict, coverage: dict) -> None:
         elif disposition == "duplicate":
             saved = part["duplicateOf"] in reported
         elif disposition == "deferred":
-            saved = claim in deferred
+            saved = claim in deferred and claim not in reported
         else:
-            saved = (claim, disposition) in rejected
+            saved = (claim, disposition) in rejected and claim not in reported
         if not saved:
             raise RecoverableContractError(
-                f"Standard claim {claim} is {disposition}. Its decision is missing from the report."
+                f"Standard claim {claim} is {disposition}. The report does not match its decision."
             )
 
 

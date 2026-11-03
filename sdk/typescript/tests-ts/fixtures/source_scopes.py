@@ -141,7 +141,7 @@ def directory_link(target: Path, link: Path) -> None:
         link.symlink_to(target, target_is_directory=True)
 
 
-def replacements(repository: Path) -> dict:
+def replacements(repository: Path) -> None:
     write(repository, "selected.py", "selected source\n")
     write(repository, "private.py", "private source\n")
     write(repository, "selected/public.py", "selected directory\n")
@@ -167,10 +167,9 @@ def replacements(repository: Path) -> dict:
     scopes.tree_entries.cache_clear()
     captured = scan(repository, revision, ["selected.py", "selected"])
     assert json.loads(captured["source_scopes_json"])["scopes"] == []
-    return {"savedObjectsUnchanged": True, "newReplacementViewOmitted": True}
 
 
-def replacement_filters(repository: Path) -> dict:
+def replacement_filters(repository: Path) -> None:
     write(repository, "tracked.py", "synthetic source\n")
     write(repository, ".gitattributes", "tracked.py filter=scope_probe\n")
     revision = commit(repository)
@@ -215,10 +214,9 @@ def replacement_filters(repository: Path) -> dict:
     assert not marker.exists(), "source capture executed a working-tree filter"
     assert json.loads(record["source_scopes_json"])["scopes"] == []
     assert json.loads(record["recipe_json"]) == recipe
-    return {"workingTreeFilterNotRun": True, "registrationRecipeUnchanged": True}
 
 
-def replacement_snapshot(repository: Path) -> dict:
+def replacement_snapshot(repository: Path) -> None:
     from workbench_scan_start import scan_target_identity
 
     write(repository, "src/public.py", "historical source\n")
@@ -258,10 +256,9 @@ def replacement_snapshot(repository: Path) -> dict:
             == []
         )
         assert excerpt(legacy, repository, "src/removed.py", ["."]) is None
-    return {"mismatchedCaptureOmitted": True, "ambiguousLegacyViewOmitted": True}
 
 
-def indexed_scopes(repository: Path) -> dict:
+def indexed_scopes(repository: Path) -> int:
     selected = [f"source-{index}.py" for index in range(256)]
     for name in selected:
         write(repository, name, "synthetic source\n")
@@ -279,10 +276,10 @@ def indexed_scopes(repository: Path) -> dict:
         record = scan(repository, revision, selected)
     assert len(json.loads(record["source_scopes_json"])["scopes"]) == len(selected)
     assert calls <= 3 * len(selected), calls
-    return {"selected": len(selected), "linearNormalization": True}
+    return len(selected)
 
 
-def display_locations(repository: Path) -> dict:
+def display_locations(repository: Path) -> int:
     import workbench_db as db
     from filesystem_identity import serialize_filesystem_identity
 
@@ -340,10 +337,10 @@ def display_locations(repository: Path) -> dict:
     assert [item["path"] for item in result["locations"]] == selected[:8]
     assert result["sourceExcerpt"] == "1  source 0"
     connection.close()
-    return {"displayed": 8, "excerptUsesDisplayedLocation": True}
+    return len(result["locations"])
 
 
-def selected_redirects(repository: Path) -> dict:
+def selected_redirects(repository: Path) -> None:
     write(repository, ".gitignore", "/selected/link\n")
     write(repository, "selected/public.py", "selected source\n")
     write(repository, "private/secret.py", "private source\n")
@@ -374,12 +371,6 @@ def selected_redirects(repository: Path) -> dict:
         excerpt(direct, repository, "private/secret.py", ["private"])
         == "1  private source"
     )
-    return {
-        "selectedLinkOmitted": True,
-        "linkedAncestorOmitted": True,
-        "registrationRecipeUnchanged": True,
-        "directSelectionPreserved": True,
-    }
 
 
 def working_tree_excerpt(repository: Path) -> dict:
@@ -423,7 +414,7 @@ def working_tree_excerpt(repository: Path) -> dict:
     }
 
 
-def unsafe_locations(repository: Path) -> dict:
+def unsafe_locations(repository: Path) -> None:
     write(repository, "source.py", "selected source\n")
     record = scan(repository, commit(repository), ["."])
     outside = repository.parent / "outside"
@@ -448,10 +439,6 @@ def unsafe_locations(repository: Path) -> dict:
             )
             is None
         )
-    return {
-        "unsafePathsRejectedBeforeGit": True,
-        "invalidLocationRejectedBeforeGit": True,
-    }
 
 
 def boundaries(repository: Path) -> dict:
@@ -577,22 +564,17 @@ def boundaries(repository: Path) -> dict:
     result["removedDirectory"] = excerpt(
         selected, repository, "src/nested/child.py", ["src"]
     )
-    calls = []
-    original = scopes.git_bytes
-
-    def observed(target: Path, *arguments: str):
-        calls.append(
-            (
-                os.environ.get("GIT_NO_LAZY_FETCH"),
-                os.environ.get("GIT_ALLOW_PROTOCOL"),
-                os.environ.get("GIT_NO_REPLACE_OBJECTS"),
-            )
-        )
-        return original(target, *arguments)
-
-    with patch.object(scopes, "git_bytes", observed):
+    scopes.tree_entries.cache_clear()
+    with patch.object(subprocess, "run", wraps=subprocess.run) as run:
         result["offline"] = excerpt(selected, repository, "src/public.py", ["src"])
-    assert calls and all(call == ("1", "", "1") for call in calls)
+    for command in ("ls-tree", "cat-file"):
+        reads = [call for call in run.call_args_list if command in call.args[0]]
+        assert reads, command
+        for call in reads:
+            env = call.kwargs["env"]
+            assert env["GIT_NO_LAZY_FETCH"] == "1"
+            assert env["GIT_ALLOW_PROTOCOL"] == ""
+            assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
     with patch.object(excerpts, "offline_git_bytes", return_value=None):
         result["missingObject"] = excerpt(
             selected, repository, "src/public.py", ["src"]
@@ -683,7 +665,7 @@ def aliases(repository: Path) -> dict:
     return result
 
 
-def descendant_aliases(repository: Path) -> dict:
+def descendant_aliases(repository: Path) -> None:
     pairs = [("foo.py", "FOO.py"), ("nested/public.py", "NESTED/public.py")]
     for lower, _ in pairs:
         write(repository, f"selected/{lower}", "lower source\n")
@@ -718,7 +700,6 @@ def descendant_aliases(repository: Path) -> dict:
     for lower, upper in pairs:
         for path in (lower, upper):
             assert excerpt(record, repository, f"selected/{path}", ["selected"]) is None
-    return {"fileAndDirectoryCollisionsChecked": True, "missingWitnessesOmitted": True}
 
 
 def alias_evidence(_: Path) -> dict:
@@ -750,7 +731,7 @@ def alias_evidence(_: Path) -> dict:
     return result
 
 
-def worktrees(repository: Path) -> dict:
+def worktrees(repository: Path) -> None:
     write(repository, "nested/src/public.py", "nested target source\n")
     write(repository, "private.py", "outside target source\n")
     revision = commit(repository)
@@ -773,10 +754,9 @@ def worktrees(repository: Path) -> dict:
         == "1  nested target source"
     )
     assert excerpt(linked_record, linked_target, "private.py", ["."]) is None
-    return {"subdirectoryBound": True, "linkedWorktreeBound": True}
 
 
-def writer(repository: Path, kind: str) -> dict:
+def writer(repository: Path, kind: str) -> str:
     write(repository, "src/public.py", "public source\n")
     write(repository, "selected.py", "selected file\n")
     revision = commit(repository)
@@ -913,15 +893,10 @@ def writer(repository: Path, kind: str) -> dict:
         else:
             raise AssertionError("Original commit was not pruned")
         assert excerpt(row, repository, "selected.py", ["."]) == "1  selected file"
-    return {
-        "writer": kind,
-        "sourceAuthorityRecorded": True,
-        "launchRecipeUnchanged": True,
-        "legacyExactScopesPreserved": True,
-    }
+    return kind
 
 
-def migration(_: Path) -> dict:
+def migration(_: Path) -> None:
     from workbench_schema import MIGRATIONS, apply_migrations
 
     timestamp = "2026-08-01T00:00:00Z"
@@ -1003,11 +978,6 @@ def migration(_: Path) -> dict:
             )
             apply(MIGRATIONS)
         connection.close()
-    return {
-        "legacyAuthorityUnset": True,
-        "otherMigrationsPreserved": True,
-        "conflictRejected": True,
-    }
 
 
 with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temporary:

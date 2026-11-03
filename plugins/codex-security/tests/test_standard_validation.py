@@ -87,11 +87,26 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
         {"disposition": "reportable", "reason": "Independent control in src/extract.py:44."}
     )
     decisions[1]["parts"][0]["duplicateOf"] = "standard-1.1"
-    for batch in [decisions[:5], decisions[5:]]:
-        subprocess.run(
-            [sys.executable, SCRIPT, "record", scan], input=json.dumps(batch), text=True, check=True
+
+    def record(batch, check=True):
+        return subprocess.run(
+            [sys.executable, SCRIPT, "record", scan],
+            input=json.dumps(batch),
+            text=True,
+            capture_output=True,
+            check=check,
         )
+
+    record(decisions[:5])
+    record(decisions[5:])
     assert page() == []
+    recorded_deferred = decisions[4]
+    record([recorded_deferred])
+    rewritten = {
+        **recorded_deferred,
+        "parts": [{"disposition": "duplicate", "duplicateOf": "standard-1.1", "reason": "Same."}],
+    }
+    assert "already has a different decision" in record([rewritten], check=False).stderr
     finding = documents["findings"]["findings"][0]
     finding["provenance"].update(candidateId="standard-1.1", duplicateCandidateIds=["standard-6.1"])
     review = documents["reviewState"]
@@ -125,6 +140,21 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
         "provenance": {"source": "local_plugin", "candidateId": "standard-1.2"},
     }
     documents["findings"]["findings"].append(sibling)
+    # The rejection surface alone must not authorize also publishing the rejected claim.
+    sibling["provenance"]["candidateId"] = "standard-3.1"
+    stage.write_text(json.dumps(documents))
+    rejected = scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(stage), check=False
+    )
+    assert "standard-3.1 is rejected and cannot be a finding" in rejected["stderr"]
+    sibling["provenance"]["candidateId"] = "standard-1.2"
+    finding["provenance"]["duplicateCandidateIds"].append("standard-5.1")
+    stage.write_text(json.dumps(documents))
+    rejected = scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(stage), check=False
+    )
+    assert "standard-5.1 is deferred" in rejected["stderr"]
+    finding["provenance"]["duplicateCandidateIds"].pop()
     stage.write_text(json.dumps(documents))
     scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))
     completed = scan_command(state, "complete-scan", scan_id)

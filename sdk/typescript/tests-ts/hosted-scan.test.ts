@@ -1,11 +1,19 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, realpath, stat, symlink } from "node:fs/promises";
+import {
+  appendFile,
+  readFile,
+  realpath,
+  stat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import hostedContract from "../schemas/hosted-scan-v2.fixture.json" with { type: "json" };
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -41,6 +49,7 @@ import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
 
+const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
@@ -151,7 +160,10 @@ async function fixture(
   };
 }
 
-async function writeDraft(request: ScanExecutionRequest) {
+async function writeDraft(
+  request: ScanExecutionRequest,
+  receiptRefs: string[] = [],
+) {
   const directory = request.runtime.outputDirectory;
   const reviewState = {
     inventoryStrategy:
@@ -161,7 +173,7 @@ async function writeDraft(request: ScanExecutionRequest) {
         id: "fixture",
         label: "Synthetic scope fixture",
         disposition: "no_issue_found",
-        receiptRefs: [],
+        receiptRefs,
         notes: "Synthetic test only.",
       },
     ],
@@ -185,6 +197,7 @@ async function writeDraft(request: ScanExecutionRequest) {
   };
   for (const [name, document] of Object.entries(documents))
     await writeJson(join(directory, name), document);
+  return reviewState;
 }
 
 function receipt(
@@ -379,9 +392,7 @@ test.each(sealedScopes)(
     if (normalized.length > 1) expect(report).not.toContain("service-c");
     for (const artifact of result.artifacts) {
       const data = await readFile(join(result.outputDirectory, artifact.path));
-      expect(artifact.sha256).toBe(
-        createHash("sha256").update(data).digest("hex"),
-      );
+      expect(artifact.sha256).toBe(hash("sha256", data));
       expect(artifact.bytes).toBe(data.byteLength);
     }
     const artifactPaths = result.artifacts.map((artifact) => artifact.path);
@@ -389,6 +400,68 @@ test.each(sealedScopes)(
       expect(artifactPaths).toContain(path);
     for (const artifact of manifest.scan.artifacts)
       expect(artifactPaths).toContain(artifact.path);
+  },
+);
+
+test.skipIf(process.platform !== "linux").each([
+  ["private", "completed"],
+  ["private", "acceptance_unknown"],
+  ["output", "completed"],
+  ["lost", "completed"],
+] as const)(
+  "hosted scope generation with %s scratch preserves the %s receipt",
+  async (storage, status) => {
+    const input = await fixture(["service-a/nested/route [x].ts"]);
+    const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
+    let inventory = "";
+    const run: ScanExecutor["run"] = async (request) => {
+      expect(request.prompt).toContain("pending decisions in context");
+      expect(request.prompt).toContain("reviewState.deferred");
+      expect(request.prompt).not.toContain("build the queue once");
+      const commands = request.prompt.split("\n");
+      const [primary, recovery] = commands.filter((line) =>
+        line.includes("--helper make-hosted-repo-scope-input "),
+      );
+      const environment = { ...request.runtime.environment };
+      if (storage === "output")
+        environment["CODEX_SECURITY_STATE_DIR"] =
+          request.runtime.outputDirectory;
+      const shell = (command: string) =>
+        execFileSync("/bin/sh", ["-c", command], {
+          cwd: request.runtime.outputDirectory,
+          env: environment,
+          encoding: "utf8",
+        });
+      const generate = (command: string) =>
+        shell(command).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
+      inventory = generate(primary!);
+      if (storage !== "output") {
+        expect(await realpath(dirname(inventory))).toBe(
+          await realpath(request.runtime.stateDirectory),
+        );
+      }
+      if (storage === "lost") {
+        await unlink(inventory);
+        inventory = generate(recovery!);
+      }
+      if (storage !== "private") expect(inventory).toBe(outputCopy);
+      if (status === "completed") {
+        await writeDraft(request);
+        shell(
+          commands.find((line) => line.includes("--helper bind-repo-scopes "))!,
+        );
+      }
+      return receipt(request, { status });
+    };
+    const result = await runHostedScan(input, { executor: { run } });
+    expect(result.status, JSON.stringify(result)).toBe(status);
+    expect(result.execution?.sessionId).toBe("host-session");
+    expect(parseJsonLines(await readFile(inventory, "utf8"))).toEqual([
+      { path: "service-a/index.ts" },
+      { path: "service-a/nested/route [x].ts" },
+    ]);
+    if (storage === "private")
+      await expect(stat(outputCopy)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
 
@@ -486,7 +559,10 @@ test.each(["missing", "file"] as const)(
         signal: controller.signal,
       });
       if (timing === "during") queueMicrotask(() => controller.abort(reason));
-      await expect(pending).rejects.toBe(reason);
+      await expect(pending).resolves.toMatchObject({
+        status: "canceled",
+        error: expect.stringContaining(reason.message),
+      });
     }
     for (const options of [{}, { signal: new AbortController().signal }]) {
       await expect(
@@ -610,20 +686,144 @@ test("sealed review with follow-up diagnostics remains completed", async () => {
   );
 });
 
+test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
+  "changed bytes in %s cannot produce a completed hosted receipt",
+  async (path) => {
+    const original = CodexSecurity.prototype.run;
+    using _swap = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+      async function (this: CodexSecurity, ...args) {
+        const validated = await original.apply(this, args);
+        await appendFile(join(validated.scanDir, path), "\n");
+        return validated;
+      },
+    );
+    const result = await runHostedScan(await fixture(), {
+      executor: {
+        async run(request) {
+          const evidence = "artifacts/evidence.txt";
+          writeSource(
+            request.runtime.outputDirectory,
+            evidence,
+            "scan evidence",
+          );
+          await writeDraft(request, [evidence]);
+          return receipt(request);
+        },
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts).toEqual([]);
+    expect(result).toHaveProperty(
+      "error",
+      `The sealed file ${path} changed before the hosted receipt was created.`,
+    );
+  },
+);
+
+test("hosted receipts hash MCP checkpoints as written", async () => {
+  const { saveScanDraftCheckpoint } = await import(
+    new URL(
+      "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
+      import.meta.url,
+    ).href
+  );
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        const reviewState = await writeDraft(request);
+        await saveScanDraftCheckpoint(
+          {
+            root: request.runtime.outputDirectory,
+            repoRoot: request.repository,
+            layout: "scan",
+          },
+          { scanId: request.scanId, findings: [], reviewState },
+        );
+        return receipt(request);
+      },
+    },
+  });
+  expect(result.status).toBe("completed");
+  const manifest = await readJson<{
+    scan: { preservedSources: Record<string, string> };
+  }>(join(input.outputDirectory, "scan-manifest.json"));
+  const checkpoint = result.artifacts.find(
+    ({ path, sha256 }) =>
+      path.startsWith("checkpoints/") &&
+      Object.hasOwn(manifest.scan.preservedSources, path) &&
+      sha256 !== manifest.scan.preservedSources[path],
+  );
+  expect(checkpoint).toBeDefined();
+  const contents = await readFile(
+    join(input.outputDirectory, checkpoint!.path),
+  );
+  expect(checkpoint!.sha256).toBe(hash("sha256", contents));
+});
+
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
+  input.severityRubric = severityRubric;
   const result = await runHostedScan(input, {
     executor: draftExecutor(() => {
       git(input.repository, "commit", "--allow-empty", "-qm", "changed");
     }),
   });
   expect(result.status).toBe("failed");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.artifacts).toEqual([]);
 });
 
 test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
+
+test.each(["valid", "tampered"] as const)(
+  "scan --host receives an immediate cancellation with a %s rubric",
+  async (rubric) => {
+    const params = await fixture();
+    params.severityRubric =
+      rubric === "valid"
+        ? severityRubric
+        : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
+    const input = new PassThrough();
+    const output = capture();
+    const run = main(["scan", "--host"], output.stream, capture().stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    try {
+      send(input, { id: "run", method: "run", params });
+      send(input, { method: "cancel", params: { id: "run" } });
+      expect(await run).toBe(rubric === "valid" ? 1 : 2);
+      const messages = parseJsonLines(output.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ jsonrpc: "2.0", id: "run" });
+      if (rubric === "tampered") {
+        expect(messages[0].error).toMatchObject({
+          code: -32602,
+          message: expect.stringContaining("SHA-256"),
+        });
+      } else {
+        expect(messages[0].result).toMatchObject({
+          status: "canceled",
+          identity: params.identity,
+          repository: params.repository,
+          revision: params.revision,
+          scope: params.scope,
+          severityRubric,
+          outputDirectory: params.outputDirectory,
+          provenance: { buildId: params.identity.buildId },
+          artifacts: [],
+        });
+        expect(messages[0].result).not.toHaveProperty("scanId");
+        expect(messages[0].result).not.toHaveProperty("execution");
+      }
+    } finally {
+      input.destroy();
+    }
+  },
+);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -660,6 +860,7 @@ test.each([false, true])(
     if (!cancel) {
       input.reasoningEffort = "synthetic-future-effort";
       input.ownerSuggestions = true;
+      input.severityRubric = severityRubric;
     }
     const child = spawn(
       process.execPath,
@@ -691,6 +892,15 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          if (cancel) {
+            expect(message.params).not.toHaveProperty("severityRubric");
+            expect(message.params.prompt).not.toContain('"severityRubric"');
+          } else {
+            expect(message.params.severityRubric).toEqual(severityRubric);
+            expect(message.params.prompt).toContain(
+              JSON.stringify({ severityRubric: message.params.severityRubric }),
+            );
+          }
           requestId = message.params.requestId;
           for (const event of [
             progressEvent,
@@ -743,7 +953,10 @@ test.each([false, true])(
           execution: { sessionId: "fake-host", usage },
         },
       });
-      if (!cancel) {
+      if (cancel) {
+        expect(response.result).not.toHaveProperty("severityRubric");
+      } else {
+        expect(response.result.severityRubric).toEqual(severityRubric);
         expect(response.result).not.toHaveProperty("ownerSuggestionsError");
         expect(response.result.artifacts).toContainEqual(
           expect.objectContaining({ path: "owner-suggestions.json" }),
@@ -1092,10 +1305,13 @@ test("cancellation after registration retains scan identity before executor disp
 test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  const result = await runHostedScan(input, {
+  input.severityRubric = { ...severityRubric };
+  const pending = runHostedScan(input, {
     signal: controller.signal,
     executor: {
       async run(request, options) {
+        expect(request.severityRubric).toEqual(severityRubric);
+        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
         controller.abort();
         expect(options.signal.aborted).toBe(true);
         await Promise.resolve();
@@ -1107,7 +1323,10 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
       },
     },
   });
+  input.severityRubric.markdown = "Edited by caller.";
+  const result = await pending;
   expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.execution).toMatchObject({
     status: "canceled",
     sessionId: "canceled-session",
@@ -1156,6 +1375,50 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   }
   expect(requests).toHaveLength(2);
   expect(requests[0]).not.toBe(requests[1]);
+});
+
+test("a host retry can resupply the saved rubric in a fresh attempt", async () => {
+  const input = await fixture();
+  const saved = join(dirname(input.repository), "host-rubric.json");
+  await writeJson(saved, severityRubric);
+  const requestIds = new Set<string>();
+  for (const [attemptId, status] of [
+    ["first", "canceled"],
+    ["retry", "completed"],
+  ] as const) {
+    const identity = { ...input.identity, attemptId };
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        return receipt(request, { status });
+      }),
+    };
+    const result = await runHostedScan(
+      {
+        ...input,
+        identity,
+        outputDirectory: join(input.outputDirectory, attemptId),
+        stateDirectory: join(input.stateDirectory, attemptId),
+        severityRubric: await readJson<typeof severityRubric>(saved),
+      },
+      { executor },
+    );
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const [request] = executor.run.mock.calls[0]!;
+    expect(request.identity).toEqual(identity);
+    expect(request.severityRubric).toEqual(severityRubric);
+    expect(request.prompt).toContain(
+      JSON.stringify({ severityRubric: request.severityRubric }),
+    );
+    expect(result).toMatchObject({
+      identity,
+      status,
+      severityRubric,
+      execution: { requestId: request.requestId, status },
+    });
+    requestIds.add(request.requestId);
+  }
+  expect(requestIds.size).toBe(2);
 });
 
 test.each(["cancel", "disconnect", "signal"])(
@@ -1218,10 +1481,11 @@ test.each(["result", "error"])(
 );
 
 test("the exported contract fixture matches v2 and rejects explicit empty scope", async () => {
-  const fixture = await readJson<any>(
-    join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
-  );
-  expect(HostedScanInputSchema.parse(fixture.run.params).scope).toEqual({
+  const fixture = hostedContract;
+  const input = HostedScanInputSchema.parse(fixture.run.params);
+  expect(input.severityRubric).toEqual(severityRubric);
+  expect(fixture.execution.params.severityRubric).toEqual(severityRubric);
+  expect(input.scope).toEqual({
     paths: ["service-a", "service-b"],
   });
   expect(
@@ -1240,6 +1504,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     status: "completed",
     identity: fixture.run.params.identity,
     scope: fixture.run.params.scope,
+    severityRubric,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });

@@ -97,7 +97,7 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     scanDir: string,
   ) {
     super(
-      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; scan output directory: ${scanDir}.`,
       scanDir,
     );
     this.maxCostUsd = maxCostUsd;

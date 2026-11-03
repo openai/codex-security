@@ -7,7 +7,8 @@ import {
 import type { JsonObject } from "./src/types.js";
 import { isRecord as isJsonObject } from "./src/record.js";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
@@ -410,6 +411,20 @@ const findingRemediationSchema = {
   baseRevision: requiredText.max(512).optional(),
   expectedVersion: positiveInteger,
   occurrenceId: occurrenceIdSchema,
+  patch: z
+    .union([
+      z
+        .string()
+        .refine(
+          (value) => value.isWellFormed(),
+          "Patch text contains an unpaired Unicode surrogate. Send the original bytes as base64.",
+        ),
+      z.object({ encoding: z.literal("base64"), content: z.base64() }),
+    ])
+    .optional()
+    .describe(
+      "For state generated, supply the exact unified diff as UTF-8 text or as base64 of its original bytes. The workbench saves it and computes its digest. For an existing scan-local file, supply patchPath and patchDigest without patch.",
+    ),
   patchDigest: z
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
@@ -800,6 +815,7 @@ export function createCodexSecurityServer(): McpServer {
       const selected = await deepScanProjectSetup(
         targetPath,
         projectConfigPath,
+        "preview",
       );
       const setup = await runWorkbench([
         "inspect-setup",
@@ -841,6 +857,7 @@ export function createCodexSecurityServer(): McpServer {
       const selected = await deepScanProjectSetup(
         targetPath,
         projectConfigPath,
+        "save",
       );
       return workspaceResult(
         (await runWorkbench(
@@ -947,6 +964,8 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const modelSettings = codexModelSettingsFromExtra(extra);
+      const serviceTier =
+        requestMetadataFromExtra(extra)?.["codex/turn-service-tier"];
       let parentSandbox: DeepWorkerParentSandbox;
       try {
         parentSandbox = resolveDeepWorkerParentSandbox(extra);
@@ -999,6 +1018,8 @@ export function createCodexSecurityServer(): McpServer {
             threadId,
             projectConfigPath,
             ...modelSettings,
+            serviceTier:
+              typeof serviceTier === "string" ? serviceTier : undefined,
             scanRoot: await scanRoot(),
           });
           if (handoffClaimToken) {
@@ -1808,36 +1829,17 @@ export function createCodexSecurityServer(): McpServer {
       annotations: nonIdempotentWritingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({
-      occurrenceId,
-      requestId,
-      actionToken,
-      expectedVersion,
-      state,
-      summary,
-      patchPath,
-      patchDigest,
-      baseRevision,
-      verificationSummary,
-    }) =>
+    async ({ patch, ...fields }) =>
       scanActionResult(
-        await runWorkbench([
-          "set-finding-remediation",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          ...optionalArg("--action-token", actionToken),
-          "--expected-version",
-          String(expectedVersion),
-          "--state",
-          state,
-          ...definedArg("--summary", summary),
-          ...definedArg("--patch-path", patchPath),
-          ...definedArg("--patch-digest", patchDigest),
-          ...definedArg("--base-revision", baseRevision),
-          ...definedArg("--verification-summary", verificationSummary),
-        ]),
+        await runWorkbench(
+          workbenchArgs("set-finding-remediation", {
+            ...fields,
+            patchStdin: patch !== undefined,
+          }),
+          typeof patch === "object"
+            ? Buffer.from(patch.content, patch.encoding)
+            : patch,
+        ),
         "Updated the local Codex Security finding remediation state.",
       ),
   );
@@ -2012,22 +2014,51 @@ async function startHeadlessStandardScan(
 
 async function deepScanProjectSetup(
   targetPath: string,
-  projectConfigPath?: string,
+  projectConfigPath: string | undefined,
+  action: "preview" | "save",
 ) {
   if (projectConfigPath === undefined) return { targetPath };
+  const inspectWithSetup =
+    action === "preview" && (await isCanonicalDirectory(targetPath));
+  if (!inspectWithSetup) targetPath = await inspectProjectTarget(targetPath);
+  try {
+    const project = await readDeepScanProjectConfig(
+      projectConfigPath,
+      targetPath,
+    );
+    return { targetPath, projectConfigJson: JSON.stringify(project) };
+  } catch (error) {
+    // Target or Git errors take precedence over an invalid project file.
+    if (inspectWithSetup) await inspectProjectTarget(targetPath);
+    throw error;
+  }
+}
+
+async function isCanonicalDirectory(targetPath: string): Promise<boolean> {
+  // Leave home expansion, UNC paths and drive-relative paths to the workbench.
+  if (
+    process.platform === "win32"
+      ? !/^[A-Za-z]:[/\\]/.test(targetPath)
+      : !isAbsolute(targetPath)
+  )
+    return false;
+  try {
+    return (
+      (await realpath(targetPath)) === targetPath &&
+      (await stat(targetPath)).isDirectory()
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function inspectProjectTarget(targetPath: string): Promise<string> {
   const inspected = await runWorkbench(
     workbenchArgs("inspect-target", { targetPath }),
   );
   if (typeof inspected.targetPath !== "string")
     throw new Error("Missing scan target path.");
-  const project = await readDeepScanProjectConfig(
-    projectConfigPath,
-    inspected.targetPath,
-  );
-  return {
-    targetPath: inspected.targetPath,
-    projectConfigJson: JSON.stringify(project),
-  };
+  return inspected.targetPath;
 }
 
 function wholeTargetScope(

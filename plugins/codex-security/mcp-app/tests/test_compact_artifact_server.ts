@@ -44,6 +44,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -411,10 +412,27 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record compact diff canonical semantics`,
     );
+    const note = {
+      scanId,
+      handoffClaimToken,
+      storage: "persistent",
+      path: "artifacts/review-note.md",
+    };
+    const content = "Saved with the scan.\n";
+    requireSuccessfulTool(
+      await call("save_codex_security_artifact", { ...note, content }),
+      `${runtimeLabel}: save supplemental note`,
+    );
     requireSuccessfulTool<ScanResult>(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
       `${runtimeLabel}: complete compact diff scan`,
     );
+    await rename(repoRoot, repoRoot + "-moved");
+    const saved = requireSuccessfulTool<{ content: string }>(
+      await call("read_codex_security_artifact", note),
+      `${runtimeLabel}: read supplemental note after moving its checkout`,
+    );
+    assert.equal(saved.content, content);
     const completed = requireSuccessfulTool<CompletedResult>(
       await call("get_codex_security_completed_scan", {
         scanId,

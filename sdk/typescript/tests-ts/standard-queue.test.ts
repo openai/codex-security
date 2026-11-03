@@ -1,6 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { nodeCommand } from "./support/shell.js";
@@ -46,6 +53,17 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
     return JSON.parse(result.stdout);
   };
 
+  if (process.platform !== "win32") {
+    const rulesFile = join(context, "standard-rules.json");
+    const external = join(root, "other-rules.json");
+    renameSync(rulesFile, external);
+    symlinkSync(external, rulesFile);
+    const redirected = run("build", [repo, "src"]);
+    expect(redirected.status).toBe(1);
+    expect(redirected.stderr).toContain("not a regular file");
+    unlinkSync(rulesFile);
+    renameSync(external, rulesFile);
+  }
   expect(success("build", repo, "src", "selected.txt")).toEqual({
     files: 7,
     batches: 2,

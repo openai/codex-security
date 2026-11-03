@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
@@ -25,7 +24,6 @@ export async function standardQueue(args: string[], home?: string) {
     throw new Error(
       "Expected standard-queue <build|pending|reviewed|check> <scan_dir> [arguments]",
     );
-  const context = join(scanDir, "artifacts", "01_context");
   const destination = (name: string) =>
     artifactDestination(
       { root: scanDir },
@@ -45,7 +43,9 @@ export async function standardQueue(args: string[], home?: string) {
       throw new Error(
         "Supply the registered scopes, or . for a whole repository.",
       );
-    const rules: Rule[] = readJson(join(context, "standard-rules.json"));
+    const rules: Rule[] = readJson(
+      await destination("artifacts/01_context/standard-rules.json"),
+    );
     if (!Array.isArray(rules) || !rules.length)
       throw new Error("Expected a nonempty array of search rules.");
     const matchers = rules.map(({ path, content }) => {
