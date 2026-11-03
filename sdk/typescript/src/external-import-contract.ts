@@ -277,6 +277,16 @@ export function validateExternalReport(
   serializeImportJson(report, checkReportNumber);
 }
 
+export function validateCodeLineRange(
+  firstLine: number | null | undefined,
+  endLine: number | null | undefined,
+) {
+  if (endLine != null && (firstLine == null || endLine < firstLine))
+    throw new Error(
+      "The code end line requires a first source location line and cannot precede it.",
+    );
+}
+
 export function validateExternalEvidenceFields(
   input: unknown,
   target: ExternalImportTarget = "cloud",
@@ -313,14 +323,10 @@ export function validateExternalEvidenceFields(
         throw new Error("Advisory source context requires advisory evidence.");
     }
   }
-  const endLine = result.details?.code?.end_line;
-  if (endLine !== null && endLine !== undefined) {
-    const firstLine = result.locations?.[0]?.line;
-    if (firstLine === null || firstLine === undefined || endLine < firstLine)
-      throw new Error(
-        "The code end line requires a first source location line and cannot precede it.",
-      );
-  }
+  validateCodeLineRange(
+    result.locations?.[0]?.line,
+    result.details?.code?.end_line,
+  );
   const urls = [
     result.url,
     result.details?.repository?.url,

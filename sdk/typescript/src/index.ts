@@ -361,14 +361,31 @@ export {
   readSnykFindings,
 } from "./snyk-findings.js";
 export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesFindings,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
+export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export { collectSelectedSemgrepGuardianFindings } from "./semgrep-guardian-findings.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 export {
   normalizeSelectedSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
   type SemgrepPlatformSelection,
 } from "./semgrep-platform-findings.js";
 export {

@@ -1048,7 +1048,7 @@ test("direct SDK imports respect the native source even with a caller-selected I
   };
   await expect(
     prepareNormalizedExternalPublication(
-      { ...normalized, findings: [exported] },
+      { read: 1, excluded: [], findings: [exported] },
       options,
       { ...deps, fetch },
     ),

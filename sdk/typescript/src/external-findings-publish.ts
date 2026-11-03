@@ -27,12 +27,17 @@ import {
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
+import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
   DEFAULT_CLOUD_BASE_URL,
 } from "./cloud-endpoint.js";
-import { isSemgrepSelectionEvidence } from "./semgrep-platform-findings.js";
+import {
+  isSemgrepPlatformEvidence,
+  semgrepPlatformReportRepository,
+} from "./semgrep-platform-findings.js";
+import { isSnykRestFinding, isSnykRestReport } from "./snyk-rest-findings.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -506,22 +511,38 @@ function storedFindingId(finding: ExternalFinding): string {
   return "";
 }
 
-function rejectLocalSelections(input: ExternalFindings): void {
-  const rows = input?.findings;
-  if (!Array.isArray(rows)) return;
+function rejectLocalScannerReports(
+  input: ExternalFindings,
+  provider: string,
+): void {
+  if (!input || (typeof input !== "object" && typeof input !== "function"))
+    return;
+  const stored = (row: ExternalFinding) => ({
+    source_finding_id: storedFindingId(row),
+    evidence: row.evidence,
+  });
+  const isPlatform = (row: ExternalFinding) => {
+    if (!row) return false;
+    const finding = stored(row);
+    return (
+      /^semgrep-guardian:[0-9a-f]{64}$/u.test(finding.source_finding_id) ||
+      ownData(ownData(finding.evidence, "source_data"), "format") ===
+        guardianSelectionFormat ||
+      isSemgrepPlatformEvidence(finding, provider)
+    );
+  };
+  const hasPlatformRows = (rows: ExternalFinding[]) =>
+    Array.isArray(rows) && rows.some(isPlatform);
   if (
-    rows.some(
-      (row) =>
-        row &&
-        isSemgrepSelectionEvidence({
-          source_finding_id: storedFindingId(row),
-          evidence: row.evidence,
-        }),
-    )
+    ownData(ownData(input, "report"), "format") === guardianSelectionFormat ||
+    semgrepPlatformReportRepository(input, provider, isPlatform) ||
+    hasPlatformRows(input.findings)
   )
     throw new CodexSecurityError(
-      "Semgrep Platform selections require a local import.",
+      "Semgrep Platform findings require a local import.",
     );
+  if (isSnykRestReport(input, (row) => row && isSnykRestFinding(stored(row))))
+    throw new CodexSecurityError("Snyk REST findings require a local import.");
 }
 
 export async function prepareExternalPublication(
@@ -532,9 +553,10 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
-  rejectLocalSelections(parsed.findings);
+  rejectLocalScannerReports(parsed.findings, settings.provider);
   return preparePublicationInput(
-    parsed.publication ?? normalizedPublicationInput(parsed.findings),
+    parsed.publication ??
+      normalizedPublicationInput(parsed.findings, settings.provider),
     { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider] },
     dependencies,
     path,
@@ -548,10 +570,10 @@ export async function prepareNormalizedExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
-  rejectLocalSelections(input);
   const settings = snapshotImportOptions(options);
+  rejectLocalScannerReports(input, settings.provider);
   return preparePublicationInput(
-    normalizedPublicationInput(input),
+    normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
   );
@@ -736,6 +758,7 @@ function historicalPublication(
 
 function normalizedPublicationInput(
   input: ExternalFindings,
+  provider: string,
 ): PublicationSelection {
   const nativeDiagnostics = new Map<number, Error>();
   let native: ExternalFindings | undefined;
@@ -810,7 +833,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
-  if (original) rejectLocalSelections(original.parsed);
+  if (original) rejectLocalScannerReports(original.parsed, provider);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -823,7 +846,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  rejectLocalSelections(current);
+  rejectLocalScannerReports(current, provider);
   const identity = publicationIdentity(current);
   return {
     current,
@@ -1170,7 +1193,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalSelections({ ...parsed, findings: saved });
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     return content;
   }
 
@@ -1205,7 +1228,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalSelections({ ...parsed, findings: saved });
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     content.legacyApproval = true;
     content.inputProjection = {
       identityFormat: 2,

@@ -11,6 +11,8 @@
 - keep non-breaking hyphens in DOCX text ([#2272](https://github.com/openai/codex-security/pull/2272))
 - expose durable scan lifecycle telemetry ([#2274](https://github.com/openai/codex-security/pull/2274))
 - import saved Semgrep selections through the CLI ([#2166](https://github.com/openai/codex-security/pull/2166))
+- collect Semgrep findings through Guardian and the Web API ([#2167](https://github.com/openai/codex-security/pull/2167))
+- collect Snyk Code and Open Source findings locally ([#2168](https://github.com/openai/codex-security/pull/2168))
 
 <!-- release-section: highlights:end -->
 
