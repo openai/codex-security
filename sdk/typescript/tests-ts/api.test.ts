@@ -6566,12 +6566,17 @@ if __name__ == "__main__":
       const inventoryRead = Promise.withResolvers<void>();
       const workerRead = Promise.withResolvers<void>();
       let parentPath = "";
+      let workerPath = "";
       let pauseClose = false;
       const originalOpen = fsPromises.open;
       const originalReaddir = fsPromises.readdir;
       const opening = spyOn(fsPromises, "open").mockImplementation((async (
         ...args: Parameters<typeof originalOpen>
       ) => {
+        // Split the parent snapshot from the worker receipt even when the
+        // tracker opens both files concurrently.
+        if (split && String(args[0]) === workerPath)
+          await closeReleased.promise;
         const handle = await originalOpen(...args);
         if (String(args[0]) !== parentPath || !pauseClose) return handle;
         const close = handle.close.bind(handle);
@@ -6607,7 +6612,7 @@ if __name__ == "__main__":
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
           // Both paths exist before enumeration; this poll can read the newly
           // appended worker receipt after its older parent snapshot closes.
-          const worker = await writeUsageSession(
+          workerPath = await writeUsageSession(
             codexHome,
             "worker-thread",
             {},
@@ -6640,7 +6645,7 @@ if __name__ == "__main__":
               commandOutput(marker("validation", 7)),
             );
             await appendFile(
-              worker,
+              workerPath,
               JSON.stringify({
                 type: "response_item",
                 payload: {
@@ -17977,7 +17982,7 @@ process.exit(2);
     expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
     expect(createCodex.mock.lastCall?.[0]?.codexPathOverride).toBe(
       process.platform === "win32"
-        ? win32.toNamespacedPath(resolveCodexCommand({}).command)
+        ? win32.toNamespacedPath(fakeCommand.command.command)
         : undefined,
     );
     expect(
@@ -19446,6 +19451,7 @@ test.each([
         if (scenario === "late marker") {
           expect(updates.at(-1)).toEqual({
             ...updates[1]!,
+            phase: "discovery",
             filesCompleted: 3,
           });
         }

@@ -1495,10 +1495,16 @@ describe("Deep worker terminal lifecycle", () => {
       for (const resume of [false, true]) {
         // The managed overlay replaces this file. Input validation must not
         // try to interpret its stale contents before that existing write.
-        await writeFile(join(worker.home, "config.toml"), "invalid = [\n");
+        const config = join(worker.home, "config.toml");
+        const previous = Buffer.concat([
+          Buffer.from("invalid = [\n"),
+          Buffer.from([0xff]),
+        ]);
+        await writeFile(config, previous);
         await expect(worker.run(resume)).resolves.toMatchObject({
           status: "completed",
         });
+        expect(await readFile(config)).toEqual(previous);
       }
       expect(worker.selected).toEqual([undefined, undefined]);
       expect(worker.attempted).toEqual([false, true]);

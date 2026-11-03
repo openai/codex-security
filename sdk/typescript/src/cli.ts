@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { classificationRunsSchema } from "./severity-review.js";
 import { severityRubricSchema } from "./severity-rubric.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -6303,7 +6304,11 @@ export async function main(
               controller && listenForAbort(dependencies, controller);
             try {
               progress?.startVerification();
-              for (const findings of batches) {
+              for (const [index, findings] of batches.entries()) {
+                if (index > 0) {
+                  await yieldToEventLoop();
+                  controller?.signal.throwIfAborted();
+                }
                 const batchIds =
                   findings?.map(({ occurrenceId }) => occurrenceId) ??
                   identifiers;

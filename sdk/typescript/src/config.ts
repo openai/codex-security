@@ -472,7 +472,7 @@ export async function writeCodexConfig(
 /** @internal Write private configuration without changing its serialized contents. */
 export async function writePrivateConfig(
   path: string,
-  contents: string,
+  contents: string | Uint8Array,
 ): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });

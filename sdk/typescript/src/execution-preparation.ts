@@ -1,5 +1,5 @@
 import { restoreReplayProfile } from "./provider-profile.js";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, rm } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
 import {
   accountStatus,
@@ -27,6 +27,7 @@ import {
   scanCompositionOverrides,
   setScanSubagentBudget,
   writeCodexConfig,
+  writePrivateConfig,
   type JsonObject,
 } from "./config.js";
 import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
@@ -237,9 +238,11 @@ export async function lockExecutionConfiguration(
   );
   try {
     const configPath = join(session.runtime.codexHome, "config.toml");
-    const previousConfig = await readCodexHomeConfig(
-      { CODEX_HOME: session.runtime.codexHome },
-      signal,
+    const previousConfig = await readFile(configPath, { signal }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      },
     );
     // The launch selects its own provider through SDK overrides and a private
     // native profile. Keep that selection out of the shared credential home.
@@ -252,9 +255,11 @@ export async function lockExecutionConfiguration(
     );
     let cleanup: Promise<void> | undefined;
     return () =>
-      (cleanup ??= writeCodexConfig(configPath, previousConfig).finally(
-        release,
-      ));
+      (cleanup ??= (
+        previousConfig === undefined
+          ? rm(configPath, { force: true })
+          : writePrivateConfig(configPath, previousConfig)
+      ).finally(release));
   } catch (error) {
     await release();
     throw error;
