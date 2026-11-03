@@ -1,3 +1,4 @@
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -46,9 +47,7 @@ for (const [resume, continueAfterResume] of [
           `canonical report retains ${text}`,
         );
       }
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(coverage.completeness, undefined);
       assert.deepEqual(
         coverage.reviews.map((review) => review.completeness),
@@ -60,11 +59,18 @@ for (const [resume, continueAfterResume] of [
         "a finding does not discharge independent unresolved work",
       );
       assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
+        new Set(
+          coverage.deferred.map((item) =>
+            JSON.stringify([
+              item.provenance.workerId,
+              item.provenance.candidateId,
+            ]),
+          ),
+        ).size,
         2,
       );
-      for (const item of coverage.deferred)
-        assert.ok(report.includes(item.reason));
+      for (const exclusion of coverage.explicitExclusions)
+        assert.ok(report.includes(exclusion.pattern));
       for (const surface of coverage.surfaces) {
         assert.equal(
           await readFile(path.join(scanDir, surface.receiptRefs[0]), "utf8"),

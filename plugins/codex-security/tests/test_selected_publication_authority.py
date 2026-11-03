@@ -5,7 +5,6 @@ import json
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
@@ -14,7 +13,7 @@ def test_publication_uses_committed_finalization_selection(
     workbench_api, workbench_db, publication_scan, publication
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker()
     contents = json.dumps(
         {
             "scanId": scan.scan_id,

@@ -13,10 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importModule } from "./import-module.ts";
 
-const bundle = await build({
-  bundle: true,
+const module = await importModule({
   banner: {
     js: `import { createRequire as recoveryRequire } from "node:module"; const require = recoveryRequire(${JSON.stringify(import.meta.url)});`,
   },
@@ -31,18 +30,13 @@ const bundle = await build({
       new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
     ),
   ],
-  format: "esm",
-  platform: "node",
-  write: false,
 });
 const {
   beginDeepScanWithCapturedSettings: beginWithCapturedSettings,
   captureDeepScanExecutionSettings: captureSettings,
   restoredDeepScanWorkerSettings: restoreSettings,
   loadDeepScanExecutionSettings: loadSettings,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
 try {
   const settings = {
@@ -295,6 +289,11 @@ name = "Fixture"
 http_headers = { Authorization = "synthetic-secret" }
 `,
   );
+  const captureEnvironment = {
+    CODEX_CLI_PATH: process.execPath,
+    CODEX_HOME: root,
+    CODEX_SECURITY_CONFIG_PATH: configPath,
+  };
   const captured = await captureSettings(
     { model: "original-model", reasoningEffort: "ultra" },
     {
@@ -302,11 +301,18 @@ http_headers = { Authorization = "synthetic-secret" }
       literalFilesystemDenies: ["/fixture/account [original]"],
       globScanMaxDepth: 3,
     },
-    {
-      CODEX_CLI_PATH: process.execPath,
-      CODEX_HOME: root,
-      CODEX_SECURITY_CONFIG_PATH: configPath,
-    },
+    captureEnvironment,
+  );
+  const explicitTier = await captureSettings(
+    { serviceTier: "future-tier" },
+    { filesystemDenies: [] },
+    captureEnvironment,
+  );
+  assert.equal(explicitTier.serviceTier, "future-tier");
+  assert.equal(
+    restoreSettings(explicitTier, { filesystemDenies: [] }).codexOptions.config
+      .service_tier,
+    "future-tier",
   );
   assert.deepEqual(captured.parentSandbox.literalFilesystemDenies, [
     "/fixture/account [original]",

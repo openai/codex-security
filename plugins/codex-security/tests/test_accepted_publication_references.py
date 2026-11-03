@@ -6,12 +6,12 @@ from argparse import Namespace
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import read_review_state
 
 
 def accept_reducer(connection, scan):
-    result = add_worker(connection, scan)
+    result = scan.add_worker(connection)
     worker_id = result.parent.name
     coverage = {
         **scan.coverage,
@@ -89,7 +89,7 @@ def test_stopped_recovery_uses_accepted_bytes_after_replaceable_output_disappear
     )["scan"]
 
     assert stopped["findingCount"] == 1
-    published = json.loads((scan.scan_dir / "coverage.json").read_text())
+    published = read_review_state(workbench_db, scan.scan_dir)
     assert published["reviews"] == coverage["reviews"]
     assert coverage["deferred"][0] in published["deferred"]
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()

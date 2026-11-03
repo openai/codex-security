@@ -26,8 +26,23 @@ from finalize_scan_contract import (
     warnings_for_seal,
     write_scan_local_bytes,
 )
+from review_state import checkpoint_review_state, review_state, uses_legacy_review
 from workbench_coverage_receipts import capture_receipt_checkpoints, clear_scan_receipt_refs
 from workbench_validation import has_verified_selected_result, latest_publication_reducer
+
+
+class _CheckpointSnapshotError(ContractError):
+    """A captured source observation could not be persisted for publication replay."""
+
+    def __init__(self, message: str, captured: dict[str, tuple[str, int]]) -> None:
+        super().__init__(message)
+        self.captured = captured
+        self.records: dict[str, tuple[dict[str, Any], str, int]] = {}
+        self.heads: dict[str, str | None] = {}
+        self.model_source: list[str] = []
+        self.parent_context: dict[str, str] = {}
+        self.include_parent = False
+        self.documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None
 
 
 def _encoded(value: Any) -> bytes:
@@ -54,14 +69,43 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
             value["sources"], "Saved stopped-scan source digests are malformed."
         )
         model_source = value.get("threatModelSource")
-        if not isinstance(model_source, str) or model_source not in sources:
+        if "threatModelSource" in value and (
+            not isinstance(model_source, str) or model_source not in sources
+        ):
             raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
         return sources, model_source
     return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
 
 
-def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
-    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+def _retained_checkpoint_state(
+    scan: Any,
+) -> tuple[dict[str, str | None] | None, dict[str, Any] | None]:
+    raw = scan["retained_checkpoint_heads_json"]
+    if raw is None:
+        return None, None
+    saved = json.loads(raw)
+    if not isinstance(saved.get("heads"), dict):
+        return saved, None
+    if saved["recoveryBaseDigest"] != scan["seal_manifest_digest"]:
+        raise ContractError("Stopped scan recovery publication changed after selection.")
+    return saved["heads"], saved
+
+
+def _encode_retained_sources(
+    sources: dict[str, str],
+    model_source: list[str],
+    source_times: dict[str, int] | None = None,
+    parent_context: dict[str, str] | None = None,
+) -> str:
+    state: dict[str, Any] = sources
+    if model_source or source_times is not None:
+        state = {"sources": sources}
+        if model_source:
+            state["threatModelSource"] = model_source[0]
+        if source_times is not None:
+            state["sourceTimes"] = source_times
+            if parent_context:
+                state["parentContext"] = parent_context
     return json.dumps(state, sort_keys=True)
 
 
@@ -96,6 +140,23 @@ def _checkpoint_head_directory(relative: str) -> Path | None:
     return None
 
 
+def _unselected_root_order(
+    saved_heads: dict[str, str],
+    checkpoint_heads: dict[str, str | None],
+    source_order: dict[str, tuple[int, int]],
+) -> tuple[int, int]:
+    # One payload can have several accepted observations; retain their order.
+    return max(
+        (
+            source_order[head]
+            for head, checkpoint in saved_heads.items()
+            if _checkpoint_head_directory(head) == Path(".")
+            and checkpoint_heads.get(".") not in (None, head, f"checkpoints/{checkpoint}")
+        ),
+        default=(-1, 0),
+    )
+
+
 def _capture_saved_source(
     scan_dir: Path,
     relative: str,
@@ -106,6 +167,8 @@ def _capture_saved_source(
     write: bool = True,
     created_paths: set[str] | None = None,
     accepted_source_digests: dict[str, str] | None = None,
+    checkpoint_heads: dict[str, str | None] | None = None,
+    expected_digest: str | None = None,
 ) -> dict[str, tuple[str, int]]:
     read = partial(
         _read_saved_result,
@@ -122,27 +185,42 @@ def _capture_saved_source(
             partial(_checkpoint_paths, scan_dir),
             read,
         )
-    head, _, observed = read(relative)
+    head, head_digest, observed = read(relative)
+    if expected_digest is not None and head_digest != expected_digest:
+        raise ContractError("checkpoint changed after the scan stopped")
     observation = {
         **{key: head[key] for key in ("checkpoint", "inputCheckpoint") if key in head},
         "observedAtNs": str(observed),
     }
     directory = Path(relative).parent
-    selected_sources = {}
+    selected_records = {}
     for key in ("checkpoint", "inputCheckpoint"):
         if key in head:
             selected = (directory / "checkpoints" / head[key]).as_posix()
-            _, selected_digest, selected_time = read(selected)
-            selected_sources[selected] = (selected_digest, selected_time)
+            selected_records[selected] = read(selected)
+    selected_sources = {
+        path: (digest, seen) for path, (_, digest, seen) in selected_records.items()
+    }
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
+    if checkpoint_heads is not None:
+        checkpoint_heads[directory.as_posix()] = snapshot
     if write and not (scan_dir / snapshot).exists():
         if created_paths is not None and not os.path.lexists(scan_dir / snapshot):
             created_paths.add(snapshot)
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        try:
+            write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        except (ContractError, OSError) as exc:
+            if checkpoint_heads is not None:
+                checkpoint_heads[directory.as_posix()] = relative
+            failure = _CheckpointSnapshotError(
+                str(exc), {relative: (head_digest, observed), **selected_sources}
+            )
+            failure.records = {relative: (head, head_digest, observed), **selected_records}
+            raise failure from exc
     return {
-        snapshot: (digest, int(observation["observedAtNs"])),
+        snapshot: (digest, observed),
         **selected_sources,
     }
 
@@ -154,6 +232,7 @@ def _read_saved_result(
     *,
     kind: str | None = None,
     accepted_source_digests: dict[str, str] | None = None,
+    normalize_review: bool = True,
 ) -> tuple[dict[str, Any], str, int]:
     draft, contents, metadata = _read_scan_local_json_with_metadata(
         scan_dir, relative, "Saved scan checkpoint"
@@ -193,9 +272,9 @@ def _read_saved_result(
     if not _is_source_order_snapshot(relative) and (
         not isinstance(draft.get("findings"), list)
         or not isinstance(
-            draft.get("sourceCoverage", draft.get("coverage", {}))
+            draft.get("reviewState", draft.get("sourceCoverage", draft.get("coverage", {})))
             if kind == "dedup"
-            else draft.get("coverage"),
+            else draft.get("reviewState", draft.get("coverage")),
             dict,
         )
     ):
@@ -208,6 +287,8 @@ def _read_saved_result(
     ):
         # Direct snapshots retain their accepted bytes, but supply no host receipt ownership.
         clear_scan_receipt_refs(draft)
+    if normalize_review and "coverage" in draft and "reviewState" not in draft:
+        draft["reviewState"] = draft.pop("coverage")
     return draft, frozen_digest, metadata.st_mtime_ns
 
 
@@ -271,6 +352,91 @@ def _frozen_source_times(
     if snapshots and sources.keys() - set(snapshots) - times.keys():
         raise ContractError("saved source ordering is incomplete")
     return times
+
+
+def _frozen_checkpoint_heads(
+    scan_dir: Path, scan_id: str, sources: dict[str, str], *, skip_unreadable: bool = False
+) -> dict[str, str]:
+    parent_context: dict[str, str] = {}
+    try:
+        times = _frozen_source_times(scan_dir, scan_id, sources, parent_context)
+    except (ContractError, OSError, ValueError):
+        if not skip_unreadable:
+            raise
+        times = {}
+        parent_context.clear()
+    # A frozen parent can identify its accepted head even when observation times tie.
+    accepted_root = None
+    heads: dict[str, tuple[int, str]] = {}
+    ambiguous: set[str] = set()
+    for relative, expected_digest in sources.items():
+        directory = _checkpoint_head_directory(relative)
+        if directory is None:
+            continue
+        try:
+            head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
+            if digest != expected_digest:
+                raise ContractError("checkpoint changed after the scan stopped")
+        except (ContractError, OSError, ValueError):
+            if skip_unreadable:
+                continue
+            raise
+        selected = (directory / "checkpoints" / head["checkpoint"]).as_posix()
+        observation = (times.get(relative, observed), selected)
+        key = directory.as_posix()
+        if relative == parent_context.get("head"):
+            accepted_root = relative
+        if key not in heads or observation[0] > heads[key][0]:
+            heads[key] = observation
+            ambiguous.discard(key)
+        elif observation[0] == heads[key][0] and selected != heads[key][1]:
+            ambiguous.add(key)
+    # A legacy tie retains both observations until recovery selects a head.
+    frozen = {
+        directory: selected
+        for directory, (_, selected) in heads.items()
+        if directory not in ambiguous
+    }
+    if accepted_root is not None:
+        frozen["."] = accepted_root
+    return frozen
+
+
+def _legacy_checkpoint_observed_at(
+    scan_dir: Path, scan_id: str, sources: dict[str, str], selected: str
+) -> int | None:
+    times = _frozen_source_times(scan_dir, scan_id, sources)
+    checkpoint = Path(selected)
+    observations = []
+    for relative, expected_digest in sources.items():
+        if _checkpoint_head_directory(relative) != checkpoint.parent.parent:
+            continue
+        head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
+        if digest != expected_digest:
+            raise ContractError("checkpoint changed after the scan stopped")
+        if head["checkpoint"] == checkpoint.name:
+            observations.append(times.get(relative, observed))
+    # Payload-only selections used the newest retained observation for that payload.
+    return max(observations, default=None)
+
+
+def _restore_checkpoint_head(
+    heads: dict[str, str | None],
+    previous_heads: dict[str, str | None],
+    sources: dict[str, str],
+    relative: str,
+) -> None:
+    path = Path(relative)
+    if path.name != "checkpoint-head.json":
+        return
+    directory = path.parent.as_posix()
+    if directory in previous_heads:
+        heads[directory] = previous_heads[directory]
+        return
+    directories = {path.parent, path.parent / "checkpoints", path.parent / "checkpoint-heads"}
+    if any(Path(source).parent in directories for source in sources):
+        # Legacy evidence can remain accepted without one selected head.
+        heads.pop(directory, None)
 
 
 def _freeze_source_times(
@@ -340,7 +506,10 @@ def _admit_parent_checkpoint(
             and "inputCheckpoint" in previous
         ):
             accepted, _, _ = _read_saved_result(
-                scan_dir, f"checkpoints/{previous['inputCheckpoint']}", scan_id
+                scan_dir,
+                f"checkpoints/{previous['inputCheckpoint']}",
+                scan_id,
+                normalize_review=False,
             )
             if {key: value for key, value in accepted.items() if key != "publication"} == {
                 key: value for key, value in checkpoint.items() if key != "publication"
@@ -371,6 +540,7 @@ def _admit_parent_checkpoint(
 
 def _capture_parent_observation(
     scan_dir: Path,
+    scan_id: str,
     checkpoint: str,
     observed: int,
     legacy_head: bool = False,
@@ -383,13 +553,20 @@ def _capture_parent_observation(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint})
         )
         os.utime(scan_dir / "checkpoint-head.json", ns=(observed, observed))
+        return _capture_saved_source(
+            scan_dir, "checkpoint-head.json", scan_id, created_paths=created_paths
+        )
     observation = {"checkpoint": checkpoint, "observedAtNs": str(observed)}
     digest = _digest(observation)
     snapshot = f"checkpoint-heads/{digest}.json"
     if not (scan_dir / snapshot).exists():
         if created_paths is not None and not os.path.lexists(scan_dir / snapshot):
             created_paths.add(snapshot)
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        try:
+            write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+        except (ContractError, OSError) as exc:
+            # The canonical checkpoint carries this observation without a live head.
+            raise _CheckpointSnapshotError(str(exc), {}) from exc
     return {snapshot: (digest, observed)}
 
 
@@ -402,7 +579,7 @@ def _parent_scan_draft(
     parent = {
         "scanId": scan_id,
         "findings": findings.get("findings"),
-        "coverage": coverage,
+        "reviewState": coverage,
         **{
             key: parent_scan[key]
             for key in ("scope", "threatModel", "complete")
@@ -476,15 +653,46 @@ def _worker_checkpoint_heads(
     return heads
 
 
+def _model_capture(scan_id: str, model: dict[str, Any]) -> dict[str, Any]:
+    return _parent_scan_draft(scan_id, {"threatModel": model}, {"findings": []}, {})
+
+
+def _restore_frozen_model_capture(
+    scan_dir: Path,
+    scan_id: str,
+    sources: dict[str, str],
+    times: dict[str, int] | None,
+    model_source: str | None,
+) -> None:
+    if model_source not in (times or {}) or (scan_dir / model_source).exists():
+        return
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved scan manifest")
+    scan = manifest.get("scan")
+    if not isinstance(scan, dict) or not isinstance(scan.get("threatModel"), dict):
+        return
+    draft = _model_capture(scan_id, scan["threatModel"])
+    digest = _digest(draft)
+    if model_source != f"checkpoints/{digest}.json" or sources.get(model_source) != digest:
+        return
+    # A failed first capture can retry only the model and time bound by that stop.
+    write_scan_local_bytes(scan_dir, model_source, _encoded(draft))
+    observed = times[model_source]
+    os.utime(scan_dir / model_source, ns=(observed, observed))
+
+
 def _read_saved_parent_result(
     scan_dir: Path, scan_id: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
     findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
     parent_scan = manifest.get("scan")
     if not isinstance(parent_scan, dict):
         raise ContractError("Saved parent manifest has no scan object")
+    coverage = (
+        _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+        if uses_legacy_review(parent_scan)
+        else review_state(parent_scan)
+    )
     if manifest_is_sealed(parent_scan) and (
         parent_scan.get("id", scan_id) != scan_id
         or findings.get("scanId", scan_id) != scan_id
@@ -503,6 +711,16 @@ def _selected_publication_digest(
     for field in ("completedAt", "sealedAt"):
         manifest["scan"].pop(field, None)
     coverage = prepared.coverage
+    if prepared.was_sealed and not uses_legacy_review(manifest["scan"]):
+        scan_id = manifest["scan"]["id"]
+        head = _worker_checkpoint_head(prepared.scan_dir, ".", scan_id)
+        if head is not None:
+            # The compact seal stores only the review summary. Bind its original
+            # detailed projection through the scan-local retained checkpoint.
+            draft, _, _ = _read_saved_result(prepared.scan_dir, head, scan_id)
+            coverage = review_state(
+                {**manifest["scan"], "reviewState": checkpoint_review_state(draft["reviewState"])}
+            )
     if legacy_completeness is not None:
         # Reconstruct the historical projection and its coverage artifact binding.
         coverage = {**coverage, "completeness": legacy_completeness}
@@ -578,7 +796,11 @@ def require_selected_publication(
         matches = sealed_digest == _selected_publication_digest(prepared)
     else:
         matches = digest == _selected_publication_digest(prepared)
-        if not matches and "completeness" not in prepared.coverage:
+        if (
+            not matches
+            and uses_legacy_review(prepared.manifest["scan"])
+            and "completeness" not in prepared.coverage
+        ):
             # Historical receipts include coverage completeness and its artifact digest.
             matches = any(
                 digest == _selected_publication_digest(prepared, completeness)
@@ -649,11 +871,33 @@ def _require_current_deep_publication(
         scan = db.require_scan(connection, scan_id)
         accepted_findings = has_verified_selected_result(db, connection, scan)
         if "publicationSha256" in selection:
+            manifest = draft["manifest"]
+            if "reviewState" in draft:
+                manifest_scan = {
+                    **manifest["scan"],
+                    "reviewState": checkpoint_review_state(draft["reviewState"]),
+                }
+                manifest_scan.pop("coverageRef", None)
+                manifest = {**manifest, "scan": manifest_scan}
+            elif (
+                uses_legacy_review(manifest["scan"])
+                and (Path(scan["scan_dir"]) / "coverage.json").is_file()
+            ):
+                # Historical workbenches inferred this reference from the sidecar
+                # when reading a staged manifest that did not name it explicitly.
+                manifest = {
+                    **manifest,
+                    "scan": {"coverageRef": "coverage.json", **manifest["scan"]},
+                }
             prepared = _prepare_scan_finalization(
                 Path(scan["scan_dir"]),
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=db.workbench_completion_binding(scan, db.now()),
-                draft_documents=(draft["manifest"], draft["findings"], draft["coverage"]),
+                draft_documents=(
+                    manifest,
+                    draft["findings"],
+                    draft["reviewState"] if "reviewState" in draft else draft["coverage"],
+                ),
                 accepted_findings=accepted_findings,
             )
             require_selected_publication(db, connection, scan, prepared)
@@ -742,6 +986,23 @@ def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
     return [(output.as_posix(), attempt), *archived]
 
 
+def _reducer_output_paths(
+    scan_dir: Path, worker: Any, directory: str, attempt: int
+) -> tuple[str | None, list[str]]:
+    # A durable acceptance replaces the mutable output for exactly this attempt.
+    if (
+        attempt == worker["attempt"]
+        and "accepted_result_path" in worker.keys()
+        and worker["accepted_result_path"]
+    ):
+        try:
+            return Path(worker["accepted_result_path"]).relative_to(scan_dir).as_posix(), []
+        except ValueError:
+            return None, []
+    checkpoints = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+    return (f"{directory}/result.json" if checkpoints else None), checkpoints
+
+
 def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
     latest_reducer = _latest_successful_reducer(workers)
     yield "checkpoint-head.json", None
@@ -754,17 +1015,20 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
             outputs = _worker_outputs(scan_dir, worker)
         except (TypeError, ValueError):
             continue
-        for directory, _ in outputs:
-            if worker["kind"] == "discovery":
+        for directory, attempt in outputs:
+            if worker["kind"] == "dedup":
+                result, checkpoints = _reducer_output_paths(scan_dir, worker, directory, attempt)
+                if result is not None:
+                    yield result, worker["kind"]
+            else:
                 yield f"{directory}/checkpoint-head.json", worker["kind"]
                 yield from (
                     (path, worker["kind"])
                     for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
                 )
-            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
-            if worker["kind"] == "discovery" or checkpoint_paths:
                 yield f"{directory}/result.json", worker["kind"]
-                yield from ((path, worker["kind"]) for path in checkpoint_paths)
+                checkpoints = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+            yield from ((path, worker["kind"]) for path in checkpoints)
         if worker["result_manifest_path"] and (
             worker["kind"] == "discovery"
             or (latest_reducer is not None and worker["id"] == latest_reducer["id"])

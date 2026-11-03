@@ -13,7 +13,7 @@ def retain_unmerged_review_coverage(
     scan_dir: Path, coverage: dict[str, Any], worker: sqlite3.Row, draft: dict[str, Any]
 ) -> None:
     """Retain review provenance and obligations without promoting its findings."""
-    source = draft["coverage"]
+    source = draft["reviewState"] if "reviewState" in draft else draft["coverage"]
     provenance = {"workerId": worker["id"], "attempt": worker["attempt"]}
     prefix = f"{worker['id']}-attempt-{worker['attempt']}"
     artifact_prefix = Path(worker["artifact_dir"]).relative_to(scan_dir).as_posix()

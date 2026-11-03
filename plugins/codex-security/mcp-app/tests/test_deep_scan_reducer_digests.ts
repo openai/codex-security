@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import type { DeepScanStore } from "../src/deep-scan/types.js";
-import { importSource } from "./import-module.ts";
+import { importNativeSource as importSource } from "./import-module.ts";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -245,7 +245,6 @@ for (const [replaced, phase] of [
           label: "discovery-0001",
           artifactDir: dirname(resultPath),
           resultPath,
-          result,
           completionSequence: 1,
           attempt: 1,
         },

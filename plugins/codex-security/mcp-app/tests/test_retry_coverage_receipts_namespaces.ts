@@ -13,49 +13,16 @@ for (const resume of [false, true]) {
           resume,
         }));
     }
-  }
-}
 
-for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
-    for (const receiptSpelling of ["scan", "equivalent scan"] as const) {
-      test(`receipt namespace survives ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${receiptSpelling} spelling`, () =>
-        publishReceiptFixture({
-          receiptRetry: true,
-          receiptSpelling,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
-          resume,
-        }));
-    }
-  }
-}
-
-for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
-    for (const activeReceiptSpelling of ["scan", "equivalent scan"] as const) {
-      test(`active receipt namespace survives ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${activeReceiptSpelling} spelling`, () =>
-        publishReceiptFixture({
-          receiptRetry: true,
-          activeReceiptSpelling,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
-          resume,
-        }));
-    }
-  }
-}
-
-for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
-    for (const receiptSpelling of [
-      "active scan",
-      "equivalent active scan",
+    for (const [receiptSpelling, activeReceiptSpelling] of [
+      ["scan", "scan"],
+      ["active scan", "equivalent scan"],
     ] as const) {
-      test(`linked archived receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome} with ${receiptSpelling} spelling`, () =>
+      test(`archived ${receiptSpelling} and current ${activeReceiptSpelling} receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome}`, () =>
         publishReceiptFixture({
           receiptRetry: true,
           receiptSpelling,
+          activeReceiptSpelling,
           stopAfterDraft: outcome === "recovery",
           stopBeforeDraft: outcome === "no parent",
           resume,

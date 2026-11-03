@@ -1,4 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
+import { readDeepScanProjectConfig } from "./project-config.js";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -139,39 +140,69 @@ export class WorkbenchDeepScanStore {
     targetPath?: string;
     scope?: string;
     userContext?: string;
+    projectConfigPath?: string;
     handoffClaimToken?: string;
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
     threadId: string;
     scanRoot: string;
     executionSettings?: DeepScanExecutionSettings | null;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
-    const result = await this.enqueueWrite(
-      workbenchArgs("begin-deep-scan", {
-        threadId: input.threadId,
-        scanId: input.scanId || undefined,
-        targetPath: input.targetPath || undefined,
-        scope: input.scope || undefined,
-        userContextStdin:
-          Boolean(userContext) && input.executionSettings === undefined,
-        claimToken: input.handoffClaimToken || undefined,
-        model: input.model || undefined,
-        reasoningEffort: input.reasoningEffort || undefined,
-        scanRoot: input.scanRoot,
-        availableParallelism: availableParallelism(),
-        workflowVersion: WORKFLOW_VERSION,
-      }),
-      false,
+    const payload =
       input.executionSettings === undefined
         ? userContext
         : JSON.stringify({
             executionSettings: input.executionSettings,
             userContext,
-          }),
+          });
+    const args = {
+      threadId: input.threadId,
+      scanId: input.scanId || undefined,
+      targetPath: input.targetPath || undefined,
+      projectConfigPath: input.projectConfigPath,
+      scope: input.scope || undefined,
+      userContextStdin:
+        Boolean(userContext) && input.executionSettings === undefined,
+      claimToken: input.handoffClaimToken || undefined,
+      model: input.model || undefined,
+      reasoningEffort: input.reasoningEffort || undefined,
+      serviceTier: input.serviceTier,
+      scanRoot: input.scanRoot,
+      availableParallelism: availableParallelism(),
+      workflowVersion: WORKFLOW_VERSION,
+    };
+    let result = await this.enqueueWrite(
+      workbenchArgs("begin-deep-scan", {
+        ...args,
+        joinOnly: input.projectConfigPath !== undefined,
+      }),
+      false,
+      payload,
       false,
       input.executionSettings !== undefined,
     );
+    if (
+      input.projectConfigPath !== undefined &&
+      typeof result.newScanTarget === "string"
+    ) {
+      const project = await readDeepScanProjectConfig(
+        input.projectConfigPath,
+        result.newScanTarget,
+      );
+      result = await this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", {
+          ...args,
+          targetPath: result.newScanTarget,
+          deepScanProjectJson: JSON.stringify(project),
+        }),
+        false,
+        payload,
+        false,
+        input.executionSettings !== undefined,
+      );
+    }
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {

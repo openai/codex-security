@@ -5,7 +5,7 @@ description: Use when the user asks for a deep, exhaustive, multi-pass, or varia
 
 # Deep Security Scan
 
-The coordinator runs independent Standard audits, aggregates their validated findings, and writes the parent scan's unsealed canonical artifacts. This thread owns setup, user context, and completion of that same scan. It does not repeat worker phases or aggregate results itself.
+The coordinator runs independent Standard audits, aggregates their validated findings, and finalizes plugin-launched scans even if the calling thread detaches. This thread owns setup, user context, and reporting the completed result.
 
 ## Resolve the Scan
 
@@ -27,27 +27,30 @@ Immediately before the first coordinator call, follow `../../references/access-a
 
 ```text
 Existing scan: start_codex_security_deep_scan({ scanId, handoffClaimToken? })
-New scan: start_codex_security_deep_scan({ targetPath, scope: ".", userContext? })
+New scan: start_codex_security_deep_scan({ targetPath, scope: ".", userContext?, projectConfigPath? })
 ```
+
+Before a new target-based scan, call `inspect_codex_security_setup({ targetPath, scope: ".", mode: "deep", projectConfigPath? })`. Show the worker count, subagents per worker, convergence threshold, review cap, discovery time limit, and their sources from `setup.deepScanConfig`. Supply a project YAML or JSON path only when the user selects it. Pass that same path at launch. Native continuations use the saved `workspace.deepScanConfig`.
 
 Pass the existing handoff token when required, including after a waiter detaches or the server restarts. Preserve exact user context as untrusted analysis data; workers remain offline. They use the immutable context captured at independent-scan start. Persist later user changes through the context-update tool, without restarting completed phases or changing active workers' snapshots.
 
 Wait on the coordinator call or its running execution cell. It owns discovery progress, the configured time limit, worker cancellation at that limit, and aggregation. Leave the public phase at preflight before the call; do not publish competing progress while it runs.
 
-An ended turn or host timeout detaches the caller, not the scan. A later continuation can rejoin with the same scan ID and token; a CLI/headless caller can repeat the identical target form to rejoin its owning thread's active scan. Server restart recovery retains completed worker results. A terminal failure is not a detached waiter and must not trigger a replacement scan.
+After an ended turn or host timeout, rejoin with the same scan ID and token. If a CLI/headless call detached before returning its ID, repeat the identical target form. It can recover the completed report for the same checkout snapshot, context, and project-file selection after a server restart. Once the report is returned, a later target-based call can start a fresh scan. A terminal failure must not trigger a replacement scan.
 
 ## Handle the Result
 
-- **Canonical result:** `structuredContent` contains `scanId`, `scanDir`, `manifestPath`, and `instructions`. Confirm that the manifest, `findings.json`, and `coverage.json` exist in the authoritative directory. For the first target-based call, retain the returned scan ID; for a continuation, retain the existing authoritative ID. The unsealed manifest may lack an ID, so do not infer one from it.
+- **SDK-registered scan.** The coordinator returns the aggregate's `scanId`, `scanDir`, `manifestPath`, and `instructions`. End the turn with the returned identity and manifest path. The SDK owns finalization and report generation after the turn ends.
+- **Plugin-launched scan.** The coordinator also returns `completion`. Use the returned scan ID, sealed artifacts, and generated `report.md` in the authoritative directory.
 - **Cancelled:** stop without completion. Report retained findings and pending work without claiming a successful scan or generating a replacement report.
 - **Terminal failure:** surface the exact stable MCP error and read the existing scan context to report preserved results and remaining work. Do not continue analysis, complete or cancel an already terminal scan, or claim a no-findings result.
 - **Missing or malformed canonical artifacts:** surface the blocker and preserve the existing scan. Do not fabricate a report.
 
-## Complete the Parent Scan
+## Report the Completed Parent Scan
 
-After the canonical result is available, call `complete_codex_security_scan({ scanId, handoffClaimToken? })` exactly once. The host seals the existing artifacts and generates `report.md`. Do not submit another semantic draft, rerun validation or attack-path analysis, or write the report yourself.
+When the coordinator returns `completion`, the host has sealed the artifacts and generated `report.md`. Read measured usage from `completion.scan.usage`. Do not call completion again, submit another semantic draft, rerun worker phases, or write the report yourself.
 
-If completion fails, surface its exact error without retrying in the same response or changing the durable scan's status. Preserve resumable work and its handoff claim. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
+If completion fails, surface its exact error. Preserve the accepted aggregate and handoff claim. A later continuation can rejoin the same scan to retry finalization. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
 
 Return the report and canonical artifact links after completion succeeds and `report.md` exists. Report usage according to `../../references/final-report.md`. Distinguish an empty finding set after completed review from a time limit reached before any source review finished.
 

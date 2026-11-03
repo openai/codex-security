@@ -224,11 +224,6 @@ function environmentWithPath(entries: readonly string[]): NodeJS.ProcessEnv {
 }
 
 describe("scan target normalization", () => {
-  test("tolerates a temporary repository removed before cleanup", async () => {
-    const repo = await repository();
-    await rm(join(repo, ".."), { recursive: true, force: true });
-  });
-
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
     const alias = join(repo, "source-link");

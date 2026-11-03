@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { errorMessage } from "./errors.js";
-import { readScanFile } from "../../../../../sdk/typescript/src/scan-files.js";
+import { readSealedScanFile as readScanFile } from "../sealed-contract.js";
 export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
 export function createDeepScanArtifacts(scanDir: string) {

@@ -25,6 +25,7 @@ export type DeepScanRunState = Omit<
   usageOwner?: z.output<typeof runSchema>["usageOwner"];
   executionSettings?: z.output<typeof runSchema>["executionSettings"];
   persistedMergeClaims?: PersistedDeepScanMergeClaim[];
+  parentComplete?: boolean;
   persistedWorkers?: PersistedDeepScanWorker[];
   persistedDedupInputs?: PersistedDeepScanDedupInput[];
   startDisposition?: "created" | "joined";
@@ -86,7 +87,12 @@ export interface DedupCommit {
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorLeaseArgs" | "selectFinalization" | "claimDedup"
+  | "begin"
+  | "cancel"
+  | "releaseCoordinator"
+  | "coordinatorLeaseArgs"
+  | "selectFinalization"
+  | "claimDedup"
 > & {
   selectFinalization?: WorkbenchDeepScanStore["selectFinalization"];
   claimDedup(

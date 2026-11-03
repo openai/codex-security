@@ -3,6 +3,7 @@ import { isRecord } from "./record.js";
 import { isAbsolute } from "node:path";
 import {
   EXTERNAL_CODEX_PROVIDERS,
+  MODEL_FILE_SETTINGS,
   isExternalModelProvider,
   resolveCodexProfile,
   scanModelProvider,
@@ -21,11 +22,13 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     const result: JsonObject = {};
     for (const key of [
       "goals",
-      "cli_daybreak",
       "multi_agent",
       "enable_fanout",
+      "cli_daybreak",
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
+      "shell_tool",
+      "unified_exec",
     ]) {
       if (typeof value[key] === "boolean") result[key] = value[key];
     }
@@ -45,7 +48,21 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
         result["multi_agent_v2"] = sanitized;
       }
     }
+    const codeMode = value["code_mode"];
+    if (typeof codeMode === "boolean" || isRecord(codeMode)) {
+      result["code_mode"] = structuredClone(codeMode) as JsonObject[string];
+    }
     return result;
+  };
+  const copyWorkerSettings = (result: JsonObject, source: JsonObject): void => {
+    for (const key of [
+      ...MODEL_FILE_SETTINGS,
+      "model_verbosity",
+      "web_search",
+    ]) {
+      const value = source[key];
+      if (typeof value === "string") result[key] = value;
+    }
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
@@ -62,6 +79,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       const value = source[key];
       if (safeString(value)) result[key] = value;
     }
+    copyWorkerSettings(result, source);
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
     const skills = source["skills"];
@@ -97,7 +115,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const result = executionConfig(
     safeProfileName(config["profile"]) ? config : resolved,
   );
-  // Keep effective worker settings even when preflight filters the profile name.
+  // Keep effective execution settings even when preflight filters the profile name.
+  copyWorkerSettings(result, resolved);
   for (const key of [
     "model_provider",
     "model_reasoning_summary",
@@ -111,9 +130,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
+    "code_mode",
     "cli_daybreak",
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
+    "shell_tool",
+    "unified_exec",
   ]) {
     if (resolvedFeatures[key] !== undefined) {
       result["features"] = {
@@ -122,19 +144,24 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       };
     }
   }
-  const selectedProfile = safeProfileName(config["profile"])
-    ? config["profile"]
-    : undefined;
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const selectedProfile =
+    safeProfileName(profileName) &&
+    isRecord(profiles) &&
+    isRecord(profiles[profileName])
+      ? profileName
+      : undefined;
   if (selectedProfile !== undefined) {
     result["profile"] = selectedProfile;
   }
-  const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
     for (const [name, profile] of Object.entries(profiles)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
-      if (Object.keys(projected).length === 0) continue;
+      if (Object.keys(projected).length === 0 && name !== selectedProfile)
+        continue;
       sanitized[name] = projected;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;

@@ -9,14 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_workbench_deep_scan import (
-    begin_target_scan,
-    commit_reducer,
-    dispatch_discovery_worker,
-    upsert_worker,
-    worker_paths,
-)
-from workbench_test_support import run_workbench
+from test_workbench_deep_scan import DeepScan, begin_target_scan
+from workbench_test_support import run_workbench, worker_paths
 
 
 def test_state_snapshot_does_not_mix_concurrent_acceptance(
@@ -25,12 +19,9 @@ def test_state_snapshot_does_not_mix_concurrent_acceptance(
     state_dir, codex_home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     initial = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state_dir, codex_home, initial["scanId"], Path(initial["scanDir"]))
     scan_id = initial["scanId"]
-    worker_id, _, _, _ = dispatch_discovery_worker(
-        state_dir,
-        codex_home,
-        scan_id=scan_id,
-        scan_dir=Path(initial["scanDir"]),
+    worker_id, _, _, _ = deep.dispatch_discovery_worker(
         name="discovery-1",
         succeed=False,
     )
@@ -101,30 +92,26 @@ def test_replaced_attempts_retain_observed_sessions_and_accepted_result(tmp_path
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     worker_id = str(uuid.uuid4())
     prompt, artifacts, result = worker_paths(Path(run["scanDir"]), "discovery-1")
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
     )
-    upsert_worker(state, home, **mutation, status="running", attempt=1, thread_id="old-session")
-    upsert_worker(
-        state,
-        home,
+    deep.upsert_worker(**mutation, status="running", attempt=1, thread_id="old-session")
+    deep.upsert_worker(
         **mutation,
         status="running",
         attempt=1,
         thread_id="old-session",
         error="Artifact validation failed",
     )
-    upsert_worker(state, home, **mutation, status="running", attempt=2, thread_id="new-session")
+    deep.upsert_worker(**mutation, status="running", attempt=2, thread_id="new-session")
     result.write_text('{"findings": []}\n')
-    accepted = upsert_worker(
-        state,
-        home,
+    accepted = deep.upsert_worker(
         **mutation,
         status="succeeded",
         attempt=2,
@@ -145,9 +132,7 @@ def test_replaced_attempts_retain_observed_sessions_and_accepted_result(tmp_path
     assert attempts[1]["acceptedResultSha256"]
     assert Path(attempts[1]["acceptedResultPath"]).read_text() == result.read_text()
     result.unlink()
-    replayed = upsert_worker(
-        state,
-        home,
+    replayed = deep.upsert_worker(
         **mutation,
         status="succeeded",
         attempt=2,
@@ -163,22 +148,15 @@ def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
     inputs = [
-        dispatch_discovery_worker(
-            state,
-            home,
-            scan_id=scan_id,
-            scan_dir=scan_dir,
+        deep.dispatch_discovery_worker(
             name=f"discovery-{index}",
         )[0]
         for index in range(2)
     ]
-    committed = commit_reducer(
-        state,
-        home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
+    committed = deep.commit_reducer(
         name="dedup-1",
         input_worker_ids=inputs,
         new_findings_count=0,
@@ -193,18 +171,10 @@ def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path
         snapshot = Path(item["resultManifestPath"])
         assert snapshot.name == f"accepted-{item['resultManifestSha256']}.json"
         assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == item["resultManifestSha256"]
-    later = dispatch_discovery_worker(
-        state,
-        home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
+    later = deep.dispatch_discovery_worker(
         name="discovery-2",
     )[0]
-    second_commit = commit_reducer(
-        state,
-        home,
-        scan_id=scan_id,
-        scan_dir=scan_dir,
+    second_commit = deep.commit_reducer(
         name="dedup-2",
         input_worker_ids=[later],
         new_findings_count=1,
@@ -251,29 +221,27 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     worker_id = str(uuid.uuid4())
     prompt, artifacts, _ = worker_paths(Path(run["scanDir"]), "discovery-1")
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
     )
-    upsert_worker(state, home, **mutation, status="running", attempt=1, thread_id="old")
-    upsert_worker(state, home, **mutation, status="running", attempt=2, thread_id="old")
-    upsert_worker(
-        state,
-        home,
+    deep.upsert_worker(**mutation, status="running", attempt=1, thread_id="old")
+    deep.upsert_worker(**mutation, status="running", attempt=2, thread_id="old")
+    deep.upsert_worker(
         **mutation,
         status="running",
         attempt=2,
         thread_id="old",
         error="fixture failure",
     )
-    upsert_worker(state, home, **mutation, status="running", attempt=3, thread_id="replacement")
-    terminal = upsert_worker(
-        state, home, **mutation, status="canceled", attempt=3, thread_id="replacement"
+    deep.upsert_worker(**mutation, status="running", attempt=3, thread_id="replacement")
+    terminal = deep.upsert_worker(
+        **mutation, status="canceled", attempt=3, thread_id="replacement"
     )["deepScan"]
     assert [item["status"] for item in terminal["attempts"]] == ["replaced", "failed", "canceled"]
     environment = {
@@ -333,13 +301,9 @@ def test_claim_replay_preserves_original_inputs_after_concurrent_discovery(tmp_p
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
-    inputs = [
-        dispatch_discovery_worker(
-            state, home, scan_id=scan_id, scan_dir=scan_dir, name=f"discovery-{index}"
-        )[0]
-        for index in range(2)
-    ]
+    inputs = [deep.dispatch_discovery_worker(name=f"discovery-{index}")[0] for index in range(2)]
     prompt, artifacts, _ = worker_paths(scan_dir, "reducer")
     args = [
         "claim-deep-scan-dedup",
@@ -355,9 +319,7 @@ def test_claim_replay_preserves_original_inputs_after_concurrent_discovery(tmp_p
     for worker in inputs:
         args.extend(["--input-worker-id", worker])
     claimed = run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
-    dispatch_discovery_worker(
-        state, home, scan_id=scan_id, scan_dir=scan_dir, name="concurrent-discovery"
-    )
+    deep.dispatch_discovery_worker(name="concurrent-discovery")
     replayed = run_workbench(state, *args, environment={"CODEX_HOME": str(home)})
     assert replayed["deepScan"]["mergeClaims"] == claimed["deepScan"]["mergeClaims"]
     assert replayed["deepScan"]["dedupInputs"] == claimed["deepScan"]["dedupInputs"]
@@ -372,17 +334,17 @@ def test_acceptance_reuses_authoritative_checkpoint_without_rewriting(tmp_path: 
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     worker_id = str(uuid.uuid4())
     prompt, artifacts, result = worker_paths(Path(run["scanDir"]), "discovery")
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
         attempt=1,
     )
-    upsert_worker(state, home, **mutation, status="running")
+    deep.upsert_worker(**mutation, status="running")
     draft = {"scanId": run["scanId"], "findings": [], "coverage": {}}
     content = json.dumps(draft, indent=2).encode() + b"\n"
     checkpoint = artifacts / "checkpoints" / f"{hashlib.sha256(content).hexdigest()}.json"
@@ -390,13 +352,11 @@ def test_acceptance_reuses_authoritative_checkpoint_without_rewriting(tmp_path: 
     checkpoint.write_bytes(content)
     (artifacts / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
     result.write_text(json.dumps({**draft, "handoffClaimToken": "synthetic-claim"}))
-    accepted = upsert_worker(state, home, **mutation, status="succeeded", result_path=result)[
-        "deepScan"
-    ]
+    accepted = deep.upsert_worker(**mutation, status="succeeded", result_path=result)["deepScan"]
     assert accepted["attempts"][0]["acceptedResultPath"] == str(checkpoint)
     assert accepted["attempts"][0]["acceptedResultSha256"] == hashlib.sha256(content).hexdigest()
     result.unlink()
-    upsert_worker(state, home, **mutation, status="succeeded", result_path=result)
+    deep.upsert_worker(**mutation, status="succeeded", result_path=result)
     assert list(checkpoint.parent.iterdir()) == [checkpoint]
     assert checkpoint.read_bytes() == content
     assert not (artifacts / "accepted").exists()
@@ -408,17 +368,17 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
     worker_id = str(uuid.uuid4())
     prompt, artifacts, result = worker_paths(Path(run["scanDir"]), "discovery")
     mutation = dict(
-        scan_id=run["scanId"],
         worker_id=worker_id,
         kind="discovery",
         prompt_path=prompt,
         artifact_dir=artifacts,
         attempt=1,
     )
-    upsert_worker(state, home, **mutation, status="running")
+    deep.upsert_worker(**mutation, status="running")
     draft = {"scanId": run["scanId"], "findings": [], "coverage": {"deferred": ["unresolved"]}}
     content = json.dumps(draft).encode()
     checkpoint = artifacts / "checkpoints" / f"{hashlib.sha256(content).hexdigest()}.json"
@@ -427,7 +387,7 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     (artifacts / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
     result.write_text(json.dumps({**draft, "coverage": {}}))
     with pytest.raises(subprocess.CalledProcessError) as failure:
-        upsert_worker(state, home, **mutation, status="succeeded", result_path=result)
+        deep.upsert_worker(**mutation, status="succeeded", result_path=result)
     assert "does not match its current checkpoint head" in failure.value.stderr
     assert checkpoint.read_bytes() == content
 
@@ -441,9 +401,10 @@ def test_accepted_result_does_not_reopen_replaced_path(
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
-    scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
-    worker_id, prompt, artifacts, result = dispatch_discovery_worker(
-        state, home, scan_id=scan_id, scan_dir=scan_dir, name="discovery-1", succeed=False
+    deep = DeepScan(state, home, run["scanId"], Path(run["scanDir"]))
+    scan_id = run["scanId"]
+    worker_id, prompt, artifacts, result = deep.dispatch_discovery_worker(
+        name="discovery-1", succeed=False
     )
     payload = {
         "scanId": scan_id,

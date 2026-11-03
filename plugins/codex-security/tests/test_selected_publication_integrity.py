@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pytest
 from test_accepted_publication_references import accept_reducer
+from test_budget_selection_publication import assert_budget_seal_receipt
 from test_deep_scan_publication_authority import stage_publication
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state
 
 
 def publish_selected(api, connection, scan):
@@ -67,12 +69,14 @@ def substitute(scan, accepted, defect):
         document = json.loads(path.read_bytes())
         document["findings"][0]["title"] = "Substituted accepted finding"
     else:
-        path = scan.scan_dir / ("findings.json" if defect == "findings" else "coverage.json")
+        path = scan.scan_dir / ("findings.json" if defect == "findings" else "scan-manifest.json")
         document = json.loads(path.read_bytes())
         if defect == "findings":
             document["findings"][0]["title"] = "Substituted valid canonical finding"
         else:
-            document["deferred"][0]["reason"] = "Substituted valid unresolved review"
+            document["scan"]["reviewState"]["deferred"][0]["reason"] = (
+                "Substituted valid unresolved review"
+            )
     path.write_text(json.dumps(document))
 
 
@@ -116,12 +120,13 @@ def test_sdk_completion_keeps_selected_publication_binding(
         frozen = published_bytes(scan)
         complete()
         assert published_bytes(scan) == frozen
-    assert (
-        json.loads(
-            workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[0]
-        )
-        == recorded
-    )
+    current = workbench_db.execute("SELECT finalization_input_json FROM deep_scan_runs").fetchone()[
+        0
+    ]
+    if defect is None:
+        assert_budget_seal_receipt(scan, json.dumps(recorded), current)
+    else:
+        assert json.loads(current) == recorded
 
 
 @pytest.mark.parametrize("defect", [None, "findings", "accepted-result"])
@@ -166,7 +171,7 @@ def test_budget_completion_validates_then_binds_intentional_projection(
         }
         assert rebound["publicationSha256"] != recorded["publicationSha256"]
         assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert "completeness" not in coverage
         assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
 
@@ -196,7 +201,7 @@ def test_stopped_recovery_keeps_accepted_reviews_with_later_parent_coverage(
     )["scan"]
 
     assert stopped["findingCount"] == 1
-    published = json.loads(parent_coverage.read_text())
+    published = read_review_state(workbench_db, scan.scan_dir)
     assert published["reviews"] == coverage["reviews"]
     assert coverage["deferred"][0] in published["deferred"]
     manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()

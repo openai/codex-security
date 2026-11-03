@@ -7,10 +7,10 @@ import sqlite3
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state
 
 
 @pytest.mark.parametrize("explicit_ids", [True, False], ids=["named-surfaces", "omitted-ids"])
@@ -37,7 +37,7 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
     monkeypatch,
 ):
     scan = publication_scan()
-    worker_id = add_worker(workbench_db, scan).parent.name
+    worker_id = scan.add_worker().parent.name
     output = scan.scan_dir / "artifacts/deep_discovery/workers/discovery-0001/output"
     output.mkdir(parents=True)
     descriptions = {
@@ -206,7 +206,13 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
 
         def interrupt_before_seal(connection, *_args, **_kwargs):
             coverage_path = scan.scan_dir / "coverage.json"
-            coverage = json.loads(coverage_path.read_text())
+            manifest_path = scan.scan_dir / "scan-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            coverage = read_review_state(connection, scan.scan_dir)
+            # The interrupted writer stored its review document beside the manifest.
+            manifest["scan"].pop("reviewState")
+            manifest["scan"]["coverageRef"] = "coverage.json"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
             legacy_projection(coverage)
             # The old writer appended the budget marker after projecting worker rows.
             coverage["deferred"].sort(key=lambda item: item.get("id") == "scan-cost-limit")
@@ -253,7 +259,7 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         budget(workbench_db, args)
 
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     actual = coverage["surfaces"]
     assert [(item["label"], item.get("notes"), item.get("reason")) for item in actual] == [
@@ -289,11 +295,8 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         assert obligation["surfaceIds"] == [item["id"] for item in actual]
     assert {"workerId": worker_id, "attempt": 1} in coverage["reviews"]
     report = (scan.scan_dir / "report.md").read_text()
-    for surface in surfaces:
-        for field in ("notes", "reason"):
-            if field in surface:
-                assert surface[field] in report
-    assert deferred["reason"] in report
+    assert args.message in report
+    assert all(exclusion["pattern"] in report for exclusion in coverage["explicitExclusions"])
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
     assert tuple(workbench_db.execute(counter_query).fetchone()) == counters
     attempt = workbench_db.execute(

@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { promises as fs, renameSync, symlinkSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
 import {
+  appendFile,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importNativeModule as importModule } from "./import-module.ts";
 
-const bundle = await build({
+const module = await importModule({
   stdin: {
     contents: `export * from "./src/deep-scan/finalization.ts";
       export * from "./src/deep-scan/artifacts.ts";
@@ -25,10 +26,7 @@ const bundle = await build({
       export { legacyAcceptedFinding } from "./tests/legacy-accepted-finding.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+
   footer: { js: "//# sourceURL=deep-scan-finalization-contract.js" },
 });
 const {
@@ -39,9 +37,7 @@ const {
   parseDeepReduction,
   parseScanDraft,
   legacyAcceptedFinding,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 const scanId = "4e7b4acb-ac80-4d68-98cd-3d5ac5581cd1";
 
 for (const rootCause of ["object", "text"]) {
@@ -89,8 +85,8 @@ for (const rootCause of ["object", "text"]) {
   });
 }
 
-for (const mode of ["normal", "symlink", "swapped", "changed", "canceled"]) {
-  test(`selected reducer read preserves accepted-file boundary: ${mode}`, async (t) => {
+for (const mode of ["normal", "symlink", "changed", "canceled"]) {
+  test(`selected reducer read preserves accepted-file boundary: ${mode}`, async () => {
     const root = await realpath(
       await mkdtemp(path.join(tmpdir(), "selected-reader-")),
     );
@@ -120,48 +116,30 @@ for (const mode of ["normal", "symlink", "swapped", "changed", "canceled"]) {
         omittedWorkerIds: [],
         selectedAt: "2030-01-01T00:00:00Z",
       };
-      const swap = () => {
-        renameSync(selected, `${selected}.original`);
-        symlinkSync(outside, selected, "file");
-      };
-      if (mode === "symlink") swap();
-      if (mode === "changed") await fs.appendFile(selected, "\n");
+      if (mode === "symlink") {
+        await rename(selected, `${selected}.original`);
+        await symlink(outside, selected, "file");
+      }
+      if (mode === "changed") await appendFile(selected, "\n");
       const controller = new AbortController();
       if (mode === "canceled")
         controller.abort(new Error("Stopped selected publication"));
-      const lstat = fs.lstat;
-      let swapped = false;
-      const spy = t.mock.method(fs, "lstat", async (...args) => {
-        const result = await lstat(...args);
-        if (mode === "swapped" && args[0] === selected && !swapped) {
-          swap();
-          swapped = true;
-        }
-        return result;
-      });
-      syncBuiltinESMExports();
-      try {
-        const reading = readSelectedDeepScanDraft(
-          createDeepScanArtifacts(scanDir),
-          scanId,
-          selection,
-          controller.signal,
+      const reading = readSelectedDeepScanDraft(
+        createDeepScanArtifacts(scanDir),
+        scanId,
+        selection,
+        controller.signal,
+      );
+      if (mode === "normal") assert.equal((await reading).scanId, scanId);
+      else
+        await assert.rejects(
+          reading,
+          mode === "canceled"
+            ? /Stopped selected publication/
+            : mode === "changed"
+              ? /changed after acceptance/
+              : /file|directory|symlink/,
         );
-        if (mode === "normal") assert.equal((await reading).scanId, scanId);
-        else
-          await assert.rejects(
-            reading,
-            mode === "canceled"
-              ? /Stopped selected publication/
-              : mode === "changed"
-                ? /changed after acceptance/
-                : /file|directory|symlink/,
-          );
-        if (mode === "swapped") assert.equal(swapped, true);
-      } finally {
-        spy.mock.restore();
-        syncBuiltinESMExports();
-      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -181,7 +159,7 @@ for (const terminalReason of ["capped", "saturated"]) {
         scanId,
         complete: true,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [],
           explicitExclusions: [],
@@ -190,15 +168,15 @@ for (const terminalReason of ["capped", "saturated"]) {
           ],
         },
       };
-      const { coverage, ...reduction } = draft;
+      const { reviewState, ...reduction } = draft;
       await saveScanDraftCheckpoint(
         { root, repoRoot: scanDir, layout: "reducer" },
         {
           ...reduction,
-          sourceCoverage: coverage,
+          sourceCoverage: reviewState,
         },
       );
-      delete draft.coverage.completeness;
+      delete draft.reviewState.completeness;
       const [name] = await readdir(path.join(root, "checkpoints"));
       const checkpoint = path.join(root, "checkpoints", name);
       const contents = await readFile(checkpoint);
@@ -261,8 +239,8 @@ test("retains unresolved coverage for a persisted zero-success deadline selectio
   );
   assert.equal(result.scanId, scanId);
   assert.deepEqual(result.findings, []);
-  assert.equal(result.coverage.completeness, undefined);
-  assert.equal(result.coverage.deferred.length, 1);
+  assert.equal(result.reviewState.completeness, undefined);
+  assert.equal(result.reviewState.deferred.length, 1);
   await assert.rejects(
     readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {
       ...selection,

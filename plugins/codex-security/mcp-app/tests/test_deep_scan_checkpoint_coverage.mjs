@@ -1,3 +1,4 @@
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,9 +19,7 @@ for (const continueAfterResume of [false, true]) {
         continueAfterResume,
         immutableInputs: true,
       });
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(coverage.completeness, undefined);
       assert.deepEqual(
         coverage.reviews.map((review) => review.completeness),
@@ -28,12 +27,19 @@ for (const continueAfterResume of [false, true]) {
       );
       assert.equal(coverage.reviews[0].attempt, 2);
       assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
+        new Set(
+          coverage.deferred.map((item) =>
+            JSON.stringify([
+              item.provenance.workerId,
+              item.provenance.candidateId,
+            ]),
+          ),
+        ).size,
         2,
       );
       const report = await readFile(path.join(scanDir, "report.md"), "utf8");
-      for (const item of coverage.deferred)
-        assert.ok(report.includes(item.reason));
+      for (const exclusion of coverage.explicitExclusions)
+        assert.ok(report.includes(exclusion.pattern));
       for (const surface of coverage.surfaces) {
         for (const receipt of surface.receiptRefs) {
           assert.equal(
@@ -57,9 +63,7 @@ for (const retry of ["missing", "collision"]) {
       const { scanDir } = await publishCoverageFixture(fixture, "complete", {
         discoveryReceiptRetry: retry,
       });
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       const archived = coverage.surfaces.find(
         (surface) => surface.label === "Archived boundary",
       );

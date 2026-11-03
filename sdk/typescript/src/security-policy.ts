@@ -42,6 +42,7 @@ import {
   enclosingGitWorktreeRoots,
   gitMetadataDirectories,
   gitObjectDirectories,
+  gitOutput,
   isGitMetadataDirectory,
   normalizeRepository,
   normalizeTarget,
@@ -430,10 +431,13 @@ async function securityPolicyPaths(
   const gitDirectories = new Set<string>();
   const policies: string[] = [];
   const reportingPaths = new Set<string>();
+  const ignored = new Set<string>();
   const isGitData = (path: string): boolean =>
     [...gitDirectories].some(
       (directory) => !relativePathIsOutside(relative(directory, path)),
     );
+  const isIgnored = (path: string): boolean =>
+    ignored.has(path) || (dirname(path) !== path && isIgnored(dirname(path)));
   const addRoot = async (repository: string) => {
     if (knownRoots.has(repository)) return;
     knownRoots.add(repository);
@@ -444,6 +448,21 @@ async function securityPolicyPaths(
       gitDirectories.add(join(gitRoot, ".git"));
       for (const directory of await gitMetadataDirectories(gitRoot, signal))
         gitDirectories.add(directory);
+      // Like scans, skip Git-ignored files such as installed dependencies.
+      const ignoredPaths = await gitOutput(
+        gitRoot,
+        [
+          "ls-files",
+          "--others",
+          "--ignored",
+          "--exclude-standard",
+          "--directory",
+          "-z",
+        ],
+        signal,
+      );
+      for (const path of ignoredPaths.split("\0").filter(Boolean))
+        ignored.add(resolve(gitRoot, path));
     }
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
@@ -507,7 +526,11 @@ async function securityPolicyPaths(
     gitDirectories.add(path);
   // Git storage can reference a directory visited earlier in the walk.
   return {
-    paths: [...policies, ...reportingPaths].filter((path) => !isGitData(path)),
+    paths: [...policies, ...reportingPaths].filter(
+      (path) =>
+        !isGitData(path) &&
+        (path === join(root, "SECURITY.md") || !isIgnored(path)),
+    ),
     gitMetadataPaths: [...gitDirectories],
   };
 }

@@ -25,10 +25,10 @@ type Layout = "standard" | "diff" | "deep" | "worker";
 // Fixtures also exercise malformed and legacy inputs before runtime validation.
 type DraftFixture = Omit<
   ScanDraftInput,
-  "findings" | "coverage" | "threatModel"
+  "findings" | "reviewState" | "threatModel"
 > & {
   findings: Record<string, unknown>[];
-  coverage: Record<string, unknown>;
+  reviewState: Record<string, unknown>;
   threatModel?: Record<string, unknown>;
 };
 
@@ -63,31 +63,45 @@ export function draftFixture(root: string, layout: Layout) {
     },
   };
   const draft = (
-    coverage: { deferred?: unknown[]; [key: string]: unknown } = {},
+    reviewState: { deferred?: unknown[]; [key: string]: unknown } = {},
     complete = false,
   ): DraftFixture => ({
     scanId,
     ...(layout === "worker" ? {} : { handoffClaimToken: claimToken }),
     complete,
     findings: [],
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
-      ...coverage,
+      ...reviewState,
     },
   });
+  const findingsDraft = (
+    findings: DraftFixture["findings"],
+    options: Pick<DraftFixture, "complete"> = {},
+  ) => ({ ...draft({}, options.complete), findings });
+  const write = (input: unknown) =>
+    layout === "worker"
+      ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
+      : recordCodexSecurityScanDraft(context, input);
   return {
     root,
     context,
     draft,
-    write: (input: unknown) =>
-      layout === "worker"
-        ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : recordCodexSecurityScanDraft(context, input),
+    findingsDraft,
+    write,
+    writeReviewState: (...args: Parameters<typeof draft>) =>
+      write(draft(...args)),
+    writeFindings: (
+      findings: DraftFixture["findings"],
+      options?: Pick<DraftFixture, "complete">,
+    ) => write(findingsDraft(findings, options)),
+    checkpoint: (input: unknown) =>
+      draftApi.saveScanDraftCheckpoint(context, input, false),
     read: async () =>
       layout === "worker"
-        ? (await readJson(root, "result.json")).coverage
+        ? (await readJson(root, "result.json")).reviewState
         : await readJson(root, "coverage.json"),
   };
 }

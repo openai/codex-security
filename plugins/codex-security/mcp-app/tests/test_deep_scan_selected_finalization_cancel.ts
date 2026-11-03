@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
-import { importModule } from "./import-module.ts";
+import { importNativeModule as importModule } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
 import type { DeepScanRunState } from "../src/deep-scan/types.ts";
 import type { DeepScanPublication } from "../src/artifact-scan-draft.ts";

@@ -4,22 +4,17 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { importNativeModule as importModule } from "./import-module.ts";
 
-const bundle = await build({
+const module = await importModule({
   entryPoints: [
     path.resolve(import.meta.dirname, "../src/deep-scan/coordinator.ts"),
   ],
   loader: { ".md": "text" },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+
   footer: { js: "//# sourceURL=deep-scan-selected-replay.js" },
 });
-const { DeepScanCoordinator } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+const { DeepScanCoordinator } = module;
 
 for (const terminalReason of ["saturated", "capped"]) {
   test(`restart publishes the selected ${terminalReason} result after an output failure`, async () => {
@@ -32,7 +27,7 @@ for (const terminalReason of ["saturated", "capped"]) {
         scanId,
         complete: true,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "partial",
           surfaces: [],
           explicitExclusions: [],
@@ -41,9 +36,12 @@ for (const terminalReason of ["saturated", "capped"]) {
           ],
         },
       };
-      const { coverage, ...reduction } = draft;
-      const bytes = JSON.stringify({ ...reduction, sourceCoverage: coverage });
-      delete draft.coverage.completeness;
+      const { reviewState, ...reduction } = draft;
+      const bytes = JSON.stringify({
+        ...reduction,
+        sourceCoverage: reviewState,
+      });
+      delete draft.reviewState.completeness;
       const digest = createHash("sha256").update(bytes).digest("hex");
       const resultPath = `artifacts/deep_discovery/dedup/dedup-0001/output/checkpoints/${digest}.json`;
       await mkdir(path.dirname(path.join(scanDir, resultPath)), {

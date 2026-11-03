@@ -36,7 +36,7 @@ export async function recordCodexSecurityScanDraft(
         ...(scope === undefined ? {} : { scope }),
         ...(threatModel === undefined ? {} : { threatModel }),
         findings: draft.findings.findings,
-        coverage: draft.coverage,
+        reviewState: draft.reviewState,
       };
       if (context.mode === "deep") {
         const head = await readJson(context.root, "checkpoint-head.json").catch(
@@ -80,9 +80,10 @@ export async function recordCodexSecurityScanDraft(
           ...(checkpoint.publication ? { inputCheckpoint: rawName } : {}),
         },
       );
+      draft.manifest.scan.coverageRef = "coverage.json";
       for (const [key, name] of [
         ["findings", "findings.json"],
-        ["coverage", "coverage.json"],
+        ["reviewState", "coverage.json"],
         ["manifest", "scan-manifest.json"],
       ]) {
         await replaceArtifactJson(

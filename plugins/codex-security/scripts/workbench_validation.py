@@ -16,11 +16,13 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
+from workbench_constants import optional_text as optional_text
 from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
     _reject_nonstandard_json_number as reject_nonstandard_json_number,
 )
 from workbench_scan_usage import _timestamp as usage_timestamp
+from workbench_setup import require_target
 
 reject_non_finite_json = finalizer._reject_non_finite_json
 
@@ -43,15 +45,6 @@ def require_uuid(value: str, label: str) -> str:
         return str(uuid.UUID(value))
     except ValueError as exc:
         raise SystemExit(f"{label} must be a UUID.") from exc
-
-
-def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    if maximum is not None and len(normalized) > maximum:
-        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
-    return normalized or None
 
 
 def sqlite_busy(error: sqlite3.OperationalError) -> bool:
@@ -326,16 +319,6 @@ def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sq
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
-
-
-def require_target(value: str) -> Path:
-    expanded = Path(value).expanduser()
-    if not expanded.is_absolute():
-        raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
-    if not target.is_dir():
-        raise SystemExit(f"Scan target is not a readable local directory: {target}")
-    return target
 
 
 def parse_scan_recipe(

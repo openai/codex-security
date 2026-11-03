@@ -1,5 +1,6 @@
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -43,14 +44,9 @@ for (const options of [
         materialFindings: true,
         sourceProvenance,
       });
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(coverage.completeness, undefined);
-      assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
-        2,
-      );
+      assert.equal(new Set(coverage.deferred.map((item) => item.id)).size, 2);
       for (const field of [
         "surfaces",
         "explicitExclusions",

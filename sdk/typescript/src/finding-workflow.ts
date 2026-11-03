@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
+import type { LoadedContract } from "./contract.js";
+import type { ScanCost } from "./cost-model.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { findingsBaseUrl } from "./findings-client.js";
 import type { FindingSearchScope } from "./finding-retrieval.js";
@@ -26,6 +28,7 @@ export interface WorkflowBinding {
 }
 export interface WorkflowState extends WorkflowBinding {
   id: string;
+  recordedCost?: ScanCost;
   stages: Record<
     WorkflowStage,
     {
@@ -58,6 +61,14 @@ export function workflowDigest(value: unknown): string {
       : item,
   );
   return createHash("sha256").update(json).digest("hex");
+}
+
+export function scanArtifactDigest({
+  manifest,
+  findings,
+  review,
+}: Pick<LoadedContract, "manifest" | "findings" | "review">): string {
+  return workflowDigest({ manifest, findings, review });
 }
 
 export function workflowDestination(url: string): string {
@@ -150,9 +161,9 @@ export class FindingWorkflow {
     }
   }
 
-  async registeredScan(scanId: string): Promise<JsonObject> {
-    const context = await this.call(["get-scan", "--scan-id", scanId]);
-    return context["scan"] as JsonObject;
+  async registeredScan(scanId: string) {
+    const { scan, recipe } = await this.call(["get-scan", "--scan-id", scanId]);
+    return { scan: scan as JsonObject, recipe };
   }
 
   async sourceSnapshot(

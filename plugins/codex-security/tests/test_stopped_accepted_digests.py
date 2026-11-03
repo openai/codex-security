@@ -8,7 +8,6 @@ from argparse import Namespace
 
 import pytest
 from test_accepted_publication_references import accept_reducer
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
@@ -45,7 +44,7 @@ def test_stopped_recovery_checks_recorded_accepted_bytes(
         checkpoint.write_text(json.dumps(damaged))
     accepted_bytes = checkpoint.read_bytes()
     # An unrelated valid source must still survive stopped partial preservation.
-    healthy = add_worker(workbench_db, scan)
+    healthy = scan.add_worker()
     finding = copy.deepcopy(scan.findings[0])
     finding["summary"] = "Independent preserved evidence."
     finding["identity"]["anchor"] += ".independent"

@@ -398,6 +398,44 @@ describe("security policy generation", () => {
     expect(inventory.gitMetadataPaths).toEqual([]);
   });
 
+  test("leaves Git-ignored dependencies out of the policy inventory", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    await writeFile(
+      join(f.repository, ".gitignore"),
+      "/SECURITY.md\nnode_modules/\n.venv/\n",
+    );
+    await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+    for (const directory of [
+      "node_modules/dependency",
+      "node_modules/tracked",
+      ".venv/src/dependency",
+      "services/api",
+    ]) {
+      await mkdir(join(f.repository, directory), { recursive: true });
+      await writeFile(join(f.repository, directory, "SECURITY.md"), POLICY);
+    }
+    policyGit(join(f.repository, ".venv/src/dependency"), "init", "--quiet");
+    policyGit(f.repository, "add", "--force", "node_modules/tracked");
+    const inventory = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(f.repository),
+    );
+    expect(inventory.policyPaths).toEqual([
+      "SECURITY.md",
+      "node_modules/tracked/SECURITY.md",
+      "services/api/SECURITY.md",
+    ]);
+    const selectedDependency = await inspectSecurityPolicySources(
+      await resolveSecurityPolicyTarget(
+        f.repository,
+        "node_modules/dependency",
+      ),
+    );
+    expect(selectedDependency.policyPaths).toEqual([
+      "node_modules/dependency/SECURITY.md",
+    ]);
+  });
+
   test("recognizes shared Git storage without HEAD during policy discovery", async () => {
     const f = await fixture();
     const metadata = join(f.repository, "shared-data");
@@ -1120,15 +1158,17 @@ describe("security policy preview", () => {
     const f = await fixture();
     const draft = await f.generate();
     const source = new URL("../src/security-policy.ts", import.meta.url);
-    const built = await Bun.build({
-      entrypoints: [fileURLToPath(source)],
-      target: "node",
-      format: "esm",
-      define: { "import.meta.url": JSON.stringify(source.href) },
-    });
-    expect(built.success).toBe(true);
     const module = join(f.root, "policy.mjs");
-    await writeFile(module, await built.outputs[0]!.text());
+    // Repeated in-process Bun builds can misread dependency files on macOS.
+    execFileSync(process.execPath, [
+      "build",
+      fileURLToPath(source),
+      "--target=node",
+      "--format=esm",
+      "--define",
+      `import.meta.url=${JSON.stringify(source.href)}`,
+      `--outfile=${module}`,
+    ]);
     const missingPython = join(f.root, "missing-python");
     const result = JSON.parse(
       execFileSync(

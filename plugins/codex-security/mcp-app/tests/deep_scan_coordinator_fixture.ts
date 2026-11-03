@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { importModule } from "./import-module.ts";
+import { importNativeModule as importModule } from "./import-module.ts";
 
 export const {
   DeepScanCoordinator,
@@ -304,7 +304,7 @@ export class FakeStore {
       : {
           scanId: this.run.scanId,
           findings: [],
-          coverage: {
+          reviewState: {
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -317,7 +317,7 @@ export class FakeStore {
         ...(draft.threatModel ? { threatModel: draft.threatModel } : {}),
       },
       findings: draft.findings,
-      coverage: draft.coverage,
+      reviewState: draft.reviewState,
     });
     this.run.status = "succeeded";
     this.run.terminalReason = input.reason;
@@ -650,7 +650,7 @@ async function writeDedupArtifacts(
   if (options.canonicalCandidateId && draft.findings.length > 0) {
     draft.findings[0].provenance.candidateId = options.canonicalCandidateId;
   }
-  delete (draft as { coverage?: unknown }).coverage;
+  delete (draft as { reviewState?: unknown }).reviewState;
   if (invalidResult) (draft as { findings: unknown }).findings = "invalid";
   if (options.dropLastFinding) draft.findings.pop();
   const resultPath = path.join(artifactContext.root, "result.json");
@@ -692,7 +692,7 @@ export function standardScanDraft(
           },
         ]
       : [],
-    coverage: {
+    reviewState: {
       surfaces: [
         {
           label: "Fixture query",

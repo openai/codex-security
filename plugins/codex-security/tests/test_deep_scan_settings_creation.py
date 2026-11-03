@@ -47,8 +47,8 @@ def write_settings(scan_dir, relative_path, payload, **kwargs):
     return write(scan_dir, relative_path, payload, **kwargs)
 deep.write_scan_local_bytes = write_settings
 ensure = deep.ensure_deep_scan_run
-def ensure_run(connection, scan, *args):
-    result = ensure(connection, scan, *args)
+def ensure_run(connection, scan, *args, **kwargs):
+    result = ensure(connection, scan, *args, **kwargs)
     if boundary == 'before-commit':
         pause(scan)
     return result
@@ -269,7 +269,6 @@ def test_managed_creation_retry_preserves_saved_settings_before_commit(tmp_path:
     workspace = create_saved_workspace(state, target, thread_id="original-thread", mode="deep")
     started = start_delivered_scan(
         state,
-        "--workspace-id",
         workspace["id"],
         "--scan-root",
         str(tmp_path / "scans"),
@@ -278,7 +277,7 @@ def test_managed_creation_retry_preserves_saved_settings_before_commit(tmp_path:
         "--reasoning-effort",
         "high",
     )
-    scan = started["results"]
+    scan = started
     args = ["begin-deep-scan", "--scan-id", scan["scanId"], "--thread-id", "original-thread"]
     original = settings(tmp_path, "original")
     process = start_process(tmp_path, original, *args, boundary="before-commit")
@@ -319,9 +318,7 @@ def test_preexisting_artifact_does_not_choose_original_execution_settings(tmp_pa
     target.mkdir()
     state = tmp_path / "state"
     workspace = create_saved_workspace(state, target, thread_id="original-thread", mode="deep")
-    scan = start_delivered_scan(
-        state, "--workspace-id", workspace["id"], "--scan-root", str(tmp_path / "scans")
-    )["results"]
+    scan = start_delivered_scan(state, workspace["id"], "--scan-root", str(tmp_path / "scans"))
     path = snapshot(scan["scanDir"])
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"version": 1, "settings": settings(tmp_path, "substituted")}))

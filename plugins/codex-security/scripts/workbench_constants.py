@@ -2,6 +2,7 @@
 
 import argparse
 
+DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v2"
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")
@@ -19,7 +20,6 @@ FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_UPDATE_STATES = ("generated", "applied", "verifying", "verified", "failed")
 EXPORT_FORMATS = ("csv", "json", "sarif")
 ARTIFACTS = {
-    "coverage": "coverage.json",
     "findings": "findings.json",
     "manifest": "scan-manifest.json",
     "markdownReport": "report.md",
@@ -61,6 +61,15 @@ EMPTY_GIT_TREES = {
     "sha1": EMPTY_GIT_TREE,
     "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
 }
+
+
+def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if maximum is not None and len(normalized) > maximum:
+        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
+    return normalized or None
 
 
 def positive_int(value: str) -> int:

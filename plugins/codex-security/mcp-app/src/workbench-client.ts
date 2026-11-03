@@ -78,19 +78,13 @@ async function executeWorkbench(
     isolatedPython = selectFinalization.isolatedPython ?? isolatedPython;
     selectFinalization = false;
   }
-  const internalInvocation = releaseCoordinator
-    ? "release_coordinator=True"
+  const internalOption = releaseCoordinator
+    ? "release_coordinator"
     : selectFinalization
-      ? "select_finalization=True"
+      ? "select_finalization"
       : withExecutionSettings
-        ? "with_execution_settings=True"
+        ? "with_execution_settings"
         : undefined;
-  const pythonSource = internalInvocation
-    ? WORKBENCH_PYTHON.replace(
-        "workbench_db.main()",
-        `workbench_db.main(${internalInvocation})`,
-      )
-    : WORKBENCH_PYTHON;
   const timeout = [
     "begin-deep-scan",
     "cancel-scan",
@@ -126,8 +120,9 @@ async function executeWorkbench(
       ...(isolatedPython ? ["-I", "-X", "utf8"] : []),
       "-B",
       "-c",
-      pythonSource,
+      WORKBENCH_PYTHON,
       workbenchScriptPath(),
+      ...(internalOption === undefined ? [] : [internalOption]),
     ],
     {
       signal,

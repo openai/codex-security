@@ -6,16 +6,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importNativeModule as importModule } from "./import-module.ts";
 import { finding as fixtureFinding } from "./scan-draft-fixture.ts";
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const plugin = path.resolve(app, "..");
-const bundle = await build({
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  write: false,
+const module = await importModule({
   loader: { ".md": "text" },
   stdin: {
     resolveDir: app,
@@ -37,9 +33,7 @@ const {
   DeepScanCoordinator,
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
-} = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+} = module;
 const execute = promisify(execFile);
 for (const responseLosses of [3, 1]) await testResponseLoss(responseLosses);
 
@@ -186,7 +180,7 @@ async function testResponseLoss(responseLosses) {
               disposition: "no_issue_found",
               receiptRefs: [ref],
             };
-            draft.coverage = {
+            draft.reviewState = {
               completeness: "complete",
               surfaces: [review],
               explicitExclusions: [],
@@ -240,7 +234,7 @@ async function testResponseLoss(responseLosses) {
       randomUUID(),
       "discovery-1",
     );
-    assert.equal(discovery.status, "succeeded");
+    assert.equal(discovery.status, "succeeded", discovery.error?.message);
     assert.notEqual(
       discovery.worker.resultPath,
       path.join(discovery.worker.artifactDir, "result.json"),
@@ -384,7 +378,7 @@ async function testAcceptedWriteupRecovery(workflowVersion, missing) {
                   writeup: { reportPath },
                 },
               ],
-              coverage: {
+              reviewState: {
                 completeness: "complete",
                 surfaces: [],
                 explicitExclusions: [],

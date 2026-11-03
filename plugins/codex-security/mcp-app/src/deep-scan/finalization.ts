@@ -18,7 +18,7 @@ import {
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { type ScanDraftInput } from "../artifact-scan-draft.js";
-import { readScanFile } from "../../../../../sdk/typescript/src/scan-files.js";
+import { readSealedScanFile as readScanFile } from "../sealed-contract.js";
 import type {
   DeepScanFinalizationInput,
   DeepScanRunState,
@@ -88,7 +88,7 @@ export async function readSelectedDeepScanDraft(
     return {
       scanId,
       findings: [],
-      coverage: {
+      reviewState: {
         surfaces: [],
         explicitExclusions: [],
         deferred: [

@@ -5,9 +5,9 @@ from argparse import Namespace
 
 import pytest
 from test_budget_selection_publication import accept_unmerged
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state
 
 
 @pytest.mark.parametrize("accepted", [False, True], ids=["unfinished-audit", "accepted-unmerged"])
@@ -18,7 +18,7 @@ def test_empty_budget_report_does_not_deny_saved_validation(
     if accepted:
         evidence = accept_unmerged(workbench_db, scan)
     else:
-        result = add_worker(workbench_db, scan, status="running")
+        result = scan.add_worker(status="running")
         checkpoints = result.parent / "checkpoints"
         checkpoints.mkdir()
         evidence = checkpoints / ("a" * 64 + ".json")
@@ -55,9 +55,13 @@ def test_empty_budget_report_does_not_deny_saved_validation(
     assert evidence.read_bytes() == original
     assert json.loads(original)["findings"]
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
-    assert "completeness" not in json.loads((scan.scan_dir / "coverage.json").read_text())
+    state = read_review_state(workbench_db, scan.scan_dir)
+    assert "completeness" not in state
+    assert any(
+        item["reason"] == "Validation was deferred because the scan reached its cost limit."
+        for item in state["deferred"]
+    )
     report = (scan.scan_dir / "report.md").read_text()
     assert "No findings were validated" not in report
     assert "No findings were reported." in report
-    assert "## Deferred Requested Work" in report
-    assert "Validation was deferred because the scan reached its cost limit." in report
+    assert "Deep Scan reached its cost limit" in report

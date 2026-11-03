@@ -1,3 +1,4 @@
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,20 +39,15 @@ for (const splitSeededReducers of [false, true]) {
       ]) {
         assert.equal(report.split(fix).length - 1, 1);
       }
-      const coverage = JSON.parse(
-        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
-      );
+      const coverage = await readFixtureCoverage(scanDir);
       assert.equal(coverage.completeness, undefined);
       assert.deepEqual(
         coverage.reviews.map((review) => review.completeness),
         [undefined, undefined, undefined],
       );
-      assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
-        2,
-      );
-      for (const item of coverage.deferred)
-        assert.ok(report.includes(item.reason));
+      assert.equal(new Set(coverage.deferred.map((item) => item.id)).size, 2);
+      for (const item of coverage.explicitExclusions)
+        assert.ok(report.includes(item.pattern));
       for (const surface of coverage.surfaces) {
         assert.equal(
           await readFile(path.join(scanDir, surface.receiptRefs[0]), "utf8"),

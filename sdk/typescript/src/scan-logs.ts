@@ -142,6 +142,7 @@ export async function readScanLogs(options: ScanLogOptions) {
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
+  let children: Map<string | undefined, SessionLog[]> | undefined;
 
   const attribution = options.executionAttribution?.legacy
     ? null
@@ -162,14 +163,16 @@ export async function readScanLogs(options: ScanLogOptions) {
   const pending = attribution ? [] : traversed;
   for (const parentId of pending) {
     const parent = logs.get(parentId)?.[0];
-    for (const [session] of logs.values()) {
+    // Parentless workers can only belong to the root, in discovery order.
+    children ??= Map.groupBy(
+      logs.values().map(([session]) => session),
+      (session) => session.parentThreadId ?? root?.threadId,
+    );
+    for (const session of children.get(parentId) ?? []) {
       if (
         !traversed.has(session.threadId) &&
         (session.parentThreadId === parentId ||
-          (root !== undefined &&
-            parent === root &&
-            session.parentThreadId === null &&
-            belongsToScan(session, root, options)))
+          (parent !== undefined && belongsToScan(session, parent, options)))
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);

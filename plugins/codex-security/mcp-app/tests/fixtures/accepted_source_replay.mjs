@@ -1,24 +1,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { importSource } from "../import-module.ts";
 import { proposal, scanId, workers } from "./accepted_source_bank.mjs";
 
 export async function loadReducer() {
-  const bundled = await build({
-    bundle: true,
-    entryPoints: [
-      fileURLToPath(
-        new URL("../../src/artifact-deep-reducer.ts", import.meta.url),
-      ),
-    ],
-    format: "esm",
-    platform: "node",
-    write: false,
-  });
-  return import(
-    "data:text/javascript;base64," +
-      Buffer.from(bundled.outputFiles[0].contents).toString("base64")
+  return importSource(
+    fileURLToPath(
+      new URL("../../src/artifact-deep-reducer.ts", import.meta.url),
+    ),
   );
 }
 

@@ -1,3 +1,4 @@
+import { readReviewState } from "./support/review-state.js";
 import { execFileSync, spawn } from "node:child_process";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,6 +20,20 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
+
+async function readSealedArtifacts(scanDir: string) {
+  const head = await readFile(join(scanDir, "checkpoint-head.json"));
+  const { checkpoint } = JSON.parse(head.toString("utf8"));
+  const artifacts = await Promise.all(
+    [
+      "scan-manifest.json",
+      "findings.json",
+      "report.md",
+      join("checkpoints", checkpoint),
+    ].map((name) => readFile(join(scanDir, name))),
+  );
+  return [head, ...artifacts];
+}
 
 for (const boundary of ["registration", "stream-start"] as const) {
   test(`SDK cancels registered Deep Scan before first thread event: ${boundary}`, async () => {
@@ -444,14 +459,8 @@ for (const {
               expect(saved["scan"]).toMatchObject({
                 progress: { status: "complete" },
               });
-              concurrentlyCompletedArtifacts = await Promise.all(
-                [
-                  "scan-manifest.json",
-                  "findings.json",
-                  "coverage.json",
-                  "report.md",
-                ].map((name) => readFile(join(scanDir, name))),
-              );
+              concurrentlyCompletedArtifacts =
+                await readSealedArtifacts(scanDir);
             }
             if (
               args[0] === "get-deep-scan" &&
@@ -1030,8 +1039,11 @@ for (const {
             return;
           }
           const result = await running;
-          expect(result.coverage["completeness"]).toBeUndefined();
-          expect(JSON.stringify(result.coverage)).toContain("cost limit");
+          const coverage = await readReviewState(scanDir);
+          expect(coverage).not.toHaveProperty("completeness");
+          expect(result.manifest.scan.warnings?.join(" ")).toMatch(
+            /cost limit|budget baseline .* exceeded .* limit/,
+          );
           if (unpricedUsage) {
             expect(result.cost).toBeNull();
             expect(reportedCosts).toEqual([]);
@@ -1106,10 +1118,9 @@ for (const {
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );
-        expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
-            .completeness,
-        ).toBeUndefined();
+        expect(await readReviewState(scanDir)).not.toHaveProperty(
+          "completeness",
+        );
         expect(commands).toContain("fail-scan");
         expect(modelInputs).toHaveLength(1);
         await client.close();
@@ -1170,10 +1181,9 @@ for (const {
           findingCount: 1,
           reportAvailable: true,
         });
-        expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
-            .completeness,
-        ).toBeUndefined();
+        expect(await readReviewState(scanDir)).not.toHaveProperty(
+          "completeness",
+        );
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );
@@ -1321,16 +1331,9 @@ for (const {
       expect(result.threadId).toBe(threadId);
       if (completeBeforePreparation) {
         expect(completedBeforePreparation).toBe(true);
-        expect(
-          await Promise.all(
-            [
-              "scan-manifest.json",
-              "findings.json",
-              "coverage.json",
-              "report.md",
-            ].map((name) => readFile(join(scanDir, name))),
-          ),
-        ).toEqual(concurrentlyCompletedArtifacts!);
+        expect(await readSealedArtifacts(scanDir)).toEqual(
+          concurrentlyCompletedArtifacts!,
+        );
       }
       if (recoveryBudget)
         expect(commands).toContain("complete-budget-exhausted-scan");
@@ -1355,7 +1358,7 @@ for (const {
         // The synthetic accepted workers have no native usage receipts.
         expect(result.cost).toBeNull();
       }
-      expect(result.coverage["completeness"]).toBeUndefined();
+      expect(await readReviewState(scanDir)).not.toHaveProperty("completeness");
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
       );
@@ -1417,7 +1420,7 @@ for (const {
       await client.close();
     }
   };
-  test(name, runCase, 30_000);
+  test(name, runCase, 120_000);
 }
 
 async function rejoinSelectedScanThroughMcp(

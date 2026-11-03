@@ -6,7 +6,6 @@ from argparse import Namespace
 
 import pytest
 from test_checkpoint_publication_authority import save_disposition
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
@@ -42,7 +41,7 @@ def test_stopped_result_publication_requires_supported_protocol(
                 (supported_workflows[protocol], scan.scan_id),
             )
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = scan.add_worker(status="canceled")
     draft = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(draft))
 

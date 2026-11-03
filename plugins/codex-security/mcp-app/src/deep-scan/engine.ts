@@ -34,6 +34,7 @@ export function startDeepScanEngine(options: {
   reasoningEffort?: string;
   log?: DeepScanLogger;
   onFinalized?: CoordinatorOptions["onFinalized"];
+  onStart?: CoordinatorOptions["onStart"];
 }) {
   const { run, runWorkbench, pluginRoot, threadId, handoffClaimToken } =
     options;
@@ -72,6 +73,7 @@ export function startDeepScanEngine(options: {
             ),
             options.parentSandbox,
           ),
+          serviceTier: owned.serviceTier,
           artifactContext: {
             pluginRoot,
             scanRoot: owned.scanDir,
@@ -86,6 +88,8 @@ export function startDeepScanEngine(options: {
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
+        serviceTier: run.serviceTier,
+        deepScanConfig: run.config,
         parentSandbox: options.parentSandbox,
         parentTurn: options.parentTurn,
         artifactContext: {
@@ -101,6 +105,7 @@ export function startDeepScanEngine(options: {
       }),
       pluginRoot,
       log: options.log,
+      onStart: options.onStart,
       handoffClaimToken,
       threadId,
       onComplete: async (draft, signal, publication) => {

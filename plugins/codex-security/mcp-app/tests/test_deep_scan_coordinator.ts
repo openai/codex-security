@@ -6,6 +6,7 @@ import {
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import {
   testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
+  testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
   testWorkerScopedCandidateSourceAggregation,
 } from "./deep_scan_coverage_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
@@ -793,46 +794,37 @@ async function testExhaustedRetryFailsScan() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately() {
-  for (const message of [
-    "Request blocked by cyberPolicy.",
-    "Request blocked by a safety policy violation.",
-    "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for potentially high-risk cyber activity.",
-  ]) {
-    const { fixture, store } = await coordinatorFixture({
-      stopAfterNoNew: 4,
-      stopAfterConsecutiveErrors: 3,
-      maxDiscoveryRuns: 3,
-    });
-    const executor = new FakeExecutor({
-      discoveryFailureMessages: { "discovery-0001": message },
-      discoveryCandidateId: "candidate-1",
-    });
-    const sleeps: number[] = [];
-    const terminal = await runCoordinator(fixture, store, executor, {
-      random: () => 0,
-      retryDelaysMs: [1, 3, 9],
-      clock: recordingClock(sleeps),
-    });
+async function testPolicyRefusalReplacesDiscoveryImmediately() {
+  const { fixture, store } = await coordinatorFixture({
+    stopAfterNoNew: 4,
+    stopAfterConsecutiveErrors: 3,
+    maxDiscoveryRuns: 3,
+  });
+  const executor = new FakeExecutor({
+    discoveryFailureMessages: {
+      "discovery-0001": "Request blocked by cyberPolicy.",
+    },
+    discoveryCandidateId: "candidate-1",
+  });
+  const sleeps: number[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    random: () => 0,
+    retryDelaysMs: [1, 3, 9],
+    clock: recordingClock(sleeps),
+  });
 
-    assert.equal(terminal?.status, "succeeded", message);
-    assert.equal(terminal?.terminalReason, "capped");
-    assert.equal(executor.discoveryAttempts.size, 3);
-    assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1, message);
-    assert.deepEqual(
-      sleeps,
-      [],
-      `a refused conversation must not be resumed: ${message}`,
-    );
-    assert.equal(store.run.consecutiveErrors, 0, message);
-    const refusal = [...store.workers.values()].find(
-      (worker) =>
-        path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
-    );
-    assert.equal(refusal?.replaceableFailureKind, "policy_refusal", message);
-    assert.equal(refusal?.status, "canceled");
-  }
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal?.terminalReason, "capped");
+  assert.equal(executor.discoveryAttempts.size, 3);
+  assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1);
+  assert.deepEqual(sleeps, [], "a refused conversation must not be resumed");
+  assert.equal(store.run.consecutiveErrors, 0);
+  const refusal = [...store.workers.values()].find(
+    (worker) =>
+      path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
+  );
+  assert.equal(refusal?.replaceableFailureKind, "policy_refusal");
+  assert.equal(refusal?.status, "canceled");
 }
 
 async function testTransientDiscoveryErrorsRetainRecovery() {
@@ -1271,7 +1263,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   assert.match(continuation, /completed source analysis/);
   assert.match(
     continuation,
-    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, coverage \}\)/,
+    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, reviewState \}\)/,
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
@@ -1469,7 +1461,7 @@ async function testMissingReducerResultResumesExistingThread(
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
-    /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+    /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
   );
   assert.doesNotMatch(
     executor.dedupContinuationPrompts[1] ?? "",
@@ -3279,7 +3271,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
         "result.json",
       );
       const result = await readJson(resultPath);
-      result.coverage.deferred = [
+      result.reviewState.deferred = [
         { id: "remaining-review", reason: "Source review remains pending." },
       ];
       await writeJson(resultPath, result);
@@ -3315,7 +3307,7 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   assert.equal(resumed?.status, "succeeded", resumed?.error);
 
   assert.equal(
-    (completedDrafts[0].coverage.deferred as unknown[]).length,
+    (completedDrafts[0].reviewState.deferred as unknown[]).length,
     5,
     "resumed reduction must retain pending review from every merged worker",
   );
@@ -3645,7 +3637,7 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence
   const manifest = await readJson(terminal.manifestPath);
   assert.deepEqual(manifest.findings, []);
 
-  assert.deepEqual(completedDrafts[0].coverage.deferred, [
+  assert.deepEqual(completedDrafts[0].reviewState.deferred, [
     {
       reason:
         "The configured discovery time limit elapsed before any source review completed.",
@@ -3877,9 +3869,9 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
   const acceptedReducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup" && worker.status === "succeeded",
   );
-  const { coverage, ...publishedReduction } = completed[0];
+  const { reviewState, ...publishedReduction } = completed[0];
   assert.deepEqual(
-    { ...publishedReduction, sourceCoverage: coverage },
+    { ...publishedReduction, sourceCoverage: reviewState },
     await readJson(acceptedReducer!.resultManifestPath!),
     "the accepted aggregate still reaches publication when redundant cancellation writes fail",
   );
@@ -3896,7 +3888,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     for (const worker of store.workers.values()) {
       if (worker.kind !== "discovery" || !worker.resultManifestPath) continue;
       const changed = await readJson(worker.resultManifestPath);
-      changed.coverage = {
+      changed.reviewState = {
         surfaces: [],
         explicitExclusions: [],
         deferred: [{ reason: "Late write after acceptance." }],
@@ -3937,11 +3929,11 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
   );
 
   assert.deepEqual(
-    completed[0].coverage.deferred,
+    completed[0].reviewState.deferred,
     [],
-    "late writes cannot change accepted coverage",
+    "late writes cannot change accepted reviewState",
   );
-  assert.equal(completed[0].coverage.surfaces.length, 1);
+  assert.equal(completed[0].reviewState.surfaces.length, 1);
   const reducer = [...store.workers.values()].find(
     (worker) => worker.kind === "dedup",
   );
@@ -4274,6 +4266,7 @@ try {
   await testSaturationPreservesFindingAlreadyBuffered();
   await testSaturationOmitsWorkerAcceptedDuringCancellation();
   await testSuccessfulDeepCoveragePreservesWorkerReviewStatus();
+  await testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure();
   await testSaturationIgnoresDiscoveryCancellationWriteFailure(true);
   await testPublicationUsesAcceptedReducerSnapshot();
@@ -4289,7 +4282,7 @@ try {
   await testSlowReducerPausesDiscoveryRefill();
   await testSingletonHardCapReduction();
   await testExhaustedRetryFailsScan();
-  await testProviderCybersecurityRiskMessagesReplaceRefusedDiscoveryImmediately();
+  await testPolicyRefusalReplacesDiscoveryImmediately();
   await testTransientDiscoveryErrorsRetainRecovery();
   await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
   await testRecoverableWorkerErrorsCannotFailScan();

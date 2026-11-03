@@ -5,8 +5,8 @@ import json
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import read_review_state
 
 
 @pytest.mark.parametrize("host_coverage", [True, False], ids=["accepted-projection", "legacy"])
@@ -25,7 +25,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     }
     source_files = []
     for disposition in ("needs_follow_up", "rejected"):
-        result = add_worker(workbench_db, scan)
+        result = scan.add_worker()
         worker_id = result.parent.name
         surface = {
             "id": "surface-1",
@@ -68,7 +68,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
                     "provenance": provenance,
                 }
             )
-    reducer = add_worker(workbench_db, scan)
+    reducer = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' "
@@ -82,7 +82,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     source_files.append(reducer)
     saved_bytes = {path: path.read_bytes() for path in source_files}
     if not parent_draft:
-        for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
+        for filename in ("scan-manifest.json", "findings.json"):
             (scan.scan_dir / filename).unlink()
 
     stopped = workbench_api["saved_results"].fail_scan(
@@ -92,7 +92,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
     )["scan"]
 
     assert stopped["progress"]["status"] == "failed"
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert len(coverage["deferred"]) == 2
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
@@ -127,13 +127,13 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    accepted = add_worker(workbench_db, scan)
+    accepted = scan.add_worker()
     accepted.write_text(
         json.dumps(
             {"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": scan.coverage}
         )
     )
-    reducer = add_worker(workbench_db, scan)
+    reducer = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' "
@@ -151,7 +151,7 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
             }
         )
     )
-    pending = add_worker(workbench_db, scan, status="canceled")
+    pending = scan.add_worker(status="canceled")
     deferred = {"id": "pending-review", "reason": "The independent review remains unresolved."}
     pending.write_text(
         json.dumps(
@@ -170,7 +170,7 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert coverage["reviews"] == reviews
     assert {

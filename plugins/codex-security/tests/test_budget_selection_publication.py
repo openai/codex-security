@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import load_script, read_review_state
 
 
 def assert_budget_seal_receipt(scan, before_json, after_json):
@@ -23,17 +23,33 @@ def assert_budget_seal_receipt(scan, before_json, after_json):
     after = json.loads(after_json)
     sealed = [
         json.loads((scan.scan_dir / name).read_bytes())
-        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+        for name in ("scan-manifest.json", "findings.json")
     ]
+    manifest_scan = sealed[0]["scan"]
+    if "coverageRef" in manifest_scan:
+        coverage = json.loads((scan.scan_dir / manifest_scan["coverageRef"]).read_bytes())
+    else:
+        head = json.loads((scan.scan_dir / "checkpoint-head.json").read_bytes())
+        checkpoint = json.loads((scan.scan_dir / "checkpoints" / head["checkpoint"]).read_bytes())
+        review = load_script("review_state")
+        coverage = review.review_state(
+            {
+                **manifest_scan,
+                "reviewState": review.checkpoint_review_state(checkpoint["reviewState"]),
+            }
+        )
+    sealed.append(coverage)
     for timestamp in ("completedAt", "sealedAt"):
         del sealed[0]["scan"][timestamp]
     canonical = json.dumps(sealed, sort_keys=True, separators=(",", ":")).encode()
-    assert after.pop("sealedPublicationSha256") == hashlib.sha256(canonical).hexdigest()
+    seal_digest = hashlib.sha256(canonical).hexdigest()
+    if seal_digest != before["publicationSha256"]:
+        before["sealedPublicationSha256"] = seal_digest
     assert after == before
 
 
 def accept_unmerged(connection, scan):
-    result = add_worker(connection, scan)
+    result = scan.add_worker(connection)
     worker_id = result.parent.name
     result.write_text(
         json.dumps(
@@ -119,7 +135,7 @@ def test_cost_before_selection_retains_only_merged_findings(
         _, accepted, _ = accept_reducer(workbench_db, scan)
     elif accepted_kind == "unmerged":
         accepted = accept_unmerged(workbench_db, scan)
-    active = add_worker(workbench_db, scan, status="running")
+    active = scan.add_worker(status="running")
     active_id = active.parent.name
     with workbench_db:
         workbench_db.execute(
@@ -186,7 +202,7 @@ def test_cost_before_selection_retains_only_merged_findings(
         assert args.message in json.loads(row["completion_warnings_json"])
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert len(findings) == (1 if accepted_kind == "reducer" else 0)
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert "completeness" not in coverage
         assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
         if accepted_kind == "reducer":
@@ -293,7 +309,7 @@ def test_budget_keeps_selection_committed_before_transaction_and_unmerged_obliga
     assert all(path.read_bytes() == contents for path, contents in originals.items())
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 1
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert original_coverage["deferred"][0] in coverage["deferred"]
     gaps = [
         item
@@ -383,7 +399,7 @@ def test_budget_preserves_accepted_scope_and_unmerged_scope_limits(
         else:
             assert saved_scope[key] == value
     assert warning in saved_scope["limitations"]
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert any(
         item["reason"] == unmerged_limit
@@ -434,7 +450,7 @@ def test_budget_replay_after_draft_commit_keeps_unmerged_coverage_once(
         assert run["status"] == "succeeded"
         selection = run["finalization_input_json"]
         assert connection.execute("SELECT status FROM scans").fetchone()[0] == "running"
-    before = json.loads((scan.scan_dir / "coverage.json").read_text())
+    before = read_review_state(workbench_db, scan.scan_dir)
     monkeypatch.setitem(budget.__globals__, "complete_scan_locked", original_complete)
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
@@ -444,7 +460,7 @@ def test_budget_replay_after_draft_commit_keeps_unmerged_coverage_once(
             "SELECT finalization_input_json FROM deep_scan_runs"
         ).fetchone()
         assert_budget_seal_receipt(scan, selection, recorded[0])
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     for key in ("surfaces", "explicitExclusions", "deferred", "reviews"):
         assert coverage.get(key, []) == before.get(key, [])
     assert len({row["id"] for row in coverage["deferred"]}) == len(coverage["deferred"])
@@ -513,7 +529,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
             assert {key: recorded[key] for key in selection} == selection
             assert len(recorded["publicationSha256"]) == 64
         assert accepted.read_bytes() == accepted_bytes
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(connection, scan.scan_dir)
         assert "completeness" not in coverage
         assert any(item["id"] == "accepted-follow-up" for item in coverage["deferred"])
         if not cancel_first:
@@ -529,7 +545,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
 
 
 @pytest.mark.parametrize(
-    "cut", ["after-findings", "after-coverage", "after-draft-commit", "after-seal"]
+    "cut", ["after-findings", "after-manifest", "after-draft-commit", "after-seal"]
 )
 @pytest.mark.parametrize("has_reducer", [False, True])
 def test_budget_process_death_replays_exact_evidence(
@@ -602,7 +618,7 @@ else:
 
     def write_then_die(scan_dir, name, contents):
         result = original(scan_dir, name, contents)
-        if name == ('findings.json' if cut == 'after-findings' else 'coverage.json'):
+        if name == ('findings.json' if cut == 'after-findings' else 'scan-manifest.json'):
             terminate(cut)
         return result
 
@@ -683,7 +699,7 @@ os._exit(87)
             else:
                 assert snapshot["afterSelection"] == run["finalization_input_json"]
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(findings) == int(has_reducer)
     assert "completeness" not in coverage
     assert len({x["id"] for x in coverage["deferred"]}) == len(coverage["deferred"])

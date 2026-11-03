@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, reject_worker_candidate, stop_scan
 
@@ -57,7 +56,7 @@ def test_selection_commit_loss_replays_accepted_identity_before_stopping(
     result, accepted, _ = accept_reducer(workbench_db, scan)
     omissions = []
     if reason == "saturated":
-        omitted = add_worker(workbench_db, scan)
+        omitted = scan.add_worker()
         reject_worker_candidate(scan, omitted)
         omissions.append(omitted.parent.name)
         with workbench_db:

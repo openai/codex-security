@@ -35,7 +35,7 @@ function coverage(completeness = "complete", deferred = []) {
 function worker(id, findings, scanCoverage = coverage()) {
   return {
     id,
-    result: { scanId, complete: true, findings, coverage: scanCoverage },
+    result: { scanId, complete: true, findings, reviewState: scanCoverage },
   };
 }
 

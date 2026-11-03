@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
-from test_deep_scan_stop_conditions import canceled_discovery_output, complete, finish
+from test_deep_scan_deadline_recovery import finish_after_crashes as finish_after_crashes
+from test_deep_scan_stop_conditions import canceled_discovery_output, finish
 from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
 from test_deep_scan_stop_conditions import publication_scan as publication_scan
 from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
 from workbench_test_support import (
+    read_review_state,
     replay_saved_results,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    select_checkpoint,
     write_checkpoint,
 )
 
@@ -29,47 +28,11 @@ def pending(identity, reason, surface_id="entry"):
     return {"id": identity, "reason": reason, "surfaceIds": [surface_id]}
 
 
-def interrupt_in_fresh_python(database, scan, hash_seed):
-    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-c",
-            """
-import runpy
-import sys
-from pathlib import Path
-from types import SimpleNamespace
-sys.path.insert(0, str(Path(sys.argv[1]).parents[1] / "tests"))
-from test_deep_scan_deadline_recovery import interrupt_finish_before_commit
-
-api = runpy.run_path(sys.argv[1], run_name="surface_link_recovery_test")
-api["deep_scan"]._dependencies = SimpleNamespace(
-    **api, preserve_stopped_results=api["preserve_stopped_results_after_transition"]
+@pytest.mark.parametrize(
+    "parent_collision", [pytest.param(False, marks=pytest.mark.cross_platform), True]
 )
-scan = SimpleNamespace(scan_id=sys.argv[3], scan_dir=Path(sys.argv[4]))
-interrupt_finish_before_commit(api, Path(sys.argv[2]), scan)
-""",
-            str(script),
-            str(database),
-            scan.scan_id,
-            str(scan.scan_dir),
-        ],
-        cwd=Path(__file__).parent,
-        env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
-@pytest.mark.parametrize("parent_collision", [False, True])
 def test_deadline_surface_links_follow_sources_across_repeated_crashes(
-    workbench_api, workbench_db, deadline_scan, tmp_path, parent_collision
+    workbench_db, deadline_scan, finish_after_crashes, parent_collision
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
@@ -87,8 +50,8 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
                 surfaces=[surface(label)],
                 deferred=[pending(f"{label}-review", f"Review {label}."), shared],
             ),
+            mtime_ns=index * 100,
         )
-        os.utime(checkpoint, ns=(index * 100, index * 100))
         checkpoints.append(checkpoint)
     canonical_id = f"{worker_id}/entry" if parent_collision else "parent-entry"
     canonical_surface = surface("Canonical parent", canonical_id)
@@ -96,29 +59,7 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
     scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_pending])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     originals = {path: path.read_bytes() for path in checkpoints}
-    database = tmp_path / "surface-links.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for hash_seed in (1, 17, 83):
-        interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
-        with sqlite3.connect(database) as connection:
-            assert (
-                connection.execute(
-                    "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-                ).fetchone()[0]
-                == "running"
-            )
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        completed = complete(workbench_api, connection, scan)
-
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert completed["progress"]["status"] == "complete"
-    assert all(publication == coverage for publication in publications)
+    _, coverage = finish_after_crashes()
     assert canonical_surface in coverage["surfaces"]
     assert canonical_pending in coverage["deferred"]
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
@@ -159,9 +100,9 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     surfaces = [row for row in coverage["surfaces"] if row["label"] in {"download", "upload"}]
     assert len(surfaces) == len({row["id"] for row in surfaces}) == 2
     task = next(
@@ -189,9 +130,9 @@ def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(
     originals = {path: path.read_bytes() for path in (earlier, current)}
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     retained = next(row for row in coverage["surfaces"] if row["label"] == "Earlier review")
     task = next(row for row in coverage["deferred"] if row["reason"] == "Review prior surface.")
     assert task["surfaceIds"] == [retained["id"]] == [f"{worker_id}/prior"]
@@ -226,17 +167,15 @@ def test_deadline_reopened_generic_surface_copy_retains_its_link(
     ]
     originals = {}
     for index, draft in enumerate(drafts, start=1):
-        checkpoint = write_checkpoint(output / "checkpoints", draft)
-        os.utime(checkpoint, ns=(index * 100, index * 100))
+        checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=index * 100)
         originals[checkpoint] = checkpoint.read_bytes()
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = select_checkpoint(output, checkpoint)
     originals[head] = head.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     retained = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert len(retained) == 1
     assert retained[0]["disposition"] == "needs_follow_up"
@@ -276,12 +215,9 @@ def test_stopped_recovery_preserves_source_link_union(workbench_api, tmp_path):
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize("changed_task", [False, True], ids=["copied-task", "updated-task"])
 def test_deadline_retains_equal_task_origins_from_selected_worker_result(
-    workbench_api, workbench_db, deadline_scan, tmp_path, changed_task
+    workbench_db, deadline_scan, finish_after_crashes, changed_task
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
@@ -290,11 +226,8 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     archived_draft = saved_draft(
         scan.scan_id, surfaces=[surface("download")], deferred=[previous_task]
     )
-    checkpoint = write_checkpoint(archived / "checkpoints", archived_draft)
-    os.utime(checkpoint, ns=(100, 100))
-    archived_head = archived / "checkpoint-head.json"
-    archived_head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(archived_head, ns=(110, 110))
+    checkpoint = write_checkpoint(archived / "checkpoints", archived_draft, mtime_ns=100)
+    select_checkpoint(archived, checkpoint, mtime_ns=110)
     archived_result = archived / "result.json"
     archived_result.write_bytes(checkpoint.read_bytes())
     os.utime(archived_result, ns=(120, 120))
@@ -307,36 +240,18 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
         surfaces=[surface("upload")],
         deferred=[current_task, retained_task] if changed_task else [current_task],
     )
-    raw_checkpoint = write_checkpoint(output / "checkpoints", incoming)
-    os.utime(raw_checkpoint, ns=(200, 200))
+    write_checkpoint(output / "checkpoints", incoming, mtime_ns=200)
     # The writer preserves the old pending task while publishing its latest surface.
     merged = saved_draft(
         scan.scan_id, surfaces=[surface("upload")], deferred=[current_task, retained_task]
     )
-    selected = write_checkpoint(output / "checkpoints", merged)
-    os.utime(selected, ns=(210, 210))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(220, 220))
+    selected = write_checkpoint(output / "checkpoints", merged, mtime_ns=210)
+    select_checkpoint(output, selected, mtime_ns=220)
     result = output / "result.json"
     result.write_bytes(selected.read_bytes())
     os.utime(result, ns=(230, 230))
     originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
-    database = tmp_path / "selected-result.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for hash_seed in (1, 17, 83):
-        interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        complete(workbench_api, connection, scan)
-
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert all(publication == coverage for publication in publications)
+    _, coverage = finish_after_crashes()
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert {row["label"] for row in surfaces} == {"download", "upload"}
     upload = next(row for row in surfaces if row["label"] == "upload")
@@ -351,14 +266,11 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     "selected_result", [False, True], ids=["raw-checkpoint", "selected-result"]
 )
 def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
-    workbench_api, workbench_db, deadline_scan, tmp_path, selected_result
+    workbench_db, deadline_scan, finish_after_crashes, selected_result
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
@@ -367,8 +279,8 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     archived_checkpoint = write_checkpoint(
         archived / "checkpoints",
         saved_draft(scan.scan_id, surfaces=[surface("download")], deferred=[download_task]),
+        mtime_ns=100,
     )
-    os.utime(archived_checkpoint, ns=(100, 100))
     archived_result = archived / "result.json"
     archived_result.write_bytes(archived_checkpoint.read_bytes())
     os.utime(archived_result, ns=(110, 110))
@@ -378,8 +290,8 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     raw_checkpoint = write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, surfaces=[malformed_surface], deferred=[upload_task]),
+        mtime_ns=200,
     )
-    os.utime(raw_checkpoint, ns=(200, 200))
     if selected_result:
         selected = write_checkpoint(
             output / "checkpoints",
@@ -388,31 +300,14 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
                 surfaces=[malformed_surface],
                 deferred=[upload_task, download_task],
             ),
+            mtime_ns=210,
         )
-        os.utime(selected, ns=(210, 210))
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": selected.name}))
-        os.utime(head, ns=(220, 220))
+        select_checkpoint(output, selected, mtime_ns=220)
         result = output / "result.json"
         result.write_bytes(selected.read_bytes())
         os.utime(result, ns=(230, 230))
     originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
-    database = tmp_path / "dropped-surface.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for hash_seed in (1, 17, 83):
-        interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        completed = complete(workbench_api, connection, scan)
-
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert completed["progress"]["status"] == "complete"
-    assert all(publication == coverage for publication in publications)
+    completed, coverage = finish_after_crashes()
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert len(surfaces) == 1 and surfaces[0]["label"] == "download"
     tasks = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
@@ -428,15 +323,12 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     "history",
     ["parent-collision", "current-checkpoints", "retry-checkpoints", "coalesced-history"],
 )
 def test_deadline_inherited_surface_links_follow_historical_observations(
-    workbench_api, workbench_db, deadline_scan, tmp_path, history
+    workbench_db, deadline_scan, finish_after_crashes, history
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(
@@ -444,26 +336,26 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     )
     archived = output.parent / "attempts" / "attempt-01"
     first_output = archived if history == "retry-checkpoints" else output
-    earlier = write_checkpoint(
+    write_checkpoint(
         first_output / "checkpoints",
         saved_draft(scan.scan_id, surfaces=[surface("Earlier observation")]),
+        mtime_ns=100,
     )
-    os.utime(earlier, ns=(100, 100))
     expected_labels = {"Earlier observation"}
     if history != "parent-collision":
-        newer = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft(scan.scan_id, surfaces=[surface("Newer observation")]),
+            mtime_ns=200,
         )
-        os.utime(newer, ns=(200, 200))
         expected_labels.add("Newer observation")
     inherited_task = pending("history-review", "Review the inherited surface.")
     unknown_task = pending("unknown-review", "Review an unresolved reference.", "not-declared")
-    deferred_only = write_checkpoint(
+    write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, deferred=[inherited_task, unknown_task]),
+        mtime_ns=300,
     )
-    os.utime(deferred_only, ns=(300, 300))
     if history == "coalesced-history":
         # The merged checkpoint copies a task whose earlier raw source inherited history.
         selected = write_checkpoint(
@@ -473,40 +365,23 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
                 surfaces=[surface("Newer observation")],
                 deferred=[inherited_task, unknown_task],
             ),
+            mtime_ns=400,
         )
-        os.utime(selected, ns=(400, 400))
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": selected.name}))
-        os.utime(head, ns=(410, 410))
+        select_checkpoint(output, selected, mtime_ns=410)
     if history == "current-checkpoints":
         # An interrupted later write cannot identify an earlier task's target.
-        future = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft(scan.scan_id, surfaces=[surface("Later observation")]),
+            mtime_ns=400,
         )
-        os.utime(future, ns=(400, 400))
     canonical_id = f"{worker_id}/entry" if history == "parent-collision" else "parent-entry"
     canonical_surface = surface("Canonical parent", canonical_id)
     canonical_task = pending("parent-review", "Parent review remains.", canonical_id)
     scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_task])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
-    database = tmp_path / "historical-links.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for hash_seed in (1, 17, 83):
-        interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        completed = complete(workbench_api, connection, scan)
-
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert completed["progress"]["status"] == "complete"
-    assert all(publication == coverage for publication in publications)
+    _, coverage = finish_after_crashes()
     assert canonical_surface in coverage["surfaces"]
     assert canonical_task in coverage["deferred"]
     worker_surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
@@ -523,16 +398,13 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.skipif(
-    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
-)
 @pytest.mark.parametrize(
     ("changed_surface_id", "legacy_duplicate_id"),
     [(False, False), (True, False), (True, True)],
     ids=["same-id", "changed-id", "legacy-duplicate-id"],
 )
 def test_deadline_candidate_supersession_preserves_independent_surface_links(
-    workbench_api, workbench_db, deadline_scan, tmp_path, changed_surface_id, legacy_duplicate_id
+    workbench_db, deadline_scan, finish_after_crashes, changed_surface_id, legacy_duplicate_id
 ):
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan)
@@ -547,46 +419,30 @@ def test_deadline_candidate_supersession_preserves_independent_surface_links(
     if legacy_duplicate_id:
         # Legacy artifacts may reuse an ID for a candidate and an independent observation.
         earlier_surfaces.append(surface("Independent observation"))
-    earlier = write_checkpoint(
+    write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, surfaces=earlier_surfaces, deferred=[independent]),
+        mtime_ns=100,
     )
-    os.utime(earlier, ns=(100, 100))
     outcome_id = "outcome" if changed_surface_id else "entry"
     outcome = {
         **surface("Candidate reviewed", outcome_id, "rejected"),
         "candidateId": "candidate",
     }
-    raw_checkpoint = write_checkpoint(
-        output / "checkpoints", saved_draft(scan.scan_id, complete=True, surfaces=[outcome])
+    write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, complete=True, surfaces=[outcome]),
+        mtime_ns=200,
     )
-    os.utime(raw_checkpoint, ns=(200, 200))
     # The selected merged checkpoint retains independent work before result publication.
     selected = write_checkpoint(
         output / "checkpoints",
         saved_draft(scan.scan_id, complete=True, surfaces=[outcome], deferred=[independent]),
+        mtime_ns=210,
     )
-    os.utime(selected, ns=(210, 210))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(220, 220))
+    select_checkpoint(output, selected, mtime_ns=220)
     originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
-    database = tmp_path / "candidate-links.db"
-    with sqlite3.connect(database) as connection:
-        workbench_db.backup(connection)
-
-    publications = []
-    for hash_seed in (1, 17, 83):
-        interrupt_in_fresh_python(database, scan, hash_seed)
-        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
-    with sqlite3.connect(database) as connection:
-        connection.row_factory = sqlite3.Row
-        finish(workbench_api, connection, scan, terminal_reason="capped")
-        completed = complete(workbench_api, connection, scan)
-
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert completed["progress"]["status"] == "complete"
-    assert all(publication == coverage for publication in publications)
+    _, coverage = finish_after_crashes()
     assert canonical_surface in coverage["surfaces"]
     assert canonical_task in coverage["deferred"]
     retained = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
