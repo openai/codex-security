@@ -1,10 +1,7 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import { existsSync } from "node:fs";
 import { getEventListeners } from "node:events";
-import {
-  setTimeout as delay,
-  setImmediate as nextTurn,
-} from "node:timers/promises";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { readFile, writeFile, mkdir, chmod, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
@@ -43,7 +40,9 @@ const vector = [1, ...Array<number>(EMBEDDING_DIMENSIONS - 1).fill(0)];
 
 for (const mode of ["direct", "fresh workflow", "resumed workflow"]) {
   test.skipIf(process.platform === "win32")(
-    `directory dedupe rejects repository Python before probing it from another directory (${mode})`,
+    mode === "direct"
+      ? "direct directory dedupe uses native helpers without probing repository Python"
+      : `directory dedupe rejects repository Python before probing it from another directory (${mode})`,
     async () => {
       const f = await fixture();
       const options = {
@@ -66,19 +65,31 @@ for (const mode of ["direct", "fresh workflow", "resumed workflow"]) {
       );
       await chmod(python, 0o700);
       expect(process.cwd()).not.toBe(f.repository);
-      await expect(
-        deduplicateScanDirectoryInternal(f.scanDir, options, {
-          environment: {
-            ...f.environment,
-            PYTHON: python,
-            TEST_PYTHON_PROBE: marker,
-          },
-          runWorkbench: rejecting("Repository Python reached the workbench"),
-          reviewer: emptyNeighborhoodReviewer(),
-        }),
-      ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+      const result = deduplicateScanDirectoryInternal(f.scanDir, options, {
+        environment: {
+          ...f.environment,
+          PYTHON: python,
+          TEST_PYTHON_PROBE: marker,
+        },
+        ...(mode === "direct"
+          ? {}
+          : {
+              runWorkbench: rejecting(
+                "Repository Python reached the workbench",
+              ),
+            }),
+        reviewer: emptyNeighborhoodReviewer(),
+      });
+      if (mode === "direct") {
+        expect((await result).deduplicationStatus).toBe("completed");
+        expect(f.embed).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toThrow(
+          "PYTHON interpreter is unavailable or unusable",
+        );
+        expect(f.embed).not.toHaveBeenCalled();
+      }
       expect(existsSync(marker)).toBe(false);
-      expect(f.embed).not.toHaveBeenCalled();
     },
   );
 }
@@ -1231,43 +1242,6 @@ test("local workbench calls receive cancellation and cannot report success after
   ).rejects.toBe(reason);
   expect(actions).toEqual(["prepare", "embed", "neighbors", "commit"]);
 });
-
-test.skipIf(process.platform === "win32")(
-  "local preparation cancels an active Python probe",
-  async () => {
-    const f = await fixture();
-    const python = join(f.root, "slow-python");
-    const marker = join(f.root, "probe-started");
-    await writeFile(
-      python,
-      '#!/bin/sh\nprintf started > "$TEST_PYTHON_PROBE"\nexec sleep 10\n',
-    );
-    await chmod(python, 0o700);
-    const controller = new AbortController();
-    try {
-      const local = new LocalDeduplication(
-        { ...f.environment, PYTHON: python, TEST_PYTHON_PROBE: marker },
-        { repositoryId: f.targetId },
-        f.repository,
-        controller.signal,
-        undefined,
-        f.embedding,
-      );
-      const outcome = local
-        .prepare(f.document.findings, f.targetId)
-        .catch((error: unknown) => error);
-      const completion = outcome.then((error) => ({ error }));
-      while (!existsSync(marker)) {
-        const exited = await Promise.race([delay(10), completion]);
-        if (exited) throw exited.error;
-      }
-      controller.abort();
-      expect(await outcome).toMatchObject({ name: "AbortError" });
-    } finally {
-      controller.abort();
-    }
-  },
-);
 
 test("local embeddings preserve an endpoint from a copied Windows environment", async () => {
   const f = await fixture();
