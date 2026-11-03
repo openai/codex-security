@@ -437,25 +437,6 @@ async function runInstalledSdk(pluginRoot, executable) {
                 return {
                   events: (async function* () {
                     yield { type: "thread.started", thread_id: owner };
-                    if (prompts.length > 1) {
-                      assert.equal(prompt, postScanPrompt);
-                      manifestBeforeFollowUp = await readFile(
-                        join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
-                        "utf8",
-                      );
-                      const completed = JSON.parse(manifestBeforeFollowUp);
-                      assert.equal(completed.scan.status, "completed");
-                      assert.ok(completed.scan.sealedAt);
-                      yield {
-                        type: "turn.completed",
-                        usage: {
-                          input_tokens: 100_000,
-                          cached_input_tokens: 0,
-                          output_tokens: 100_000,
-                        },
-                      };
-                      return;
-                    }
                     scanId = env.CODEX_SECURITY_SCAN_ID;
                     // The pinned SDK maps its apiKey option to this child variable.
                     const rpc = await server(f, {
@@ -478,6 +459,36 @@ async function runInstalledSdk(pluginRoot, executable) {
                         input_tokens: 1,
                         cached_input_tokens: 0,
                         output_tokens: 1,
+                      },
+                    };
+                  })(),
+                };
+              },
+            };
+          },
+          resumeThread(threadId) {
+            assert.equal(threadId, owner);
+            return {
+              id: threadId,
+              async runStreamed(prompt) {
+                prompts.push(prompt);
+                assert.equal(prompt, postScanPrompt);
+                manifestBeforeFollowUp = await readFile(
+                  join(env.CODEX_SECURITY_SCAN_DIR, "scan-manifest.json"),
+                  "utf8",
+                );
+                const completed = JSON.parse(manifestBeforeFollowUp);
+                assert.equal(completed.scan.status, "completed");
+                assert.ok(completed.scan.sealedAt);
+                return {
+                  events: (async function* () {
+                    yield { type: "thread.started", thread_id: threadId };
+                    yield {
+                      type: "turn.completed",
+                      usage: {
+                        input_tokens: 100_000,
+                        cached_input_tokens: 0,
+                        output_tokens: 100_000,
                       },
                     };
                   })(),
@@ -522,7 +533,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId, 3);
+  await assertExecutions(f, scanId);
 }
 
 async function assertSavedState(f, scanId, owner) {
@@ -616,7 +627,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId, preflightsWithoutRetry = 4) {
+async function assertExecutions(f, scanId) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -633,7 +644,7 @@ async function assertExecutions(f, scanId, preflightsWithoutRetry = 4) {
   assert.equal(reducers.length, 1);
   assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    preflightsWithoutRetry + incomplete,
+    4 + incomplete,
   );
   for (const execution of [...workers, ...reducers]) {
     assert.equal(execution.scanId, scanId);
