@@ -11,6 +11,7 @@ from unittest import mock
 
 from workbench_test_support import (
     SCRIPT,
+    empty_target_paths,
     start_saved_scan,
     windows_file_backend,
     write_completed_contract,
@@ -24,9 +25,7 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     separately cover the Win32 handle semantics.
     """
 
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "src" / "extract.py"
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
