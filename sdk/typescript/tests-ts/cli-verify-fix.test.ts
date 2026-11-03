@@ -541,20 +541,6 @@ describe("read-only finding verification", () => {
           const id = batch[0]!.occurrenceId;
           seen.push(id);
           expect(output!.appServer!.onEvent).toBeUndefined();
-          output!.appServer!.onEvent?.({
-            method: "item/reasoning/summaryTextDelta",
-            params: { itemId: "reason_0", delta: `Checked ${id}.` },
-          });
-          output!.appServer!.onEvent?.({
-            method: "item/completed",
-            params: {
-              item: {
-                type: "reasoning",
-                id: "reason_0",
-                summary: [`Checked ${id}.`],
-              },
-            },
-          });
           if (seen.length === 2 && scenario === "missing result") {
             output!.stdout.write(JSON.stringify({ results: [] }));
             return 0;
