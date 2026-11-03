@@ -233,7 +233,7 @@ def insert_running_scan(
     source_scopes: dict[str, Any],
     target_root: Path,
     target_summary: str | None,
-    scope_file_count: int,
+    scope_file_count: int | None,
     timestamp: str,
     handoff_status: str = "pending",
     model: str | None = None,
