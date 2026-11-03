@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import {
+  previousAdmission,
   validateExternalEvidenceJson,
   validateExternalReport,
   type ExternalImportTarget,
@@ -14,6 +15,7 @@ import {
   sourceRepositoryUrl,
 } from "./native-json-findings.js";
 import {
+  trackReaderSelection,
   array,
   readScannerJson,
   record,
@@ -57,11 +59,14 @@ export function normalizeOpenGrepFindings(
     excluded: [],
     report: structuredClone(report),
   };
+  const selection = trackReaderSelection(output);
   type Observation = {
     position: number;
     parsed: ReturnType<typeof parseNativeJsonResult>;
   };
   function exclude(position: number, id: string | null, error: unknown) {
+    if (id && error instanceof Error && previousAdmission(error) !== undefined)
+      selection.uncertainIds.add(id);
     output.excluded.push({
       position,
       source_finding_id: id,
@@ -132,6 +137,8 @@ export function normalizeOpenGrepFindings(
           projectedBytes,
         );
       } catch (error) {
+        if (error instanceof Error && previousAdmission(error) !== undefined)
+          selection.uncertainIds.add(id);
         singletonErrors.set(observation, errorMessage(error));
       }
     }
@@ -191,28 +198,38 @@ export function normalizeOpenGrepFindings(
   for (const [id, observations] of [...groups].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
-    const ordered =
-      observations.length === 1
-        ? observations
-        : observations
-            .flatMap((observation) => {
-              try {
-                const result = structuredClone(observation.parsed.result);
-                validateExternalEvidenceJson(
-                  { source_data: { results: [result] } },
-                  target,
-                );
-                observation.parsed.result = result;
-                return [{ observation, key: canonicalJson(result) }];
-              } catch (error) {
-                exclude(observation.position, id, error);
-                return [];
-              }
-            })
-            .sort((left, right) =>
-              left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
-            )
-            .map(({ observation }) => observation);
+    if (observations.length === 1) {
+      selection.append(observations[0]!.position, id, () =>
+        projectGroup(observations),
+      );
+      continue;
+    }
+    const ordered = observations
+      .flatMap((observation) => {
+        try {
+          const result = structuredClone(observation.parsed.result);
+          // The group adds these same raw bytes when choosing a representative
+          // and deciding which traces fit alongside it.
+          validateExternalEvidenceJson(
+            { source_data: { results: [result] } },
+            target,
+            0,
+            (previousBytes, currentBytes) => {
+              if (previousBytes !== currentBytes)
+                selection.uncertainIds.add(id);
+            },
+          );
+          observation.parsed.result = result;
+          return [{ observation, key: canonicalJson(result) }];
+        } catch (error) {
+          exclude(observation.position, id, error);
+          return [];
+        }
+      })
+      .sort((left, right) =>
+        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+      )
+      .map(({ observation }) => observation);
     if (!ordered.length) continue;
     let retained = ordered;
     try {
@@ -226,6 +243,7 @@ export function normalizeOpenGrepFindings(
         if (retained.length === ordered.length) throw error;
         evidence = projectGroup(retained);
       }
+      if (previousAdmission(evidence) === null) selection.uncertainIds.add(id);
       output.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       for (const observation of retained)
@@ -233,7 +251,7 @@ export function normalizeOpenGrepFindings(
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
-  return output;
+  return selection.finish();
 }
 
 export async function readOpenGrepFindings(

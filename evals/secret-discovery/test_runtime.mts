@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import {
   codexSettings,
@@ -153,6 +153,33 @@ test("an eval does not overwrite a later replacement login", async (t) => {
   );
 });
 
+async function captureSdkLaunch(
+  t: TestContext,
+  settings: ReturnType<typeof codexSettings>,
+) {
+  const intercepted = new Error("Synthetic launch intercepted");
+  const spawn = t.mock.method(childProcess, "spawn", () => {
+    throw intercepted;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      async () => {
+        const { events } = await new Codex(settings)
+          .startThread({ skipGitRepoCheck: true })
+          .runStreamed("Offline synthetic launch check");
+        for await (const event of events) void event;
+      },
+      (error) => error === intercepted,
+    );
+    assert.equal(spawn.mock.callCount(), 1);
+    return spawn.mock.calls[0].arguments;
+  } finally {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
+}
+
 test("the SDK launches long Windows paths with the native namespace prefix", async (t) => {
   const executable = win32.join(
     "C:\\synthetic",
@@ -171,29 +198,8 @@ test("the SDK launches long Windows paths with the native namespace prefix", asy
   }
   assert.equal(settings.env.CODEX_CLI_PATH, executable);
 
-  const intercepted = new Error("Synthetic launch intercepted");
-  let launched;
-  const spawn = t.mock.method(childProcess, "spawn", (file: string) => {
-    launched = file;
-    throw intercepted;
-  });
-  syncBuiltinESMExports();
-  try {
-    await assert.rejects(
-      async () => {
-        const { events } = await new Codex(settings)
-          .startThread({ skipGitRepoCheck: true })
-          .runStreamed("Offline synthetic launch check");
-        for await (const event of events) void event;
-      },
-      (error) => error === intercepted,
-    );
-    assert.equal(spawn.mock.callCount(), 1);
-    assert.equal(launched, win32.toNamespacedPath(executable));
-  } finally {
-    spawn.mock.restore();
-    syncBuiltinESMExports();
-  }
+  const [launched] = await captureSdkLaunch(t, settings);
+  assert.equal(launched, win32.toNamespacedPath(executable));
 });
 
 test("the SDK executable override preserves bundled tools at the child boundary", async (t) => {
@@ -209,57 +215,31 @@ test("the SDK executable override preserves bundled tools at the child boundary"
     PATH: [tools, join(directory, "unix tools"), tools].join(delimiter),
   };
   const original = { ...inherited };
-  const intercepted = new Error("Synthetic launch intercepted");
-  const environments: NodeJS.ProcessEnv[] = [];
-  const spawn = t.mock.method(
-    childProcess,
-    "spawn",
-    (
-      _file: string,
-      _args: string[],
-      options: import("node:child_process").SpawnOptions,
-    ) => {
-      environments.push(options.env!);
-      throw intercepted;
-    },
-  );
-  syncBuiltinESMExports();
-  try {
-    for (const environment of [{}, inherited]) {
-      await assert.rejects(
-        async () => {
-          const settings = codexSettings(directory, executable, environment);
-          const { events } = await new Codex(settings)
-            .startThread({ skipGitRepoCheck: true })
-            .runStreamed("Offline synthetic launch check");
-          for await (const event of events) void event;
-        },
-        (error) => error === intercepted,
-      );
-    }
-    assert.deepEqual(
-      environments.map((environment) =>
-        Object.fromEntries(
-          Object.entries(environment).filter(
-            ([key]) => key.toLowerCase() === "path",
-          ),
+  const environments = [];
+  for (const environment of [{}, inherited]) {
+    const settings = codexSettings(directory, executable, environment);
+    const [, , options] = await captureSdkLaunch(t, settings);
+    environments.push(options!.env!);
+  }
+  assert.deepEqual(
+    environments.map((environment) =>
+      Object.fromEntries(
+        Object.entries(environment).filter(
+          ([key]) => key.toLowerCase() === "path",
         ),
       ),
-      [
-        { PATH: tools },
-        process.platform === "win32"
-          ? { Path: [tools, join(directory, "other tools")].join(delimiter) }
-          : {
-              ...inherited,
-              PATH: [tools, join(directory, "unix tools")].join(delimiter),
-            },
-      ],
-    );
-    assert.deepEqual(inherited, original);
-  } finally {
-    spawn.mock.restore();
-    syncBuiltinESMExports();
-  }
+    ),
+    [
+      { PATH: tools },
+      process.platform === "win32"
+        ? { Path: [tools, join(directory, "other tools")].join(delimiter) }
+        : {
+            ...inherited,
+            PATH: [tools, join(directory, "unix tools")].join(delimiter),
+          },
+    ],
+  );
+  assert.deepEqual(inherited, original);
 });
 
 async function waitForFile(path: string) {
@@ -276,7 +256,7 @@ async function waitForFile(path: string) {
 }
 
 async function nativeFixture(
-  t: import("node:test").TestContext,
+  t: TestContext,
   mode = "complete",
   account: { type: string } | null = null,
 ) {
@@ -398,24 +378,18 @@ if (kind === "preflight") {
     OPENAI_API_KEY: "synthetic-env-key",
     DATABASE_URL: "synthetic-unrelated-secret",
   });
-  return { directory, prepared, settings, executable, result };
+  const preflight = (initial = settings) =>
+    preflightEval(prepared, initial, new AbortController().signal);
+  return { directory, prepared, settings, executable, result, preflight };
 }
 
 test(
   "native preflight and SDK exec share effective settings and fallback auth",
   unixOnly,
   async (t) => {
-    const {
-      directory,
-      prepared,
-      settings: original,
-      result,
-    } = await nativeFixture(t);
-    const settings = await preflightEval(
-      prepared,
-      original,
-      new AbortController().signal,
-    );
+    const native = await nativeFixture(t);
+    const { directory, prepared, settings: original, result } = native;
+    const settings = await native.preflight();
     const { report, semanticResult } = await runPreparedEval(
       prepared,
       new Codex(settings),
@@ -508,25 +482,21 @@ for (const {
 } of [
   {
     name: "missing file login",
-    account: null,
     expectedKey: "synthetic-env-key",
   },
   {
     name: "empty auth file",
     authFile: "",
-    account: null,
     expectedKey: "synthetic-env-key",
   },
   {
     name: "malformed auth file",
     authFile: "{",
-    account: null,
     expectedKey: "synthetic-env-key",
   },
   {
     name: "auth file without an account",
     authFile: "{}",
-    account: null,
     expectedKey: "synthetic-env-key",
   },
   {
@@ -541,7 +511,6 @@ for (const {
   },
   {
     name: "blank Codex key",
-    account: null,
     codexApiKey: " \t ",
     expectedKey: "synthetic-env-key",
   },
@@ -552,14 +521,11 @@ for (const {
     codexApiKey: "synthetic-codex-key",
     expectedKey: "synthetic-codex-key",
   },
-  { name: "blank OpenAI key", account: null, openAiApiKey: " \t " },
+  { name: "blank OpenAI key", openAiApiKey: " \t " },
 ]) {
   test(`native auth precedence with ${name}`, unixOnly, async (t) => {
-    const {
-      directory,
-      prepared,
-      settings: original,
-    } = await nativeFixture(t, "complete", account);
+    const native = await nativeFixture(t, "complete", account);
+    const { directory, prepared, settings: original } = native;
     const ambient = original.env.CODEX_HOME;
     if (authFile !== undefined)
       await writeFile(join(ambient, "auth.json"), authFile);
@@ -569,11 +535,7 @@ for (const {
         CODEX_API_KEY: codexApiKey,
         OPENAI_API_KEY: openAiApiKey,
       });
-      const settings = await preflightEval(
-        prepared,
-        initialSettings,
-        new AbortController().signal,
-      );
+      const settings = await native.preflight(initialSettings);
       const { report } = await runPreparedEval(prepared, new Codex(settings));
       assert.equal(report.passed, true);
       assert.equal(initialSettings.apiKey, undefined);
@@ -609,11 +571,8 @@ for (const codexApiKey of [undefined, "synthetic-explicit-key"]) {
     `Windows mixed-case auth snapshot with ${codexApiKey ? "explicit" : "fallback"} key`,
     unixOnly,
     async (t) => {
-      const {
-        directory,
-        prepared,
-        settings: original,
-      } = await nativeFixture(t);
+      const native = await nativeFixture(t);
+      const { directory, prepared, settings: original } = native;
       const {
         OPENAI_API_KEY,
         Path: ignoredPathAlias,
@@ -632,11 +591,7 @@ for (const codexApiKey of [undefined, "synthetic-explicit-key"]) {
         );
         assert.equal(snapshot.env.OPENAI_API_KEY, undefined);
         assert.equal(snapshot.env.OpenAI_API_Key, environment.OpenAI_API_Key);
-        settings = await preflightEval(
-          prepared,
-          snapshot,
-          new AbortController().signal,
-        );
+        settings = await native.preflight(snapshot);
       } finally {
         Object.defineProperty(process, "platform", platform!);
       }
@@ -661,13 +616,10 @@ for (const [mode, expectedError] of [
   ["account-error", /account\/read/],
 ] as const) {
   test(`${mode} prevents starting the SDK exec turn`, unixOnly, async (t) => {
-    const { directory, prepared, settings } = await nativeFixture(t, mode);
+    const native = await nativeFixture(t, mode);
+    const { directory, prepared } = native;
     await assert.rejects(async () => {
-      const resolved = await preflightEval(
-        prepared,
-        settings,
-        new AbortController().signal,
-      );
+      const resolved = await native.preflight();
       await runPreparedEval(prepared, new Codex(resolved));
     }, expectedError);
     await assert.rejects(access(join(directory, "exec.json")), {
@@ -682,12 +634,9 @@ for (const mode of ["fallback-item", "fallback-error"]) {
     `${mode} aborts the real SDK turn and discards its response`,
     unixOnly,
     async (t) => {
-      const { directory, prepared, settings } = await nativeFixture(t, mode);
-      const resolved = await preflightEval(
-        prepared,
-        settings,
-        new AbortController().signal,
-      );
+      const native = await nativeFixture(t, mode);
+      const { directory, prepared } = native;
+      const resolved = await native.preflight();
       await assert.rejects(
         runPreparedEval(prepared, new Codex(resolved)),
         /results were discarded/,

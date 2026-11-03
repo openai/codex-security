@@ -1158,15 +1158,17 @@ describe("security policy preview", () => {
     const f = await fixture();
     const draft = await f.generate();
     const source = new URL("../src/security-policy.ts", import.meta.url);
-    const built = await Bun.build({
-      entrypoints: [fileURLToPath(source)],
-      target: "node",
-      format: "esm",
-      define: { "import.meta.url": JSON.stringify(source.href) },
-    });
-    expect(built.success).toBe(true);
     const module = join(f.root, "policy.mjs");
-    await writeFile(module, await built.outputs[0]!.text());
+    // Repeated in-process Bun builds can misread dependency files on macOS.
+    execFileSync(process.execPath, [
+      "build",
+      fileURLToPath(source),
+      "--target=node",
+      "--format=esm",
+      "--define",
+      `import.meta.url=${JSON.stringify(source.href)}`,
+      `--outfile=${module}`,
+    ]);
     const missingPython = join(f.root, "missing-python");
     const result = JSON.parse(
       execFileSync(

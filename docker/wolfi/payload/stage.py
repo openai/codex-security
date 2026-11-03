@@ -27,8 +27,6 @@ VENDOR = "node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl"
 TARGET = {"os": "linux", "cpu": "x64", "libc": "glibc"}
 LICENSE_DIR = Path("usr/share/licenses/codex-security")
 REVIEWED_NPM_LICENSES = {"Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "(MIT OR CC0-1.0)"}
-CODEX_SOURCE = "https://github.com/openai/codex/tree/6aaac694803004a63c6f393d153c96d22521a6b9"
-SCANNER_SOURCE = "https://github.com/openai/codex-security/tree/f05a0b096cc881242ddf34a4d6b3ce0f322f3cf9"
 OFF_TARGET_PLUGIN_TARGETS = {
     "darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-arm64-musl",
     "linux-x64-musl", "win32-arm64", "win32-x64",
@@ -103,13 +101,26 @@ def write_attributions(root, app, wanted):
             raise ValueError(f"Review license for {key}: {pkg.get('license')}")
         npm.append({"path": key, "name": pkg["name"], "version": pkg["version"], "license": pkg["license"],
                     "repository": source_url(pkg), "input_archive": lock_record["resolved"], "integrity": lock_record["integrity"]})
+    scanner_sha = os.environ.get("SCANNER_SHA") or "f05a0b096cc881242ddf34a4d6b3ce0f322f3cf9"
+    scanner_source = f"https://github.com/openai/codex-security/tree/{scanner_sha}"
+    # Identify the native archive actually installed, including npm's alias for Codex.
+    native_sources = read_json(HERE / "native-sources.json")
+
+    def native_source(package):
+        pkg = wanted["node_modules/" + package]
+        spec = f"{pkg.get('name', package)}@{pkg['version']}"
+        if spec not in native_sources:
+            raise ValueError(f"Review the native source and notices for {spec} in payload/native-sources.json")
+        return native_sources[spec]
+
+    codex_source = native_source("@openai/codex-linux-x64")
     codex_native = {
-        VENDOR + "/bin/codex": CODEX_SOURCE + "/codex-rs/cli",
-        VENDOR + "/bin/codex-code-mode-host": CODEX_SOURCE + "/codex-rs/code-mode-host",
-        VENDOR + "/codex-resources/bwrap": CODEX_SOURCE + "/codex-rs/vendor/bubblewrap",
+        VENDOR + "/bin/codex": codex_source + "/codex-rs/cli",
+        VENDOR + "/bin/codex-code-mode-host": codex_source + "/codex-rs/code-mode-host",
+        VENDOR + "/codex-resources/bwrap": codex_source + "/codex-rs/vendor/bubblewrap",
         VENDOR + "/codex-path/rg": "https://github.com/BurntSushi/ripgrep/tree/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f",
-        SDK + "/_bundled_plugin/mcp/native/linux-x64-gnu/unix.node": SCANNER_SOURCE + "/plugins/codex-security/native",
-        "node_modules/@napi-rs/canvas-linux-x64-gnu/skia.linux-x64-gnu.node": "https://github.com/Brooooooklyn/canvas/tree/00a115d9903647f116daf86eccd2c6ba36128371",
+        SDK + "/_bundled_plugin/mcp/native/linux-x64-gnu/unix.node": scanner_source + "/plugins/codex-security/native",
+        "node_modules/@napi-rs/canvas-linux-x64-gnu/skia.linux-x64-gnu.node": native_source("@napi-rs/canvas-linux-x64-gnu"),
     }
     native_records = []
     for file, source in codex_native.items():
@@ -118,7 +129,7 @@ def write_attributions(root, app, wanted):
             while chunk := f.read(1 << 20):
                 hasher.update(chunk)
         native_records.append({"path": file, "source": source, "sha256": hasher.hexdigest()})
-    manifest = {"scanner_source": SCANNER_SOURCE, "codex_source": CODEX_SOURCE, "npm": npm,
+    manifest = {"scanner_source": scanner_source, "codex_source": codex_source, "npm": npm,
                 "native_executables_and_addons": native_records,
                 "omitted": [VENDOR + "/codex-resources/voice"] +
                            [SDK + "/_bundled_plugin/mcp/native/" + target for target in sorted(OFF_TARGET_PLUGIN_TARGETS)]}
@@ -128,9 +139,14 @@ def write_attributions(root, app, wanted):
 def stage_root(root):
     app = root / INSTALL
     app.mkdir(parents=True)
-    for name in ("package.json", "package-lock.json"):
-        shutil.copyfile(HERE / name, app / name)
-    lock = read_json(app / "package-lock.json")
+    lock_path = Path(os.environ.get("SCANNER_RUNTIME_LOCK") or HERE / "package-lock.json")
+    if os.environ.get("SCANNER_TARBALL"):
+        subprocess.run(["node", DOCKER / "prepare-release-package.mjs", os.environ["SCANNER_TARBALL"],
+                        lock_path, app], check=True)
+    else:
+        for name in ("package.json", "package-lock.json"):
+            shutil.copyfile(HERE / name, app / name)
+    lock = read_json(lock_path)
     packages = {k: v for k, v in lock["packages"].items() if k}
     # An unexpected package manager script or nonregistry artifact requires review.
     for name, pkg in packages.items():
@@ -153,8 +169,13 @@ def stage_root(root):
     for key, pkg in wanted.items():
         if installed[key]["integrity"] != pkg["integrity"] or read_json(app / key / "package.json")["version"] != pkg["version"]:
             raise ValueError(f"Installed version/integrity differs for {key}")
-    # Keep the original lock usable by npm ci. SOURCES.json records the subset
-    # installed for this platform.
+    if os.environ.get("SCANNER_TARBALL"):
+        # Retain the registry lock, without the temporary archive or its local URL.
+        (app / "scanner.tgz").unlink()
+        shutil.copyfile(lock_path, app / "package-lock.json")
+        # The pinned recipe includes this manifest's original bytes in its reviewed tar hash.
+        if lock_path.read_bytes() == (HERE / "package-lock.json").read_bytes():
+            shutil.copyfile(HERE / "package.json", app / "package.json")
     (app / "node_modules/.package-lock.json").unlink()  # transient local npm cache
     select_scanner_payload(app)
     for name in ("bin/codex", "bin/codex-code-mode-host", "codex-resources/bwrap", "codex-path/rg"):
