@@ -1,5 +1,6 @@
 import discoveryTemplate from "../../templates/deep-scan/discovery.md";
 import dedupTemplate from "../../templates/deep-scan/dedup.md";
+import type { DiscoveryAssignment } from "./types.js";
 
 export interface DiscoveryPromptInput {
   scanId: string;
@@ -10,6 +11,8 @@ export interface DiscoveryPromptInput {
   userContext?: string;
   workerLabel: string;
   subagents: number;
+  assignment?: DiscoveryAssignment;
+  peerAssignments?: DiscoveryAssignment[];
 }
 
 // Every worker starts in a fresh Codex thread. A single typed JSON object
@@ -27,6 +30,8 @@ export function renderDiscoveryPrompt(
     userContext: input.userContext ?? null,
     workerLabel: input.workerLabel,
     subagents: input.subagents,
+    ...(input.assignment && { assignment: input.assignment }),
+    ...(input.peerAssignments && { peerAssignments: input.peerAssignments }),
   });
   const prompt = discoveryTemplate.replaceAll(
     "{{DISCOVERY_CONTEXT_JSON}}",

@@ -83,6 +83,17 @@ export async function createCodexSecurityArtifactWriterServer(
     ...defined("pluginRoot", pluginRoot),
     ...defined("pythonCommand", pythonCommand),
     ...defined("deepReducer", deepReducer),
+    ...(layout === "worker" && environment.CODEX_SECURITY_DISCOVERY_BOARD_ROOT
+      ? {
+          discoveryBoard: {
+            root: environment.CODEX_SECURITY_DISCOVERY_BOARD_ROOT,
+            author: requiredEnvironment(
+              environment,
+              "CODEX_SECURITY_DISCOVERY_WORKER",
+            ),
+          },
+        }
+      : {}),
   }))();
   const server = new McpServer(
     { name: "codex-security-artifacts", version: MCP_APP_VERSION },

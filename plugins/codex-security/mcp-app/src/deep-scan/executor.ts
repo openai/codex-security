@@ -46,6 +46,8 @@ import {
   type DeepScanParentTurn,
 } from "./permission-profile-preflight.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import { discoveryPlanSchema } from "./planner.js";
+import { z } from "zod";
 import type {
   CodexWorkerDiagnostic,
   CodexWorkerExecutor,
@@ -90,6 +92,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
   ) {}
+
+  async plan(request: CodexWorkerRequest) {
+    const { finalResponse } = await this.run(request);
+    return discoveryPlanSchema.parse(JSON.parse(finalResponse ?? ""));
+  }
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
     const includePaths = this.modelSettings.artifactContext?.includePaths;
@@ -288,6 +295,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
+          ...(request.kind === "setup" && {
+            outputSchema: z.toJSONSchema(discoveryPlanSchema),
+          }),
           cyberAccessProgram:
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
@@ -334,6 +344,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         return {
           threadId: turn.threadId ?? thread.id ?? undefined,
+          ...(request.kind === "setup" && {
+            finalResponse: turn.finalResponse,
+          }),
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {
@@ -354,7 +367,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     includePathsFile?: string,
   ) {
     const scan = this.modelSettings.artifactContext;
-    if (!scan) return {};
+    if (!scan || request.kind === "setup") return {};
 
     const assigned = request.artifactContext;
     if (!assigned) {
@@ -392,6 +405,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           CODEX_SECURITY_ARTIFACT_LAYOUT: assigned.layout,
           CODEX_SECURITY_SCAN_ID: scan.scanId,
           CODEX_SECURITY_PLUGIN_ROOT: scan.pluginRoot,
+          ...(request.kind === "discovery" && assigned.discoveryBoard
+            ? {
+                CODEX_SECURITY_DISCOVERY_BOARD_ROOT:
+                  assigned.discoveryBoard.root,
+                CODEX_SECURITY_DISCOVERY_WORKER: assigned.discoveryBoard.author,
+              }
+            : {}),
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),

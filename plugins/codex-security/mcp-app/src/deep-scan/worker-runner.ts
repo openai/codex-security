@@ -28,6 +28,7 @@ import type {
   DeepScanLogger,
   DeepScanReplaceableFailureKind,
   DeepScanRunState,
+  DiscoveryAssignment,
   DeepScanStore,
   DeepScanWorkerMutation,
   PersistedDeepScanWorker,
@@ -104,6 +105,9 @@ export class DeepScanWorkerRunner {
   async runDiscoveryWorker(
     workerId: string,
     workerLabel: string,
+    assignment?:
+      | { index: number; item: DiscoveryAssignment }
+      | { peerAssignments: DiscoveryAssignment[] },
   ): Promise<DiscoveryOutcome> {
     const { artifacts, run } = this.options;
     const workerRoot = join(artifacts.workersRoot, workerLabel);
@@ -112,6 +116,12 @@ export class DeepScanWorkerRunner {
     const promptRoot = join(workerRoot, "prompts");
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
+    if (assignment && "index" in assignment) {
+      await writePrivateFile(
+        join(workerRoot, "assignment.json"),
+        JSON.stringify(assignment.index),
+      );
+    }
     const feedbackPath = join(
       artifacts.scanDir,
       "artifacts",
@@ -131,6 +141,10 @@ export class DeepScanWorkerRunner {
         includePaths: run.includePaths,
         userContext: run.userContext,
         workerLabel,
+        ...(assignment &&
+          ("item" in assignment
+            ? { assignment: assignment.item }
+            : assignment)),
         subagents: run.config.subagents,
       },
       feedback,
@@ -152,7 +166,11 @@ export class DeepScanWorkerRunner {
       promptPath,
       promptRoot,
       artifactDir,
-      artifactContext: { root: artifactDir, layout: "worker" },
+      artifactContext: {
+        root: artifactDir,
+        layout: "worker",
+        discoveryBoard: { root: artifacts.peerNotesRoot, author: workerLabel },
+      },
       subagents: run.config.subagents,
       validate: async () => {
         await validateDiscoveryArtifacts(

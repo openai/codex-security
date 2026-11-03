@@ -10,6 +10,12 @@ export interface DeepReducerWorkerContext {
   attempt?: number;
 }
 
+/** Only the coordinator chooses the shared directory and identifies the worker. */
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
+}
+
 export interface DeepReducerContext {
   scanRoot: string;
   claimedWorkers: DeepReducerWorkerContext[];
@@ -35,6 +41,7 @@ export interface ArtifactContext {
   status?: string;
   mode?: string;
   deepReducer?: DeepReducerContext;
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 export interface ArtifactPage {

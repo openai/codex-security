@@ -1,4 +1,7 @@
-import type { DeepReducerContext } from "../artifact-io.js";
+import type {
+  DeepReducerContext,
+  DiscoveryBoardContext,
+} from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type {
@@ -70,6 +73,7 @@ export interface CodexWorkerArtifactContext {
   root: string;
   layout: "worker" | "reducer";
   deepReducer?: DeepReducerContext;
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
@@ -89,6 +93,7 @@ export interface CodexWorkerRequest {
 export interface CodexWorkerResult {
   threadId?: string;
   diagnostics?: CodexWorkerDiagnostic[];
+  finalResponse?: string;
 }
 
 /** SDK failure diagnostics retained alongside artifact-validation failures. */
@@ -103,6 +108,17 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  plan?(request: CodexWorkerRequest): Promise<DiscoveryPlan>;
+}
+
+export interface DiscoveryAssignment {
+  title: string;
+  objective: string;
+  startingPoints: string[];
+}
+
+export interface DiscoveryPlan {
+  workItems: DiscoveryAssignment[];
 }
 
 export interface DeepScanClock {

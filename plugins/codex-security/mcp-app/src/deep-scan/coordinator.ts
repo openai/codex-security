@@ -23,6 +23,7 @@ import {
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import { DeepScanWorkerRunner } from "./worker-runner.js";
+import { DiscoveryAssignments, prepareDiscoveryPlan } from "./planner.js";
 import type {
   AcceptedDiscovery,
   DedupOutcome,
@@ -886,6 +887,21 @@ export class DeepScanCoordinator {
       );
     };
 
+    const plan =
+      !stopReason &&
+      !this.discoveryDeadlineReached &&
+      dispatched < config.maxDiscoveryRuns
+        ? await prepareDiscoveryPlan(
+            this.state,
+            this.artifacts,
+            this.options.store,
+            this.options.executor,
+            this.discoveryAbortController.signal,
+            this.log,
+          )
+        : undefined;
+    const assignments = plan && new DiscoveryAssignments(plan.workItems);
+    await assignments?.restore(this.state, this.log);
     await this.options.store.updateProgress({
       scanId: this.state.scanId,
       phase: "discovery",
@@ -910,12 +926,17 @@ export class DeepScanCoordinator {
           active.size < config.workers &&
           dispatched < config.maxDiscoveryRuns
         ) {
+          const workerId = randomUUID();
+          const assignment = assignments?.claim(workerId);
           dispatched += 1;
           workerSequence += 1n;
           const workerLabel = `discovery-${String(workerSequence).padStart(4, "0")}`;
-          const workerId = randomUUID();
           const workerPromise = this.trackSchedulerWork(
-            this.discoveryWorkers.runDiscoveryWorker(workerId, workerLabel),
+            this.discoveryWorkers.runDiscoveryWorker(
+              workerId,
+              workerLabel,
+              assignment,
+            ),
           );
           active.set(workerId, workerPromise);
           observe(workerPromise);
@@ -968,9 +989,10 @@ export class DeepScanCoordinator {
       }
       const outcome = settlement.outcome;
       if (outcome.type === "discovery") {
-        active.delete(
-          outcome.status === "succeeded" ? outcome.worker.id : outcome.workerId,
-        );
+        const workerId =
+          outcome.status === "succeeded" ? outcome.worker.id : outcome.workerId;
+        active.delete(workerId);
+        assignments?.settle(workerId, outcome.status === "succeeded");
         if (outcome.status === "failed") {
           if (outcome.replaceableFailureKind) {
             lastReplaceableFailure = outcome;

@@ -118,6 +118,38 @@ async function run() {
       overrides.push(args[++index]);
   }
   const config = parse(overrides.join("\n"));
+  if (args.includes("--output-schema")) {
+    assert.equal(
+      config.responses_api_metadata.codex_security_worker_role,
+      "setup",
+    );
+    assert.equal(config.mcp_servers.cs_artifacts, undefined);
+    await trace({ phase: "planner" });
+    const workItems = [
+      {
+        title: "Fixture input",
+        objective: "Trace the fixture input",
+        startingPoints: ["fixture.py"],
+      },
+    ];
+    for (const event of [
+      { type: "thread.started", thread_id: "package-planner" },
+      {
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          id: "plan",
+          text: JSON.stringify({ workItems }),
+        },
+      },
+      {
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+      },
+    ])
+      console.log(JSON.stringify(event));
+    return;
+  }
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;

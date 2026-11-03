@@ -337,7 +337,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
     );
     assert.equal(recovered.dispatchedCount, 2);
     const retained = partial.workers.find(
-      (worker) => worker.status === "succeeded",
+      (worker) => worker.kind === "discovery" && worker.status === "succeeded",
     );
     assert.equal(
       recovered.workers.find((worker) => worker.id === retained.id).status,
@@ -498,8 +498,12 @@ async function assertExecutions(f, scanId) {
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
   assert.equal(reducers.length, 1);
   assert.equal(
+    executions.filter((entry) => entry.phase === "planner").length,
+    1,
+  );
+  assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    4 + incomplete,
+    5 + incomplete,
   );
   for (const execution of [...workers, ...reducers]) {
     assert.equal(execution.scanId, scanId);

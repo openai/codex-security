@@ -814,6 +814,8 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
   --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
+Deep Scan plans starting points within the requested scope. Workers can follow a call across those areas, share a lead, or ask a peer to check a specific piece of evidence. Each worker validates the findings it submits. Discovery can stop with planned areas still unreviewed when it reaches a configured stopping condition.
+
 For `scan --mode deep`, `--workers` controls discovery concurrency and
 `--subagents` controls subagents per worker. `--stop-after-no-new`,
 `--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,

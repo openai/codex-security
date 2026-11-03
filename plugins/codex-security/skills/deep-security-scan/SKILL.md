@@ -1,11 +1,11 @@
 ---
 name: deep-security-scan
-description: Use when the user asks for a deep, exhaustive, multi-pass, or variance-reducing repository-wide or scoped-path Codex Security scan. Run repeated independent Standard scans with the Codex Security deep-scan tool. Do not use for PRs, commits, branch diffs, or working-tree diffs.
+description: Use when the user asks for a deep, exhaustive, multi-pass, or variance-reducing repository-wide or scoped-path Codex Security scan. Use the Codex Security deep-scan tool to coordinate Standard audits. Do not use for PRs, commits, branch diffs, or working-tree diffs.
 ---
 
 # Deep Security Scan
 
-The coordinator runs independent Standard audits, aggregates their validated findings, and finalizes plugin-launched scans even if the calling thread detaches. This thread owns setup, user context, and reporting the completed result.
+The coordinator plans starting points for Standard audits. Workers can share leads and ask each other to check evidence. The coordinator aggregates validated findings and finalizes plugin-launched scans even if the calling thread detaches. This thread owns setup, user context, and reporting the completed result.
 
 ## Resolve the Scan
 

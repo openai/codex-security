@@ -2063,7 +2063,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                             claimedWorkers: [],
                           },
                         }
-                      : {}),
+                      : {
+                          discoveryBoard: {
+                            root: path.join(fixture.root, `board-${index}`),
+                            author: `discovery-${index}`,
+                          },
+                        }),
                   },
                 }),
               );
@@ -2435,6 +2440,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 path.join(fixture.root, `plugin-${index}`),
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_BOARD_ROOT":
+                kind === "discovery"
+                  ? path.join(fixture.root, `board-${index}`)
+                  : undefined,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_WORKER":
+                kind === "discovery" ? `discovery-${index}` : undefined,
             });
             const servers = nativeConfigOverrides(invocation.argv)
               .map((value) => parseToml(value))
