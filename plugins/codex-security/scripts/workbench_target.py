@@ -83,8 +83,11 @@ def git_bytes(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> bytes | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     return completed.stdout if completed.returncode == 0 else None
 
 
@@ -159,7 +162,7 @@ def _read_git_batch_flags(output: BinaryIO, object_names: list[str]) -> list[boo
         if size < 0:
             raise ValueError("invalid blob size")
         # Consume non-blob objects too, so subsequent records stay aligned.
-        sample = _stream_is_binary(output, size)
+        sample = _stream_is_binary(output, size, drain=True)
         if output.read(1) != b"\n":
             raise ValueError("missing blob terminator")
         samples.append(sample if fields[1] == b"blob" else None)
@@ -172,7 +175,7 @@ def _is_binary_sample(data: bytes) -> bool:
     return b"\0" in data
 
 
-def _stream_is_binary(output: BinaryIO, size: int) -> bool:
+def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bool:
     read_size = 64 * 1024
     sample_size = min(size, read_size)
     sample = output.read(sample_size)
@@ -181,7 +184,7 @@ def _stream_is_binary(output: BinaryIO, size: int) -> bool:
     binary = _is_binary_sample(sample)
     bom = sample[:2] if sample.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else b""
     remaining = size - sample_size
-    while remaining:
+    while remaining and (drain or not binary):
         chunk_size = min(remaining, read_size)
         chunk = output.read(chunk_size)
         if len(chunk) != chunk_size:
@@ -269,7 +272,7 @@ def git_command(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
     stdout_file: BinaryIO | None = None,
-    pathspec_environment: dict[str, str] | None = None,
+    environment_overrides: dict[str, str] | None = None,
     offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
@@ -278,11 +281,11 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
-    if pathspec_environment is not None:
-        environment.update(pathspec_environment)
+    if environment_overrides is not None:
+        environment.update(environment_overrides)
     if offline:
         # Deny transports even on Git versions that do not honor GIT_NO_LAZY_FETCH.
-        environment.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="", GIT_NO_REPLACE_OBJECTS="1")
+        environment.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     executable = trusted_git_executable(target)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
@@ -381,23 +384,33 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             for relative in untracked.stdout.split(b"\0")
             if relative and not relative.endswith(b"/")
         )
-        return sorted(
-            (path, status)
-            for path, status in combined.items()
-            if SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts)
-            and (status == "D" or (not path.is_symlink() and path.is_file()))
-        )
+        selected = []
+        linked_prefixes: dict[str, bool] = {}
+        for path, status in combined.items():
+            if not SOURCE_METADATA_DIRECTORIES.isdisjoint(path.relative_to(repo).parts):
+                continue
+            try:
+                if status == "M" and _directory_link_boundary(repo, path, linked_prefixes) != path:
+                    selected.append((path, "D"))
+                elif status == "D" or (not path.is_symlink() and path.is_file()):
+                    selected.append((path, status))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+        return sorted(selected)
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
-def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int:
+def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | None:
     base, head = diff_target["baseRevision"], diff_target["headRevision"]
     local = diff_target["kind"] == "working_tree"
     selected: list[str] = []
     committed: dict[str, str] = {}
-    for path, status in git_changed_paths(
-        target, base, head, "local-patch" if local else "revisions"
-    ):
+    try:
+        changes = git_changed_paths(target, base, head, "local-patch" if local else "revisions")
+    except subprocess.CalledProcessError:
+        # A partial clone can lack a tree needed even to enumerate the changed paths.
+        return None
+    for path, status in changes:
         name = path.relative_to(target).as_posix()
         if not local or status == "D":
             committed[name] = f"{base if status == 'D' else head}:{name}"
@@ -412,15 +425,15 @@ def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int:
                 continue
             if not binary:
                 selected.append(name)
-    for (name, ref), binary in zip(
-        committed.items(), git_blob_binary_flags(target, list(committed.values())), strict=True
+    for name, binary in zip(
+        committed, git_blob_binary_flags(target, list(committed.values())), strict=True
     ):
         if binary is None:
-            raise SystemExit(f"Unable to read committed diff blob: {ref}")
+            return None
         if not binary:
             selected.append(name)
     if any("\n" in name or "\r" in name for name in selected):
-        raise SystemExit("Git changes contain a path that cannot fit in the file inventory")
+        return None
     return len(selected)
 
 
@@ -485,7 +498,14 @@ def candidate_source_lines(
         source: dict[str, Any] = {"path": name}
         if raw in location_set:
             if name not in counts:
-                blob = git_command(target, "cat-file", "blob", f"{revision}:{name}", text=False)
+                blob = git_command(
+                    target,
+                    "cat-file",
+                    "blob",
+                    f"{revision}:{name}",
+                    text=False,
+                    offline=True,
+                )
                 blob.check_returncode()
                 data = blob.stdout
                 counts[name] = len(re.split(rb"\r\n|[\r\n]", data)) - int(
@@ -973,7 +993,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 input_data=b"\0".join(candidates) + b"\0",
                 git_dir=Path(git_directory),
                 work_tree=repository,
-                pathspec_environment={
+                environment_overrides={
                     "GIT_NOGLOB_PATHSPECS": "0",
                 },
             )
@@ -1253,7 +1273,16 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
     branch = git_output(target, "symbolic-ref", "--quiet", "--short", "HEAD")
     metadata.update({"branch": branch, "detachedHead": revision is not None and branch is None})
     if revision is not None:
-        subject = git_bytes(target, "show", "-s", "--no-show-signature", "--format=%s", "HEAD")
+        subject = git_bytes(
+            target,
+            "log",
+            "-1",
+            "--no-patch",
+            "--no-show-signature",
+            "--format=%s",
+            "HEAD",
+            offline=True,
+        )
         metadata.update(
             {
                 "commitSubject": (subject or b"").decode("utf-8", errors="replace").strip() or None,
