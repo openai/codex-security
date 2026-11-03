@@ -612,16 +612,7 @@ async function validateSeal(
       );
     }
   };
-  for (const entry of [
-    ...(coverage?.surfaces ?? []),
-    ...(coverage?.receiptSealVersion === 1
-      ? coverage.explicitExclusions.filter(
-          (item) => coverageCandidateKey(item) !== undefined,
-        )
-      : []),
-  ]) {
-    const receipts =
-      entry["receiptRefs"] === undefined ? [] : entry["receiptRefs"];
+  const requireReceipts = (receipts: unknown) => {
     if (!Array.isArray(receipts)) {
       throw new ContractValidationError(
         "Coverage receipt references must be an array.",
@@ -629,6 +620,20 @@ async function validateSeal(
     }
     for (const receipt of receipts)
       requireSealedReference(receipt, "Coverage receipt");
+  };
+  for (const surface of coverage?.surfaces ?? []) {
+    if (root.profile === "tracking" && surface.receiptRefs === undefined)
+      continue;
+    requireReceipts(surface.receiptRefs);
+  }
+  if (coverage?.receiptSealVersion === 1) {
+    for (const exclusion of coverage.explicitExclusions ?? []) {
+      if (
+        coverageCandidateKey(exclusion) !== undefined &&
+        exclusion["receiptRefs"] !== undefined
+      )
+        requireReceipts(exclusion["receiptRefs"]);
+    }
   }
   const extensions = scan["extensions"];
   const imported = isRecord(extensions) ? extensions["import"] : undefined;

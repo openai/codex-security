@@ -49,11 +49,12 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
 
 def checkpoint_review_state(state: dict[str, Any]) -> dict[str, Any]:
     """Retain unfinished work and candidate outcomes, without a coverage report."""
+    surfaces = copy.deepcopy(state.get("surfaces", []))
+    for surface in surfaces:
+        if isinstance(surface, dict):
+            surface.pop("riskArea", None)
     return {
-        "surfaces": [
-            {key: copy.deepcopy(value) for key, value in item.items() if key != "riskArea"}
-            for item in state.get("surfaces", [])
-        ],
+        "surfaces": surfaces,
         "explicitExclusions": copy.deepcopy(state.get("explicitExclusions", [])),
         "deferred": copy.deepcopy(state.get("deferred", [])),
         **{

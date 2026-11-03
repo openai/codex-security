@@ -223,7 +223,7 @@ for (const candidateId of ["", " "]) {
         draft([ref], { candidateId }),
       );
       const sources = await readDeepReductionSources(f.reducer);
-      const surfaces = sources.discoveries[0].reviewState.surfaces;
+      const surfaces = sources.discoveries[0].coverage.surfaces;
       assert.equal(surfaces.length, 1);
       assert.equal(surfaces[0].candidateId, candidateId);
       assert.deepEqual(surfaces[0].receiptRefs, [ref]);
@@ -276,7 +276,7 @@ test("a pending candidate keeps its nested shared receipt on retry", async (t) =
   await receipt(f.root, ref, "Updated shared evidence");
   await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
   const sources = await readDeepReductionSources(f.reducer);
-  const [surface] = sources.discoveries[0].reviewState.surfaces;
+  const [surface] = sources.discoveries[0].coverage.surfaces;
   assert.deepEqual(surface.receiptRefs, [ref]);
   assert.equal(
     await readFile(path.join(f.root, surface.receiptRefs[0]), "utf8"),

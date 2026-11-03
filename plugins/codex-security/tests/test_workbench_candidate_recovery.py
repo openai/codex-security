@@ -164,7 +164,22 @@ def test_legacy_stopped_parent_yields_to_current_worker_resolution(
     )["scan"]
 
     assert recovered["findingCount"] == (0 if same_worker else 1)
+    # Admitting a later checkpoint replays the captured parent without consulting its old seal.
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        {
+            "scanId": scan_id,
+            "findings": [],
+            "reviewState": {"deferred": [{"id": "later", "reason": "Later review."}]},
+            "complete": False,
+        },
+    )
+    replayed = run_workbench(
+        state_dir, "recover-scan-results", "--scan-id", scan_id, environment=environment
+    )["scan"]
+    assert replayed["findingCount"] == recovered["findingCount"]
     coverage = read_review_state(state_dir, scan_dir)
+    assert any(row["id"] == "later" for row in coverage["deferred"])
     candidate_digest = hashlib.sha256(b"candidate-one").hexdigest()
     resolution = next(
         item

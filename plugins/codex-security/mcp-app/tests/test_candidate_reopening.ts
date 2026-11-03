@@ -143,7 +143,7 @@ for (const mode of ["standard", "worker"] as const) {
           "--claim-token",
           context.handoffClaimToken,
         ]);
-        const savedCoverage = await readSavedReviewState(context.root);
+        const savedCoverage = await readSavedReviewState(context.root, state);
         const savedFindings = await readJson(context.root, "findings.json");
         assert.equal(savedCoverage.deferred.length, Number(expectedPending));
         if (expectedPending)

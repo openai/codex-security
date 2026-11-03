@@ -1,4 +1,4 @@
-import { readSavedReviewState } from "./support/json.ts";
+import { readJson, readSavedReviewState } from "./support/json.ts";
 import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
 import {
   discoveryPluginRoot,
@@ -293,7 +293,11 @@ runpy.run_path(script, run_name='__main__')
           const completed = JSON.parse(
             execFileSync(python, args, { encoding: "utf8", env }),
           ).scan;
-          const coverage = await readSavedReviewState(scan.scanDir);
+          const { scan: sealed } = await readJson(
+            scan.scanDir,
+            "scan-manifest.json",
+          );
+          const unresolved = sealed.review.unresolvedCandidates ?? [];
           assert.equal(
             completed.progress.candidates.unresolved,
             Number(resolution === "pending"),
@@ -303,8 +307,7 @@ runpy.run_path(script, run_name='__main__')
             Number(resolution === "finding"),
           );
           if (resolution === "pending") {
-            assert.deepEqual(
-              coverage.deferred.find((row: any) => row.id === pending.id),
+            assert.deepEqual(unresolved, [
               {
                 ...pending,
                 candidate,
@@ -312,18 +315,14 @@ runpy.run_path(script, run_name='__main__')
                   ? {}
                   : { surfaceIds: [`candidate-${candidate.candidate_id}`] }),
               },
-            );
+            ]);
             assert.ok(
               (
                 await readFile(path.join(scan.scanDir, "report.md"), "utf8")
               ).includes(reason),
             );
           } else {
-            assert.ok(
-              !coverage.deferred.some(
-                (row: any) => row.candidateId === candidate.candidate_id,
-              ),
-            );
+            assert.deepEqual(unresolved, []);
           }
           assert.deepEqual(await readFile(ledger), ledgerBefore);
           for (const [name, bytes] of saved)

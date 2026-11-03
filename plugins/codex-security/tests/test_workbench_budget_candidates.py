@@ -499,7 +499,7 @@ def test_budget_completion_links_existing_pending_candidate_to_follow_up_surface
     surface = candidate_surfaces[0]
     assert surface["disposition"] == "needs_follow_up"
     assert actual["surfaceIds"] == [surface["id"]]
-    assert surface["label"] in (scan_dir / "report.md").read_text()
+    assert f"Surfaces: {surface['id']}." in (scan_dir / "report.md").read_text()
     before_retry = copy.deepcopy(saved)
     workbench_api["saved_results"].preserve_budget_candidates(saved, [], [candidate])
     assert saved == before_retry

@@ -1304,8 +1304,13 @@ def merge_saved_results(
     represented_history: dict[str, set[str]] = {}
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    captured_parent = drafts_by_path.get(parent_context.get("canonical"), {})
     stopped_parent_seal = bool(
-        stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
+        stopped
+        and (
+            (parent_manifest and parent_manifest["scan"].get("sealedAt"))
+            or captured_parent.get("reviewState", {}).get("legacyUnscopedParentCandidates") is True
+        )
     )
 
     # A damaged canonical row must not replace a checkpoint's established identity.
@@ -1765,6 +1770,7 @@ def merge_saved_results(
                     source_owners[relative] is None
                     and source_owners[saved_relative] is None
                     and saved_order == order
+                    and pending_order != order
                     and (saved_relative, key) in accepted_in_source
                 )
                 and not (
@@ -1794,7 +1800,24 @@ def merge_saved_results(
                     saved_relative,
                 ) in active_deferred.items()
             ):
-                inactive_outcomes.add((relative, key))
+                # An unselected legacy checkpoint can contribute pending proof
+                # without withdrawing the canonical root's own terminal surface.
+                if not (
+                    relative == "parent"
+                    and parent_is_canonical
+                    and owner is None
+                    and disposition != "reported"
+                    and pending_order < order
+                ):
+                    inactive_outcomes.add((relative, key))
+                    canonical = parent_context.get("canonical")
+                    if (
+                        relative == "parent"
+                        and owner is None
+                        and canonical in source_order
+                        and source_order[canonical] <= pending_order
+                    ):
+                        inactive_outcomes.add((canonical, key))
                 continue
             previous = ordered_outcomes.get(key)
             if (

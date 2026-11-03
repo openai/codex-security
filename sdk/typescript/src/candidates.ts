@@ -90,9 +90,9 @@ export function unresolvedCandidates(
   }
   // A reported surface can cover multiple candidates; findings confirm identities.
   for (const surface of [
-    ...coverage.surfaces,
+    ...(coverage.surfaces ?? []),
     ...(!sealed || coverage.receiptSealVersion === 1
-      ? coverage.explicitExclusions
+      ? (coverage.explicitExclusions ?? [])
       : []),
   ]) {
     const key = coverageCandidateKey(surface);
@@ -103,7 +103,7 @@ export function unresolvedCandidates(
     )
       resolved.add(key);
   }
-  return uniqueCandidateRows(coverage.deferred, resolved);
+  return uniqueCandidateRows(coverage.deferred ?? [], resolved);
 }
 
 export function uniqueCandidateRows(

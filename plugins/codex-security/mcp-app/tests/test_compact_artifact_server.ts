@@ -962,7 +962,6 @@ async function testSemanticScanDraftCompletion(
     assert.equal(results.manifest.scan.mode, "repository");
     assert.deepEqual(results.manifest.scan.scope.includePaths, ["."]);
     assert.deepEqual(results.manifest.scan.scope.excludePaths, []);
-    assert.deepEqual(results.review, { excludedPaths: [] });
     const head = JSON.parse(
       await readFile(path.join(scanDirectory, "checkpoint-head.json"), "utf8"),
     );
@@ -1013,6 +1012,12 @@ async function testSemanticScanDraftCompletion(
         id: candidateCollisionDeferredId,
       },
     ]);
+    assert.deepEqual(results.review, {
+      excludedPaths: [],
+      unresolvedCandidates: retained.deferred.filter(
+        (row: { candidateId?: string }) => row.candidateId !== undefined,
+      ),
+    });
     assert.deepEqual(retained.openQuestions, savedCoverage.openQuestions);
     assert.ok(
       (await readFile(path.join(scanDirectory, "report.md"), "utf8")).length >

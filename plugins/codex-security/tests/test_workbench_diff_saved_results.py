@@ -21,6 +21,10 @@ from workbench_test_support import (
 )
 
 
+def checkpoint_review(checkpoint: dict) -> dict:
+    return checkpoint.get("reviewState", checkpoint.get("coverage", {}))
+
+
 def saved_diff_candidate(
     tmp_path: Path, *, pending: bool = True, complete: bool = False
 ) -> tuple[Path, Path, str, Path, dict]:
@@ -256,15 +260,13 @@ def test_stopped_diff_reconciles_and_freezes_saved_candidate_decisions(
 
     assert_retained()
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    snapshots = [
-        json.loads((scan_dir / path).read_text())
+    reviews = (
+        checkpoint_review(json.loads((scan_dir / path).read_text()))
         for path in manifest["scan"]["preservedSources"]
-        if json.loads((scan_dir / path).read_text())
-        .get("coverage", {})
-        .get("stoppedDiffCandidateDecisions")
-    ]
-    assert len(snapshots) == 1
-    assert len(snapshots[0]["coverage"]["surfaces"]) == (0 if expected_count else 1)
+    )
+    decisions = [review for review in reviews if review.get("stoppedDiffCandidateDecisions")]
+    assert len(decisions) == 1
+    assert len(decisions[0]["surfaces"]) == (0 if expected_count else 1)
     if expected_count:
         candidate["validation"]["disposition"] = "suppressed"
         candidate.pop("attack_path", None)
@@ -563,7 +565,9 @@ def test_stopped_diff_preserves_siblings_across_projected_checkpoints(tmp_path: 
     decisions = [
         draft
         for path in (scan_dir / "checkpoints").glob("*.json")
-        if (draft := json.loads(path.read_text()))["coverage"].get("stoppedDiffCandidateDecisions")
+        if checkpoint_review(draft := json.loads(path.read_text())).get(
+            "stoppedDiffCandidateDecisions"
+        )
     ]
     assert len(decisions) == 1
     assert [row["identity"] for row in decisions[0]["findings"]] == [
@@ -631,7 +635,8 @@ def test_stopped_diff_retains_every_reopened_sibling_finding(
         coverage = read_review_state(state_dir, scan_dir)
         if ledger_state == "deferred":
             row = next(item for item in coverage["deferred"] if item.get("candidateId"))
-            retained = list(workbench_api["saved_results"]._retained_findings(row["finding"]))
+            finding = row["finding"]
+            retained = [finding, *finding["provenance"]["previousFindings"]]
         else:
             row = next(item for item in coverage["surfaces"] if item.get("candidateId"))
             retained = row["previousFindings"]
@@ -1520,8 +1525,7 @@ def test_stopped_diff_without_saved_candidates_does_not_consult_ledger(tmp_path:
         json.loads(path.read_text()) for path in (scan_dir / "checkpoints").glob("*.json")
     )
     assert not any(
-        draft.get("reviewState", draft.get("coverage", {})).get("stoppedDiffCandidateDecisions")
-        for draft in checkpoints
+        checkpoint_review(draft).get("stoppedDiffCandidateDecisions") for draft in checkpoints
     )
 
 
@@ -1555,7 +1559,7 @@ def test_stopped_diff_retains_imported_surface_owner_when_dismissing_candidate(
     sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["preservedSources"]
     assert any(
         imported_surface
-        in json.loads((scan_dir / path).read_text()).get("coverage", {}).get("surfaces", [])
+        in checkpoint_review(json.loads((scan_dir / path).read_text())).get("surfaces", [])
         for path in sources
     )
     assert imported_surface in read_review_state(state_dir, scan_dir)["surfaces"]

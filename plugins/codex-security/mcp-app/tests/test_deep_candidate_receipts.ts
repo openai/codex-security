@@ -137,7 +137,7 @@ for (const archived of [false, true]) {
           : f.output;
         if (archived) await archiveDirectory(f.output, source);
         const original = await readFile(path.join(source, "result.json"));
-        const python = JSON.parse(
+        const pending = JSON.parse(
           execFileSync(
             process.env.PYTHON?.trim() || "python3",
             [
@@ -149,14 +149,14 @@ from workbench_budget_candidates import recover_candidate_receipts
 from candidate_identity import unresolved_candidates
 root=Path(sys.argv[2]); draft=json.loads((root/'result.json').read_text()); warnings=[]
 recovered=recover_candidate_receipts(draft,root,warnings)
-print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovered['findings']),'coverage':recovered['coverage']}))`,
+print(json.dumps(unresolved_candidates(recovered['reviewState'],recovered['findings'])))`,
               path.join(import.meta.dirname, "../../scripts"),
               source,
             ],
             { encoding: "utf8" },
           ),
         );
-        assert.equal(python.pending.length, valid ? 0 : 1);
+        assert.equal(pending.length, valid ? 0 : 1);
         for (let replay = 0; replay < 2; replay++) {
           if (archived)
             await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
