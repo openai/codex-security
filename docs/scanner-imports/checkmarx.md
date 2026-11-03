@@ -22,18 +22,21 @@ already have a supported report, give Codex its path and skip collection.
 
 Run collection in the operator's trusted login environment, without running a
 project build or loading environment settings from the scanned source. Codex
-starts the collector from the source root for local and Cloud imports. If
-there is no local source tree, it starts from a private temporary directory.
+starts collection from a trusted private directory outside the scanned source.
+For local and Cloud imports, it supplies the source root separately whenever
+the checkout or unpacked source is available.
 Provide trusted absolute paths outside the source tree for the native Python
-3.10+ interpreter and vendor tools. For Checkmarx One, supply your signed-in
-`cx` executable. If you set `CX_CONFIG_FILE_PATH`, use an absolute path to
+3.10+ interpreter and vendor tools. For `cx` and Java, use native binaries or
+symlinks to them. For Checkmarx One, supply your signed-in `cx` executable.
+If you set `CX_CONFIG_FILE_PATH`, use an absolute path to
 your trusted profile. For CxSAST, supply Java, the CxFlow JAR and a SAST-only
 configuration file. Enable the `CxXml` file writer and declare any required
 Spring configuration imports in that file. The collector retrieves the existing
 scan in project mode and selects only the XML file writer. It runs CxFlow with
 your chosen configuration, writes its logs in a private directory and ignores
-inherited JVM startup options for that process. If your setup requires a JVM
-option or agent, export the XML with your usual setup and give Codex the file.
+inherited JVM startup options for that process. If either product requires a
+custom shell launcher, or CxFlow requires a JVM option or agent, export the
+report with your usual setup and give Codex the file.
 [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow XML configuration](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
 
 Codex checks the scan ID in the exported file. For CxSAST, it also checks the

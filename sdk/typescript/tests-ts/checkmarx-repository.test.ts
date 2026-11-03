@@ -65,6 +65,50 @@ test("native Checkmarx batches without report metadata belong to one scan", asyn
   }
 });
 
+test("SDK-only Checkmarx rows compare declared scan IDs and repositories", async () => {
+  await using fixture = await localFindingsFixture();
+  const row = (id: string, scan?: string, url?: string) => ({
+    source_finding_id: id,
+    evidence: {
+      title: "Example",
+      severity: "low" as const,
+      ...(scan ? { source_scan_id: scan } : {}),
+      ...(url
+        ? { details: { kind: "sast" as const, repository: { url } } }
+        : {}),
+    },
+  });
+  const bind = (
+    findings: ExternalFindings["findings"],
+    provider: "checkmarx" | "wiz" = "checkmarx",
+  ) =>
+    prepareNormalizedLocalImport(
+      { findings, read: findings.length, excluded: [] },
+      {
+        provider,
+        repository: fixture.repository,
+        sourceKey: "example/project/main",
+      },
+      { environment: fixture.environment },
+    );
+  const partial = row("sdk-unspecified");
+  const first = row("sdk-a", "1", source);
+  await expect(
+    bind([partial, first, row("sdk-b", "2", source)]),
+  ).rejects.toThrow(/same product, project and scan/i);
+  await expect(
+    bind([partial, first, row("sdk-b", "1", source + "-other")]),
+  ).rejects.toThrow(/repository/i);
+  expect(
+    (await bind([partial, first, row("sdk-b", "1", source + ".git")])).preview
+      .findings,
+  ).toHaveLength(3);
+  expect(
+    (await bind([first, row("sdk-b", "2", source + "-other")], "wiz")).preview
+      .findings,
+  ).toHaveLength(2);
+});
+
 test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {
   await using fixture = await localFindingsFixture();
   const native = xml("1").findings[0]!;
@@ -147,6 +191,41 @@ test("normalized CxSAST batches compare the known viewer instances, including li
       },
       { environment: fixture.environment },
     );
+  const projected = (link: string, pathId?: string) => ({
+    source_finding_id: "projected",
+    evidence: {
+      title: "Example",
+      severity: "low" as const,
+      source_data: {
+        result: { DeepLink: link },
+        ...(pathId && { path: { PathId: pathId } }),
+      },
+    },
+  });
+  const viewer = "https://one.example/CxWebClient/ViewerMain.aspx?";
+  const prepare = (rows: ExternalFindings["findings"]) =>
+    prepareNormalizedLocalImport(
+      { read: rows.length, findings: rows, excluded: [] },
+      {
+        provider: "checkmarx",
+        sourceKey: "example/project/main",
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+  await expect(
+    prepare([projected(viewer + "scanid=2"), second]),
+  ).rejects.toThrow(/same product, project and scan/);
+  await expect(
+    prepare([second, projected(viewer + "projectid=2")]),
+  ).rejects.toThrow(/same product, project and scan/);
+  await expect(
+    prepare([second, projected(viewer + "pathid=2", "1")]),
+  ).rejects.toThrow(/DeepLink/);
+  expect(
+    (await prepare([second, projected(viewer + "scanid=1&projectid=1")]))
+      .preview.findings,
+  ).toHaveLength(2);
   await expect(bind()).rejects.toThrow(/same instance/i);
   result(third)["DeepLink"] = result(second)["DeepLink"];
   expect((await bind()).preview.findings).toHaveLength(3);

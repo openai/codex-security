@@ -4,7 +4,7 @@ import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import { requiredText } from "./scanner-import.js";
 import { checkmarxOneId } from "./checkmarx-one.js";
-import { checkmarxXmlId, checkmarxXmlInstance } from "./checkmarx-xml.js";
+import { checkmarxXmlId, checkmarxXmlScope } from "./checkmarx-xml.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -49,52 +49,61 @@ function requireCheckmarx(provider: Provider) {
     );
 }
 
-/** Optional report metadata can be dropped when callers select rows for import. */
-function nativeBatchRepository(
+/** Compare each explicit claim, including selections that omit the original report. */
+function checkBatchScope(
   findings: ExternalFindings["findings"],
   report: ExternalFindings["report"],
-  target: ExternalImportTarget,
 ) {
-  const native = findings.find((finding) => retainedFormat(finding));
-  if (!native) return;
-  const format = retainedFormat(native);
-  const scan = native.evidence.source_scan_id;
-  if (report?.["scanId"] != null && report["scanId"] !== scan)
-    throw new Error(
-      "Checkmarx finding does not match the retained report scan.",
-    );
-  let project =
-    report?.["projectId"] ?? native.evidence.source_data?.["projectId"];
-  let instance =
-    format === "cxsast-xml" && report
-      ? checkmarxXmlInstance(report)
-      : undefined;
-  const scanner = format === "cxsast-xml" ? "CxSAST" : "Checkmarx One SAST";
-  for (const { evidence } of findings) {
-    const data = evidence.source_data;
-    const rowProject = data?.["projectId"];
-    project ??= rowProject;
-    if (format === "cxsast-xml" && data) {
-      const rowInstance = checkmarxXmlInstance(data);
-      instance ??= rowInstance;
-      if (rowInstance && rowInstance !== instance)
-        throw new Error("CxSAST viewer links must identify the same instance.");
-    }
-    if (
-      (evidence.source_scan_id != null && evidence.source_scan_id !== scan) ||
-      (evidence.details?.scanner_origin != null &&
-        evidence.details.scanner_origin !== scanner) ||
-      (project != null && rowProject != null && rowProject !== project)
-    )
+  let scan = report?.["scanId"];
+  let project = report?.["projectId"];
+  let scanner: unknown;
+  let instance: string | undefined;
+  function agree(current: unknown, value: unknown) {
+    if (current != null && value != null && current !== value)
       throw new Error(
-        "Checkmarx occurrences must belong to the same product, project and scan as the retained report or native rows.",
+        report
+          ? "Checkmarx finding does not match the retained report format, scan or project."
+          : "Checkmarx occurrences must belong to the same product, project and scan.",
+      );
+    return current ?? value;
+  }
+  function checkFormat(format: unknown) {
+    if (checkmarxFormat(format))
+      scanner = agree(
+        scanner,
+        format === "cxsast-xml" ? "CxSAST" : "Checkmarx One SAST",
       );
   }
-  return declaredScannerRepositoryUrl(
-    native.evidence.source_data?.["sourceRepositoryUrl"],
-    "Checkmarx",
-    target,
-  );
+  checkFormat(report?.["format"]);
+  for (const finding of findings) {
+    checkFormat(retainedFormat(finding));
+    const { evidence } = finding;
+    scan = agree(scan, evidence.source_scan_id);
+    project = agree(project, evidence.source_data?.["projectId"]);
+    scanner = agree(scanner, evidence.details?.scanner_origin);
+  }
+  // A projected row can retain a viewer link even when it omits the product and path.
+  const sources = [
+    report,
+    ...findings.map(({ evidence }) => evidence.source_data),
+  ];
+  if (scanner !== "CxSAST") {
+    const hasViewer = sources.some((source) => {
+      const result = source?.["result"];
+      return isRecord(result) && checkmarxXmlScope({ result }).instance;
+    });
+    if (!hasViewer) return;
+    agree(scanner, "CxSAST");
+  }
+  for (const data of sources) {
+    if (!data) continue;
+    const scope = checkmarxXmlScope(data);
+    if (scope.instance && instance && scope.instance !== instance)
+      throw new Error("CxSAST viewer links must identify the same instance.");
+    instance ??= scope.instance;
+    scan = agree(scan, scope.scanId);
+    project = agree(project, scope.projectId);
+  }
 }
 
 /** The native reader also retains scope when a report has no accepted rows. */
@@ -105,11 +114,8 @@ export function checkmarxReportRepository(
   target: ExternalImportTarget,
   historical = false,
 ): string | undefined {
-  const nativeSource =
-    provider === "checkmarx"
-      ? nativeBatchRepository(findings, report, target)
-      : undefined;
-  if (!report) return nativeSource;
+  if (provider === "checkmarx") checkBatchScope(findings, report);
+  if (!report) return;
   const format = report["format"];
   if (!checkmarxFormat(format) || (historical && provider !== "checkmarx")) {
     const source = report["sourceRepositoryUrl"];
@@ -124,7 +130,7 @@ export function checkmarxReportRepository(
       (provider === "checkmarx" || checkmarxFormat(format))
     )
       return declaredScannerRepositoryUrl(source, "Checkmarx", target);
-    return nativeSource;
+    return;
   }
   requireCheckmarx(provider);
   const scan = requiredText(report["scanId"], "Checkmarx report scan ID");

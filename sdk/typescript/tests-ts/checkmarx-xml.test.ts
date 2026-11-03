@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { normalizeCheckmarxXml } from "../src/checkmarx-xml.js";
+import {
+  checkmarxXmlId,
+  checkmarxXmlScope,
+  normalizeCheckmarxXml,
+} from "../src/checkmarx-xml.js";
 
 const repository = "https://github.com/example/sample";
 const normalize = (xml: string) =>
@@ -63,12 +67,15 @@ const withLink = (xml: string, tag: string, link: string) =>
     `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
   );
 
-test("checks explicit scan and project IDs in native viewer links", () => {
+test("checks explicit scan, project and path IDs in native viewer links", () => {
   const viewer = "https://sast.example/CxWebClient/ViewerMain.aspx";
-  const matching = viewer + "?pathid=17&projectid=8&scanid=100";
-  const rows = [matching, viewer + "?scanid=101", viewer + "?projectid=9"].map(
-    (link) => withLink(result(13), "Result", link),
-  );
+  const matching = viewer + "?pathid=1&projectid=8&scanid=100";
+  const rows = [
+    matching,
+    viewer + "?scanid=101",
+    viewer + "?projectid=9",
+    viewer + "?pathid=2",
+  ].map((link) => withLink(result(13), "Result", link));
   const output = normalize(
     withLink(
       report(rows.join("")),
@@ -83,7 +90,33 @@ test("checks explicit scan and project IDs in native viewer links", () => {
   expect(output.excluded).toMatchObject([
     { position: 2, reason: expect.stringContaining("DeepLink") },
     { position: 3, reason: expect.stringContaining("DeepLink") },
+    { position: 4, reason: expect.stringContaining("DeepLink") },
   ]);
+  const data = output.findings[0]!.evidence.source_data!;
+  expect(() =>
+    checkmarxXmlId(
+      { ...data, result: { DeepLink: viewer + "?pathid=2" } },
+      "100",
+    ),
+  ).toThrow(/DeepLink/u);
+  expect(
+    normalize(
+      report(
+        withLink(result(13).replace('PathId="1"', ""), "Result", matching),
+      ),
+    ).excluded,
+  ).toEqual([]);
+  expect(checkmarxXmlScope({ result: { DeepLink: matching } })).toEqual({
+    instance: "https://sast.example",
+    scanId: "100",
+    projectId: "8",
+  });
+  for (const field of ["scanid", "projectid", "pathid"]) {
+    const DeepLink = viewer + `?${field}=1&${field.toUpperCase()}=2`;
+    expect(() => checkmarxXmlScope({ result: { DeepLink } })).toThrow(
+      /DeepLink/u,
+    );
+  }
   const unrelated = "https://sast.example/issue?scanid=101";
   expect(
     normalize(report(withLink(result(13), "Result", unrelated))).excluded,
@@ -125,6 +158,22 @@ test("requires all known CxSAST viewer instances to agree", () => {
       ),
     ).toThrow(/same instance/u);
   }
+});
+
+test("excluded results cannot select the instance of a linkless report", () => {
+  const unlinked = result(15);
+  const viewer = "https://other.example/CxWebClient/ViewerMain.aspx";
+  const wrongScan = withLink(result(17), "Result", viewer + "?scanid=999");
+  const duplicate = withLink(result(19), "Result", viewer + "?scanid=100");
+  const parsed = normalize(
+    report(wrongScan + duplicate + unlinked + duplicate),
+  );
+  expect(parsed.excluded.map((item) => item.position)).toEqual([1, 2, 4]);
+  expect(parsed.findings).toHaveLength(1);
+  expect(parsed.report).not.toHaveProperty("instance");
+  expect(parsed.findings[0]!.evidence.source_data).not.toHaveProperty(
+    "instance",
+  );
 });
 
 test("retains distinct intermediate paths and replays their identity across scans", () => {

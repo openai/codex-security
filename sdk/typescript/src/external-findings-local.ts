@@ -885,13 +885,14 @@ export async function prepareLocalImport(
     current.report,
     "local",
   );
-  if (checkmarx) {
-    sources.set(checkmarx, { url: checkmarx });
-    if (!sameRepositories(sources.keys()))
-      throw new Error(
-        "The retained Checkmarx report repository does not match the finding repository.",
-      );
-  }
+  if (checkmarx) sources.set(checkmarx, { url: checkmarx });
+  if (
+    (options.provider === "checkmarx" || checkmarx) &&
+    !sameRepositories(sources.keys())
+  )
+    throw new Error(
+      "The retained Checkmarx report repository does not match the finding repository.",
+    );
   const sonarSources = sonarRepositoryUrls(
     options.provider,
     current.findings,

@@ -3,17 +3,20 @@
 import argparse
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from uuid import UUID
 from xml.parsers import expat
 
 
-def source_root() -> Path:
-    source = Path.cwd().resolve()
+def source_root(target: Path) -> Path:
+    if not target.is_absolute() or not target.is_dir():
+        raise ValueError("Select an existing absolute source directory.")
+    source = target.resolve()
     root = source
     for parent in (source, *source.parents):
         if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
@@ -30,64 +33,45 @@ def in_source(path: Path, source: Path) -> bool:
     return False
 
 
-def installed_file(value: str) -> Path:
+def installed_file(value: str, source: Path) -> Path:
     path = Path(value)
     if not path.is_absolute() or not path.is_file():
-        raise argparse.ArgumentTypeError("expected an absolute path to an existing file")
-    if in_source(path, source_root()):
-        raise argparse.ArgumentTypeError("use an installed file outside the source checkout")
-    # Invoke the selected name for multicall shims.
+        raise ValueError("expected an absolute path to an existing file")
+    if in_source(path, source):
+        raise ValueError("use an installed file outside the source checkout")
+    # Invoke the selected name for native multicall binaries.
     return path.parent.resolve() / path.name
 
 
-def installed_launcher(value: str) -> Path:
-    path = installed_file(value)
+def installed_launcher(value: str, source: Path) -> Path:
+    path = installed_file(value, source)
     if sys.platform == "win32" and (
         path.suffix.lower() not in {".exe", ".com"}
         or path.resolve().suffix.lower() in {".bat", ".cmd"}
     ):
-        raise argparse.ArgumentTypeError("use a native Windows executable (.exe or .com)")
+        raise ValueError("use a native Windows executable (.exe or .com)")
+    with path.open("rb") as image:
+        magic = image.read(4)
+        if sys.platform == "win32":
+            # The DOS header points to the PE signature.
+            image.seek(0x3C)
+            pe_offset = int.from_bytes(image.read(4), "little")
+            image.seek(pe_offset)
+            native = magic.startswith(b"MZ") and image.read(4) == b"PE\0\0"
+        elif sys.platform == "darwin":
+            # 32/64-bit thin and universal Mach-O, in either byte order.
+            native = any(
+                int.from_bytes(magic, order) in {0xFEEDFACE, 0xFEEDFACF, 0xCAFEBABE, 0xCAFEBABF}
+                for order in ("big", "little")
+            )
+        else:
+            native = magic == b"\x7fELF"
+    if not native:
+        raise ValueError("use the installed native executable for cx or java")
     return path
 
 
-def check_shim_interpreters(launcher: Path, source: Path, search_path: str) -> None:
-    if os.name == "nt":
-        return
-    pending = [launcher]
-    checked = set()
-    while pending:
-        program = pending.pop()
-        if in_source(program, source):
-            raise ValueError("Use a vendor shim whose interpreter is outside the source checkout.")
-        if program in checked or not program.is_file():
-            continue
-        checked.add(program)
-        with program.open("rb") as stream:
-            if stream.read(2) != b"#!":
-                continue
-            fields = os.fsdecode(stream.readline()).strip().split(None, 1)
-        if not fields:
-            continue
-        interpreter = Path(fields[0])
-        pending.append(interpreter)
-        if interpreter.name == "env" and len(fields) == 2:
-            argument = fields[1]
-            if argument.startswith("-S "):
-                command = argument[3:].lstrip().split(None, 1)[0]
-            else:
-                command = argument
-            # GNU env's -S form can expand variables and reassign PATH. Only
-            # the simple COMMAND or -S COMMAND [args...] form has a fixed lookup.
-            if not command or command.startswith("-") or any(c in command for c in "=$\\'\""):
-                raise ValueError(
-                    "Use a native launcher or an env shebang with a fixed interpreter."
-                )
-            selected = shutil.which(command, path=search_path)
-            if selected is not None:
-                pending.append(Path(selected))
-
-
-def vendor_environment(source: Path, launcher: Path) -> dict[str, str]:
+def vendor_environment(source: Path) -> dict[str, str]:
     env = os.environ.copy()
     entries = []
     for entry in os.get_exec_path(env):
@@ -97,7 +81,6 @@ def vendor_environment(source: Path, launcher: Path) -> dict[str, str]:
         if path.is_absolute() and path.is_dir() and not in_source(path, source):
             entries.append(str(path.resolve()))
     env["PATH"] = os.pathsep.join(entries)
-    check_shim_interpreters(launcher, source, env["PATH"])
     return env
 
 
@@ -144,15 +127,12 @@ def verify_one(report: Path, scan_id: str) -> None:
     with report.open(encoding="utf-8-sig") as stream:
         data = json.load(stream)
     reported = data.get("scanID") if isinstance(data, dict) else None
-    if isinstance(reported, str):
-        if reported == scan_id:
-            return
-        try:
-            if UUID(reported) == UUID(scan_id):
-                return
-        except ValueError:
-            pass
-    raise ValueError("The Checkmarx One report does not match the requested scan ID.")
+    if (
+        not isinstance(reported, str)
+        or not reported.isascii()
+        or reported.lower() != scan_id.lower()
+    ):
+        raise ValueError("The Checkmarx One report does not match the requested scan ID.")
 
 
 def team_path(value: str) -> str:
@@ -178,14 +158,13 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
         parser.ParseFile(stream)
 
 
-def collect(args: argparse.Namespace) -> Path:
-    source = source_root()
+def collect(args: argparse.Namespace, source: Path) -> None:
     temp = Path(tempfile.gettempdir())
     if in_source(temp, source):
         raise ValueError(
             "Select a temporary directory outside the source checkout (TMPDIR or TEMP)."
         )
-    env = vendor_environment(source, args.cx if args.product == "one" else args.java)
+    env = vendor_environment(source)
     output = Path(tempfile.mkdtemp(prefix="checkmarx-report-", dir=temp)).resolve()
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
@@ -230,9 +209,10 @@ def collect(args: argparse.Namespace) -> Path:
                     "-Dfile.encoding=UTF-8",
                     "-jar",
                     str(args.jar),
-                    f"--spring.config.location={args.config}",
+                    f"--spring.config.location={args.config.as_uri()}",
                     "--spring.config.additional-location=",
                     "--spring.config.import=",
+                    "--logging.config=classpath:logback-spring.xml",
                     f"--logging.file.path={work}",
                     f"--logging.file.name={Path(work, 'cx-flow.log')}",
                     f"--logging.logback.rollingpolicy.file-name-pattern={Path(work, 'cx-flow.%d{yyyy-MM-dd}.%i.gz')}",
@@ -266,7 +246,7 @@ def collect(args: argparse.Namespace) -> Path:
                 verify_cxsast(report, str(args.scan_id), args.project, args.team)
             report.chmod(0o600)
             saved = report.replace(output / report.name)
-        return saved
+        print(saved, flush=True)
     except BaseException:
         shutil.rmtree(output)
         raise
@@ -274,27 +254,51 @@ def collect(args: argparse.Namespace) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, help="absolute source directory to protect")
     products = parser.add_subparsers(dest="product", required=True)
     one = products.add_parser("one", help="export an existing Checkmarx One scan")
     one.add_argument("scan_id")
-    one.add_argument("--cx", required=True, type=installed_launcher)
+    one.add_argument("--cx", required=True)
     cxsast = products.add_parser("cxsast", help="retrieve an existing CxSAST scan with CxFlow")
     cxsast.add_argument("scan_id", type=int)
-    cxsast.add_argument("--java", required=True, type=installed_launcher)
-    cxsast.add_argument("--jar", required=True, type=installed_file)
-    cxsast.add_argument("--config", required=True, type=installed_file)
+    cxsast.add_argument("--java", required=True)
+    cxsast.add_argument("--jar", required=True)
+    cxsast.add_argument("--config", required=True)
     cxsast.add_argument("--team", required=True)
     cxsast.add_argument("--project", required=True)
     args = parser.parse_args()
     if os.environ.get("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS") != "1":
         parser.error("Set CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1 to enable external imports.")
-    if args.product == "cxsast" and args.scan_id <= 0:
-        parser.error("Select an existing positive CxSAST scan ID.")
+    if args.product == "one":
+        if not re.fullmatch(
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.scan_id, re.I | re.ASCII
+        ):
+            parser.error("Select a Checkmarx One scan UUID in hyphenated form.")
+    else:
+        if args.scan_id <= 0:
+            parser.error("Select an existing positive CxSAST scan ID.")
+        if not re.search(r"[^\s/\\]", args.team) or not args.project.strip():
+            parser.error("Select a nonblank CxSAST team path and project.")
+
+    def terminate(signum, _frame):
+        # Unwind subprocess.run so it kills and reaps the vendor before capture cleanup.
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, terminate)
     try:
-        print(collect(args))
+        source = source_root(args.source_root or Path.cwd())
+        if args.product == "one":
+            args.cx = installed_launcher(args.cx, source)
+        else:
+            args.java = installed_launcher(args.java, source)
+            args.jar = installed_file(args.jar, source)
+            args.config = installed_file(args.config, source)
+        collect(args, source)
     except (ValueError, OSError, expat.ExpatError) as error:
         print(error, file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     return 0
 
 
