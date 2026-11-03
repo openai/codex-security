@@ -582,13 +582,14 @@ def _open_scan_local_directory(
                             raise ScanLocalIOError(
                                 f"{part}: process umask prevents owner access to the new directory"
                             )
-            next_descriptor = os.open(
+            parent_descriptor = descriptor
+            descriptor = os.open(
                 part,
                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=descriptor,
+                dir_fd=parent_descriptor,
             )
-            os.close(descriptor)
-            descriptor = next_descriptor
+            # If closing the parent fails, cleanup now owns the child.
+            os.close(parent_descriptor)
         return descriptor
     except BaseException:
         os.close(descriptor)

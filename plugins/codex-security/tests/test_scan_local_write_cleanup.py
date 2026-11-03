@@ -39,6 +39,20 @@ def test_scan_directory_closes_descriptor_when_metadata_read_fails(tmp_path: Pat
         pytest.fail("metadata read failure left the directory open")
 
 
+def test_directory_walk_closes_child_when_closing_parent_fails() -> None:
+    failure = OSError(errno.EIO, "could not close parent directory")
+    parent_fd, child_fd = 11, 12
+    with (
+        mock.patch.object(os, "dup", return_value=parent_fd),
+        mock.patch.object(os, "open", return_value=child_fd),
+        mock.patch.object(os, "close", side_effect=[failure, None]) as close,
+        pytest.raises(OSError) as raised,
+    ):
+        FINALIZER._open_scan_local_directory(10, ("child",), create=False)
+    assert raised.value is failure
+    assert close.call_args_list == [mock.call(parent_fd), mock.call(child_fd)]
+
+
 def test_write_retries_after_umask_denies_owner_write(tmp_path: Path) -> None:
     relative_path = "remediation/request/generated.patch"
     patch = b"--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-old\n+new\n"

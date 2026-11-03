@@ -214,9 +214,10 @@ def test_generated_patch_compares_decoded_git_paths(tmp_path: Path, workbench_ap
     # A suffix following a space in a directory name is still a different target.
     for header in (b"a/other b/source file", b"a/source file b/other dir/source file"):
         unrelated = patch.replace(patch.splitlines()[0], b"diff --git " + header)
-        assert subprocess.check_output(
+        numstat = subprocess.check_output(
             ["git", "apply", "--numstat", "-z", "-"], input=unrelated, cwd=tmp_path
-        ).endswith(b"\tsource file\0")
+        )
+        assert numstat.endswith(b"\tsource file\0")
         with pytest.raises(SystemExit, match="omits file content"):
             workbench_api["remediation_state"].require_valid_patch(tmp_path, unrelated)
 
@@ -235,10 +236,10 @@ def test_generated_patch_rejects_truncated_hunk_header(tmp_path: Path, workbench
     validate = workbench_api["remediation_state"].require_valid_patch
     validate(repo, patch)
     truncated = first + b"\n@@ -"
-    assert (
-        subprocess.check_output(["git", "apply", "--numstat", "-z", "-"], input=truncated, cwd=repo)
-        == b"1\t1\tsource\0"
+    numstat = subprocess.check_output(
+        ["git", "apply", "--numstat", "-z", "-"], input=truncated, cwd=repo
     )
+    assert numstat == b"1\t1\tsource\0"
     for tail in (b"", b"12,2 +", b"12,2 +12,2 @\n"):
         with pytest.raises(SystemExit, match="omits file content"):
             validate(repo, truncated + tail)
