@@ -65,7 +65,7 @@ test("native Checkmarx batches without report metadata belong to one scan", asyn
   }
 });
 
-test("SDK-only Checkmarx rows compare declared scan IDs and repositories", async () => {
+test("SDK-only Checkmarx rows compare declared scan IDs, repositories and instances", async () => {
   await using fixture = await localFindingsFixture();
   const row = (id: string, scan?: string, url?: string) => ({
     source_finding_id: id,
@@ -91,6 +91,30 @@ test("SDK-only Checkmarx rows compare declared scan IDs and repositories", async
       },
       { environment: fixture.environment },
     );
+  const withInstance = (id: string, instance: unknown) => {
+    const finding = row(id, "1", source);
+    return {
+      ...finding,
+      evidence: {
+        ...finding.evidence,
+        source_data: { projectId: "17", instance },
+      },
+    };
+  };
+  const one = withInstance("sdk-host-a", "https://one.example/sast");
+  const two = withInstance("sdk-host-b", "https://one.example/other");
+  await expect(bind([one, two])).rejects.toThrow(/same instance/i);
+  expect(
+    (
+      await bind([
+        one,
+        withInstance("opaque-number", 2),
+        withInstance("opaque-label", "worker-17"),
+        withInstance("same", "https://one.example/sast"),
+      ])
+    ).preview.findings,
+  ).toHaveLength(4);
+  expect((await bind([one, two], "wiz")).preview.findings).toHaveLength(2);
   const partial = row("sdk-unspecified");
   const first = row("sdk-a", "1", source);
   await expect(
@@ -282,6 +306,15 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
       sourceRepositoryUrl: source + "-other",
     };
     await expect(relabeled()).rejects.toThrow(/retained scanner repository/i);
+    unmarked.findings[0]!.source_finding_id = "sdk-projection";
+    delete unmarked.findings[0]!.evidence.details!.repository;
+    await expect(relabeled()).rejects.toThrow(
+      /does not match a configured remote/i,
+    );
+    unmarked.findings[0]!.evidence.source_data = {
+      sourceRepositoryUrl: source,
+    };
+    expect((await relabeled()).preview.findings).toHaveLength(1);
     delete unmarked.findings[0]!.evidence.source_data;
     expect((await relabeled()).preview.findings).toHaveLength(1);
 
@@ -320,6 +353,25 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
   await expect(
     prepare({ ...normal, report: { sourceRepositoryUrl: source + "-other" } }),
   ).rejects.toThrow(/retained Checkmarx report/i);
+  const viewerOnly = xml("1");
+  delete viewerOnly.report;
+  const projected = viewerOnly.findings[0]!;
+  projected.source_finding_id = "sdk-viewer";
+  delete projected.evidence.details;
+  projected.evidence.source_data = {
+    sourceRepositoryUrl: source + "-other",
+    result: {
+      DeepLink:
+        "https://sast.example/CxWebClient/ViewerMain.aspx?scanid=1&projectid=1",
+    },
+  };
+  await expect(
+    prepareNormalizedLocalImport(
+      viewerOnly,
+      { ...options, provider: "wiz" },
+      dependencies,
+    ),
+  ).rejects.toThrow(/does not match a configured remote/i);
   const conflict = xml("1");
   delete conflict.report;
   const attrs = conflict.findings[0]!.evidence.source_data!["result"] as Record<
@@ -350,4 +402,50 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
   await expect(
     prepare({ findings: combined, read: combined.length, excluded: [] }),
   ).rejects.toThrow(/same product, project and scan/i);
+});
+
+test("Checkmarx One scan UUIDs compare by value and retain their original spellings", async () => {
+  await using fixture = await localFindingsFixture({ remote: source });
+  const id = "e074e307-135b-4185-9b4d-d249dcf70559";
+  const upper = id.toUpperCase();
+  const first = one(id, "7");
+  const second = one(upper, "8");
+  const sdk = (scan: string) => ({
+    source_finding_id: scan,
+    evidence: {
+      title: "SDK finding",
+      severity: "low" as const,
+      source_scan_id: scan,
+    },
+  });
+  const bind = (
+    findings: ExternalFindings["findings"],
+    report?: ExternalFindings["report"],
+  ) =>
+    prepareNormalizedLocalImport(
+      { findings, read: findings.length, excluded: [], report },
+      {
+        provider: "checkmarx",
+        repository: fixture.repository,
+        sourceKey: "example/project/main",
+      },
+      { environment: fixture.environment },
+    );
+  const preview = (
+    await bind([...first.findings, ...second.findings], second.report)
+  ).preview;
+  expect(preview.report!["scanId"]).toBe(upper);
+  expect(
+    preview.findings.map(({ evidence }) => evidence.source_scan_id),
+  ).toEqual([id, upper]);
+  expect(
+    (await bind([sdk(upper), ...first.findings])).preview.findings,
+  ).toHaveLength(2);
+  expect((await bind([sdk(id), sdk(upper)])).preview.findings).toHaveLength(2);
+  await expect(bind([sdk("scan-key"), sdk("SCAN-KEY")])).rejects.toThrow(
+    /same product, project and scan/i,
+  );
+  await expect(bind([sdk(upper), ...xml("1", id).findings])).rejects.toThrow(
+    /same product, project and scan/i,
+  );
 });

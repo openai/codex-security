@@ -20,9 +20,10 @@ For self-managed CxSAST, include the full team path and project name. Use the
 exact spelling shown in CxSAST for non-ASCII team characters. If you
 already have a supported report, give Codex its path and skip collection.
 
-Run collection in the operator's trusted login environment, without running a
-project build or loading environment settings from the scanned source. Codex
-starts collection from a trusted private directory outside the scanned source.
+Use a trusted Codex session with your existing Checkmarx sign-in. If you
+started Codex from a build or IDE that loads libraries or shell startup files
+from the scanned project, start a clean session or supply an exported report.
+Codex starts collection from a private directory outside the source tree.
 For local and Cloud imports, it supplies the source root separately whenever
 the checkout or unpacked source is available.
 Provide trusted absolute paths outside the source tree for the native Python

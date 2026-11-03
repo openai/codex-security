@@ -79,13 +79,19 @@ function viewerId(link: URL | undefined, field: string, expected?: string) {
   return selected;
 }
 
+export function checkmarxResultViewer(
+  source: Record<string, unknown> | null | undefined,
+) {
+  const result = source?.["result"];
+  return isRecord(result) ? viewerLink(result["DeepLink"]) : undefined;
+}
+
 export function checkmarxXmlScope(
   source: Record<string, unknown>,
   scanId?: string,
   projectId?: string,
 ) {
-  const result = source["result"];
-  const link = isRecord(result) ? viewerLink(result["DeepLink"]) : undefined;
+  const link = checkmarxResultViewer(source);
   const path = source["path"];
   viewerId(
     link,

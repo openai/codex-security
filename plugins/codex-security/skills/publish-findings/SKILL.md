@@ -47,9 +47,11 @@ Use `--provider blackduck` for a BOM-6 vulnerable-components export from one pro
 
 If the user supplies a Checkmarx One CLI JSON or CxSAST XML report, use that file directly. To retrieve existing results, require an explicitly selected completed scan ID and product. Verify the project, repository URL and branch or ref with the operator. An installation may host several tenants or teams. Ask for missing scope before fetching.
 
-Start in the operator's trusted login environment with their vendor credentials and configuration. Invoke the collector directly. Do not run a repository build, source a file from the checkout, or load a project-provided environment to collect findings.
+Use the operator's trusted Codex session with its existing vendor sign-in. Set the command tool's working directory to a trusted private directory outside the source tree before it starts any process. Use a trusted noninteractive, non-login system shell (on POSIX, `/bin/sh` with `login: false` where supported). Do not source project environment files or run a repository build to collect findings.
 
-Resolve `scripts/collect_checkmarx.py` beside this installed `SKILL.md` to its absolute path as `collector`. From a trusted directory outside the source tree, locate the operator-configured Python 3.10+ installation. Use trusted system tools to resolve symlinks and inspect the file type without running the candidate. Verify that both its configured path and resolved target are outside the source tree and that the target is the native Python interpreter binary. Invoke that binary's absolute path as `python_path` with `-I`. If the configured path invokes a script or version-manager shim, ask for the interpreter binary's installed path.
+If an IDE or build can supply checkout-controlled loader or shell startup settings, use a clean Codex session. The operator can add `LD_*`, `DYLD_*`, `BASH_ENV` and `ENV` to that session's trusted `shell_environment_policy.exclude`, keeping existing exclusions. A trusted host that accepts a direct argument vector can also launch Python with these variables removed before startup. Do not start a shell under suspect settings to inspect or unset them. If a terminal integration, policy override or restored shell snapshot can reintroduce those settings, use a known-clean session or an exported report. [Codex shell environment policy](https://developers.openai.com/codex/config-advanced/)
+
+Resolve `scripts/collect_checkmarx.py` beside this installed `SKILL.md` to its absolute path as `collector`. From a trusted directory outside the source tree, locate the operator-configured Python 3.10+ installation. Use trusted system tools to resolve symlinks and inspect the file type without running the candidate. Verify that both its configured path and resolved target are outside the source tree and that the target is the native Python interpreter binary. Invoke that binary's absolute path as `python_path` with `-I -S`. If the configured path invokes a script or version-manager shim, ask for the interpreter binary's installed path.
 
 Use the operator's trusted absolute installation paths for the Checkmarx One CLI (`cx_path`), or Java (`java_path`) and the CxFlow JAR (`jar_path`). Both `cx` and Java must be native binaries or symlinks to them, with all paths outside the scanned source tree. If the operator needs a shell launcher, ask for the report exported with their usual command. If a path is missing, ask for it. Never discover executables from the checkout or an unpacked source directory.
 
@@ -57,16 +59,16 @@ If `CX_CONFIG_FILE_PATH` is set, use the absolute path to the trusted Checkmarx 
 
 The helper starts CxFlow with the selected Spring configuration and private log paths. It ignores inherited JVM startup options for that child process only. The operator can keep those settings in their shell. If CxFlow needs a custom JVM option or agent, ask the operator to export XML in their usual environment and preview that file directly.
 
-Set the execution tool's working directory to a trusted private directory outside the source tree before starting the shell or Python. For both local and Cloud imports, pass the selected checkout or unpacked source root as an absolute path using `--source-root` before the product name. This lets the helper check tool, configuration and temporary paths against the selected tree. Omit `--source-root "$source_root"` from the examples only when no local source tree exists. Keep the report's temporary directory outside the source tree. Run it once for the selected product with the import opt-in set. It uses Checkmarx One's `results show` or CxFlow's project retrieval mode with the named scan ID and the `CxXml` file writer. Use only that writer during collection. [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow CxXml output](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
+For both local and Cloud imports, pass the selected checkout or unpacked source root as an absolute path using `--source-root` before the product name. This lets the helper check tool, configuration and temporary paths against the selected tree. Omit `--source-root "$source_root"` from the examples only when no local source tree exists. Keep the report's temporary directory outside the source tree. Run it once for the selected product with the import opt-in set. It uses Checkmarx One's `results show` or CxFlow's project retrieval mode with the named scan ID and the `CxXml` file writer. Use only that writer during collection. [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow CxXml output](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
 
 ```sh
 # Checkmarx One
-report=$("$python_path" -I "$collector" --source-root "$source_root" one "$scan_id" --cx "$cx_path")
+report=$("$python_path" -I -S "$collector" --source-root "$source_root" one "$scan_id" --cx "$cx_path")
 ```
 
 ```sh
 # Self-managed CxSAST
-report=$("$python_path" -I "$collector" --source-root "$source_root" cxsast "$scan_id" \
+report=$("$python_path" -I -S "$collector" --source-root "$source_root" cxsast "$scan_id" \
   --java "$java_path" --jar "$jar_path" --config "$config_path" --team "$cx_team" --project "$cx_project")
 ```
 

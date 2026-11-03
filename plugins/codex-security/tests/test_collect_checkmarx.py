@@ -11,7 +11,6 @@ from xml.etree.ElementTree import Element, ElementTree
 
 import pytest
 
-pytestmark = pytest.mark.cross_platform
 SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "skills"
@@ -50,6 +49,20 @@ def executable(directory, name):
     return str(path)
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires the Windows account profile API")
+def test_one_default_profile_uses_the_windows_account_home(monkeypatch, tmp_path):
+    import ctypes.wintypes
+
+    # CSIDL_PROFILE asks the Windows shell for the current user's profile folder.
+    account = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
+    assert ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, account) == 0
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert Path.home() == tmp_path
+    profiles = runpy.run_path(str(SCRIPT))["one_default_profiles"]()
+    assert profiles == {Path(account.value) / ".checkmarx" / "checkmarxcli.yaml"}
+
+
 @pytest.fixture
 def cxsast_args(tmp_path):
     jar, config = tmp_path / "cx-flow.jar", tmp_path / "application.yml"
@@ -72,6 +85,7 @@ def cxsast_args(tmp_path):
 
 
 @pytest.mark.parametrize("option", ["--cx", "--java", "--jar", "--config"])
+@pytest.mark.cross_platform
 def test_refuses_vendor_files_inside_the_scan_source(
     option, capture_dir, cxsast_args, monkeypatch, tmp_path, capsys
 ):
@@ -111,6 +125,7 @@ def test_refuses_vendor_files_inside_the_scan_source(
 
 
 @pytest.mark.parametrize("suffix", [".cmd", ".BAT"])
+@pytest.mark.cross_platform
 def test_refuses_windows_batch_launchers(
     suffix, capture_dir, cxsast_args, monkeypatch, tmp_path, capsys
 ):
@@ -129,6 +144,7 @@ def test_refuses_windows_batch_launchers(
 
 
 @pytest.mark.parametrize("setting", ["CX_CONFIG_FILE_PATH", "TMPDIR"])
+@pytest.mark.cross_platform
 def test_refuses_vendor_paths_that_resolve_into_source(
     setting, capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -157,6 +173,7 @@ def test_refuses_vendor_paths_that_resolve_into_source(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="exercises Bash startup on Unix")
+@pytest.mark.native_macos
 def test_shell_launcher_cannot_load_checkout_startup_hook(capture_dir, monkeypatch, tmp_path):
     hook = Path.cwd() / "bash-env"
     marker = tmp_path / "hook-ran"
@@ -168,7 +185,7 @@ def test_shell_launcher_cannot_load_checkout_startup_hook(capture_dir, monkeypat
     cx.write_text("#!/usr/bin/env bash\nexit 19\n")
     cx.chmod(0o755)
     result = subprocess.run(
-        [sys.executable, "-I", str(SCRIPT), "one", ONE_SCAN, "--cx", str(cx)],
+        [sys.executable, "-I", "-S", str(SCRIPT), "one", ONE_SCAN, "--cx", str(cx)],
         capture_output=True,
         text=True,
     )
@@ -177,6 +194,31 @@ def test_shell_launcher_cannot_load_checkout_startup_hook(capture_dir, monkeypat
     assert not list(capture_dir.iterdir())
 
 
+@pytest.mark.cross_platform
+def test_omitted_source_protects_only_an_enclosing_checkout(capture_dir, monkeypatch, capsys):
+    bootstrap = Path.cwd()
+    cx = executable(bootstrap, "cx")
+    temp = bootstrap / "private temp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+
+    def run(args, *, cwd, **kwargs):
+        (Path(cwd) / "cx_result.json").write_text(json.dumps({"scanID": ONE_SCAN}))
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    request = ["one", ONE_SCAN, "--cx", cx]
+    assert invoke(monkeypatch, *request) == 0
+    assert Path(capsys.readouterr().out.strip()).is_relative_to(temp)
+
+    (bootstrap / ".git").mkdir()
+    (bootstrap / ".git" / "HEAD").touch()
+    monkeypatch.chdir(temp)
+    assert invoke(monkeypatch, *request) != 0
+    assert "outside the source checkout" in capsys.readouterr().err
+
+
+@pytest.mark.cross_platform
 def test_one_collects_exact_scan_to_a_fresh_private_path(
     capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -197,6 +239,14 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
     monkeypatch.setenv("PATH", os.pathsep.join(["bin", str(checkout_bin), str(tools)]))
     selected = Path.cwd()
     monkeypatch.chdir(tmp_path)
+    loaders = {
+        "LD_LIBRARY_PATH": str(checkout_bin),
+        "LD_PRELOAD": str(checkout_bin / "plugin.so"),
+        "DYLD_INSERT_LIBRARIES": str(checkout_bin / "plugin.dylib"),
+    }
+    for name, value in loaders.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("JDK_ALTERNATE_VM", "unrelated-java-setting")
     requested = ["--source-root", str(selected), "one", ONE_SCAN, "--cx", cx]
     reports = []
 
@@ -206,6 +256,9 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         assert kwargs["env"]["CX_CONFIG_FILE_PATH"] == str(config)
         assert kwargs["env"]["JAVA_TOOL_OPTIONS"] == "-Xmx256m"
         assert kwargs["env"]["PATH"] == str(tools.resolve())
+        if os.name != "nt":
+            assert loaders.keys().isdisjoint(kwargs["env"])
+        assert kwargs["env"]["JDK_ALTERNATE_VM"] == "unrelated-java-setting"
         kwargs["stdout"].write("retrieved existing scan\n")
         assert list(map(str, args)) == [
             cx,
@@ -236,9 +289,11 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         assert json.loads(saved.read_text())["scanID"] == ONE_SCAN
         reports.append(saved)
     assert reports[0].parent != reports[1].parent
+    assert {name: os.environ[name] for name in loaders} == loaders
 
 
 @pytest.mark.parametrize("failure", ["wrong scan", "invalid JSON", "missing file", "nonzero exit"])
+@pytest.mark.cross_platform
 def test_one_discards_failed_exports(failure, capture_dir, monkeypatch, tmp_path, capsys):
     cx = executable(tmp_path, "cx")
 
@@ -263,6 +318,7 @@ def test_one_discards_failed_exports(failure, capture_dir, monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("refusal", ["opt-in disabled", "relative config"])
+@pytest.mark.cross_platform
 def test_one_refuses_before_vendor_invocation(refusal, capture_dir, monkeypatch, tmp_path, capsys):
     cx = executable(tmp_path, "cx")
     if refusal == "opt-in disabled":
@@ -289,6 +345,7 @@ def test_one_refuses_before_vendor_invocation(refusal, capture_dir, monkeypatch,
     "result",
     ["selected", "scan", "project", "team", "missing team", "expanded team", "invalid XML"],
 )
+@pytest.mark.cross_platform
 def test_cxsast_collects_selected_scan_with_xml_tracker(
     result, capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -303,6 +360,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
     executable(tmp_path, "java")
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", "unrelated-one-config.yaml")
     jvm_options = {
+        "JDK_ALTERNATE_VM": str(Path.cwd()),
         "JDK_JAVA_OPTIONS": "-Xmx256m",
         "JAVA_TOOL_OPTIONS": f'-javaagent:"{Path.cwd() / "coverage.jar"}"',
         "_JAVA_OPTIONS": f"-DLOGBACK_ROLLINGPOLICY_FILE_NAME_PATTERN={Path.cwd()}/escape.%i.gz",
@@ -400,6 +458,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         assert not list(capture_dir.iterdir())
 
 
+@pytest.mark.cross_platform
 def test_excludes_source_by_filesystem_identity(capture_dir, monkeypatch, tmp_path, capsys):
     source = Path.cwd()
     checkout_file = executable(source, "cx")
@@ -416,7 +475,18 @@ def test_excludes_source_by_filesystem_identity(capture_dir, monkeypatch, tmp_pa
             ),
         )
     assert source.samefile(alias)
-    assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", str(alias / Path(checkout_file).name)) != 0
+    assert (
+        invoke(
+            monkeypatch,
+            "--source-root",
+            str(source),
+            "one",
+            ONE_SCAN,
+            "--cx",
+            str(alias / Path(checkout_file).name),
+        )
+        != 0
+    )
     assert "outside the source checkout" in capsys.readouterr().err
 
 
@@ -424,6 +494,7 @@ def test_excludes_source_by_filesystem_identity(capture_dir, monkeypatch, tmp_pa
     "lookup", ["libc", "passwd", "HOME"] if sys.platform == "linux" else ["libc"]
 )
 @pytest.mark.skipif(os.name == "nt", reason="exercises Unix account home lookup")
+@pytest.mark.native_macos
 def test_one_checks_default_profile_from_account_home(
     lookup, capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -450,11 +521,23 @@ def test_one_checks_default_profile_from_account_home(
         monkeypatch.setattr(Path, "open", open_file)
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("unexpected cx invocation"))
-    assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) != 0
+    assert (
+        invoke(
+            monkeypatch,
+            "--source-root",
+            str(Path.cwd()),
+            "one",
+            ONE_SCAN,
+            "--cx",
+            executable(tmp_path, "cx"),
+        )
+        != 0
+    )
     assert "CX_CONFIG_FILE_PATH" in capsys.readouterr().err
     assert not list(capture_dir.iterdir())
 
 
+@pytest.mark.cross_platform
 def test_one_accepts_the_same_scan_uuid_in_server_spelling(
     capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -472,6 +555,7 @@ def test_one_accepts_the_same_scan_uuid_in_server_spelling(
 
 
 @pytest.mark.parametrize("scan_id", ["?limit=1", ONE_SCAN.replace("-", ""), ONE_SCAN + "\n"])
+@pytest.mark.cross_platform
 def test_one_rejects_invalid_uuid_before_vendor_lookup(
     scan_id, capture_dir, monkeypatch, tmp_path, capsys
 ):
@@ -489,6 +573,7 @@ def test_one_rejects_invalid_uuid_before_vendor_lookup(
         ("--project", "\t "),
     ],
 )
+@pytest.mark.cross_platform
 def test_cxsast_rejects_unselected_scope_before_vendor_lookup(
     option, name, cxsast_args, capture_dir, monkeypatch, capsys
 ):
@@ -501,16 +586,19 @@ def test_cxsast_rejects_unselected_scope_before_vendor_lookup(
     assert not list(capture_dir.iterdir())
 
 
-@pytest.mark.skipif(os.name != "posix", reason="exercises POSIX SIGTERM")
-def test_sigterm_reaps_vendor_and_removes_partial_report(capture_dir, monkeypatch, tmp_path):
+@pytest.mark.skipif(os.name != "posix", reason="exercises POSIX termination signals")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+@pytest.mark.native_macos
+def test_cancellation_reaps_vendor_and_removes_partial_report(
+    name, capture_dir, monkeypatch, tmp_path
+):
     # Bash as the native test client reads its first argument ("results") from PATH.
-    bash = shutil.which("bash")
-    if not bash:
-        pytest.skip("requires Bash to simulate an active native vendor process")
+    bash = shutil.which("bash", path=os.defpath)
+    assert bash, "Bash is required to simulate an active native vendor process"
     (tmp_path / "results").write_text(
         "echo partial >cx_result.json\n"
         'echo $$ >"$VENDOR_PID_FILE"\n'
-        'kill -TERM "$PPID"\n'
+        f'kill -{name} "$PPID"\n'
         "exec sleep 30\n"
     )
     pid_file = tmp_path / "vendor.pid"
@@ -518,7 +606,7 @@ def test_sigterm_reaps_vendor_and_removes_partial_report(capture_dir, monkeypatc
     monkeypatch.setenv("TMPDIR", str(capture_dir))
     monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), os.environ["PATH"]]))
     result = subprocess.run(
-        [sys.executable, "-I", str(SCRIPT), "one", ONE_SCAN, "--cx", bash],
+        [sys.executable, "-I", "-S", str(SCRIPT), "one", ONE_SCAN, "--cx", bash],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         timeout=10,
@@ -531,6 +619,6 @@ def test_sigterm_reaps_vendor_and_removes_partial_report(capture_dir, monkeypatc
     else:
         os.kill(pid, signal.SIGKILL)
         pytest.fail("vendor survived collector cancellation")
-    assert result.returncode == 128 + signal.SIGTERM
+    assert result.returncode == 128 + getattr(signal, name)
     assert not result.stdout
     assert not list(capture_dir.iterdir())

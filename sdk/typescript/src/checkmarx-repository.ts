@@ -4,7 +4,11 @@ import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import { requiredText } from "./scanner-import.js";
 import { checkmarxOneId } from "./checkmarx-one.js";
-import { checkmarxXmlId, checkmarxXmlScope } from "./checkmarx-xml.js";
+import {
+  checkmarxResultViewer,
+  checkmarxXmlId,
+  checkmarxXmlScope,
+} from "./checkmarx-xml.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -14,6 +18,13 @@ const nativeId = /^checkmarx-(?:one|cxsast):[a-f0-9]{64}$/u;
 
 function checkmarxFormat(value: unknown) {
   return value === "cxsast-xml" || value === "checkmarx-one-json";
+}
+
+function scanKey(value: unknown, xml: boolean) {
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu;
+  return !xml && typeof value === "string" && uuid.test(value)
+    ? value.toLowerCase()
+    : value;
 }
 
 function retainedFormat({ source_finding_id: id, evidence }: ExternalFinding) {
@@ -34,7 +45,14 @@ export function projectedCheckmarxRepositoryUrl(
   finding: ExternalFinding,
   target: ExternalImportTarget,
 ) {
-  if (!nativeId.test(finding.source_finding_id) && !retainedFormat(finding))
+  const scanner = finding.evidence.details?.scanner_origin;
+  if (
+    scanner !== "CxSAST" &&
+    scanner !== "Checkmarx One SAST" &&
+    !nativeId.test(finding.source_finding_id) &&
+    !retainedFormat(finding) &&
+    !checkmarxResultViewer(finding.evidence.source_data)
+  )
     return;
   const source = finding.evidence.source_data?.["sourceRepositoryUrl"];
   return typeof source === "string"
@@ -54,7 +72,6 @@ function checkBatchScope(
   findings: ExternalFindings["findings"],
   report: ExternalFindings["report"],
 ) {
-  let scan = report?.["scanId"];
   let project = report?.["projectId"];
   let scanner: unknown;
   let instance: string | undefined;
@@ -78,7 +95,6 @@ function checkBatchScope(
   for (const finding of findings) {
     checkFormat(retainedFormat(finding));
     const { evidence } = finding;
-    scan = agree(scan, evidence.source_scan_id);
     project = agree(project, evidence.source_data?.["projectId"]);
     scanner = agree(scanner, evidence.details?.scanner_origin);
   }
@@ -87,16 +103,20 @@ function checkBatchScope(
     report,
     ...findings.map(({ evidence }) => evidence.source_data),
   ];
-  if (scanner !== "CxSAST") {
-    const hasViewer = sources.some((source) => {
-      const result = source?.["result"];
-      return isRecord(result) && checkmarxXmlScope({ result }).instance;
-    });
-    if (!hasViewer) return;
-    agree(scanner, "CxSAST");
-  }
+  const xml = scanner === "CxSAST" || sources.some(checkmarxResultViewer);
+  if (xml) agree(scanner, "CxSAST");
+  let scan = scanKey(report?.["scanId"], xml);
+  for (const { evidence } of findings)
+    scan = agree(scan, scanKey(evidence.source_scan_id, xml));
+
   for (const data of sources) {
     if (!data) continue;
+    if (!xml) {
+      // A retained deployment URL distinguishes this claim from opaque SDK metadata.
+      const value = data["instance"];
+      const protocol = typeof value === "string" && URL.parse(value)?.protocol;
+      if (protocol !== "http:" && protocol !== "https:") continue;
+    }
     const scope = checkmarxXmlScope(data);
     if (scope.instance && instance && scope.instance !== instance)
       throw new Error("CxSAST viewer links must identify the same instance.");
@@ -133,16 +153,19 @@ export function checkmarxReportRepository(
     return;
   }
   requireCheckmarx(provider);
-  const scan = requiredText(report["scanId"], "Checkmarx report scan ID");
-  const project =
-    format === "cxsast-xml"
-      ? requiredText(report["projectId"], "CxSAST report project ID")
-      : undefined;
+  const xml = format === "cxsast-xml";
+  const scan = scanKey(
+    requiredText(report["scanId"], "Checkmarx report scan ID"),
+    xml,
+  );
+  const project = xml
+    ? requiredText(report["projectId"], "CxSAST report project ID")
+    : undefined;
   for (const { evidence } of findings) {
     const data = evidence.source_data;
     if (
       data?.["format"] !== format ||
-      evidence.source_scan_id !== scan ||
+      scanKey(evidence.source_scan_id, xml) !== scan ||
       (project !== undefined && data["projectId"] !== project)
     )
       throw new Error(
@@ -203,7 +226,7 @@ export const checkmarxReportRepositories = repositoryScopeValidator(
       scope: JSON.stringify([
         format,
         format === "cxsast-xml" ? data["projectId"] : null,
-        scan,
+        scanKey(scan, format === "cxsast-xml"),
       ]),
     };
   },

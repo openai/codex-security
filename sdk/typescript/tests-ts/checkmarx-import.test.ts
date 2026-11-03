@@ -111,3 +111,28 @@ for (const [format, report] of [
     );
   });
 }
+
+test.each([
+  ["git@ssh.dev.azure.com:v3/team/project/repo", "project"],
+  ["ssh://git@ssh.dev.azure.com:22/v3/team/My%20Project/repo", "My%20Project"],
+  ["git@ssh.dev.azure.com:v3/team/My%20Project/repo", "My%20Project"],
+])(
+  "Checkmarx matches its HTTPS repository to Azure Repos clone %s",
+  async (remote, project) => {
+    const url = `https://dev.azure.com/team/${project}/_git/repo`;
+    await using fixture = await localReportFixture(
+      "checkmarx.json",
+      {
+        provider: "checkmarx",
+        sourceKey: "team/project/main",
+        sourceRepositoryUrl: url,
+      },
+      { remote },
+    );
+    await writeFile(fixture.file, oneReport("High"));
+    expect((await fixture.prepare()).matchesRepositoryRemote).toBe(true);
+    await expect(
+      fixture.prepare({ sourceRepositoryUrl: url + "-other" }),
+    ).rejects.toThrow(/does not match a configured remote/);
+  },
+);

@@ -271,7 +271,8 @@ function remoteRepository(
     );
   // Azure's generated SCP clone URL spells spaces as %20, even though Git sends SCP paths literally.
   const azure =
-    provider === "sonar" && !(scpStyle && path.startsWith("/"))
+    (provider === "sonar" || provider === "checkmarx") &&
+    !(scpStyle && path.startsWith("/"))
       ? azureReposHttpsUrl(
           url,
           scpStyle ? name.replace(/%2520/gu, "%20") : name,

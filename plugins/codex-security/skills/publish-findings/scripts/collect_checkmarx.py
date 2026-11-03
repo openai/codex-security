@@ -13,18 +13,20 @@ from pathlib import Path
 from xml.parsers import expat
 
 
-def source_root(target: Path) -> Path:
-    if not target.is_absolute() or not target.is_dir():
+def source_root(target: Path | None) -> Path | None:
+    if target is not None and (not target.is_absolute() or not target.is_dir()):
         raise ValueError("Select an existing absolute source directory.")
-    source = target.resolve()
-    root = source
+    source = (target or Path.cwd()).resolve()
+    root = source if target is not None else None
     for parent in (source, *source.parents):
         if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
             root = parent
     return root
 
 
-def in_source(path: Path, source: Path) -> bool:
+def in_source(path: Path, source: Path | None) -> bool:
+    if source is None:
+        return False
     invocation = path.parent.resolve() / path.name
     for candidate in (path, invocation, path.resolve()):
         for ancestor in (candidate, *candidate.parents):
@@ -33,7 +35,7 @@ def in_source(path: Path, source: Path) -> bool:
     return False
 
 
-def installed_file(value: str, source: Path) -> Path:
+def installed_file(value: str, source: Path | None) -> Path:
     path = Path(value)
     if not path.is_absolute() or not path.is_file():
         raise ValueError("expected an absolute path to an existing file")
@@ -43,7 +45,7 @@ def installed_file(value: str, source: Path) -> Path:
     return path.parent.resolve() / path.name
 
 
-def installed_launcher(value: str, source: Path) -> Path:
+def installed_launcher(value: str, source: Path | None) -> Path:
     path = installed_file(value, source)
     if sys.platform == "win32" and (
         path.suffix.lower() not in {".exe", ".com"}
@@ -71,8 +73,13 @@ def installed_launcher(value: str, source: Path) -> Path:
     return path
 
 
-def vendor_environment(source: Path) -> dict[str, str]:
-    env = os.environ.copy()
+def vendor_environment(source: Path | None) -> dict[str, str]:
+    # Let the native loader use installed libraries when starting a vendor process.
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if os.name == "nt" or not name.startswith(("LD_", "DYLD_"))
+    }
     entries = []
     for entry in os.get_exec_path(env):
         if os.name == "nt" and entry.startswith('"') and entry.endswith('"'):
@@ -87,12 +94,11 @@ def vendor_environment(source: Path) -> dict[str, str]:
 def one_default_profiles() -> set[Path]:
     # Both cx configuration and its keyring resolver use Go's os/user.Current.
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
+        import ctypes.wintypes
 
         get_profile = ctypes.windll.userenv.GetUserProfileDirectoryW
-        token = wintypes.HANDLE(-4)  # GetCurrentProcessToken() pseudo-handle
-        size = wintypes.DWORD()
+        token = ctypes.wintypes.HANDLE(-4)  # GetCurrentProcessToken() pseudo-handle
+        size = ctypes.wintypes.DWORD()
         get_profile(token, None, ctypes.byref(size))
         directory = ctypes.create_unicode_buffer(size.value)
         if not get_profile(token, directory, ctypes.byref(size)):
@@ -118,6 +124,7 @@ def one_default_profiles() -> set[Path]:
                             local_home = Path(os.fsdecode(fields[5]))
                             break
             except OSError:
+                # Without a readable passwd file, Go's static lookup falls back to HOME.
                 pass
             homes.add(local_home if local_home is not None else Path.home())
     return {home / ".checkmarx" / "checkmarxcli.yaml" for home in homes}
@@ -158,7 +165,7 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
         parser.ParseFile(stream)
 
 
-def collect(args: argparse.Namespace, source: Path) -> None:
+def collect(args: argparse.Namespace, source: Path | None) -> None:
     temp = Path(tempfile.gettempdir())
     if in_source(temp, source):
         raise ValueError(
@@ -193,6 +200,7 @@ def collect(args: argparse.Namespace, source: Path) -> None:
             else:
                 # Start CxFlow without JVM agents or logging overrides from the build shell.
                 for name in (
+                    "JDK_ALTERNATE_VM",
                     "JDK_JAVA_OPTIONS",
                     "JAVA_TOOL_OPTIONS",
                     "_JAVA_OPTIONS",
@@ -284,9 +292,12 @@ def main() -> int:
         # Unwind subprocess.run so it kills and reaps the vendor before capture cleanup.
         raise SystemExit(128 + signum)
 
-    previous = signal.signal(signal.SIGTERM, terminate)
+    signals = [signal.SIGTERM]
+    if os.name == "posix" and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        signals.append(signal.SIGHUP)
+    previous = {number: signal.signal(number, terminate) for number in signals}
     try:
-        source = source_root(args.source_root or Path.cwd())
+        source = source_root(args.source_root)
         if args.product == "one":
             args.cx = installed_launcher(args.cx, source)
         else:
@@ -298,7 +309,8 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 1
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for number, handler in previous.items():
+            signal.signal(number, handler)
     return 0
 
 
