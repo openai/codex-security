@@ -784,6 +784,28 @@ Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
 planning and authentication choices. Custom `createSecurity` clients receive
 absolute targets; saved plans and component receipts retain relative paths.
 
+### Choose a severity rubric
+
+Standalone Standard and Deep scans grade findings with the bundled rubric by
+default. Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` to fetch the
+current default from Statsig once when starting a scan. If that lookup fails,
+the scan uses the bundled rubric.
+
+```bash
+CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 codex-security scan .
+codex-security scan . --mode deep --rubric ./severity.md
+```
+
+An explicit Markdown file takes precedence and skips the lookup, even when
+opted in. The SDK accepts `rubricPath` or a `severityRubric` snapshot with
+`markdown`, a positive integer `revision`, and the SHA-256 of the exact UTF-8
+Markdown. A supplied snapshot takes precedence over a file.
+
+The scan saves the rubric text in its local launch recipe. Retrying a Standard
+scan with the same `--workflow-id`, resuming a Deep scan, or rerunning a scan
+with a saved rubric reuses that copy even if the remote default or file changes.
+Older scans without a saved rubric continue to resume using their existing workflow.
+
 ### Set investigation time
 
 ```bash
@@ -1742,7 +1764,7 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md).
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
 from severity; missing proof alone does not justify a downgrade.
@@ -1774,6 +1796,12 @@ Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
 missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
+
+For a single rubric document, the classification result reports the SHA-256 of
+the exact UTF-8 text supplied to the reviewer in `rubricSha256`. For multiple
+documents it reports the digest of the ordered text collection. A bundled or
+remote default also records its `rubricRevision`. Older saved results retain
+their original digest and may omit the revision.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed

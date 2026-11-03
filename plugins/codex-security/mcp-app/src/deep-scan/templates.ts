@@ -1,6 +1,6 @@
 import discoveryTemplate from "../../templates/deep-scan/discovery.md";
 import dedupTemplate from "../../templates/deep-scan/dedup.md";
-import type { DiscoveryAssignment } from "./types.js";
+import type { DeepScanRunState, DiscoveryAssignment } from "./types.js";
 
 export interface DiscoveryPromptInput {
   scanId: string;
@@ -9,6 +9,7 @@ export interface DiscoveryPromptInput {
   scope: string;
   includePaths?: readonly string[];
   userContext?: string;
+  severityRubric?: DeepScanRunState["severityRubric"];
   workerLabel: string;
   subagents: number;
   assignment?: DiscoveryAssignment;
@@ -28,10 +29,11 @@ export function renderDiscoveryPrompt(
     targetPath: input.targetPath,
     includePaths: input.includePaths ?? [input.scope],
     userContext: input.userContext ?? null,
+    severityRubric: input.severityRubric,
     workerLabel: input.workerLabel,
     subagents: input.subagents,
-    ...(input.assignment && { assignment: input.assignment }),
-    ...(input.peerAssignments && { peerAssignments: input.peerAssignments }),
+    assignment: input.assignment,
+    peerAssignments: input.peerAssignments,
   });
   const prompt = discoveryTemplate.replaceAll(
     "{{DISCOVERY_CONTEXT_JSON}}",
@@ -48,10 +50,12 @@ export function renderDiscoveryPrompt(
 export function renderDedupPrompt(
   reducerLabel: string,
   claimedWorkerIds: string[],
+  severityRubric?: DeepScanRunState["severityRubric"],
 ): string {
   const context = formattedJson({
     reducerLabel,
     claimedWorkerIds,
+    severityRubric,
   });
   return dedupTemplate.replaceAll("{{DEDUP_CONTEXT_JSON}}", () => context);
 }

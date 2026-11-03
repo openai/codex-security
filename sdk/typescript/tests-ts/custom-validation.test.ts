@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { resolveCodexProfile } from "../src/config.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import {
   appendFile,
@@ -768,6 +768,12 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const markdown = "# Custom severity policy\nGrade by verified impact.";
+      const severityRubric = {
+        markdown,
+        revision: 4,
+        sha256: createHash("sha256").update(markdown).digest("hex"),
+      };
       const workflowFile = join(root, "validation.md");
       if (scenario === "standard") await writeFile(workflowFile, workflow);
       const falsePositive = {
@@ -885,6 +891,9 @@ describe("custom validation", () => {
                       "daybreak_blue",
                     );
                     turns += 1;
+                    expect(prompt).toContain(
+                      JSON.stringify({ severityRubric }),
+                    );
                     if (turns === 1) {
                       expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
                         maxTimeMinutes !== undefined,
@@ -1115,6 +1124,7 @@ describe("custom validation", () => {
         : undefined;
       try {
         const pending = client.run(repository, {
+          severityRubric,
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"

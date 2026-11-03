@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { classificationRunsSchema } from "./severity-review.js";
+import { severityRubricSchema } from "./severity-rubric.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
@@ -134,15 +135,9 @@ import {
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
-import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
-import {
-  classifySeverityRecords,
-  type ClassifySeverityRecordsInput,
-} from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
@@ -1121,6 +1116,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  rubricPath?: string;
+  severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
@@ -1977,13 +1974,16 @@ export async function main(
       : argv[0] === "verify-fix"
         ? "verify"
         : undefined;
+  const recordsCommand =
+    argv[0] === "dedupe" ||
+    argv[0] === "validate" ||
+    argv[0] === "classify-severity"
+      ? argv[0]
+      : undefined;
   const hostedCommand =
     argv[0] === "scan" || remediationOperation !== undefined;
   if (
-    (((argv[0] === "dedupe" ||
-      argv[0] === "validate" ||
-      argv[0] === "classify-severity") &&
-      argv.includes("--records")) ||
+    ((recordsCommand !== undefined && argv.includes("--records")) ||
       (hostedCommand &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
@@ -2021,36 +2021,21 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
-      const runProtocol =
-        argv[0] === "scan"
-          ? runHostedScanProtocol
-          : argv[0] === "validate"
-            ? runValidationRecordsProtocol
-            : runRecordsProtocol;
+      const input = dependencies.recordsInput ?? process.stdin;
       const code =
-        argv[0] === "classify-severity"
-          ? await runHostRecordsProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              (value, options) =>
-                classifySeverityRecords(value as ClassifySeverityRecordsInput, {
-                  ...options,
-                  classificationRuns,
-                }),
-              controller.signal,
-            )
+        recordsCommand !== undefined
+          ? await runHostRecordsProtocol(recordsCommand, input, output, {
+              signal: controller.signal,
+              classificationRuns,
+            })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
-                dependencies.recordsInput ?? process.stdin,
+                input,
                 output,
                 controller.signal,
                 remediationOperation,
               )
-            : await runProtocol(
-                dependencies.recordsInput ?? process.stdin,
-                output,
-                controller.signal,
-              );
+            : await runHostedScanProtocol(input, output, controller.signal);
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -4614,6 +4599,11 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          rubric: optionValue("--rubric")
+            .optional()
+            .describe(
+              "Use this Markdown file to grade findings. Takes precedence over the default severity rubric.",
+            ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append scan instructions from FILE."),
@@ -4786,6 +4776,10 @@ export async function main(
           outcome = await runScan(
             {
               ...settings,
+              rubricPath:
+                options.rubric === undefined
+                  ? undefined
+                  : resolveCliPath(directory, options.rubric),
               codexOverrides: config.codexOverrides,
               projectConfig: provenance,
               workflowId: options.workflowId,
@@ -7604,6 +7598,10 @@ async function prepareScanArgumentsFromRecipe(
   }
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
+  const severityRubric =
+    operation === "rerun"
+      ? severityRubricSchema.optional().parse(recipe["severityRubric"])
+      : undefined;
   if (
     (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
     (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
@@ -7632,6 +7630,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
     ownerSuggestions: ownerSuggestions.data,
+    ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
@@ -9866,6 +9865,12 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.rubricPath === undefined
+        ? {}
+        : { rubricPath: arguments_.rubricPath }),
+      ...(arguments_.severityRubric === undefined
+        ? {}
+        : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}
