@@ -24,7 +24,13 @@ from filesystem_identity import (
     serialize_filesystem_identity,
     stored_filesystem_identity_matches,
 )
-from workbench_target import _protected_repository_root, git_bytes, git_output, git_worktree_context
+from workbench_target import (
+    _protected_repository_root,
+    git_bytes,
+    git_output,
+    git_worktree_context,
+    pin_scoped_git,
+)
 
 
 def stable_target_id(target: Path) -> str:
@@ -1016,6 +1022,9 @@ def register_security_target(
     existing = connection.execute(target_query, (target_path,)).fetchone()
     inserted = False
     if existing is None:
+        if verify_ownership:
+            # Pin ambient Git before the new row temporarily lacks a checkout boundary.
+            pin_scoped_git(Path(target_path))
         target_id = stable_target_id(Path(target_path))
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         # Leave repository_identity NULL until the guarded binding below succeeds.

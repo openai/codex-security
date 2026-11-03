@@ -2982,6 +2982,7 @@ def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(os.name == "nt", reason="The executable marker fixture is a POSIX script")
+@pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize(
     "executable_source",
     [
@@ -2993,7 +2994,7 @@ def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> N
     ],
 )
 def test_identity_migration_excludes_all_history_and_caller_git(
-    tmp_path: Path, executable_source: str
+    tmp_path: Path, executable_source: str, configured: bool
 ) -> None:
     git = shutil.which("git")
     assert git is not None
@@ -3040,6 +3041,8 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         MIGRATION_GIT_MARKER=str(marker),
         MIGRATION_HOST_GIT=git,
     )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = git
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "list-scans"],
         cwd=caller,
@@ -3052,8 +3055,10 @@ def test_identity_migration_excludes_all_history_and_caller_git(
     assert not marker.exists()
     with sqlite3.connect(state / "workbench.sqlite3") as database:
         identities = dict(database.execute("SELECT id, repository_identity FROM security_targets"))
-        assert identities["saved-0"] is not None
-        assert (identities["saved-1"] is None) == (executable_source == "unavailable-historical")
+        assert (identities["saved-0"] is not None) is configured
+        assert (identities["saved-1"] is not None) is (
+            configured and executable_source != "unavailable-historical"
+        )
 
 
 @pytest.mark.cross_platform

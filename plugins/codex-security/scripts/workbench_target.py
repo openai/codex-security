@@ -27,7 +27,7 @@ from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
-_SCOPED_GIT: ContextVar[Callable[[], str] | None] = ContextVar("workbench_git", default=None)
+_SCOPED_GIT: ContextVar[Callable[[Path], str] | None] = ContextVar("workbench_git", default=None)
 
 
 class UnreadableLocalFile(SystemExit):
@@ -104,12 +104,16 @@ def _protected_repository_root(target: Path) -> Path:
     return protected
 
 
+def pin_scoped_git(target: Path) -> str | None:
+    scoped = _SCOPED_GIT.get()
+    return scoped(target) if scoped is not None else None
+
+
 def trusted_git_executable(protected_root: Path) -> str | None:
     """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
-    scoped = _SCOPED_GIT.get()
-    if configured is None and scoped is not None:
-        configured = scoped()
+    if configured is None:
+        configured = pin_scoped_git(protected_root)
     return _resolve_git_executable(protected_root, configured)
 
 
@@ -227,14 +231,14 @@ def scoped_git_discovery(
         return
     executable: str | None = None
 
-    def resolve_once() -> str:
+    def resolve_once(target: Path) -> str:
         nonlocal executable
         if executable is None:
             executable = (
                 _resolve_git_executable(
                     Path.cwd(),
                     None,
-                    discovery_roots=protected_roots(),
+                    discovery_roots=(*protected_roots(), target),
                     recorded_git_roots=recorded_git_roots(),
                     excluded_roots=excluded_roots(),
                 )

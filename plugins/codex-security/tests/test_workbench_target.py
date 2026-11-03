@@ -1427,7 +1427,17 @@ def test_workbench_commands_exclude_saved_checkout_git(
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
 @pytest.mark.parametrize(
-    "evidence", ["identity", "generation", "revision", "legacy-revision", "directory"]
+    "evidence",
+    [
+        "identity",
+        "generation",
+        "revision",
+        "legacy-revision",
+        "legacy-unborn",
+        "legacy-workspace",
+        "legacy-directory",
+        "directory",
+    ],
 )
 @pytest.mark.parametrize("configured", [False, True])
 def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
@@ -1443,7 +1453,15 @@ def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
     assert host_git is not None
     requested, historical = (tmp_path / name for name in ("requested", "historical"))
     initialize_git_repository(requested)
-    revision = initialize_git_repository(historical)
+    if evidence in {"legacy-unborn", "legacy-workspace"}:
+        subprocess.run([host_git, "init", "-q", str(historical)], check=True)
+        revision = WORKBENCH_TARGET["git_revision"](historical)
+        assert revision == "unversioned"
+    elif evidence in {"directory", "legacy-directory"}:
+        historical.mkdir()
+        revision = "unversioned"
+    else:
+        revision = initialize_git_repository(historical)
     saved = historical / "surviving" / "component"
     saved.mkdir(parents=True)
     identity = repository_identity(saved)
@@ -1455,61 +1473,67 @@ def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
         connection.row_factory = sqlite3.Row
         apply_migrations = workbench_api["apply_migrations"]
         with monkeypatch.context() as migration_patch:
-            if evidence == "legacy-revision":
+            if evidence.startswith("legacy-"):
+                last_version = 52 if evidence == "legacy-revision" else 60
                 migration_patch.setitem(
                     apply_migrations.__globals__,
                     "MIGRATIONS",
-                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] < 53),
+                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] <= last_version),
                 )
             apply_migrations(connection)
-        connection.executemany(
-            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
-            "VALUES (?, ?, 'Saved target', 'created', 'updated')",
-            [("requested", str(requested)), ("historical", str(saved))],
-        )
-        if evidence == "identity":
+        register = workbench_api["register_security_target"]
+        historical_id = register(connection, str(saved)).target_id
+        if not evidence.startswith("legacy-") or evidence == "legacy-revision":
+            register(connection, str(requested))
+        if evidence in {"identity", "generation", "revision"}:
+            # These rows predate recorded roots, but retain distinct kinds of Git evidence.
             connection.execute(
-                "UPDATE security_targets SET repository_identity = ? WHERE id = 'historical'",
-                (identity,),
+                "UPDATE security_targets SET git_checkout_root = NULL, repository_identity = ? "
+                "WHERE id = ?",
+                (identity if evidence == "identity" else None, historical_id),
             )
-        else:
+        if evidence != "identity":
             connection.execute(
                 "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
-                "VALUES ('workspace', 'historical', ?, 'created', 'updated')",
-                (str(saved),),
+                "VALUES ('workspace', ?, ?, 'created', 'updated')",
+                (historical_id, str(saved)),
             )
+        if evidence not in {"identity", "legacy-workspace"}:
             connection.execute(
                 "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
                 "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
-                "VALUES ('scan', 'workspace', 'historical', ?, ?, '.', 'standard', "
+                "VALUES ('scan', 'workspace', ?, ?, ?, '.', 'standard', "
                 "?, 'complete', 'reporting', 'created', 'created', 'updated')",
                 (
+                    historical_id,
                     str(saved),
-                    "unversioned" if evidence in {"directory", "generation"} else revision,
+                    "unversioned" if evidence == "generation" else revision,
                     str(tmp_path / "saved-scan"),
                 ),
             )
             if evidence == "generation":
                 connection.execute("UPDATE scans SET repository_generation = ?", (identity,))
-    shutil.rmtree(historical / ".git")
-    marker = tmp_path / "repository-git-ran"
-    host_marker = tmp_path / "host-git-ran"
-    tools = tmp_path / "host-tools" if evidence == "directory" else historical / "bin"
+    if evidence not in {"directory", "legacy-directory"}:
+        shutil.rmtree(historical / ".git")
+    tools = (
+        tmp_path / "host-tools"
+        if evidence in {"directory", "legacy-directory"}
+        else historical / "bin"
+    )
     tools.mkdir()
     executable = tools / "git"
-    executable.write_text(
-        '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
-    )
+    executable.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexec "$WORKBENCH_HOST_GIT" "$@"\n')
     executable.chmod(0o700)
     environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
     environment.update(
         CODEX_SECURITY_STATE_DIR=str(state),
         PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
-        WORKBENCH_GIT_MARKER=str(host_marker if evidence == "directory" else marker),
         WORKBENCH_HOST_GIT=host_git,
     )
+    pinned = tmp_path / "trusted-git"
     if configured:
-        environment["CODEX_SECURITY_GIT"] = host_git
+        shutil.copy(executable, pinned)
+        environment["CODEX_SECURITY_GIT"] = str(pinned)
     script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
     completed = subprocess.run(
         [sys.executable, str(script), "list-scans", "--repository", str(requested)],
@@ -1520,16 +1544,25 @@ def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
         check=True,
     )
     assert json.loads(completed.stdout)["scans"] == []
-    assert not marker.exists()
-    if evidence == "directory":
-        assert host_marker.exists() is not configured
+    assert executable.with_suffix(".ran").exists() is (evidence == "directory" and not configured)
+    assert pinned.with_suffix(".ran").exists() is configured
+    if evidence == "legacy-directory":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            register(connection, str(saved))
+            assert (
+                connection.execute(
+                    "SELECT git_checkout_root FROM security_targets WHERE id = ?", (historical_id,)
+                ).fetchone()[0]
+                is None
+            )
     if evidence == "legacy-revision":
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             identities = dict(
-                connection.execute("SELECT id, repository_identity FROM security_targets")
+                connection.execute("SELECT current_path, repository_identity FROM security_targets")
             )
-        assert (identities["requested"] is not None) is configured
-        assert identities["historical"] is None
+        assert (identities[str(requested)] is not None) is configured
+        assert identities[str(saved)] is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
@@ -1616,8 +1649,8 @@ def test_new_workspace_skips_git_in_its_unregistered_checkout(
         )
         assert len(identities) == (2 if migrate else 1)
         if migrate:
-            assert identities[str(saved)] is not None
-        # After migration the saved identity has no recorded executable boundary.
+            assert (identities[str(saved)] is not None) is configured
+        # Only an explicit Git can inspect a state with an unknown legacy boundary.
         assert (identities[str(repository)] is not None) is (configured or not migrate)
 
 

@@ -155,28 +155,7 @@ def unvalidated_workspace_paths(connection: sqlite3.Connection) -> list[Path]:
 
 
 def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | None:
-    """Return saved checkout boundaries, or None for Git history that predates them."""
-    paths: set[Path] = set()
-    for table, column, evidence_columns in (
-        ("security_targets", "current_path", {"repository_identity": "IS NOT NULL"}),
-        (
-            "scans",
-            "target_path",
-            {"repository_generation": "IS NOT NULL", "target_revision": "<> 'unversioned'"},
-        ),
-    ):
-        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
-        evidence = [
-            f"{name} {condition}" for name, condition in evidence_columns.items() if name in columns
-        ]
-        if column in columns and evidence:
-            paths.update(
-                Path(row[0])
-                for row in connection.execute(
-                    f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL "
-                    f"AND ({' OR '.join(evidence)})"
-                )
-            )
+    """Return saved boundaries, or None if any historical target lacks one."""
     target_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
     }
@@ -191,7 +170,8 @@ def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | N
         if "git_checkout_root" in target_columns
         else {}
     )
-    if paths.difference(boundaries):
+    # Even an unversioned scan may have come from an unborn Git checkout.
+    if any(path not in boundaries for path in migration_target_paths(connection)):
         return None
     return set(boundaries.values())
 
