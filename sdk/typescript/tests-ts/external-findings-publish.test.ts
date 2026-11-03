@@ -1434,6 +1434,27 @@ test("an undefined optional Snyk context permits generic SDK evidence", async ()
   ).rejects.toThrow("Expected a versioned Snyk REST report context");
 });
 
+test("a saved selection with Guardian evidence cannot resume a Cloud upload", async () => {
+  const f = await fixture([normalized()]);
+  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const path = await f.loseResponse(await prepare());
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  const { source_finding_id, evidence } = saved.requests[0].items[0];
+  evidence.source_data = { format: "semgrep-guardian-selection/v1" };
+  // An older reader can store a different projection of the same finding.
+  saved.inputProjection.savedEvidenceDigest = hash(
+    "sha256",
+    canonicalJson([{ source_finding_id, evidence }]),
+  );
+  const bytes = JSON.stringify(saved);
+  await writeFile(path, bytes);
+  await expect(prepare()).rejects.toThrow(
+    /Guardian findings require a local import/,
+  );
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(path, "utf8")).toBe(bytes);
+});
+
 test("a normalized Semgrep report checks the provider before Cloud credentials", async () => {
   const url = "https://github.com/example/project";
   const report = normalizeSemgrepFindings(

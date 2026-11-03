@@ -1192,6 +1192,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
+  if (original) rejectGuardianSelection(original.parsed);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -1204,6 +1205,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
+  rejectGuardianSelection(current);
   // A Trivy header provides repository provenance for its findings. Either entrypoint
   // can resume the same immutable request when the independently checked rows agree.
   const identity =
@@ -1977,6 +1979,7 @@ async function preparePublicationInput(
       throw new CodexSecurityError(
         "This build cannot verify the original repository for this pending Trivy import. Check its destination before resuming with the build that created it.",
       );
+    rejectGuardianSelection({ ...parsed, findings: saved });
     const approvedScope = content.inputProjection?.semgrepPartialScopeDigest;
     if (
       approvedScope !== undefined &&
@@ -1997,7 +2000,8 @@ async function preparePublicationInput(
   ): SavedSubmission | "different-wire" | undefined {
     const content = readSaved(record);
     const projection = content.inputProjection;
-    const savedWire = wireJson(submissionFindings(content.requests));
+    const saved = submissionFindings(content.requests);
+    const savedWire = wireJson(saved);
     const wireDigest = hash("sha256", savedWire);
     if (projection?.inputDigest !== jsonDigest(originalIdentity, canonicalJson))
       throw unmatchedPreviousNumbers();
@@ -2019,6 +2023,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
+    rejectGuardianSelection({ ...parsed, findings: saved });
     content.legacyApproval = true;
     content.inputProjection = {
       ...content.inputProjection,

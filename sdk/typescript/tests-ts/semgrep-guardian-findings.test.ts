@@ -198,6 +198,45 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
   expect(await fixture.read()).toHaveLength(0);
 });
 
+test("SDK exports containing Guardian findings fail before Cloud credential lookup", async () => {
+  const guardian = normalizeSemgrepFindings(capture, {}, "local");
+  const normalized = {
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: "example",
+        evidence: { title: "Example", severity: "high" as const },
+      },
+    ],
+  };
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential lookup");
+  });
+  for (const input of [
+    { ...normalized, toJSON: () => guardian },
+    {
+      ...normalized,
+      findings: [
+        { ...normalized.findings[0]!, toJSON: () => guardian.findings[0] },
+      ],
+    },
+  ]) {
+    await expect(
+      prepareNormalizedExternalPublication(
+        input,
+        {
+          repository: project,
+          provider: "semgrep",
+          sourceKey: "example/topic",
+        },
+        { environment, credentials },
+      ),
+    ).rejects.toThrow(/local import/);
+  }
+  expect(credentials).not.toHaveBeenCalled();
+});
+
 test("empty selections and disabled imports do not call Guardian; tool errors retain their message", async () => {
   const callTool = mock(async () => ({
     isError: true,
