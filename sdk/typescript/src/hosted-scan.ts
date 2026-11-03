@@ -18,7 +18,7 @@ export type { ScanExecutor, ScanExecutionRequest } from "./scan-executor.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { CodexSecurity } from "./api.js";
+import { CodexSecurity, type CodexSecuritySurface } from "./api.js";
 import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
 import {
@@ -199,7 +199,16 @@ export interface HostedScanOptions {
 }
 
 /** One invocation, with only scan-domain state. The host decides retry/reconciliation. */
-export async function runHostedScan(
+export function runHostedScan(
+  value: HostedScanInput,
+  options: HostedScanOptions,
+) {
+  return runHostedScanInternal("sdk", value, options);
+}
+
+/** @internal */
+export async function runHostedScanInternal(
+  surface: CodexSecuritySurface,
   value: HostedScanInput,
   options: HostedScanOptions,
 ) {
@@ -281,7 +290,7 @@ export async function runHostedScan(
         throw new Error("Local inference is unavailable in hosted mode.");
       },
     },
-    { surface: "sdk" },
+    { surface },
   );
   try {
     const result = await client.run(context.repository, {

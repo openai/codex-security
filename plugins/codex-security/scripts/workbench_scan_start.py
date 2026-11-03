@@ -26,7 +26,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text
+from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
@@ -38,6 +38,16 @@ def safe_segment(value: str) -> str:
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def loaded_plugin_version() -> str:
+    manifest = read_json_object(
+        Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+    )
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
+    return version
 
 
 def scan_target_identity(
@@ -239,10 +249,18 @@ def insert_running_scan(
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    surface: str | None = "plugin",
+    package_version: str | None = None,
+    launch_kind: str = "scan",
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
     user_context = optional_text(workspace["user_context"])
+    try:
+        plugin_version = loaded_plugin_version()
+    except SystemExit:
+        # Missing version attribution must not prevent scan registration.
+        plugin_version = None
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -257,9 +275,10 @@ def insert_running_scan(
             target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            launch_surface, launch_package_version, launch_plugin_version, launch_kind
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?)
+            'running', 'preflight', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -281,6 +300,10 @@ def insert_running_scan(
             timestamp,
             timestamp,
             timestamp,
+            surface,
+            package_version,
+            plugin_version,
+            launch_kind,
         ),
     )
     connection.execute(
