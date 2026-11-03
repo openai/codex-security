@@ -33,6 +33,7 @@ const distModules = [
   "snyk-findings",
   "scanner-repository-url",
   "semgrep-findings",
+  "semgrep-guardian-findings",
   "semgrep-platform-findings",
   "hosted-git-remotes",
   "hosted-git-repository",

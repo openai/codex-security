@@ -38,6 +38,7 @@ import {
   localFindingRepositories,
   semgrepSarifRepositories,
 } from "./external-findings-read.js";
+import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
@@ -751,6 +752,17 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
+  if (
+    options.provider === "semgrep" &&
+    current.report?.["format"] === guardianSelectionFormat
+  ) {
+    const url = declaredScannerRepositoryUrl(
+      current.report["repositoryUrl"],
+      "Guardian",
+      "local",
+    );
+    sources.set(url, { url });
+  }
   const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
     options.provider,
@@ -876,6 +888,17 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     } else hasOrdinaryRows = true;
     const { evidence } = finding;
+    if (
+      options.provider === "semgrep" &&
+      evidence.source_data?.["format"] === guardianSelectionFormat
+    ) {
+      const url = declaredScannerRepositoryUrl(
+        evidence.source_data["sourceRepositoryUrl"],
+        "Guardian",
+        "local",
+      );
+      sources.set(url, { url });
+    }
     const url = evidence.details?.repository?.url;
     // A selected row's projected URL was already verified against its hosted source.
     if (!semgrep && url) sources.set(url, { url });

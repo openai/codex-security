@@ -25,7 +25,8 @@ changes.
 | [Snyk Open Source](snyk.md)                                                           | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
 | [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)               | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
 | [Semgrep CLI or CI reports](semgrep.md), [OpenGrep](opengrep.md)                      | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
-| [Semgrep Platform findings](semgrep.md#existing-platform-findings)                    | Deployment, project ID, product, full Git ref and native finding ID. Individual SAST selections and full SAST collections share IDs.                                                     |
+| [Semgrep Guardian selections](semgrep.md#import-selected-guardian-findings)           | Deployment, repository name, Guardian tool, full ref and exact string ID. Guardian records stay separate from Web API occurrences.                                                       |
+| [Semgrep Platform findings](semgrep.md#existing-platform-findings)                    | Deployment, project ID, product, full Git ref and native finding ID. Web API SAST selections and full SAST collections share IDs.                                                        |
 
 Repeat local imports replace changed evidence for the same identity. Identical
 evidence is unchanged, and records omitted from a later report remain stored.

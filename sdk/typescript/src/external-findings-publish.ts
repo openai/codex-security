@@ -19,6 +19,7 @@ import {
   isStringObject,
 } from "node:util/types";
 import { readCloudCredentials } from "./cloud-publish.js";
+import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -497,15 +498,21 @@ function rejectLocalSemgrepReports(
 ): void {
   if (!input || (typeof input !== "object" && typeof input !== "function"))
     return;
-  const isPlatform = (row: ExternalFinding) =>
-    row &&
-    isSemgrepPlatformEvidence(
-      { source_finding_id: storedFindingId(row), evidence: row.evidence },
-      provider,
+  const isPlatform = (row: ExternalFinding) => {
+    if (!row) return false;
+    const id = storedFindingId(row);
+    const evidence = row.evidence;
+    return (
+      /^semgrep-guardian:[0-9a-f]{64}$/u.test(id) ||
+      ownData(ownData(evidence, "source_data"), "format") ===
+        guardianSelectionFormat ||
+      isSemgrepPlatformEvidence({ source_finding_id: id, evidence }, provider)
     );
+  };
   const hasPlatformRows = (rows: ExternalFinding[]) =>
     Array.isArray(rows) && rows.some(isPlatform);
   if (
+    ownData(ownData(input, "report"), "format") === guardianSelectionFormat ||
     semgrepPlatformReportRepository(input, provider, isPlatform) ||
     hasPlatformRows(input.findings)
   )

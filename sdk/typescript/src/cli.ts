@@ -4132,8 +4132,9 @@ export async function main(
       })
       .optional();
     imports.command("semgrep", {
-      description: "Read Semgrep Platform findings for one project and ref.",
-      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Save complete --format json output and import it with publish findings --to local --provider semgrep.",
+      description:
+        "Read a full Semgrep Platform project and ref through the Web API.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output or a selected Guardian MCP capture with publish findings --to local --provider semgrep.",
       destructive: false,
       mcp: false,
       args: z.object({

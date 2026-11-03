@@ -5,6 +5,10 @@ import {
   semgrepPlatformFormat,
 } from "./semgrep-platform-findings.js";
 import { isRecord } from "./record.js";
+import {
+  guardianSelectionFormat,
+  normalizeGuardianSelection,
+} from "./semgrep-guardian-findings.js";
 import { parseHostedScannerJson } from "./hosted-scanner-http.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
@@ -164,6 +168,11 @@ export function normalizeSemgrepFindings(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
+  if (document["format"] === guardianSelectionFormat) {
+    if (target !== "local")
+      throw new Error("Import Guardian selections into the local workbench.");
+    return normalizeGuardianSelection(document, options.sourceRepositoryUrl);
+  }
   if (isSemgrepPlatformFormat(document["format"])) {
     return normalizeSemgrepPlatformFindings(
       document,

@@ -1305,7 +1305,10 @@ source key and finding ID reports created, updated, or unchanged records.
 Records omitted from the new selection stay stored. An import with exclusions
 exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
 
-Use `--provider semgrep` for a [saved Semgrep Platform selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Use `publish findings FILE --provider semgrep --to local` for a
+[selected Guardian MCP capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings)
+or a [saved Semgrep Web API selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Guardian uses its existing sign-in. Its imported IDs are separate from Web API IDs.
 To [collect a full Semgrep project and branch](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch), use
 `import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`.
 

@@ -361,6 +361,7 @@ export {
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
 export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export { collectSelectedSemgrepGuardianFindings } from "./semgrep-guardian-findings.js";
 export type {
   SemgrepPlatformOptions,
   SemgrepPlatformReport,
