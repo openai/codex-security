@@ -30,6 +30,7 @@ const distModules = [
   "reader-selection",
   "scanner-import",
   "inspector-findings",
+  "continuum-findings",
   "snyk-findings",
   "scanner-repository-url",
   "semgrep-findings",
