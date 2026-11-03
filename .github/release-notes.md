@@ -101,6 +101,9 @@
 - honor signed-in tracker connections for finding reads ([#2212](https://github.com/openai/codex-security/pull/2212))
 - inherit the launching turn's Deep Scan speed ([#2231](https://github.com/openai/codex-security/pull/2231))
 - reconcile live and saved parent updates ([#1596](https://github.com/openai/codex-security/pull/1596))
+- review agent skills before installation ([#2088](https://github.com/openai/codex-security/pull/2088))
+- show Git errors for unreadable tracked files ([#2058](https://github.com/openai/codex-security/pull/2058))
+- prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
 
 <!-- release-section: highlights:end -->
 
@@ -112,5 +115,6 @@ Review migration steps for these breaking changes:
 
 - remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
 - share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
+- prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
 
 <!-- release-section: upgrades:end -->
