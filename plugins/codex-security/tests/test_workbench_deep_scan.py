@@ -107,6 +107,7 @@ def restore_v53_schema(state_dir: Path) -> None:
             ALTER TABLE scans DROP COLUMN completion_sequence;
             ALTER TABLE scans DROP COLUMN repository_generation;
             ALTER TABLE security_targets DROP COLUMN repository_identity;
+            ALTER TABLE security_targets DROP COLUMN git_checkout_root;
             ALTER TABLE workspaces DROP COLUMN target_path_unvalidated;
         """)
         connection.execute(
