@@ -3120,21 +3120,10 @@ def test_saved_scan_remains_readable_with_large_hunk_counts(tmp_path: Path, padd
     patch_path.write_bytes(patch.encode())
     if padded:
         subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=target, check=True)
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, token)
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch.encode()).hexdigest()}",
-    )
+    request.start(token)
+    request.generate(token, patch_path)
     saved = get_scan(state_dir, scan_id, environment={"PYTHONINTMAXSTRDIGITS": str(digit_limit)})
     remediation = saved["scan"]["findings"][0]["remediationState"]
     assert remediation["state"] == "generated"
