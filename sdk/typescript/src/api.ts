@@ -3141,6 +3141,7 @@ export class CodexSecurity {
             await this.#providerPreflightCommand(effectiveConfig),
           scanDir,
           signal,
+          ...(pluginServers !== "native" && { pluginServers }),
           ...(pluginServers === "native" && {
             plugin: {
               marketplacePath: join(

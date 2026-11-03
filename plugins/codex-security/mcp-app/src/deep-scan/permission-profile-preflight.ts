@@ -64,38 +64,63 @@ export async function readDeepScanRuntimeConfig(
   options: RuntimeConfigReadOptions & {
     readonly plugin?: { marketplacePath: string; pluginName: string };
   },
+  inspect?: (
+    config: JsonRecord,
+    hasEmptyCatalog: (server: string) => Promise<boolean>,
+  ) => Promise<JsonRecord>,
 ): Promise<JsonRecord | undefined> {
   return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
       cwd: options.configCwd ?? options.cwd,
       includeLayers: false,
     });
-    const config = record(response.config);
+    let config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
-    if (!options.plugin) return config;
     // Portable plugins expose their admitted server names through native discovery.
     // Preserve native routing if the selected Codex cannot provide that metadata.
-    const detail = await client
-      .request("plugin/read", options.plugin)
-      .catch(() => undefined);
-    options.signal.throwIfAborted();
-    const plugin = record(detail?.plugin);
-    const summary = record(plugin?.summary);
-    const servers = plugin?.mcpServers;
-    if (
-      summary?.installed !== true ||
-      summary.enabled !== true ||
-      !Array.isArray(servers) ||
-      !servers.every((name) => typeof name === "string")
-    )
-      return undefined;
-    return {
-      ...config,
-      mcp_servers: {
-        ...Object.fromEntries(servers.map((name) => [name, {}])),
-        ...record(config.mcp_servers),
-      },
-    };
+    if (options.plugin) {
+      const detail = await client
+        .request("plugin/read", options.plugin)
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const plugin = record(detail?.plugin);
+      const summary = record(plugin?.summary);
+      const servers = plugin?.mcpServers;
+      if (
+        summary?.installed !== true ||
+        summary.enabled !== true ||
+        !Array.isArray(servers) ||
+        !servers.every((name) => typeof name === "string")
+      )
+        return undefined;
+      config = {
+        ...config,
+        mcp_servers: {
+          ...Object.fromEntries(servers.map((name) => [name, {}])),
+          ...record(config.mcp_servers),
+        },
+      };
+    }
+    if (!inspect) return config;
+    return inspect(config, async (serverName) => {
+      const result = await client
+        .request("mcpServerStatus/list", {
+          serverName,
+          detail: "toolsAndAuthOnly",
+        })
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const match = Array.isArray(result?.data)
+        ? result.data.map(record).find((entry) => entry?.name === serverName)
+        : undefined;
+      const tools = record(match?.tools);
+      // Native status applies tool filters before it returns the catalog.
+      return (
+        match?.toolsError === null &&
+        tools !== undefined &&
+        Object.keys(tools).length === 0
+      );
+    });
   });
 }
 

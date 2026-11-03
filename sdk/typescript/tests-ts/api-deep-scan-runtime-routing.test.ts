@@ -1,5 +1,5 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
@@ -456,7 +456,104 @@ test.each([
   }
 });
 
-test("older app-servers retain supplied routing without starting in the caller project", async () => {
+test("stock Codex resolves ordered profile overrides and inherited transport policy in the scan", async () => {
+  const home = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  await writeFile(
+    join(scanDir, "instructions.md"),
+    "Synthetic scan instructions.",
+  );
+  const owner = "codex-security";
+  const read = () =>
+    readDeepScanParentConfig({
+      codexOptions: {
+        nativeProfile: "fixture",
+        env: { CODEX_HOME: relative(process.cwd(), home) },
+        config: {
+          "features.code_mode.enabled": true,
+          features: {
+            code_mode: {
+              enabled: true,
+              direct_only_tool_namespaces: ["audit"],
+            },
+          },
+          model_instructions_file: "instructions.md",
+          mcp_servers: { [owner]: { command: "fixture" } },
+        },
+      },
+      preflightCommand: resolveCodexCommand({}),
+      scanDir,
+      signal: new AbortController().signal,
+    });
+  const overrides = async () => {
+    const config = await read();
+    expect(config?.["features"]).toMatchObject({
+      code_mode: { enabled: true, direct_only_tool_namespaces: ["audit"] },
+    });
+    return deepScanParentToolOverrides(config!, {});
+  };
+  expect(await overrides()).toEqual([
+    'mcp_servers.codex-security.omit_tools_from=["code_mode","deferred"]',
+  ]);
+  await writeFile(
+    join(home, "config.toml"),
+    '[mcp_servers.codex-security]\ncommand="fixture"\nomit_tools_from=["direct"]\n',
+  );
+  expect(await overrides()).toEqual([]);
+});
+
+test("stock Codex counts only admitted tools from a colliding MCP server", async () => {
+  const home = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  const script = join(home, "peer.mjs");
+  await writeFile(
+    script,
+    `import { createInterface } from "node:readline";
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line);
+  if (id === undefined) continue;
+  const result = method === "initialize" ? {
+    protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" },
+  } : method === "tools/list" ? { tools: [{ name: "peer_ping", inputSchema: { type: "object" } }] } : {};
+  console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
+}`,
+  );
+  const pluginServers = { "codex-security": {} };
+  const routes = async (allowed: string) => {
+    const config = await readDeepScanParentConfig({
+      codexOptions: {
+        env: { CODEX_HOME: home },
+        config: {
+          features: {
+            code_mode: {
+              enabled: true,
+              direct_only_tool_namespaces: ["audit"],
+            },
+            non_prefixed_mcp_tool_names: false,
+          },
+          mcp_servers: {
+            codex_security: {
+              command: process.execPath,
+              args: [script],
+              enabled_tools: [allowed],
+            },
+          },
+        },
+      },
+      preflightCommand: resolveCodexCommand({}),
+      pluginServers,
+      scanDir,
+      signal: new AbortController().signal,
+    });
+    return deepScanParentToolOverrides(config!, pluginServers);
+  };
+  expect(await routes("absent")).toEqual([
+    'features.code_mode.direct_only_tool_namespaces=["audit","mcp__codex_security","codex_security"]',
+  ]);
+  expect(await routes("peer_ping")).toEqual([]);
+});
+
+test("an older custom launcher retains supplied routing without starting in the caller project", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
   await writeFile(
@@ -469,7 +566,14 @@ test("older app-servers retain supplied routing without starting in the caller p
   ) =>
     readDeepScanParentConfig({
       codexOptions: { config, configOverrides, env: { CODEX_HOME: home } },
-      preflightCommand: resolveCodexCommand({}),
+      preflightCommand: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "process.exit(process.argv.includes('--help') ? 0 : 1)",
+          "--",
+        ],
+      },
       scanDir,
       signal: new AbortController().signal,
     });
@@ -488,6 +592,27 @@ test("older app-servers retain supplied routing without starting in the caller p
   ).toEqual(expected("last"));
   expect(await read({ "features.code_mode": "invalid" })).toEqual({
     features: { code_mode: "invalid" },
+  });
+  expect(
+    await read({}, [
+      "features.code_mode=false",
+      'features.code_mode.direct_only_tool_namespaces=["audit"]',
+      "features.code_mode=true",
+    ]),
+  ).toEqual({
+    features: {
+      code_mode: { enabled: true, direct_only_tool_namespaces: ["audit"] },
+    },
+  });
+  expect(
+    await read({}, [
+      "features.code_mode.enabled=false",
+      'features={code_mode={enabled=true,direct_only_tool_namespaces=["audit"]}}',
+    ]),
+  ).toEqual({
+    features: {
+      code_mode: { enabled: true, direct_only_tool_namespaces: ["audit"] },
+    },
   });
   const owner = { command: "fixture" };
   const explicit = { mcp_servers: { "codex-security": owner } };
