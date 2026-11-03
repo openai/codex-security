@@ -57,7 +57,8 @@ import {
 } from "./blackduck-findings.js";
 import {
   checkmarxReportRepositories,
-  checkmarxReportRepository,
+  checkmarxReportScope,
+  checkmarxSource,
   projectedCheckmarxRepositoryUrl,
 } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
@@ -1761,16 +1762,14 @@ async function preparePublicationInput(
       ))
         requireDestination("Sonar source", url);
     }
-    requireDestination(
-      "Checkmarx source",
-      checkmarxReportRepository(
-        options.provider,
-        findings,
-        report,
-        "cloud",
-        historicalCheckmarx,
-      ),
+    const reportScope = checkmarxReportScope(
+      options.provider,
+      findings,
+      report,
+      "cloud",
+      historicalCheckmarx,
     );
+    requireDestination("Checkmarx source", reportScope?.url);
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
@@ -1811,10 +1810,14 @@ async function preparePublicationInput(
       const checkmarxUrl = checkmarx
         ? checkmarx.get(id)?.url
         : projectedCheckmarxRepositoryUrl(finding, "cloud");
+      const checkmarxProvenance = reportScope || checkmarxSource(finding);
+      const checkWizAsset =
+        options.provider === "wiz" && (projected || checkmarxProvenance);
       if (
         replay &&
         !projected &&
         !checkmarxUrl &&
+        !checkmarxProvenance &&
         options.provider !== "inspector" &&
         options.provider !== "veracode" &&
         options.provider !== "checkmarx" &&
@@ -1826,18 +1829,23 @@ async function preparePublicationInput(
         projected,
         checkmarxUrl,
         evidence.details?.repository?.url,
-        options.provider === "wiz"
-          ? projected || checkmarxUrl
-            ? wizFindingRepository(evidence, "cloud")?.url
-            : wizCsvRepositoryUrl(evidence)
-          : undefined,
+        checkWizAsset
+          ? wizFindingRepository(evidence, "cloud")?.url
+          : options.provider === "wiz"
+            ? wizCsvRepositoryUrl(evidence)
+            : undefined,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
             })
           : []),
         ...(options.provider === "endor"
-          ? endorRepositoryUrls(evidence.source_data)
+          ? endorRepositoryUrls(
+              evidence.source_data,
+              Boolean(
+                replay && !projected && !checkmarxUrl && checkmarxProvenance,
+              ),
+            )
           : []),
         options.provider === "github"
           ? dependabotRepository(finding)

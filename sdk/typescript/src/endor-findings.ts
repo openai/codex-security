@@ -17,10 +17,24 @@ import {
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
-export function endorRepositoryUrls(sourceData: unknown): string[] {
+export function endorRepositoryUrls(
+  sourceData: unknown,
+  retainedUrlsOnly = false,
+): string[] {
   if (!isRecord(sourceData)) return [];
   const run = sourceData["runContext"];
   if (run == null) return [];
+  if (retainedUrlsOnly) {
+    // Historical projections can retain opaque run metadata alongside explicit URLs.
+    const entries = isRecord(run) ? run["versionControlProvenance"] : undefined;
+    return Array.isArray(entries)
+      ? entries.flatMap((entry: unknown) =>
+          isRecord(entry) && typeof entry["repositoryUri"] === "string"
+            ? [entry["repositoryUri"]]
+            : [],
+        )
+      : [];
+  }
   return array(
     record(run, "Endor run context")["versionControlProvenance"] ?? [],
     "Endor version control provenance",

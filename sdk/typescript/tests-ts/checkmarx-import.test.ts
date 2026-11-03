@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { readCheckmarxFindings } from "../src/checkmarx-findings.js";
 import { main } from "../src/cli.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { dependencies } from "./cli-fixtures.js";
 import {
   createAndReplayFinding,
@@ -179,3 +180,71 @@ test("reads plain and gzipped UTF-16 CxSAST XML while keeping Checkmarx One JSON
     code: "ERR_ENCODING_INVALID_ENCODED_DATA",
   });
 });
+
+test.each(["secondary URL", "embedded newline"])(
+  "Checkmarx binds only an effective Git fetch URL, even for projections (%s)",
+  async (kind) => {
+    const primary = "https://github.com/example/primary";
+    await using fixture = await localReportFixture(
+      "checkmarx.json",
+      {
+        provider: "checkmarx",
+        sourceKey: "example/project/main",
+        sourceRepositoryUrl: repositoryUrl,
+      },
+      { remote: primary },
+    );
+    await writeFile(fixture.file, oneReport("High"));
+    if (kind === "secondary URL")
+      fixture.git("config", "--add", "remote.origin.url", repositoryUrl);
+    else
+      fixture.git(
+        "config",
+        "remote.origin.url",
+        primary + "\n" + repositoryUrl,
+      );
+    const expected =
+      kind === "secondary URL"
+        ? /does not match a configured remote/
+        : /contains a line break/;
+    const project = () =>
+      prepareNormalizedLocalImport(
+        {
+          read: 1,
+          excluded: [],
+          report: { format: "sdk-selection" },
+          findings: [
+            {
+              source_finding_id: "projected-row",
+              evidence: {
+                title: "Example finding",
+                severity: "low",
+                details: {
+                  kind: "sast",
+                  scanner_origin: "CxSAST",
+                  repository: { url: repositoryUrl },
+                },
+              },
+            },
+          ],
+        },
+        {
+          provider: "wiz",
+          sourceKey: fixture.sourceKey,
+          repository: fixture.repository,
+        },
+        { environment: fixture.environment },
+      );
+    await expect(project()).rejects.toThrow(expected);
+    await expect(fixture.prepare()).rejects.toThrow(expected);
+    fixture.git(
+      "config",
+      "--replace-all",
+      "remote.origin.url",
+      "alias:example/project",
+    );
+    fixture.git("config", "url.https://github.com/.insteadOf", "alias:");
+    expect((await fixture.prepare()).matchesRepositoryRemote).toBe(true);
+    expect((await project()).matchesRepositoryRemote).toBe(true);
+  },
+);

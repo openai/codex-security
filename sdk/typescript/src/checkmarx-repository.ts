@@ -2,7 +2,7 @@ import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
-import { requiredText } from "./scanner-import.js";
+import { requiredText, text } from "./scanner-import.js";
 import { checkmarxOneId } from "./checkmarx-one.js";
 import {
   checkmarxResultViewer,
@@ -29,7 +29,10 @@ function scanKey(value: unknown, xml: boolean) {
 }
 
 /** A native payload can verify its occurrence ID. A projection can still identify its source. */
-function checkmarxSource({ source_finding_id: id, evidence }: ExternalFinding) {
+export function checkmarxSource(
+  { source_finding_id: id, evidence }: ExternalFinding,
+  provider?: Provider,
+) {
   const data = evidence.source_data;
   const format = data?.["format"];
   if (checkmarxFormat(format)) return format;
@@ -39,7 +42,10 @@ function checkmarxSource({ source_finding_id: id, evidence }: ExternalFinding) {
     scanner === "CxSAST" ||
     scanner === "Checkmarx One SAST" ||
     Boolean(checkmarxResultViewer(data));
-  if (data && (projected || "sourceRepositoryUrl" in data)) {
+  if (
+    data &&
+    (provider === "checkmarx" || projected || "sourceRepositoryUrl" in data)
+  ) {
     const row = data["row"];
     if (isRecord(row) && row["type"] === "sast" && "similarityId" in row)
       return "checkmarx-one-json";
@@ -69,12 +75,21 @@ function requireCheckmarx(provider: Provider) {
     );
 }
 
+function teamPath(value: string) {
+  return value
+    .replaceAll("\\", "/")
+    .replace(/^\/+|\/+$/gu, "")
+    .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+}
+
 /** Compare each explicit claim, including selections that omit the original report. */
 function checkBatchScope(
   findings: ExternalFindings["findings"],
   report: ExternalFindings["report"],
 ) {
   let project = report?.["projectId"];
+  let projectName: unknown;
+  let team: unknown;
   let scanner: unknown;
   let instance: string | undefined;
   function agree(current: unknown, value: unknown) {
@@ -95,7 +110,7 @@ function checkBatchScope(
   }
   checkFormat(report?.["format"]);
   for (const finding of findings) {
-    checkFormat(checkmarxSource(finding));
+    checkFormat(checkmarxSource(finding, "checkmarx"));
     const { evidence } = finding;
     project = agree(project, evidence.source_data?.["projectId"]);
     scanner = agree(scanner, evidence.details?.scanner_origin);
@@ -106,6 +121,8 @@ function checkBatchScope(
     ...findings.map(({ evidence }) => evidence.source_data),
   ];
   const xml = scanner === "CxSAST" || sources.some(checkmarxResultViewer);
+  const namedXml =
+    xml || sources.some((data) => text(data?.["teamFullPathOnReportDate"]));
   if (xml) agree(scanner, "CxSAST");
   let scan = scanKey(report?.["scanId"], xml);
   for (const { evidence } of findings)
@@ -113,6 +130,11 @@ function checkBatchScope(
 
   for (const data of sources) {
     if (!data) continue;
+    if (namedXml) {
+      projectName = agree(projectName, text(data["projectName"]));
+      const path = text(data["teamFullPathOnReportDate"]);
+      if (path) team = agree(team, teamPath(path));
+    }
     if (!xml) {
       // A retained deployment URL distinguishes this claim from opaque SDK metadata.
       const value = data["instance"];
@@ -127,13 +149,13 @@ function checkBatchScope(
 }
 
 /** The native reader also retains scope when a report has no accepted rows. */
-export function checkmarxReportRepository(
+export function checkmarxReportScope(
   provider: Provider,
   findings: ExternalFindings["findings"],
   report: ExternalFindings["report"],
   target: ExternalImportTarget,
   historical = false,
-): string | undefined {
+): { url?: string } | undefined {
   if (provider === "checkmarx") checkBatchScope(findings, report);
   if (!report) return;
   const format = report["format"];
@@ -149,10 +171,10 @@ export function checkmarxReportRepository(
       typeof source === "string" &&
       (provider === "checkmarx" ||
         checkmarxFormat(format) ||
-        (format == null && findings.some(checkmarxSource)))
+        findings.some((finding) => checkmarxSource(finding)))
     )
-      return declaredScannerRepositoryUrl(source, "Checkmarx", target);
-    return;
+      return { url: declaredScannerRepositoryUrl(source, "Checkmarx", target) };
+    return checkmarxFormat(format) ? {} : undefined;
   }
   requireCheckmarx(provider);
   const xml = format === "cxsast-xml";
@@ -167,7 +189,9 @@ export function checkmarxReportRepository(
     const { evidence } = finding;
     const data = evidence.source_data;
     const rowFormat =
-      data && "format" in data ? data["format"] : checkmarxSource(finding);
+      data && "format" in data
+        ? data["format"]
+        : checkmarxSource(finding, provider);
     if (
       rowFormat !== format ||
       scanKey(evidence.source_scan_id, xml) !== scan ||
@@ -177,11 +201,13 @@ export function checkmarxReportRepository(
         "Checkmarx finding does not match the retained report format, scan or project.",
       );
   }
-  return declaredScannerRepositoryUrl(
-    report["sourceRepositoryUrl"],
-    "Checkmarx",
-    target,
-  );
+  return {
+    url: declaredScannerRepositoryUrl(
+      report["sourceRepositoryUrl"],
+      "Checkmarx",
+      target,
+    ),
+  };
 }
 
 export const checkmarxReportRepositories = repositoryScopeValidator(
@@ -193,7 +219,7 @@ export const checkmarxReportRepositories = repositoryScopeValidator(
   (provider, finding, target) => {
     const { source_finding_id: id, evidence } = finding;
     const data = evidence.source_data;
-    const format = checkmarxSource(finding);
+    const format = checkmarxSource(finding, provider);
     if (!checkmarxFormat(format) || !data) {
       if (provider === "checkmarx" && nativeId.test(id))
         throw new Error(

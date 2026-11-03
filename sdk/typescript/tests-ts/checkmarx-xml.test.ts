@@ -67,6 +67,35 @@ const withLink = (xml: string, tag: string, link: string) =>
     `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
   );
 
+test("retains optional CxSAST project and team names without changing occurrence IDs", () => {
+  const xml = report(result(13));
+  const original = normalize(xml);
+  const names = {
+    projectName: "Source & API",
+    teamFullPathOnReportDate: "CxServer\\SP\\Café",
+  };
+  for (const field of Object.keys(names)) {
+    expect(original.report).not.toHaveProperty(field);
+    expect(original.findings[0]!.evidence.source_data).not.toHaveProperty(
+      field,
+    );
+  }
+  const scoped = normalize(
+    xml.replace(
+      "<CxXMLResults ",
+      '<CxXMLResults ProjectName="Source &amp; API" TeamFullPathOnReportDate="CxServer\\SP\\Café" ',
+    ),
+  );
+  expect(scoped.report).toEqual({ ...original.report, ...names });
+  expect(scoped.findings[0]!.evidence.source_data).toEqual({
+    ...original.findings[0]!.evidence.source_data,
+    ...names,
+  });
+  expect(scoped.findings[0]!.source_finding_id).toBe(
+    original.findings[0]!.source_finding_id,
+  );
+});
+
 test("checks explicit scan, project and path IDs in native viewer links", () => {
   const viewer = "https://sast.example/CxWebClient/ViewerMain.aspx";
   const matching = viewer + "?pathid=1&projectid=8&scanid=100";

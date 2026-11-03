@@ -1,11 +1,13 @@
 import json
 import os
+import re
 import runpy
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from xml.etree.ElementTree import Element, ElementTree
@@ -31,7 +33,8 @@ def capture_dir(monkeypatch, tmp_path):
     monkeypatch.chdir(source)
     monkeypatch.setattr(tempfile, "tempdir", str(directory))
     monkeypatch.setenv("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS", "1")
-    monkeypatch.delenv("CX_CONFIG_FILE_PATH", raising=False)
+    for setting in ("CX_CONFIG_FILE_PATH", "CX_APIKEY", "CX_CLIENT_ID", "CX_CLIENT_SECRET"):
+        monkeypatch.delenv(setting, raising=False)
     return directory
 
 
@@ -87,6 +90,32 @@ def test_refuses_profile_routed_through_the_checkout(capture_dir, tmp_path, monk
             link.symlink_to(os.path.relpath(target, link.parent), target_is_directory=True)
     profile = selected / "profile.yaml"
     assert profile.samefile(installed / "profile.yaml")
+    # Stand in for a checkout link to an SMB share. Following it, even to query
+    # the file type, would start authentication before the vendor process runs.
+    following = {selected, profile, checkout_link, checkout_link / "profile.yaml"}
+    original_stat = Path.stat
+    original_resolve = Path.resolve
+    original_readlink = Path.readlink
+
+    def guarded_stat(path, *args, **kwargs):
+        assert path not in following or not kwargs.get("follow_symlinks", True)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_resolve(path, *args, **kwargs):
+        assert path not in following
+        return original_resolve(path, *args, **kwargs)
+
+    def guarded_readlink(path):
+        assert path != checkout_link
+        return original_readlink(path)
+
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+    monkeypatch.setattr(Path, "readlink", guarded_readlink)
+    collector = runpy.run_path(str(SCRIPT))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(checkout_link), str(selected), str(installed)]))
+    with pytest.raises(ValueError, match="outside the source checkout"):
+        collector["installed_file"](str(profile), source)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(profile))
     cx = executable(tmp_path, "cx")
@@ -94,28 +123,49 @@ def test_refuses_profile_routed_through_the_checkout(capture_dir, tmp_path, monk
     assert "CX_CONFIG_FILE_PATH" in capsys.readouterr().err
     assert not list(capture_dir.iterdir())
 
+    monkeypatch.setenv("TMPDIR", str(selected))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setattr(
+        tempfile, "TemporaryFile", lambda **kwargs: pytest.fail("probed a checkout-selected temp")
+    )
+    with pytest.raises(ValueError, match="temporary directory outside"):
+        collector["capture_tempdir"](source)
+
 
 @pytest.mark.cross_platform
-def test_skips_inaccessible_vendor_search_directories(capture_dir, tmp_path, monkeypatch):
-    blocked = tmp_path / "protected" / "bin"
-    tools = tmp_path / "tools"
-    tools.mkdir()
-    original_is_dir = Path.is_dir
+def test_checkout_git_marker_does_not_follow_links(capture_dir, tmp_path, monkeypatch):
+    source = Path.cwd()
+    marker = source / ".git"
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(marker), str(tmp_path)], check=True)
+    else:
+        marker.symlink_to(tmp_path, target_is_directory=True)
+    original_stat = Path.stat
 
-    def is_dir(path):
-        if path == blocked:
-            raise PermissionError("cannot traverse PATH directory")
-        return original_is_dir(path)
+    def guarded_stat(path, *args, **kwargs):
+        if path == marker or marker in path.parents:
+            assert path == marker and not kwargs.get("follow_symlinks", True)
+        return original_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", is_dir)
-    monkeypatch.setenv("PATH", os.pathsep.join([str(blocked), str(tools)]))
-    assert runpy.run_path(str(SCRIPT))["vendor_environment"](Path.cwd())["PATH"] == str(tools)
+    monkeypatch.setattr(Path, "stat", guarded_stat)
+    assert runpy.run_path(str(SCRIPT))["source_root"](source) == source
+
+
+def cxflow_jar(path, version="1.7.14", main="com.checkmarx.flow.CxFlowApplication"):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "META-INF/MANIFEST.MF", f"Manifest-Version: 1.0\r\nStart-Class: {main}\r\n\r\n"
+        )
+        archive.writestr(
+            "META-INF/build-info.properties",
+            f"build.group=com.checkmarx\nbuild.version={version}\n",
+        )
 
 
 @pytest.fixture
 def cxsast_args(tmp_path):
     jar, config = tmp_path / "cx-flow.jar", tmp_path / "application.yml"
-    jar.touch()
+    cxflow_jar(jar)
     config.touch()
     return [
         "cxsast",
@@ -131,6 +181,26 @@ def cxsast_args(tmp_path):
         "--java",
         executable(tmp_path, "java"),
     ]
+
+
+@pytest.mark.parametrize(
+    "version, main",
+    [
+        ("1.6.36", "com.checkmarx.flow.CxFlowApplication"),
+        ("unknown", "com.checkmarx.flow.CxFlowApplication"),
+        ("1.7.14", "other.Application"),
+    ],
+)
+@pytest.mark.cross_platform
+def test_refuses_unknown_or_unsupported_scan_selection(
+    version, main, capture_dir, cxsast_args, monkeypatch, capsys
+):
+    jar = Path(cxsast_args[cxsast_args.index("--jar") + 1])
+    cxflow_jar(jar, version=version, main=main)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("started Java"))
+    assert invoke(monkeypatch, *cxsast_args) != 0
+    assert "scoped CxSAST XML export" in capsys.readouterr().err
+    assert not list(capture_dir.iterdir())
 
 
 @pytest.mark.parametrize("option", ["--cx", "--java", "--jar", "--config"])
@@ -280,7 +350,6 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
     config = tmp_path / "my cx config"
     config.touch()
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(config))
-    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx256m")
     tools = tmp_path / "external tools"
     tools.mkdir()
     checkout_bin = Path.cwd() / "bin"
@@ -295,7 +364,6 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
     }
     for name, value in loaders.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("JDK_ALTERNATE_VM", "unrelated-java-setting")
     requested = ["--source-root", str(selected), "one", ONE_SCAN, "--cx", cx]
     reports = []
 
@@ -303,11 +371,9 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         out = Path(cwd)
         assert out.is_relative_to(capture_dir)
         assert kwargs["env"]["CX_CONFIG_FILE_PATH"] == str(config)
-        assert kwargs["env"]["JAVA_TOOL_OPTIONS"] == "-Xmx256m"
-        assert kwargs["env"]["PATH"] == str(tools.resolve())
+        assert "PATH" not in kwargs["env"]
         if os.name != "nt":
             assert loaders.keys().isdisjoint(kwargs["env"])
-        assert kwargs["env"]["JDK_ALTERNATE_VM"] == "unrelated-java-setting"
         kwargs["stdout"].write("retrieved existing scan\n")
         assert list(map(str, args)) == [
             cx,
@@ -434,7 +500,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         monkeypatch.setenv(name, value)
     jar = tmp_path / "Cx Flow.jar"
     config = tmp_path / "private config,west.yml"
-    jar.touch()
+    cxflow_jar(jar)
     config.touch()
 
     def run(args, *, cwd, **kwargs):
@@ -523,6 +589,38 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         assert code != 0
         assert not stdout
         assert not list(capture_dir.iterdir())
+
+
+@pytest.mark.native_macos
+@pytest.mark.skipif(os.name != "posix", reason="exercises the Unix Java launcher")
+def test_java_receives_team_and_project_names_in_the_cxsast_environment(tmp_path):
+    java = shutil.which("java")
+    if not java:
+        pytest.skip("requires a Java runtime")
+    env = runpy.run_path(str(SCRIPT))["cxsast_environment"](str(tmp_path))
+    modules = subprocess.run([java, "--list-modules"], env=env, capture_output=True)
+    compiler = re.search(rb"^jdk\.compiler@(\d+)", modules.stdout, re.MULTILINE)
+    if not compiler or int(compiler[1]) < 11:
+        pytest.skip("the Java source-file probe requires a JDK 11+ compiler module")
+    probe = tmp_path / "Names.java"
+    probe.write_text(
+        """import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.Arrays;
+
+class Names {
+    public static void main(String[] args) throws Exception {
+        Files.write(Paths.get("arguments.txt"), Arrays.asList(args), StandardCharsets.UTF_8);
+    }
+}
+""",
+        encoding="ascii",
+    )
+    names = ["--cx-team=/CxServer/Équipe 東京", "--cx-project=Projet Maße"]
+    subprocess.run(
+        [java, "-Dfile.encoding=UTF-8", probe, *names], cwd=tmp_path, env=env, check=True
+    )
+    assert (tmp_path / "arguments.txt").read_text(encoding="utf-8").splitlines() == names
 
 
 @pytest.mark.cross_platform
@@ -665,42 +763,42 @@ def test_cxsast_rejects_unselected_scope_before_vendor_lookup(
 def test_cancellation_reaps_vendor_and_removes_partial_report(
     name, capture_dir, monkeypatch, tmp_path
 ):
-    # Bash as the native test client reads its first argument ("results") from PATH.
-    bash = shutil.which("bash", path=os.defpath)
-    assert bash, "Bash is required to simulate an active native vendor process"
-    (tmp_path / "results").write_text(
-        "echo partial >cx_result.json\n"
-        'echo $$ >"$VENDOR_PID_FILE"\n'
-        f'kill -{name} "$PPID"\n'
-        "exec sleep 30\n"
-    )
-    pid_file = tmp_path / "vendor.pid"
-    monkeypatch.setenv("VENDOR_PID_FILE", str(pid_file))
-    monkeypatch.setenv("TMPDIR", str(capture_dir))
-    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), os.environ["PATH"]]))
+    # Run a native child that signals the active collector after creating its partial report.
+    native_popen = subprocess.Popen
+    child = None
     signum = getattr(signal, name)
-    # A caught signal becomes SIG_DFL on exec, even when pytest was started with nohup.
+
+    def start_child(_command, **kwargs):
+        nonlocal child
+        child = native_popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                (
+                    "import os, signal, time; from pathlib import Path; "
+                    "Path('cx_result.json').write_text('partial'); "
+                    f"os.kill(os.getppid(), signal.{name}); time.sleep(30)"
+                ),
+            ],
+            **kwargs,
+        )
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", start_child)
     previous = signal.signal(signum, lambda *_: None)
     try:
-        result = subprocess.run(
-            [sys.executable, "-I", "-S", str(SCRIPT), "one", ONE_SCAN, "--cx", bash],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
+        assert (
+            invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) == 128 + signum
         )
+        assert child is not None and child.returncode == -signal.SIGKILL
+        assert not list(capture_dir.iterdir())
     finally:
         signal.signal(signum, previous)
-    pid = int(pid_file.read_text())
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        pass
-    else:
-        os.kill(pid, signal.SIGKILL)
-        pytest.fail("vendor survived collector cancellation")
-    assert result.returncode == 128 + signum
-    assert not result.stdout
-    assert not list(capture_dir.iterdir())
+        if child is not None:
+            child.kill()
+            child.wait()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="exercises POSIX termination signals")
@@ -790,3 +888,53 @@ def test_capture_private_before_vendor_writes_on_legacy_windows_python(
     args = SimpleNamespace(product="one", scan_id=ONE_SCAN, cx="unused")
     collector["collect"](args, None, run)
     assert ";;;WD)" not in dacl(Path(capsys.readouterr().out.strip()))
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("login", ["named-profile", "default-profile", "env-oauth", "env-key"])
+def test_one_keeps_credentials_with_the_selected_login(capture_dir, tmp_path, monkeypatch, login):
+    module = runpy.run_path(str(SCRIPT))
+    selected = tmp_path / "signed in.yaml"
+    selected.write_text("cx_client_id: saved-account\n")
+    oauth = {
+        "CX_CLIENT_ID": "test-account",
+        "CX_CLIENT_SECRET": "synthetic-secret",
+        "CX_BASE_URI": "https://api.example.invalid",
+        "CX_TENANT": "example",
+        "CX_BASE_AUTH_URI": "https://identity.example.invalid",
+    }
+    for name, value in oauth.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CX_HTTP_PROXY", "http://proxy.example.invalid")
+    monkeypatch.setenv("http_proxy", "http://proxy.example.invalid")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid")
+    monkeypatch.setenv("CX_KEYRING_MODE", "required")
+    if login == "named-profile":
+        monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(selected))
+    if login == "default-profile":
+        monkeypatch.delenv("CX_CLIENT_ID")
+    if login in {"named-profile", "env-key"}:
+        monkeypatch.setenv("CX_APIKEY", "synthetic-key")
+
+    def run(_args, *, cwd, env, **_kwargs):
+        assert {"HTTP_PROXY", "http_proxy", "CX_HTTP_PROXY"}.isdisjoint(env)
+        if login in {"named-profile", "default-profile"}:
+            assert oauth.keys().isdisjoint(env) and "CX_APIKEY" not in env
+            assert env.get("CX_CONFIG_FILE_PATH") == (
+                str(selected) if login == "named-profile" else None
+            )
+            assert env["CX_KEYRING_MODE"] == "required"
+        else:
+            profile = Path(env["CX_CONFIG_FILE_PATH"])
+            assert profile.parent == Path(cwd) and profile.read_text() == "{}\n"
+            assert env["CX_KEYRING_MODE"] == "disabled"
+            if login == "env-key":
+                assert env["CX_APIKEY"] == "synthetic-key" and oauth.keys().isdisjoint(env)
+            else:
+                assert {name: env[name] for name in oauth} == oauth and "CX_APIKEY" not in env
+        Path(cwd, "cx_result.json").write_text(json.dumps({"scanID": ONE_SCAN}))
+        return 0
+
+    args = SimpleNamespace(product="one", cx=tmp_path / "cx", scan_id=ONE_SCAN)
+    module["collect"](args, Path.cwd(), run)
+    assert list(capture_dir.glob("*/*")) == list(capture_dir.glob("*/cx_result.json"))

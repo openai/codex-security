@@ -131,6 +131,10 @@ function readReport(contents: string) {
   let projectId = "";
   let scanId = "";
   let instance: string | undefined;
+  const projectNames: {
+    projectName?: string;
+    teamFullPathOnReportDate?: string;
+  } = {};
   parser.on("opentag", ({ name, attributes }) => {
     const element: Element = { name, attributes, children: [], text: "" };
     if (!stack.length) {
@@ -138,6 +142,10 @@ function readReport(contents: string) {
         throw new Error("Expected a Checkmarx CxSAST CxXMLResults report.");
       projectId = requiredText(attributes["ProjectId"], "CxSAST ProjectId");
       scanId = requiredText(attributes["ScanId"], "CxSAST ScanId");
+      const projectName = text(attributes["ProjectName"]);
+      const team = text(attributes["TeamFullPathOnReportDate"]);
+      if (projectName) projectNames.projectName = projectName;
+      if (team) projectNames.teamFullPathOnReportDate = team;
       const link = viewerLink(attributes["DeepLink"]);
       viewerId(link, "scanid", scanId);
       viewerId(link, "projectid", projectId);
@@ -166,6 +174,7 @@ function readReport(contents: string) {
     const path = paths.length === 1 ? paths[0] : undefined;
     rows.push({
       projectId,
+      ...projectNames,
       query: parent.attributes,
       result: element.attributes,
       path: path?.attributes ?? null,
@@ -176,7 +185,7 @@ function readReport(contents: string) {
     });
   });
   parser.write(contents).close();
-  return { rows, projectId, scanId, instance };
+  return { rows, projectId, projectNames, scanId, instance };
 }
 
 /** SimilarityId groups paths, including paths with different intermediate nodes. */
@@ -217,6 +226,7 @@ export function normalizeCheckmarxXml(
     rows,
     scanId,
     projectId,
+    projectNames,
     instance: rootInstance,
   } = readReport(contents);
   function normalize(instance: string | undefined) {
@@ -253,6 +263,7 @@ export function normalizeCheckmarxXml(
           format: "cxsast-xml",
           scanId,
           projectId,
+          ...projectNames,
           ...(instance && { instance }),
           sourceRepositoryUrl: repository,
         },

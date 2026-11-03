@@ -1819,14 +1819,35 @@ const savedDependabotData = {
   sourceRepositoryUrl: "https://github.com/example/different",
 };
 
+const wizBranchAsset = {
+  nativeType: "github#repositoryBranch",
+  cloudProviderURL: "https://github.com/example/project/tree/main",
+};
+
 test.each([
   {
-    data: { format: "cxsast-xml" },
+    data: { format: "cxsast-xml", vulnerableAsset: wizBranchAsset },
     selected: options,
     requiredProvider: "checkmarx",
     filename:
-      "61dd30e93a03bf006171270e361d860fc8641071d09d075c57d8f048d5376d5d.pending.json",
-    digest: "0f79d391b698f841e2736f1260852e9265e835c7adfc94ce447bd7d5566db878",
+      "44c97129ef37ba88ccf7d6a1c43c3ef4c051080c0e746145b1f37dc6216f0181.pending.json",
+    digest: "7c90e7bf4a7d9c64c7cbbc15fdcdf6a3ff0e14f50cda77c9b523d834cf337dd7",
+  },
+  {
+    data: {
+      format: "cxsast-xml",
+      runContext: {
+        versionControlProvenance: [
+          "opaque",
+          { repositoryUri: "https://github.com/example/project" },
+        ],
+      },
+    },
+    selected: { ...options, provider: "endor" as const },
+    requiredProvider: "checkmarx",
+    filename:
+      "4d59df5533b5d0acbbcc2e28884e597a52d8b55e354eb15539d6cfba37c79011.pending.json",
+    digest: "d19b090ff4cd18329b37e74e674394deb2670c1d0dfc7bc088c02edcbb088cad",
   },
   {
     ...savedBlackDuckEvidence,
@@ -1931,6 +1952,13 @@ test.each([
       );
       expect(f.posts).toHaveLength(0);
       return;
+    }
+    if (requiredProvider === "checkmarx") {
+      const original = f.state.repositoryUrl;
+      f.state.repositoryUrl += "-other";
+      await expect(prepare()).rejects.toThrow(`belongs to "${original}"`);
+      expect(f.posts).toHaveLength(0);
+      f.state.repositoryUrl = original;
     }
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
@@ -2051,6 +2079,71 @@ test("a projected Checkmarx row binds its unformatted report repository under Wi
   f.state.repositoryUrl = source;
   expect((await (await prepare(projected)).publish()).verified).toBe(1);
   expect(f.posts[1]).toBe(f.posts[0]);
+});
+
+test("a saved Snyk import rechecks SARIF provenance on a projected Checkmarx occurrence", async () => {
+  const f = await fixture();
+  const source = f.state.repositoryUrl;
+  const { normalized } = await snykRepositoryEvidence("SARIF", source);
+  const finding = normalized.findings[0]!;
+  finding.source_finding_id = "checkmarx-one:" + "a".repeat(64);
+  const prepare = () =>
+    prepareNormalizedExternalPublication(
+      normalized,
+      { ...options, provider: "snyk" },
+      f.deps,
+    );
+  f.state.loseResponse = true;
+  await expect((await prepare()).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
+  f.state.repositoryUrl += "-other";
+  await expect(prepare()).rejects.toThrow(`belongs to "${source}"`);
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = source;
+  expect((await (await prepare()).publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]);
+});
+
+test("Checkmarx projections under Wiz check the native repository branch asset", async () => {
+  const f = await fixture();
+  f.state.repositoryUrl = "https://github.com/example/other";
+  const report = { sourceRepositoryUrl: f.state.repositoryUrl };
+  const asset = {
+    source_finding_id: "wiz-finding",
+    evidence: {
+      title: "SDK finding",
+      severity: "low" as const,
+      source_data: { vulnerableAsset: wizBranchAsset },
+    },
+  };
+  const projected = {
+    ...asset,
+    source_finding_id: "checkmarx-one:" + "a".repeat(64),
+  };
+  const prepare = (
+    findings: ExternalFindings["findings"],
+    metadata?: ExternalFindings["report"],
+  ) =>
+    prepareNormalizedExternalPublication(
+      { read: findings.length, excluded: [], findings, report: metadata },
+      options,
+      f.deps,
+    );
+  expect((await prepare([asset], report)).preview.requests).toHaveLength(1);
+  const mismatch = 'belongs to "https://github.com/example/project"';
+  await expect(prepare([projected], report)).rejects.toThrow(mismatch);
+  await expect(prepare([projected])).rejects.toThrow(mismatch);
+  await expect(
+    prepare(
+      [
+        { ...projected, evidence: { title: "Projection", severity: "low" } },
+        asset,
+      ],
+      report,
+    ),
+  ).rejects.toThrow(mismatch);
+  expect(f.posts).toHaveLength(0);
 });
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
@@ -8108,8 +8201,8 @@ test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", as
   await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
   let contextVersion = checkpoint.contextVersion;
   const requests: unknown[] = [];
-  const prepare = () =>
-    prepareNormalizedExternalPublication(selection, options, {
+  const prepare = (input: ExternalFindings = selection) =>
+    prepareNormalizedExternalPublication(input, options, {
       environment: {
         ...f.environment,
         CODEX_SECURITY_CLOUD_BASE_URL: undefined,
@@ -8151,6 +8244,38 @@ test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", as
         });
       },
     });
+  // This legacy report kept its Checkmarx format and the Wiz asset as its sole repository claim.
+  const assetSelection = {
+    ...selection,
+    report: { format: "cxsast-xml" },
+    findings: [
+      {
+        ...row,
+        evidence: validateExternalEvidence({
+          ...row.evidence,
+          source_data: { vulnerableAsset: wizBranchAsset },
+        }),
+      },
+    ],
+  };
+  await writeFile(
+    join(
+      directory,
+      "7400c077334e75f2b1ca49f05eb5cc4f431b62a9f2063734f42a03d60500ea5e.private-import.json",
+    ),
+    JSON.stringify({
+      ...checkpoint,
+      sha256:
+        "bf944f1fec0d2f97675f35dc8db1bee753807879fa6077e2bd8c5169889ce7ae",
+    }),
+    { mode: 0o600 },
+  );
+  f.state.repositoryUrl += "-other";
+  await expect(prepare(assetSelection)).rejects.toThrow(
+    `belongs to "${originalRepository}"`,
+  );
+  f.state.repositoryUrl = originalRepository;
+  expect((await prepare(assetSelection)).preview.resumed).toBe(true);
   contextVersion = "different-inbox";
   await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
   contextVersion = checkpoint.contextVersion;

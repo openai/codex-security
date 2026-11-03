@@ -103,6 +103,15 @@ test("SDK-only Checkmarx rows compare declared scan IDs, repositories and instan
   };
   const one = withInstance("sdk-host-a", "https://one.example/sast");
   const two = withInstance("sdk-host-b", "https://one.example/other");
+  const sdkProjects = ["alpha", "beta"].map((projectName) => ({
+    source_finding_id: projectName,
+    evidence: {
+      title: "Example",
+      severity: "low" as const,
+      source_data: { projectName },
+    },
+  }));
+  expect((await bind(sdkProjects)).preview.findings).toHaveLength(2);
   expect(
     (
       await bind([
@@ -157,18 +166,80 @@ test("a projected Checkmarx report under Wiz binds the configured Git fetch URL"
     source_finding_id: "checkmarx-one:" + "a".repeat(64),
     evidence: { title: "SDK finding", severity: "low" as const },
   };
-  await expect(
+  for (const format of [undefined, "custom-projection"]) {
+    await expect(
+      prepareNormalizedLocalImport(
+        {
+          read: 1,
+          excluded: [],
+          findings: [finding],
+          report: {
+            ...(format && { format }),
+            sourceRepositoryUrl: source,
+            scanId: "123",
+          },
+        },
+        {
+          provider: "wiz",
+          repository: fixture.repository,
+          sourceKey: "example",
+        },
+        { environment: fixture.environment },
+      ),
+    ).rejects.toThrow("does not match a configured remote");
+  }
+});
+
+test("a projected Checkmarx row under Wiz retains the report and original asset repositories", async () => {
+  await using fixture = await localFindingsFixture({ remote: source });
+  const other = source + "-other";
+  const projected = "checkmarx-one:" + "a".repeat(64);
+  const row = (id: string, assetUrl?: string) => ({
+    source_finding_id: id,
+    evidence: {
+      title: "SDK finding",
+      severity: "low" as const,
+      source_data: assetUrl
+        ? {
+            vulnerableAsset: {
+              type: "REPOSITORY_BRANCH",
+              cloudProviderURL: assetUrl + "/tree/main",
+            },
+          }
+        : {},
+    },
+  });
+  const bind = (findings: ExternalFindings["findings"], reportUrl?: string) =>
     prepareNormalizedLocalImport(
       {
-        read: 1,
+        findings,
+        read: findings.length,
         excluded: [],
-        findings: [finding],
-        report: { sourceRepositoryUrl: source, scanId: "123" },
+        ...(reportUrl && {
+          report: {
+            format: "custom-projection",
+            sourceRepositoryUrl: reportUrl,
+          },
+        }),
       },
       { provider: "wiz", repository: fixture.repository, sourceKey: "example" },
       { environment: fixture.environment },
-    ),
-  ).rejects.toThrow("does not match a configured remote");
+    );
+  await expect(bind([row(projected, other)], source)).rejects.toThrow(
+    /does not match/,
+  );
+  await expect(bind([row(projected, other)])).rejects.toThrow(
+    "does not match a configured remote",
+  );
+  await expect(
+    bind([row(projected), row("wiz-row", other)], source),
+  ).rejects.toThrow(/does not match/);
+  expect(
+    (await bind([row(projected, source)], source)).preview.findings,
+  ).toHaveLength(1);
+  expect(
+    (await bind([row("sdk-row", other)], other)).preview.findings,
+  ).toHaveLength(1);
 });
 
 test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {
@@ -330,6 +401,7 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
     ).rejects.toThrow(/checkmarx provider/i);
     await expect(prepare(matchingReport)).rejects.toThrow(/source finding ID/i);
     delete matchingReport.findings[0]!.evidence.details!.scanner_origin;
+    await expect(prepare(matchingReport)).rejects.toThrow(/source finding ID/i);
     expect(
       (
         await prepareNormalizedLocalImport(
@@ -516,4 +588,49 @@ test("Checkmarx One scan UUIDs compare by value and retain their original spelli
   await expect(bind([sdk(upper), ...xml("1", id).findings])).rejects.toThrow(
     /same product, project and scan/i,
   );
+});
+
+test("linkless CxSAST selections compare named project and team claims", async () => {
+  await using fixture = await localFindingsFixture({ remote: source });
+  const scan = (id: string, project?: string, team?: string) =>
+    normalizeCheckmarxXml(
+      `<CxXMLResults ScanId="10" ProjectId="3"${project ? ` ProjectName="${project}"` : ""}${team ? ` TeamFullPathOnReportDate="${team}"` : ""}>
+        <Query id="14" name="Example" Severity="Low"><Result FileName="index.ts" Line="5"><Path SimilarityId="${id}"/></Result></Query>
+       </CxXMLResults>`,
+      source,
+      "local",
+    );
+  const first = scan("1", "Project", "/CxServer\\BuildÉ/");
+  const bind = (other: ExternalFindings, report?: ExternalFindings["report"]) =>
+    prepareNormalizedLocalImport(
+      {
+        findings: [...first.findings, ...other.findings],
+        read: 2,
+        excluded: [],
+        report,
+      },
+      {
+        repository: fixture.repository,
+        provider: "checkmarx",
+        sourceKey: "example/main",
+      },
+      { environment: fixture.environment },
+    );
+  for (const report of [undefined, first.report]) {
+    for (const other of [
+      scan("2", "project", "cxserver/buildÉ"),
+      scan("2", "Project", "cxserver/buildé"),
+    ])
+      await expect(bind(other, report)).rejects.toThrow(
+        /same product|retained report/i,
+      );
+    const team = "CXSERVER/BUILDÉ\\";
+    const equivalent = await bind(scan("2", "Project", team), report);
+    expect(
+      equivalent.preview.findings[1]!.evidence.source_data?.[
+        "teamFullPathOnReportDate"
+      ],
+    ).toBe(team);
+    expect((await bind(scan("2"), report)).preview.findings).toHaveLength(2);
+  }
 });
