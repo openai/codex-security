@@ -16,6 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
+from workbench_constants import optional_text as optional_text
 from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
     _reject_nonstandard_json_number as reject_nonstandard_json_number,
@@ -23,6 +24,15 @@ from workbench_scan_usage import (
 from workbench_scan_usage import _timestamp as usage_timestamp
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def javascript_utf8(value: str) -> bytes:
+    """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
+    return (
+        value.encode("utf-16-le", errors="surrogatepass")
+        .decode("utf-16-le", errors="replace")
+        .encode("utf-8")
+    )
 
 
 def timestamp_key(value: str) -> datetime:
@@ -34,15 +44,6 @@ def require_uuid(value: str, label: str) -> str:
         return str(uuid.UUID(value))
     except ValueError as exc:
         raise SystemExit(f"{label} must be a UUID.") from exc
-
-
-def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    if maximum is not None and len(normalized) > maximum:
-        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
-    return normalized or None
 
 
 def sqlite_busy(error: sqlite3.OperationalError) -> bool:
@@ -189,8 +190,6 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     try:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:

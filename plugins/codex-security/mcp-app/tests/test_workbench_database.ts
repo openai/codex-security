@@ -181,6 +181,213 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+for (const previewVersion of [58, 59]) {
+  test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
+    const database = memory(t, previewVersion - 1);
+    const rubricMigration = migrations.find((item) => item.version === 60)!;
+    applyMigrations(database, [
+      { ...rubricMigration, version: previewVersion },
+    ]);
+    const rubric = JSON.stringify({ sha256: "a".repeat(64), revision: 2 });
+    database
+      .prepare(
+        "INSERT INTO scan_severity_classifications (scan_id, finding_ids_json, assessed_at, rubric_binding_json) VALUES ('scan', '[]', 'assessed', ?)",
+      )
+      .run(rubric);
+
+    applyMigrations(database);
+    assertMigrationNames(database, 58, 59, 60);
+    assert.equal(
+      database
+        .prepare(
+          "SELECT rubric_binding_json FROM scan_severity_classifications WHERE scan_id = 'scan'",
+        )
+        .get()?.rubric_binding_json,
+      rubric,
+    );
+  });
+}
+
+for (const { missingVersions, legacyCheckpoint, mainReader } of [
+  { missingVersions: [57, 58, 59, 60], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
+  { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 50, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 52, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 53, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 54, mainReader: false },
+  { missingVersions: [43], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [44, 45, 46], legacyCheckpoint: 47, mainReader: false },
+]) {
+  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")} (legacy checkpoint: ${legacyCheckpoint}, main reader: ${mainReader})`, async () => {
+    const directory = await temporary.create("workbench-checkpoint-upgrade-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const sources = JSON.stringify({ "results.json": "retained-digest" });
+    const heads = JSON.stringify({ worker: "accepted-checkpoint" });
+    const context = JSON.stringify("Original discovery context");
+    let originalDiscoveryMigration: Record<string, unknown> | undefined;
+    let originalCheckpointMigration: Record<string, unknown> | undefined;
+    const old = new DatabaseSync(databasePath);
+    try {
+      applyMigrations(
+        old,
+        migrations
+          .filter(
+            (item) =>
+              !missingVersions.includes(item.version) &&
+              !(legacyCheckpoint && [54, 55, 56].includes(item.version)) &&
+              !(
+                [47, 48, 50, 52, 53].includes(legacyCheckpoint) &&
+                [52, 53].includes(item.version)
+              ) &&
+              !(
+                [47, 48, 50].includes(legacyCheckpoint) &&
+                [50, 51].includes(item.version)
+              ) &&
+              !(
+                [47, 48].includes(legacyCheckpoint) &&
+                [48, 49].includes(item.version)
+              ) &&
+              !(legacyCheckpoint === 47 && item.version === 47),
+          )
+          .map((item) =>
+            legacyCheckpoint && item.version === 57
+              ? { ...item, version: legacyCheckpoint }
+              : item,
+          ),
+      );
+      if (mainReader)
+        old.exec(
+          migrations.find((item) => item.version === 47)!.statements.join("\n"),
+        );
+      insertScan(old);
+      old.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
+        workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
+        VALUES ('scan', 1, 'v1', 'failed', 'terminal', 1, 0, 7, 10, 'created', 'updated')`);
+      if (legacyCheckpoint !== 47 || mainReader) {
+        old
+          .prepare("UPDATE deep_scan_runs SET discovery_user_context_json = ?")
+          .run(context);
+        originalDiscoveryMigration = old
+          .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+          .get();
+      }
+      old
+        .prepare(
+          "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
+        )
+        .run(sources);
+      if (!missingVersions.includes(57)) {
+        old
+          .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+          .run(heads);
+      }
+      originalCheckpointMigration = old
+        .prepare(
+          "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
+        )
+        .get(legacyCheckpoint || 57);
+    } finally {
+      old.close();
+    }
+    await databaseInfo(directory);
+    const upgraded = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        upgraded
+          .prepare("SELECT retained_checkpoint_heads_json FROM scans")
+          .get()?.retained_checkpoint_heads_json,
+        !missingVersions.includes(57) ? heads : null,
+      );
+      upgraded
+        .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+        .run(heads);
+    } finally {
+      upgraded.close();
+    }
+    await databaseInfo(directory);
+    const reopened = new DatabaseSync(databasePath);
+    try {
+      const scan = reopened.prepare("SELECT * FROM scans").get()!;
+      assert.equal(scan.status, "failed");
+      assert.equal(scan.retained_source_digests_json, sources);
+      assert.equal(scan.retained_checkpoint_heads_json, heads);
+      if (originalCheckpointMigration !== undefined) {
+        assert.deepEqual(
+          reopened
+            .prepare(
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 57",
+            )
+            .get(),
+          originalCheckpointMigration,
+        );
+      }
+      assert.equal(
+        reopened
+          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get()?.count,
+        migrations.length,
+      );
+      assert.equal(
+        reopened
+          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+          .get()?.version,
+        migrations.at(-1)!.version,
+      );
+      for (const { version } of migrations.filter(
+        (item) => item.version >= 43,
+      )) {
+        assert.equal(
+          reopened
+            .prepare(
+              "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?",
+            )
+            .get(version)?.count,
+          1,
+        );
+      }
+      assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
+      assert.equal(
+        reopened
+          .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
+          .get()?.discovery_user_context_json,
+        legacyCheckpoint !== 47 || mainReader ? context : null,
+      );
+      assert.equal(
+        reopened
+          .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")
+          .get()?.terminal_reviewed_surface_count,
+        null,
+      );
+      assertMigrationNames(
+        reopened,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+      );
+      if (legacyCheckpoint !== 47) {
+        assert.deepEqual(
+          reopened
+            .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+            .get(),
+          originalDiscoveryMigration,
+        );
+      }
+    } finally {
+      reopened.close();
+    }
+  });
+}
+
 test("worker thread history survives retry, replay, and worker retirement", (t) => {
   const database = memory(t, 49);
   insertScan(database);
@@ -799,11 +1006,39 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47])
+  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  assert.ok(
+    database
+      .prepare("PRAGMA table_info(scan_severity_classifications)")
+      .all()
+      .some((column) => column.name === "rubric_binding_json"),
+  );
+  assert.equal(
+    database.prepare("SELECT service_tier FROM deep_scan_runs").get()
+      ?.service_tier,
+    null,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")
+      .get()?.terminal_reviewed_surface_count,
+    null,
+  );
+  assert.equal(
+    database.prepare("SELECT deep_scan_config_json FROM workspaces").get()
+      ?.deep_scan_config_json,
+    null,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT pending_target_project_path FROM deep_scan_runs")
+      .get()?.pending_target_project_path,
+    null,
+  );
   assert.equal(
     database
       .prepare("SELECT stop_after_consecutive_errors FROM deep_scan_runs")
@@ -1070,7 +1305,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 56),
+      String(through ?? 63),
     ],
     { encoding: "utf8" },
   );
@@ -1097,50 +1332,38 @@ function storedRows(database: DatabaseSync) {
 }
 
 test("Node initialization leaves repository migration semantics to the Python consumer", async (t) => {
-  for (const fixture of [
-    "main42",
-    "main43",
-    "main53",
-    "legacy30",
-    "legacy31",
-    "partial43",
-    "current43",
-    "current44",
-    "current48",
-    "current49",
-    "current50",
-    "current51",
-    "current53",
-    "current54",
-  ] as const) {
+  // Published schema version, followed by the historical identity migration range if installed.
+  const fixtures: [string, number, number?, number?][] = [
+    ["main42", 42],
+    ["main43", 43],
+    ["main53", 53],
+    ["main60", 60],
+    ["legacy30", 29],
+    ["legacy31", 30],
+    ["partial43", 42],
+    ["current43", 42, 43, 43],
+    ["current44", 42, 43, 44],
+    ["current48", 47, 48, 48],
+    ["current49", 47, 48, 49],
+    ["current50", 49, 50, 50],
+    ["current51", 49, 50, 51],
+    ["current53", 52, 53, 53],
+    ["current54", 52, 53, 54],
+    ["current56", 53, 54, 56],
+  ];
+  for (const [
+    fixture,
+    publishedVersion,
+    identityVersion,
+    currentVersion,
+  ] of fixtures) {
     await t.test(fixture, async () => {
-      const currentVersion = fixture.startsWith("current")
-        ? Number(fixture.slice("current".length))
-        : undefined;
       const directory = await temporary.create("workbench-repository-upgrade-");
       const databasePath = join(directory, "workbench.sqlite3");
       const database = new DatabaseSync(databasePath);
       applyMigrations(
         database,
-        migrations.filter(
-          (item) =>
-            item.version <=
-            (fixture === "legacy30"
-              ? 29
-              : fixture === "legacy31"
-                ? 30
-                : fixture === "main53"
-                  ? 53
-                  : fixture === "main43"
-                    ? 43
-                    : currentVersion !== undefined && currentVersion >= 53
-                      ? 52
-                      : currentVersion !== undefined && currentVersion >= 50
-                        ? 49
-                        : currentVersion !== undefined && currentVersion >= 48
-                          ? 47
-                          : 42),
-        ),
+        migrations.filter((item) => item.version <= publishedVersion),
       );
       insertScan(database);
       database.exec(`INSERT INTO security_targets (id,current_path,display_name,created_at,updated_at)
@@ -1167,25 +1390,21 @@ test("Node initialization leaves repository migration semantics to the Python co
           )
           .run(fixture === "legacy30" ? 30 : 31);
       database.close();
-      if (currentVersion !== undefined) {
+      if (identityVersion !== undefined && currentVersion !== undefined) {
         const current = new DatabaseSync(databasePath);
         applyMigrations(
           current,
           historicalRepositoryMigrations
             .map((item) => ({
               ...item,
-              version:
-                item.version +
-                (currentVersion >= 53
-                  ? 10
-                  : currentVersion >= 50
-                    ? 7
-                    : currentVersion >= 48
-                      ? 5
-                      : 0),
+              version: item.version - 43 + identityVersion,
             }))
             .filter((item) => item.version <= currentVersion),
         );
+        if (currentVersion === 56)
+          current.exec(`ALTER TABLE workspaces ADD COLUMN target_path_unvalidated INTEGER
+            NOT NULL DEFAULT 0 CHECK (target_path_unvalidated IN (0, 1));
+            INSERT INTO schema_migrations VALUES (56, 'distinguish unvalidated workspace targets', 'original');`);
         assert.equal(
           current
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
@@ -1204,7 +1423,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           : [];
       const originalHistory = saved
         .prepare(
-          "SELECT name, applied_at FROM schema_migrations WHERE name IN ('persist repository identities', 'stabilize Linux repository generations') ORDER BY name",
+          "SELECT name, applied_at FROM schema_migrations WHERE name IN ('persist repository identities', 'stabilize Linux repository generations', 'distinguish unvalidated workspace targets') ORDER BY name",
         )
         .all();
       saved.close();
@@ -1213,7 +1432,7 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
-      assertMigrationNames(initialized, 48, 49, 53);
+      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60);
       assert.deepEqual(
         initialized.prepare("SELECT * FROM external_source_reports").all(),
         originalReports,
@@ -1225,7 +1444,7 @@ test("Node initialization leaves repository migration semantics to the Python co
         identity,
         currentVersion !== undefined
           ? "synthetic-generation"
-          : fixture === "main42" || fixture === "main43" || fixture === "main53"
+          : fixture.startsWith("main")
             ? undefined
             : "unestablished-legacy-identity",
       );
@@ -1262,7 +1481,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          56,
+          63,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1282,11 +1501,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(54,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(61,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(55,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(62,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1420,6 +1639,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
           for (const row of rows as Record<string, unknown>[]) {
             assert.equal(row.source_scopes_json, null);
             delete row.source_scopes_json;
+            assert.equal(row.retained_checkpoint_heads_json, null);
+            delete row.retained_checkpoint_heads_json;
+          }
+        if (name === "workspaces")
+          for (const row of rows as Record<string, unknown>[]) {
+            assert.equal(row.deep_scan_config_json, null);
+            delete row.deep_scan_config_json;
           }
         return [name, rows];
       }),
@@ -1472,13 +1698,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   assertMigrationNames(initialized, 53);
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=54")
+      .prepare("SELECT name FROM schema_migrations WHERE version=61")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=55")
+      .prepare("SELECT name FROM schema_migrations WHERE version=62")
       .get(),
     undefined,
   );
@@ -1501,7 +1727,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 56
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 63
 `,
       scripts,
       databasePath,

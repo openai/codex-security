@@ -140,6 +140,7 @@ try {
         encoding: "utf8",
         env: {
           ...process.env,
+          PROMPTFOO_CONFIG_DIR: path.resolve(dispatchRoot),
           PROMPTFOO_DISABLE_TELEMETRY: "1",
           PROMPTFOO_DISABLE_UPDATE: "1",
         },

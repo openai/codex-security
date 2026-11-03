@@ -1,4 +1,5 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -6,7 +7,14 @@ import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
@@ -440,7 +448,7 @@ function checkpoint(scanId: string, candidateId: string, reason: string) {
     scanId,
     complete: false,
     findings: [],
-    coverage: {
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [{ candidateId, reason, paths: ["fixture.py"] }],
@@ -471,13 +479,14 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       },
       runWorkbench,
     );
-    const coverage = await readJson(run.scanDir, "coverage.json");
-    coverage.surfaces = [
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    const reviewState = manifest.scan.reviewState;
+    reviewState.surfaces = [
       { id: "http-api", label: "HTTP API", disposition: "reported" },
     ];
     const findings = await readJson(run.scanDir, "findings.json");
     findings.findings[0].locations[0].path = "./fixture.py";
-    await writeJsonLine(path.join(run.scanDir, "coverage.json"), coverage);
+    await writeJsonLine(path.join(run.scanDir, "scan-manifest.json"), manifest);
     await writeJsonLine(path.join(run.scanDir, "findings.json"), findings);
 
     for (const update of ["first-update", "reloaded-update"]) {
@@ -492,12 +501,13 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
         runWorkbench,
       );
       assert.equal(
-        (await readJson(run.scanDir, "coverage.json")).surfaces[0].id,
+        (await readJson(run.scanDir, "scan-manifest.json")).scan.reviewState
+          .surfaces[0].id,
         "http-api",
       );
       const head = await readJson(run.scanDir, "checkpoint-head.json");
       const saved = await readJson(run.scanDir, "checkpoints", head.checkpoint);
-      assert.equal(saved.coverage.surfaces[0].id, "http-api");
+      assert.equal(saved.reviewState.surfaces[0].id, "http-api");
       assert.equal(saved.findings[0].locations[0].path, "./fixture.py");
     }
 
@@ -508,7 +518,7 @@ async function testCanonicalParentCheckpointsSurviveSuccessiveWrites() {
       path.join(run.scanDir, "checkpoints", head.checkpoint),
       saved,
     );
-    const names = ["scan-manifest.json", "findings.json", "coverage.json"];
+    const names = ["scan-manifest.json", "findings.json"];
     const before = await Promise.all(
       names.map((name) => readFile(path.join(run.scanDir, name))),
     );
@@ -582,10 +592,11 @@ async function testConcurrentParentDraftsPreserveBothCheckpoints() {
       "the stale writer retries after the host rejects its digest",
     );
 
-    const coverage = await readJson(run.scanDir, "coverage.json");
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    const reviewState = manifest.scan.reviewState;
     assert.deepEqual(
       new Set(
-        coverage.deferred.map(
+        reviewState.deferred.map(
           (item: { candidateId: string }) => item.candidateId,
         ),
       ),
@@ -651,9 +662,16 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
     );
     const stopped = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
     assert.equal(stopped.scan.progress.status, "canceled");
-    const coverage = await readJson(run.scanDir, "coverage.json");
-    const pending = coverage.deferred.map(
-      (item: { candidateId: string }) => item.candidateId,
+    const frozen = Object.keys(JSON.parse(sealed).scan.preservedSources).filter(
+      (name) => name.startsWith("checkpoints/"),
+    );
+    const retained = await Promise.all(
+      frozen.map((name) => readJson(run.scanDir, name)),
+    );
+    const pending = retained.flatMap((checkpoint) =>
+      checkpoint.reviewState.deferred.map(
+        (item: { candidateId: string }) => item.candidateId,
+      ),
     );
     assert.ok(pending.includes("early-result"));
     assert.ok(
@@ -1056,7 +1074,7 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
       if (request.kind === "discovery") {
         const root = request.artifactContext!.root;
         const draft = await readJson(root, "result.json");
-        draft.coverage = {
+        draft.reviewState = {
           surfaces: [
             {
               id: "1",
@@ -1118,8 +1136,13 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     const terminal = await coordinator.wait(undefined, 30_000);
     assert.equal(terminal?.status, "succeeded", terminal?.error);
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
-    const coverage = await readJson(run.scanDir, "coverage.json");
-    for (const field of ["surfaces", "explicitExclusions", "deferred"]) {
+    const head = await readJson(run.scanDir, "checkpoint-head.json");
+    const { reviewState: coverage } = await readJson(
+      run.scanDir,
+      "checkpoints",
+      head.checkpoint,
+    );
+    for (const field of ["surfaces", "deferred"]) {
       assert.equal(coverage[field].length, 4, field);
       assert.equal(
         new Set(coverage[field].map((row: { id: string }) => row.id)).size,
@@ -1127,12 +1150,25 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
         field,
       );
     }
+    assert.equal(coverage.explicitExclusions.length, 4);
+    assert.equal(
+      new Set(
+        coverage.explicitExclusions.map(
+          (row: { pattern: string; provenance: { workerId: string } }) =>
+            `${row.provenance.workerId}/${row.pattern}`,
+        ),
+      ).size,
+      4,
+      "independent worker exclusions retain their provenance",
+    );
     assert.equal(coverage.openQuestions.length, 2);
     for (const row of coverage.surfaces) {
       if (row.label !== "Request entry") continue;
+      assert.equal(row.provenance.sourceId, "1");
+      assert.equal(row.provenance.attempt, 1);
       assert.equal(
         row.id,
-        `${row.workerId}/1`,
+        `${row.provenance.workerId}-attempt-1-surface-1`,
         "explicit source IDs retain their links",
       );
       assert.equal(
@@ -1180,20 +1216,106 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       scanId: run.scanId,
       threadId,
     });
-    const worker = await createWorkerFixture(run, "saved", "discovery");
-    await store.updateWorker({ ...worker, status: "running" });
-    await saveScanDraftCheckpoint(
-      { root: worker.artifactDir, layout: "worker", repoRoot: targetPath },
-      {
+    const workers: { id: string }[] = [];
+    for (const label of [
+      "valid",
+      "second-valid",
+      "anonymous",
+      "mismatch",
+      "corrupt",
+      "missing",
+    ]) {
+      const worker = await createWorkerFixture(run, label, "discovery");
+      await store.updateWorker({ ...worker, status: "running" });
+      const context = {
+        root: worker.artifactDir,
+        layout: "worker",
+        repoRoot: targetPath,
+      };
+      const saved = {
         ...checkpoint(
           run.scanId,
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [finding("saved", "fixture.py")],
-      },
-    );
-    await store.updateWorker({ ...worker, status: "canceled" });
+        findings: [finding(label, "fixture.py")],
+      };
+      if (label === "valid" || label === "second-valid") {
+        if (label === "valid") {
+          saved.findings.push(finding("out-of-scope", "../outside.py"));
+          saved.findings.push({
+            title: "Unvalidated, incomplete finding",
+          } as (typeof saved.findings)[number]);
+        } else {
+          saved.findings = [];
+        }
+        await mkdir(path.join(worker.artifactDir, "artifacts"));
+        await writeFile(
+          path.join(worker.artifactDir, "artifacts/review.md"),
+          `Source evidence for ${label}.\n`,
+        );
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          reviewState: {
+            ...saved.reviewState,
+            surfaces: [
+              {
+                id: "api",
+                label: `${label} API`,
+                disposition: "no_issue_found",
+                receiptRefs: ["artifacts/review.md"],
+              },
+            ],
+            deferred: [
+              ...saved.reviewState.deferred,
+              {
+                id: "surface-review",
+                reason: "Review remains.",
+                surfaceIds: ["api"],
+              },
+            ],
+          },
+        });
+      } else if (label === "anonymous") {
+        for (const reason of [
+          "Review authentication.",
+          "Review authorization.",
+        ]) {
+          await saveScanDraftCheckpoint(context, {
+            scanId: run.scanId,
+            complete: false,
+            findings: [],
+            threatModel: {},
+            reviewState: {
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [{ reason }],
+            },
+          });
+        }
+      } else if (label === "mismatch") {
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          scanId: randomUUID(),
+        });
+      } else {
+        await mkdir(path.join(worker.artifactDir, "checkpoints"), {
+          recursive: true,
+        });
+        const name = "a".repeat(64) + ".json";
+        await writeFile(
+          path.join(worker.artifactDir, "checkpoint-head.json"),
+          JSON.stringify({ checkpoint: name }),
+        );
+        if (label === "corrupt")
+          await writeFile(
+            path.join(worker.artifactDir, "checkpoints", name),
+            '{"scanId":',
+          );
+      }
+      await store.updateWorker({ ...worker, status: "canceled" });
+      workers.push(worker);
+    }
     const context = await createScanArtifactContext(run.scanId, runWorkbench, {
       requireRunning: true,
     });
@@ -1202,7 +1324,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       {
         scanId: run.scanId,
         findings: [],
-        coverage: {
+        reviewState: {
           surfaces: [],
           explicitExclusions: [],
           deferred: [
@@ -1223,12 +1345,31 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const draftNames = [
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "checkpoint-head.json",
     ];
     const beforeFailure = await Promise.all(
       draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
     );
+    const readObservationTimes = () =>
+      Promise.all(
+        draftNames.map(
+          async (name) =>
+            (await stat(path.join(run.scanDir, name), { bigint: true }))
+              .mtimeNs,
+        ),
+      );
+    const observationTimesBeforeFailure = await readObservationTimes();
+    const checkpointDirectory = path.join(run.scanDir, "checkpoints");
+    const readParentCheckpoints = async () =>
+      Promise.all(
+        (await readdir(checkpointDirectory))
+          .sort()
+          .map(async (name) => [
+            name,
+            await readFile(path.join(checkpointDirectory, name), "utf8"),
+          ]),
+      );
+    const checkpointsBeforeFailure = await readParentCheckpoints();
     const database = path.join(
       environment.CODEX_SECURITY_STATE_DIR,
       "workbench.sqlite3",
@@ -1265,6 +1406,16 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       beforeFailure,
       "a failed finish commit must restore the unsealed parent and accepted checkpoint head",
     );
+    assert.deepEqual(
+      await readParentCheckpoints(),
+      checkpointsBeforeFailure,
+      "rollback must not publish an aggregate checkpoint as new parent evidence",
+    );
+    assert.deepEqual(
+      await readObservationTimes(),
+      observationTimesBeforeFailure,
+      "rollback must preserve parent observation order",
+    );
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
     await runSql("DROP TRIGGER reject_deadline_commit;");
     const finished = await store.finish({
@@ -1283,11 +1434,28 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const recovered = await readJson(run.scanDir, "findings.json");
     assert.deepEqual(
       recovered.findings.map((item: { title: string }) => item.title),
-      ["Unsafe request output saved"],
+      ["Unsafe request output valid"],
     );
-    assert.equal(recovered.findings[0].provenance.workerId, worker.id);
-    const coverage = await readJson(run.scanDir, "coverage.json");
-
+    assert.equal(recovered.findings[0].provenance.workerId, workers[0].id);
+    const coverage = (await readJson(run.scanDir, "scan-manifest.json")).scan
+      .reviewState;
+    assert.equal(coverage.surfaces.length, 2);
+    for (const [index, label] of ["valid", "second-valid"].entries()) {
+      const workerId: string = workers[index].id;
+      const surface = coverage.surfaces.find(
+        (row: { workerId: string }) => row.workerId === workerId,
+      );
+      const task = coverage.deferred.find(
+        (row: { id: string }) => row.id === `${workerId}/surface-review`,
+      );
+      assert.equal(surface.id, `${workerId}/api`);
+      assert.equal(surface.disposition, "no_issue_found");
+      assert.deepEqual(task.surfaceIds, [surface.id]);
+      assert.equal(
+        await readFile(path.join(run.scanDir, surface.receiptRefs[0]), "utf8"),
+        `Source evidence for ${label}.\n`,
+      );
+    }
     assert.equal(
       coverage.deferred.some((item: { reason: string }) =>
         /time limit elapsed/.test(item.reason),
@@ -1301,12 +1469,25 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       ),
       true,
     );
+    const anonymousTasks = coverage.deferred.filter(
+      (row: { workerId?: string }) => row.workerId === workers[2].id,
+    );
+    assert.deepEqual(
+      new Set(anonymousTasks.map((row: { reason: string }) => row.reason)),
+      new Set(["Review authentication.", "Review authorization."]),
+    );
     const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.threatModel, undefined);
+    const savedScan = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.match(
+      JSON.stringify(savedScan),
+      /Skipped malformed saved threat model.*missing required schema property/,
+    );
     assert.equal(manifest.scan.sealedAt, undefined);
     assert.equal(manifest.scan.complete, undefined);
     assert.equal(
       Object.keys(manifest.scan.preservedSources).some((source) =>
-        source.includes("saved/output/checkpoints/"),
+        source.includes("valid/output/checkpoints/"),
       ),
       true,
     );
@@ -1325,6 +1506,14 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       beforeReplay,
     );
     await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    assert.deepEqual(
+      (await readFixtureCoverage(run.scanDir)).surfaces,
+      coverage.surfaces,
+    );
+    assert.deepEqual(
+      (await readFixtureCoverage(run.scanDir)).deferred,
+      coverage.deferred,
+    );
     const sealed = await readJson(run.scanDir, "scan-manifest.json");
     assert.equal(typeof sealed.scan.sealedAt, "string");
     assert.deepEqual(
@@ -1515,7 +1704,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
         await recordCodexSecurityWorkerScanDraft(context, {
           ...draft,
           complete: true,
-          coverage: {
+          reviewState: {
             completeness: pending ? "partial" : "complete",
             explicitExclusions: [],
             surfaces: [
@@ -1567,7 +1756,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
         await recordCodexSecurityWorkerScanDraft(context, {
           ...draft,
           complete: true,
-          coverage: {
+          reviewState: {
             completeness: "complete",
             explicitExclusions: [],
             deferred: [],
@@ -1598,7 +1787,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
           await recordCodexSecurityWorkerScanDraft(context, {
             ...draft,
             complete,
-            coverage: {
+            reviewState: {
               completeness: "complete",
               surfaces: [],
               explicitExclusions: [],
@@ -1614,7 +1803,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
         await recordCodexSecurityWorkerScanDraft(context, {
           ...draft,
           complete: true,
-          coverage: {
+          reviewState: {
             completeness: "complete",
             surfaces: [],
             explicitExclusions: [],
@@ -1658,7 +1847,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
       3,
       "invalid receipts must be rejected before a repaired worker is accepted",
     );
-    const before = await readJson(run.scanDir, "coverage.json");
+    const before = await readFixtureCoverage(run.scanDir);
     assert.equal(before.surfaces[0].disposition, "no_issue_found");
     const originalTitles = (
       await readJson(run.scanDir, "findings.json")
@@ -1670,7 +1859,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
       "--thread-id",
       threadId,
     ]);
-    const recovered = await readJson(run.scanDir, "coverage.json");
+    const recovered = await readFixtureCoverage(run.scanDir);
     const surfaces = recovered.surfaces as {
       id: string;
       disposition: string;

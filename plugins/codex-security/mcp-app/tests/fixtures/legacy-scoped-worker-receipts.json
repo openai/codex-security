@@ -1,0 +1,134 @@
+{
+  "checkpoint": {
+    "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+    "findings": [
+      {
+        "ruleId": "cross-site-scripting.retained",
+        "identity": {
+          "anchor": "retained"
+        },
+        "title": "Unsafe request output retained",
+        "summary": "A request-controlled value reaches an HTML response.",
+        "severity": {
+          "level": "high"
+        },
+        "confidence": {
+          "level": "high",
+          "rationale": "The source establishes reachability."
+        },
+        "taxonomy": {
+          "category": "cross-site-scripting",
+          "cwe": ["CWE-79"]
+        },
+        "locations": [
+          {
+            "path": "src/route.ts",
+            "startLine": 1,
+            "endLine": 2
+          }
+        ],
+        "remediation": "Encode request-controlled values before emitting HTML.",
+        "provenance": {
+          "source": "local_plugin"
+        }
+      },
+      {
+        "ruleId": "cross-site-scripting.outside",
+        "identity": {
+          "anchor": "outside"
+        },
+        "title": "Unsafe request output outside",
+        "summary": "A request-controlled value reaches an HTML response.",
+        "severity": {
+          "level": "high"
+        },
+        "confidence": {
+          "level": "high",
+          "rationale": "The source establishes reachability."
+        },
+        "taxonomy": {
+          "category": "cross-site-scripting",
+          "cwe": ["CWE-79"]
+        },
+        "locations": [
+          {
+            "path": "other/route.ts",
+            "startLine": 1,
+            "endLine": 2
+          }
+        ],
+        "remediation": "Encode request-controlled values before emitting HTML.",
+        "provenance": {
+          "source": "local_plugin"
+        }
+      }
+    ],
+    "coverage": {
+      "completeness": "complete",
+      "surfaces": [
+        {
+          "id": "reviewed-route",
+          "label": "Reviewed route",
+          "disposition": "no_issue_found",
+          "receiptRefs": ["artifacts/evidence.txt"],
+          "provenance": {
+            "scanReceiptRefs": ["artifacts/evidence.txt"]
+          }
+        }
+      ],
+      "explicitExclusions": [],
+      "deferred": []
+    }
+  },
+  "result": {
+    "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+    "findings": [
+      {
+        "ruleId": "cross-site-scripting.retained",
+        "identity": {
+          "anchor": "retained"
+        },
+        "title": "Unsafe request output retained",
+        "summary": "A request-controlled value reaches an HTML response.",
+        "severity": {
+          "level": "high"
+        },
+        "confidence": {
+          "level": "high",
+          "rationale": "The source establishes reachability."
+        },
+        "taxonomy": {
+          "category": "cross-site-scripting",
+          "cwe": ["CWE-79"]
+        },
+        "locations": [
+          {
+            "path": "src/route.ts",
+            "startLine": 1,
+            "endLine": 2
+          }
+        ],
+        "remediation": "Encode request-controlled values before emitting HTML.",
+        "provenance": {
+          "source": "local_plugin"
+        }
+      }
+    ],
+    "coverage": {
+      "completeness": "complete",
+      "surfaces": [
+        {
+          "id": "reviewed-route",
+          "label": "Reviewed route",
+          "disposition": "no_issue_found",
+          "receiptRefs": ["artifacts/evidence.txt"],
+          "provenance": {
+            "scanReceiptRefs": ["artifacts/evidence.txt"]
+          }
+        }
+      ],
+      "explicitExclusions": [],
+      "deferred": []
+    }
+  }
+}

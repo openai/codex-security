@@ -34,7 +34,7 @@ export function nativeConfigOverrides(args: readonly string[]) {
 
 export function assertConfigOverrides(
   args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
+  values: Record<string, string | string[] | number | boolean | undefined>,
 ) {
   const overrides = nativeConfigOverrides(args).map((value) =>
     parseToml(value),

@@ -6,7 +6,10 @@ import { dependencies, capture } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { pythonExecutable } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import {
+  scopedTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 
 const savedAliasFindings = String.raw`
@@ -134,3 +137,51 @@ test("findings list preserves exact saved aliases and rejects their stale owners
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.skipIf(process.platform !== "linux")(
+  "findings list distinguishes an undecodable directory name from its replacement spelling",
+  async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "finding-repository-byte-name-",
+    );
+    const rawPath = Buffer.concat([
+      Buffer.from(join(temp.path, "repo-")),
+      Buffer.from([0xff]),
+    ]);
+    const replacement = join(temp.path, "repo-\uFFFD");
+    const requested = join(temp.path, "requested-link");
+    await Promise.all([mkdir(rawPath), mkdir(replacement)]);
+    await symlink(rawPath, requested);
+    expect(await realpath(requested)).toBe(replacement);
+    const python = pythonExecutable()!;
+    for (const savedMatch of [false, true]) {
+      const savedAlias = join(temp.path, `saved-${savedMatch}`);
+      const state = join(temp.path, `state-${savedMatch}`);
+      await symlink(savedMatch ? rawPath : replacement, savedAlias);
+      const setup = runPython(python, [
+        "-c",
+        savedAliasFindings,
+        join(PLUGIN_ROOT, "scripts"),
+        state,
+        replacement,
+        savedAlias,
+        "current",
+      ]);
+      expect(setup.exitCode, new TextDecoder().decode(setup.stderr)).toBe(0);
+      const stdout = capture();
+      const stderr = capture();
+      const status = await main(
+        ["findings", "list", requested, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ onWorkbench: workbenchCommand(python, state) }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      expect(
+        JSON.parse(stdout.text()).findings.map(
+          (finding: { scanId: string }) => finding.scanId,
+        ),
+      ).toEqual(savedMatch ? ["alias"] : []);
+    }
+  },
+);
