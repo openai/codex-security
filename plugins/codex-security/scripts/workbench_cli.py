@@ -121,6 +121,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
     begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.add_argument("--service-tier")
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")

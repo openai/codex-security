@@ -68,6 +68,7 @@ function cloudReviewDigest(
       url: preview.destination.url,
       reset: preview.destination.reset_marker,
       source: preview.source,
+      privateImport: preview.privateImport,
       items: preview.requests.flatMap((request) =>
         request.items.map((item) => [
           item.source_finding_id,

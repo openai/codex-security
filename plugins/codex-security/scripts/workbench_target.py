@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 
@@ -363,6 +364,14 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _visible_git_character(char: str) -> str:
+    if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
+        return char
+    if ord(char) <= 0xFF:
+        return f"\\x{ord(char):02x}"
+    return ascii(char)[1:-1]
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -370,7 +379,7 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
-) -> bool:
+) -> None:
     with tempfile.TemporaryFile() as output:
         completed = git_command(
             target,
@@ -381,14 +390,19 @@ def _update_digest_field_from_git(
             stdout_file=output,
         )
         if completed.returncode != 0:
-            return False
+            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
+                "\r\n", "\n"
+            )
+            detail = "".join(map(_visible_git_character, detail))
+            raise SystemExit(
+                f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
+            )
         output.seek(0, os.SEEK_END)
         value_size = output.tell()
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
         for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
-    return True
 
 
 def worktree_content_digest(target: Path) -> str:
@@ -470,7 +484,7 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
-    tracked_ok = _update_digest_field_from_git(
+    _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
@@ -499,7 +513,7 @@ def worktree_content_digest_for_context(
         git_dir=git_dir,
         work_tree=work_tree,
     )
-    if not tracked_ok or untracked is None:
+    if untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
     for raw_path in sorted(path for path in untracked.split(b"\0") if path):
         relative_path = os.fsdecode(raw_path)

@@ -993,6 +993,8 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const modelSettings = codexModelSettingsFromExtra(extra);
+      const serviceTier =
+        requestMetadataFromExtra(extra)?.["codex/turn-service-tier"];
       let parentSandbox: DeepWorkerParentSandbox;
       try {
         parentSandbox = resolveDeepWorkerParentSandbox(extra);
@@ -1045,6 +1047,8 @@ export function createCodexSecurityServer(): McpServer {
             threadId,
             projectConfigPath,
             ...modelSettings,
+            serviceTier:
+              typeof serviceTier === "string" ? serviceTier : undefined,
             scanRoot: await scanRoot(),
           });
           if (handoffClaimToken) {
