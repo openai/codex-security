@@ -136,6 +136,7 @@ export class WorkbenchDeepScanStore {
     handoffClaimToken?: string;
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
     threadId: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
@@ -150,6 +151,7 @@ export class WorkbenchDeepScanStore {
       claimToken: input.handoffClaimToken || undefined,
       model: input.model || undefined,
       reasoningEffort: input.reasoningEffort || undefined,
+      serviceTier: input.serviceTier,
       scanRoot: input.scanRoot,
       availableParallelism: availableParallelism(),
       workflowVersion: WORKFLOW_VERSION,

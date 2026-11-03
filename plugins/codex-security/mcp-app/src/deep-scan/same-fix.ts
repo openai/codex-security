@@ -169,7 +169,7 @@ export async function checkSameFix(
     }
   }
   const matches = new Map<number, Set<number>>();
-  await Promise.all(
+  const results = await Promise.allSettled(
     [...batches.values()].map(async (pairs) => {
       const reports = [
         ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
@@ -214,5 +214,7 @@ export async function checkSameFix(
       }
     }),
   );
+  for (const result of results)
+    if (result.status === "rejected") throw result.reason;
   return matches;
 }

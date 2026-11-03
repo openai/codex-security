@@ -77,12 +77,20 @@ export const runSchema = z
       filePaths: z.array(z.string()).optional(),
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
+      serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,
       scope: requiredString,
       userContext: optionalString,
+      severityRubric: z
+        .object({
+          markdown: z.string(),
+          revision: z.number(),
+          sha256: z.string(),
+        })
+        .optional(),
       scanDir: requiredString,
       dispatchedCount: nonNegativeInteger,
       noNewStreak: nonNegativeInteger,

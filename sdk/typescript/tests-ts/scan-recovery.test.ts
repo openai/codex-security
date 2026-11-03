@@ -383,7 +383,7 @@ describe("scan publication and artifact recovery", () => {
     });
   }, 30_000);
 
-  test("builds each ordinary scan context once without losing selected findings", async () => {
+  test("builds each scan context once without losing selected findings", async () => {
     const fixture = await startDraftScan();
     const findingsPath = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(findingsPath);
@@ -429,7 +429,13 @@ describe("scan publication and artifact recovery", () => {
           "    ordinary_calls = len(calls)",
           "    calls.clear()",
           "    selected = workbench.scan_context(connection, sys.argv[2], sys.argv[3])",
-          "print(json.dumps({'ordinaryCalls': ordinary_calls, 'selectedCalls': len(calls), 'ordinaryCount': len(ordinary['scan']['findings']), 'selectedCount': len(selected['scan']['findings']), 'workspaceCount': len(selected['workspace']['results']['findings']), 'selectedIncluded': any(finding['occurrenceId'] == sys.argv[3] for finding in selected['scan']['findings'])}))",
+          "workspace_page = selected['workspace']['results']['findings']",
+          "print(json.dumps({",
+          "    'ordinaryCalls': ordinary_calls, 'selectedCalls': len(calls),",
+          "    'ordinaryCount': len(ordinary['scan']['findings']), 'selectedCount': len(selected['scan']['findings']),",
+          "    'workspaceCount': len(workspace_page), 'sameWorkspacePage': workspace_page == ordinary['workspace']['results']['findings'],",
+          "    'selectedIncluded': any(finding['occurrenceId'] == sys.argv[3] for finding in selected['scan']['findings']),",
+          "}))",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         fixture.scanId,
@@ -446,10 +452,11 @@ describe("scan publication and artifact recovery", () => {
     expect(probe.status, probe.stderr).toBe(0);
     expect(JSON.parse(probe.stdout)).toEqual({
       ordinaryCalls: 1,
-      selectedCalls: 2,
+      selectedCalls: 1,
       ordinaryCount: 20,
       selectedCount: 21,
       workspaceCount: 20,
+      sameWorkspacePage: true,
       selectedIncluded: true,
     });
   }, 30_000);

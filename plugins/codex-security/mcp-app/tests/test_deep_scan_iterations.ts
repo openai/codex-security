@@ -748,6 +748,40 @@ test("a later source with a surviving path reopens the merge and counts as new",
   );
 });
 
+test("a failed comparison waits for every started worker batch", async () => {
+  const { checkSameFix } = await importSource(
+    join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
+  );
+  const groups = [0, 1, 2].map((id) => ({ id, worker: id }));
+  const records = groups.map(() => ({
+    locations: [["fixture.py", 1, 1]],
+    evidence: [["fixture.py", "lookup(id)"]],
+  }));
+  const release = Promise.withResolvers<void>();
+  let started = 0;
+  let finished = false;
+  const check = checkSameFix(
+    groups,
+    [],
+    records,
+    new Map(),
+    new Map(groups.map(({ id }) => [id, [lookup]])),
+    async () => {
+      if (++started === 1) throw new Error("comparison failed");
+      await release.promise;
+      return JSON.stringify({ reviews: [] });
+    },
+  );
+  const rejected = assert.rejects(check, /comparison failed/).then(() => {
+    finished = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(started, 2);
+  assert.equal(finished, false);
+  release.resolve();
+  await rejected;
+});
+
 test("a saved same-fix merge keeps both original comparison inputs on resume", async () => {
   const { mergeBatch } = await importSource(
     join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
@@ -764,7 +798,15 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
   const worker = (id: string, findings: ScanDraftInput["findings"]) => ({
     id,
     resultPath: join("/tmp", id, "result.json"),
-    result: { ...standardScanDraft("fixture", undefined, id), findings },
+    result: {
+      ...standardScanDraft("fixture", undefined, id),
+      findings,
+      scope: {
+        summary: `Review by ${id}`,
+        artifactsReviewed: ["common.py", `${id}.py`],
+        limitations: ["Static review only", `${id} dependency unavailable`],
+      },
+    },
   });
   const before = { scanId: randomUUID(), findings: [] };
   const defects = (members: number[][]) =>
@@ -821,6 +863,16 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
     [1],
   );
   const draft = scanUnionToDraft(restored);
+  assert.deepEqual(draft.scope, {
+    summary: "Review by w1",
+    artifactsReviewed: ["common.py", "w1.py", "w2.py", "w3.py"],
+    limitations: [
+      "Static review only",
+      "w1 dependency unavailable",
+      "w2 dependency unavailable",
+      "w3 dependency unavailable",
+    ],
+  });
   assert.deepEqual(
     draft.findings.map(
       (f: ScanDraftInput["findings"][number]) => f.provenance.sourceFindingIds,

@@ -402,7 +402,18 @@ export async function mergeBatch(
       id++;
     }
     addScanCoverage(aggregate, worker, scanDir);
-    aggregate.scope ??= worker.result.scope;
+    const scope = worker.result.scope;
+    if (scope) {
+      const merged = { ...scope, ...aggregate.scope };
+      for (const field of ["artifactsReviewed", "limitations"] as const) {
+        if (scope[field]) {
+          merged[field] = [
+            ...new Set([...(aggregate.scope?.[field] ?? []), ...scope[field]]),
+          ];
+        }
+      }
+      aggregate.scope = merged;
+    }
     aggregate.threatModel ??= worker.result.threatModel;
   }
   // A later worker can add a separately fixable path to a previously merged group.

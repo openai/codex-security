@@ -99,6 +99,41 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
   );
 }
 
+async function testConcurrentCheckpointKeepsExistingIteration() {
+  const { fixture, store } = await coordinatorFixture({ maxDiscoveryRuns: 1 });
+  const gate = Promise.withResolvers<void>();
+  const executor = new FakeExecutor({
+    discoveryGates: { "discovery-0001": gate.promise },
+  });
+  const coordinator = createCoordinator(fixture, store, executor);
+  coordinator.start();
+  await executor.discoveryStarted.promise;
+  const root = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "dedup",
+  );
+  const existing = path.join(root, "dedup-0001", "output", "result.json");
+  try {
+    // Another coordinator commits its checkpoint while this one is scanning.
+    await mkdir(path.dirname(existing), { recursive: true });
+    await writeFile(existing, "checkpoint owned by another coordinator");
+  } finally {
+    gate.resolve();
+  }
+  const terminal = await coordinator.wait(undefined, 5_000);
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(
+    await readFile(existing, "utf8"),
+    "checkpoint owned by another coordinator",
+  );
+  assert.equal(
+    store.iterations[0].resultPath,
+    path.join(root, "dedup-0002", "output", "result.json"),
+  );
+}
+
 async function testDiscoveryWorkersKeepOneContextAfterPersistedUpdate() {
   const fixture = await fixtureRun({
     stopAfterNoNew: 10,
@@ -572,6 +607,10 @@ async function testTransientExecutionFailureResumesWorkerThread() {
     executor.discoveryContinuationPrompts[1] ?? "",
     /record_codex_security_scan_draft/,
   );
+  assert.match(
+    executor.discoveryContinuationPrompts[1] ?? "",
+    /complete:false/,
+  );
   assert.doesNotMatch(
     executor.discoveryContinuationPrompts[1] ?? "",
     /\b(?:Deep|artifacts?|rebuild)\b/i,
@@ -781,7 +820,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
   assert.match(continuation, /completed source analysis/);
   assert.match(
     continuation,
-    /record_codex_security_scan_draft\(\{ scanId, scope\?, threatModel\?, findings, reviewState \}\)/,
+    /record_codex_security_scan_draft\(\{ scanId, complete, scope\?, threatModel\?, findings, reviewState \}\)/,
   );
   assert.doesNotMatch(continuation, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.equal([...executor.discoveryPromptPaths.values()][0].size, 1);
@@ -859,7 +898,7 @@ async function testInvalidArtifactsRetry() {
     retriedPrompt
       .split("## Deterministic validation retry after attempt 1")[1]
       ?.split('{"validation_error":')[0] ?? "";
-  assert.match(retryInstructions, /Standard scan result was rejected/);
+  assert.match(retryInstructions, /ended without a valid completed result/);
   assert.match(retryInstructions, /record_codex_security_scan_draft/);
   assert.doesNotMatch(retryInstructions, /\b(?:Deep|artifacts?|rebuild)\b/i);
   assert.match(retriedPrompt, /result\.json/);
@@ -2629,6 +2668,7 @@ try {
   });
   await testQuotaFailureStopsDispatchBeforeWorkerShutdown();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
+  await testConcurrentCheckpointKeepsExistingIteration();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();
   await testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot();
   await testWorkerScopedCandidateSourceAggregation();

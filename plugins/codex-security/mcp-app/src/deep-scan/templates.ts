@@ -1,3 +1,4 @@
+import type { DeepScanRunState } from "./types.js";
 import discoveryTemplate from "../../templates/deep-scan/discovery.md";
 
 export interface DiscoveryPromptInput {
@@ -7,6 +8,7 @@ export interface DiscoveryPromptInput {
   scope: string;
   includePaths?: readonly string[];
   userContext?: string;
+  severityRubric?: DeepScanRunState["severityRubric"];
   workerLabel: string;
   subagents: number;
   previousFindings?: readonly string[];
@@ -23,6 +25,7 @@ export function renderDiscoveryPrompt(
       targetPath: input.targetPath,
       includePaths: input.includePaths ?? [input.scope],
       userContext: input.userContext ?? null,
+      severityRubric: input.severityRubric,
       workerLabel: input.workerLabel,
       subagents: input.subagents,
       ...(input.previousFindings?.length && {

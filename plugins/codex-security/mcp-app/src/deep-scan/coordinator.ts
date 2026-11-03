@@ -757,6 +757,8 @@ export class DeepScanCoordinator {
       handoffClaimToken: this.options.handoffClaimToken,
     });
 
+    this.logProgress(acceptedCount);
+
     for (;;) {
       signal.throwIfAborted();
       if (batch.length) {
@@ -765,8 +767,10 @@ export class DeepScanCoordinator {
           streak = count ? 0 : streak + 1;
         }
         resultPath = join(
-          this.artifacts.dedupRoot,
-          checkpointLabel(),
+          await reserveCheckpointDirectory(
+            this.artifacts.dedupRoot,
+            checkpointLabel,
+          ),
           "output",
           "result.json",
         );
@@ -985,6 +989,22 @@ const systemClock: DeepScanClock = {
     }
   },
 };
+
+async function reserveCheckpointDirectory(
+  root: string,
+  nextLabel: () => string,
+): Promise<string> {
+  for (;;) {
+    const directory = join(root, nextLabel());
+    try {
+      // An old coordinator can finish a batch after its replacement checkpointed.
+      await fs.mkdir(directory);
+      return directory;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+}
 
 async function nextWorkerLabel(
   root: string,

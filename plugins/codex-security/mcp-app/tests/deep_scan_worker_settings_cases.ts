@@ -51,6 +51,7 @@ export async function testWorkerCyberAccessSettings({
     parentTurn?: { threadId: string; turnId: string };
     missingParentTurn?: boolean;
     failParentReadOnce?: boolean;
+    parentServiceTier?: string;
     serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
@@ -58,6 +59,18 @@ export async function testWorkerCyberAccessSettings({
     executor?: import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
   }[] = [
     { name: "unset", configuration: "" },
+    {
+      name: "parent-default-speed",
+      configuration: 'service_tier = "ultrafast"\n',
+      parentServiceTier: "default",
+      serviceTier: "default",
+    },
+    {
+      name: "parent-fast-speed",
+      configuration: 'service_tier = "ultrafast"\n',
+      parentServiceTier: "fast",
+      serviceTier: "fast",
+    },
     {
       name: "blue",
       configuration:
@@ -302,6 +315,7 @@ export async function testWorkerCyberAccessSettings({
         model: testCase.name,
         parentSandbox,
         parentTurn: testCase.parentTurn,
+        serviceTier: testCase.parentServiceTier,
       });
     }
     for (const testCase of cases.filter(

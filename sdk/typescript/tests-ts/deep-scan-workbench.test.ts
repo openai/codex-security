@@ -5,7 +5,9 @@ import { loadContract } from "../src/contract.js";
 import { readReviewState } from "./support/review-state.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { workbenchCommand as workbench } from "./support/workbench-command.js";
-import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { fileURLToPath } from "node:url";
+import { importSource } from "../../../plugins/codex-security/mcp-app/tests/import-module.ts";
 import { runPython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -219,14 +221,15 @@ test.each([
       },
     });
 
-    const templates =
-      /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?)\/\/ src\/deep-scan\/worker-runner\.ts/u.exec(
-        await loadBundledRuntime(),
-      )?.[1];
-    expect(templates).toBeDefined();
-    const renderDiscoveryPrompt = new Function(
-      `${templates}\nreturn renderDiscoveryPrompt;`,
-    )() as (input: Record<string, unknown>) => string;
+    const { renderDiscoveryPrompt } = await importSource(
+      fileURLToPath(
+        new URL(
+          "../../../plugins/codex-security/mcp-app/src/deep-scan/templates.ts",
+          import.meta.url,
+        ),
+      ),
+      { loader: { ".md": "text" } },
+    );
     const prompt = renderDiscoveryPrompt({
       ...deepScan,
       pluginRoot: PLUGIN_ROOT,
@@ -729,188 +732,6 @@ describe("deep scan workbench ownership", () => {
     });
   });
 
-  test("adopts an expired coordinator without repeating completed discovery", async () => {
-    const root = await temporaryDirectories.create(
-      "codex-security-deep-resume-",
-    );
-    const repository = join(root, "repository");
-    const stateDir = join(root, "state");
-    const codexHome = join(root, "codex-home");
-    await mkdir(repository);
-    await writeFile(join(repository, "source.py"), "# source fixture\n");
-
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const command = (args: string[], allowFailure = false) => {
-      const result = runPython(
-        python!,
-        [join(PLUGIN_ROOT, "scripts", "workbench_db.py"), ...args],
-        {
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: stateDir,
-            CODEX_HOME: codexHome,
-          },
-        },
-      );
-      const stdout = new TextDecoder().decode(result.stdout);
-      const stderr = new TextDecoder().decode(result.stderr);
-      if (allowFailure) return { status: result.exitCode, stderr };
-      expect(result.exitCode, stderr).toBe(0);
-      return JSON.parse(stdout) as Record<string, unknown>;
-    };
-
-    const started = command([
-      "begin-deep-scan",
-      "--thread-id",
-      "thread-deep-scan",
-      "--target-path",
-      repository,
-      "--scope",
-      ".",
-      "--scan-root",
-      join(root, "scans"),
-      "--available-parallelism",
-      "4",
-    ]);
-    const initial = started["deepScan"] as Record<string, unknown>;
-    const scanId = initial["scanId"] as string;
-    const scanDir = initial["scanDir"] as string;
-    expect(initial["coordinatorGeneration"]).toBe(1);
-
-    const updateDatabase = (statement: string, ...values: string[]) => {
-      const result = runPython(python!, [
-        "-c",
-        "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.execute(sys.argv[2],sys.argv[3:]); connection.commit()",
-        join(stateDir, "workbench.sqlite3"),
-        statement,
-        ...values,
-      ]);
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-    };
-    updateDatabase(
-      "UPDATE scans SET handoff_claim_token = ? WHERE id = ?",
-      originalClaimToken,
-      scanId,
-    );
-    command([
-      "update-progress",
-      "--scan-id",
-      scanId,
-      "--phase",
-      "discovery",
-      "--claim-token",
-      originalClaimToken,
-    ]);
-
-    const completedWorkerId = "44444444-4444-4444-8444-444444444444";
-    const interruptedWorkerId = "55555555-5555-4555-8555-555555555555";
-    for (const workerId of [completedWorkerId, interruptedWorkerId]) {
-      const artifactDir = join(
-        scanDir,
-        "artifacts",
-        "deep_discovery",
-        workerId,
-      );
-      const promptPath = join(artifactDir, "prompt.md");
-      await mkdir(artifactDir, { recursive: true });
-      await writeFile(promptPath, "Review the source.\n");
-      const workerArgs = [
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        scanId,
-        "--worker-id",
-        workerId,
-        "--kind",
-        "discovery",
-        "--prompt-path",
-        promptPath,
-        "--artifact-dir",
-        artifactDir,
-        "--attempt",
-        "1",
-      ];
-      command([...workerArgs, "--status", "running"]);
-      if (workerId === completedWorkerId) {
-        const resultPath = join(artifactDir, "result.json");
-        await writeFile(resultPath, "{}\n");
-        command([
-          ...workerArgs,
-          "--status",
-          "succeeded",
-          "--result-manifest-path",
-          resultPath,
-        ]);
-      }
-    }
-
-    updateDatabase(
-      "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
-      "2000-01-01T00:00:00+00:00",
-      scanId,
-    );
-    const claimArgs = [
-      "claim-deep-scan-coordinator",
-      "--scan-id",
-      scanId,
-      "--thread-id",
-      "thread-deep-scan",
-    ];
-    const missingClaim = command(claimArgs, true);
-    expect(missingClaim["status"]).not.toBe(0);
-    expect(missingClaim["stderr"]).toContain("another continuation");
-
-    const resumed = command([
-      ...claimArgs,
-      "--claim-token",
-      originalClaimToken,
-    ]);
-    const recovered = resumed["deepScan"] as Record<string, unknown>;
-    expect(resumed["coordinatorDisposition"]).toBe("adopted");
-    expect(recovered).toMatchObject({
-      status: "running",
-      phase: "discovery",
-      coordinatorGeneration: 2,
-      dispatchedCount: 1,
-    });
-    expect(recovered["workers"]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: completedWorkerId,
-          status: "succeeded",
-        }),
-        expect.objectContaining({
-          id: interruptedWorkerId,
-          status: "canceled",
-        }),
-      ]),
-    );
-
-    const observing = command([
-      ...claimArgs,
-      "--claim-token",
-      originalClaimToken,
-    ]);
-    expect(observing["coordinatorDisposition"]).toBe("observing");
-
-    const staleProgress = command(
-      [
-        "update-progress",
-        "--scan-id",
-        scanId,
-        "--phase",
-        "discovery",
-        "--claim-token",
-        originalClaimToken,
-        "--coordinator-generation",
-        "1",
-      ],
-      true,
-    );
-    expect(staleProgress["status"]).not.toBe(0);
-    expect(staleProgress["stderr"]).toContain("newer generation");
-  });
-
   test("completes an expired discovery deadline with no workers with retained limitations", async () => {
     const root = await temporaryDirectories.create(
       "codex-security-deep-empty-deadline-",
@@ -935,8 +756,12 @@ describe("deep scan workbench ownership", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
-    const command = workbenchCommand(python, stateDir, codexHome);
-    const registration = command([
+    const command = workbench(python!, () => ({
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: stateDir,
+      CODEX_HOME: codexHome,
+    }));
+    const registration = await command([
       "register-cli-scan",
       "--repository",
       repository,
@@ -952,19 +777,21 @@ describe("deep scan workbench ownership", () => {
     ]);
     const scanId = registration["scanId"] as string;
     const targetId = registration["targetId"] as string;
-    const begun = command([
-      "begin-deep-scan",
-      "--scan-id",
-      scanId,
-      "--thread-id",
-      "empty-deadline-thread",
-      "--scan-root",
-      join(root, "scans"),
-      "--available-parallelism",
-      "4",
-      "--workflow-version",
-      "deep-scan-mcp/v1",
-    ])["deepScan"] as Record<string, unknown>;
+    const begun = (
+      await command([
+        "begin-deep-scan",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        "empty-deadline-thread",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+        "--workflow-version",
+        "deep-scan-mcp/v1",
+      ])
+    )["deepScan"] as Record<string, unknown>;
     expect(begun).toMatchObject({
       status: "running",
       completionSequence: 0,
@@ -995,15 +822,17 @@ describe("deep scan workbench ownership", () => {
     ]);
     expect(expired.exitCode, new TextDecoder().decode(expired.stderr)).toBe(0);
 
-    const capped = command([
-      "finish-deep-scan",
-      "--scan-id",
-      scanId,
-      "--terminal-reason",
-      "capped",
-      "--manifest-path",
-      manifestPath,
-    ])["deepScan"] as Record<string, unknown>;
+    const capped = (
+      await command([
+        "finish-deep-scan",
+        "--scan-id",
+        scanId,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        manifestPath,
+      ])
+    )["deepScan"] as Record<string, unknown>;
     expect(capped).toMatchObject({
       status: "succeeded",
       terminalReason: "capped",
@@ -1021,7 +850,7 @@ describe("deep scan workbench ownership", () => {
     await writeBoundedScanArtifacts(scanDir, targetId, "repository", [
       { id: "source-review", reason },
     ]);
-    const completed = command(["complete-scan", "--scan-id", scanId])[
+    const completed = (await command(["complete-scan", "--scan-id", scanId]))[
       "scan"
     ] as {
       progress: { status: string };
@@ -1073,29 +902,4 @@ function writeBoundedScanArtifacts(
       }),
     ),
   ]);
-}
-
-function workbenchCommand(
-  python: string | null,
-  stateDir: string,
-  codexHome: string,
-) {
-  return (args: string[]): Record<string, unknown> => {
-    const result = runPython(
-      python!,
-      [join(PLUGIN_ROOT, "scripts", "workbench_db.py"), ...args],
-      {
-        env: {
-          ...process.env,
-          CODEX_SECURITY_STATE_DIR: stateDir,
-          CODEX_HOME: codexHome,
-        },
-      },
-    );
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-    return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
-      string,
-      unknown
-    >;
-  };
 }
