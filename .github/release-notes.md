@@ -98,6 +98,7 @@
 - apply native profiles across scan workflows ([#1018](https://github.com/openai/codex-security/pull/1018))
 - share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
 - skip the old position of moved DOCX text ([#2256](https://github.com/openai/codex-security/pull/2256))
+- honor signed-in tracker connections for finding reads ([#2212](https://github.com/openai/codex-security/pull/2212))
 
 <!-- release-section: highlights:end -->
 
