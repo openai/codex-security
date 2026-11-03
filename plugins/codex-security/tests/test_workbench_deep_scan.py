@@ -97,6 +97,9 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
+        )
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN service_tier")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN terminal_reviewed_surface_count")
         connection.execute("ALTER TABLE scans DROP COLUMN retained_checkpoint_heads_json")
