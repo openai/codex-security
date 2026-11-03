@@ -405,7 +405,6 @@ def parse_args(
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if execution_settings:
         args.require_execution_settings = True
