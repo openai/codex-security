@@ -104,6 +104,7 @@
 - review agent skills before installation ([#2088](https://github.com/openai/codex-security/pull/2088))
 - show Git errors for unreadable tracked files ([#2058](https://github.com/openai/codex-security/pull/2058))
 - prepare hosted runners and require completed PR checks ([#1580](https://github.com/openai/codex-security/pull/1580))
+- share the host adapter for records commands ([#2259](https://github.com/openai/codex-security/pull/2259))
 
 <!-- release-section: highlights:end -->
 
