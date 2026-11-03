@@ -942,7 +942,9 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60])
+  for (const version of [
+    27, 28, 31, 32, 47, 54, 55, 57, 58, 59, 60, 61, 62, 63, 64, 65,
+  ])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
@@ -987,6 +989,10 @@ test("recorded additive migrations restore missing columns and configured error 
       .get()?.discovery_user_context_json,
     null,
   );
+  database.exec(`SELECT discovery_user_context, finalization_input_json, usage_owner_json,
+      execution_settings_json FROM deep_scan_runs;
+    SELECT result_manifest_path, result_manifest_sha256, attempt FROM deep_scan_dedup_inputs;
+    SELECT 1 FROM deep_scan_attempts, deep_scan_attempt_sessions, deep_scan_merge_claims;`);
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
     discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
@@ -1233,10 +1239,10 @@ for (const snapshot of ["original", "previous-main"]) {
       ["bind original deep scan execution settings", 51],
     ]);
     if (snapshot === "previous-main") {
-      for (const item of migrations) {
-        if (originalVersions.has(item.name))
-          originalVersions.set(item.name, item.version - 1);
-      }
+      // This preview followed main migration 52 and recorded its six extensions at 53–58.
+      let version = 53;
+      for (const name of originalVersions.keys())
+        originalVersions.set(name, version++);
     }
     const database = memory(t);
     database.exec(`CREATE TABLE schema_migrations (
@@ -1259,14 +1265,14 @@ for (const snapshot of ["original", "previous-main"]) {
     VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10,
       'original context', '{"result":"original"}', '{"turn":"original"}',
       '{"model":"synthetic"}', 'created', 'updated')`);
-    const original = database.prepare("SELECT * FROM deep_scan_runs").get();
+    const original = database.prepare("SELECT * FROM deep_scan_runs").get()!;
 
     applyMigrations(database);
 
-    assert.deepEqual(
-      { ...database.prepare("SELECT * FROM deep_scan_runs").get() },
-      { ...original, discovery_user_context_json: null },
-    );
+    const upgraded = database.prepare("SELECT * FROM deep_scan_runs").get()!;
+    for (const [column, value] of Object.entries(original))
+      assert.deepEqual(upgraded[column], value, column);
+    assert.equal(upgraded.discovery_user_context_json, null);
     assert.deepEqual(
       database.prepare("SELECT * FROM local_finding_embeddings").all(),
       [],

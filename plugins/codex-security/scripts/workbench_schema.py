@@ -75,11 +75,11 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 57, 58, 59, 60):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
-                elif 54 <= version <= 59:
+                elif 61 <= version <= 65:
                     # Recreated Deep tables need the recorded extensions too.
                     # Do not replay data updates from an already applied migration.
                     for statement in sql_statements(sql):

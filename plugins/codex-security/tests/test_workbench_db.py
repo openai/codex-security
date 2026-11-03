@@ -675,7 +675,9 @@ def test_budget_exhaustion_during_discovery_preserves_workflow_contract(
         assert saved["findings"] == []
         assert saved["cost"] == BUDGET_COST
         assert saved["warnings"] == [BUDGET_WARNING]
-        assert "completeness" not in json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
+        assert "completeness" not in coverage
+        assert [item["id"] for item in coverage["deferred"]] == ["scan-cost-limit"]
     assert ledger.read_bytes() == original
 
 
