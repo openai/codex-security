@@ -2357,7 +2357,11 @@ export class ScanCostTracker {
             keepReading,
           ).then(
             () => {
-              if (!tracked.deferred && tracked.threadId !== null && keepReading(tracked))
+              if (
+                !tracked.deferred &&
+                tracked.threadId !== null &&
+                keepReading(tracked)
+              )
                 included.add(tracked.threadId);
             },
             (error: unknown) => ({ session: tracked, error }),
