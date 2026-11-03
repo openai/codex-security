@@ -10,6 +10,7 @@ import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -2532,7 +2533,11 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
-  const remediationPatchPath = " remediation.patch";
+  const manifestPath = path.join(initializedScanDir, "scan-manifest.json");
+  const sealedManifest = await readFile(manifestPath);
+  const filesBeforeGeneration = await readdir(initializedScanDir, {
+    recursive: true,
+  });
   const remediationPatch = `diff --git a/src/a.py b/src/a.py
 --- a/src/a.py
 +++ b/src/a.py
@@ -2540,14 +2545,6 @@ try {
 -vulnerable
 +fixed
 `;
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath),
-    remediationPatch,
-  );
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath.trim()),
-    "different patch contents\n",
-  );
   const generatedPatch = await testServer.callSuccessfulTool(62, {
     name: "set_codex_security_finding_remediation",
     arguments: {
@@ -2556,24 +2553,32 @@ try {
       requestId: remediationRequestId,
       expectedVersion: 1,
       state: "generated",
-      patchPath: remediationPatchPath,
-      patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
+      patch: remediationPatch,
       summary: "Contain archive extraction under the output root.",
     },
   });
+  const generatedFinding = generatedPatch.structuredContent.scan.findings[0];
+  const remediation = generatedFinding.remediationState;
+  const savedPatchPath = path.join(initializedScanDir, remediation.patchPath);
+  assert.equal(remediation.state, "generated");
+  assert.equal(remediation.patch, remediationPatch);
   assert.equal(
-    generatedPatch.structuredContent.scan.findings[0].remediationState.state,
-    "generated",
+    remediation.patchDigest,
+    `sha256:${hash("sha256", remediationPatch)}`,
   );
+  assert.ok(
+    !filesBeforeGeneration.includes(path.normalize(remediation.patchPath)),
+  );
+  assert.deepEqual(
+    await readFile(savedPatchPath),
+    Buffer.from(remediationPatch),
+  );
+  assert.deepEqual(await readFile(manifestPath), sealedManifest);
   assert.equal(
-    generatedPatch.structuredContent.scan.findings[0].remediationState.patch,
-    remediationPatch,
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    "vulnerable\n",
   );
-  assert.equal(
-    generatedPatch.structuredContent.scan.findings[0].remediationState
-      .patchPath,
-    remediationPatchPath,
-  );
+  assert.equal(generatedFinding.triage.status, "open");
 
   const applyActionToken = randomUUID();
   const requestedApply = await testServer.callSuccessfulTool(65, {
@@ -2607,16 +2612,10 @@ try {
     markedApplyDelivered.structuredContent.scan.findings[0].remediationState
       .actionDeliveredAt,
   );
-  execFileSync(
-    "git",
-    [
-      "apply",
-      "--no-index",
-      path.join(initializedScanDir, remediationPatchPath),
-    ],
-    {
-      cwd: target,
-    },
+  execFileSync("git", ["apply", "--no-index", savedPatchPath], { cwd: target });
+  assert.match(
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    /^fixed\r?\n$/,
   );
 
   const appliedPatch = await testServer.callSuccessfulTool(66, {
@@ -2628,9 +2627,7 @@ try {
       occurrenceId,
       requestId: remediationRequestId,
       state: "applied",
-      patchPath:
-        generatedPatch.structuredContent.scan.findings[0].remediationState
-          .patchPath,
+      patchPath: remediation.patchPath,
     },
   });
   assert.equal(
@@ -2706,6 +2703,52 @@ try {
       .verificationSummary,
     "Focused remediation checks passed.",
   );
+
+  const latin1Source = path.join(target, "src/info.py");
+  await writeFile(latin1Source, "café\n", "latin1");
+  const latin1Patch = Buffer.from(
+    "--- a/src/info.py\n+++ b/src/info.py\n@@ -1 +1 @@\n-café\n+résolu\n",
+    "latin1",
+  );
+  const latin1Request = {
+    occurrenceId: results.findings[1].occurrenceId,
+    actionToken: randomUUID(),
+    requestId: randomUUID(),
+  };
+  await testServer.callSuccessfulTool(174, {
+    name: "request_codex_security_finding_remediation",
+    arguments: latin1Request,
+  });
+  const latin1Generation = {
+    ...latin1Request,
+    expectedVersion: 1,
+    state: "generated",
+  };
+  const malformedPatch = await testServer.callTool(175, {
+    name: "set_codex_security_finding_remediation",
+    arguments: { ...latin1Generation, patch: "bad\ud800" },
+  });
+  assert.equal(malformedPatch.result.isError, true);
+  assert.match(
+    malformedPatch.result.content[0].text,
+    /unpaired Unicode surrogate.*base64/,
+  );
+  const generatedLatin1 = await testServer.callSuccessfulTool(176, {
+    name: "set_codex_security_finding_remediation",
+    arguments: {
+      ...latin1Generation,
+      patch: { encoding: "base64", content: latin1Patch.toString("base64") },
+    },
+  });
+  const { patchDigest, patchPath } =
+    generatedLatin1.structuredContent.scan.findings[1].remediationState;
+  const latin1PatchPath = path.join(initializedScanDir, patchPath);
+  assert.equal(patchDigest, `sha256:${hash("sha256", latin1Patch)}`);
+  assert.deepEqual(await readFile(latin1PatchPath), latin1Patch);
+  execFileSync("git", ["apply", "--no-index", latin1PatchPath], {
+    cwd: target,
+  });
+  assert.match(await readFile(latin1Source, "latin1"), /^résolu\r?\n$/);
 
   const findingsPage = await testServer.callSuccessfulTool(67, {
     name: "list_codex_security_findings",
