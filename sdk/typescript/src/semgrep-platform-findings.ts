@@ -679,6 +679,25 @@ interface SemgrepSelectionInput {
   findingIds: readonly string[];
 }
 
+export function requireSemgrepFullRef(ref: string) {
+  // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
+  const refParts = ref.split("/");
+  if (
+    refParts[0] !== "refs" ||
+    refParts.length < 2 ||
+    refParts.some(
+      (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
+    ) ||
+    ref.endsWith(".") ||
+    ref.includes("..") ||
+    ref.includes("@{") ||
+    /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(ref)
+  )
+    throw new Error(
+      "Use a fully qualified Semgrep ref such as refs/heads/topic.",
+    );
+}
+
 function selectedRows(
   options: SemgrepSelectionInput,
   repositoryFor: (
@@ -693,22 +712,7 @@ function selectedRows(
     semgrepPlatformId,
     selectedProjectUrl,
   );
-  // git-check-ref-format distinguishes literal branch/tag names from revision expressions.
-  const refParts = scope.ref.split("/");
-  if (
-    refParts[0] !== "refs" ||
-    refParts.length < 2 ||
-    refParts.some(
-      (part) => !part || part.startsWith(".") || part.endsWith(".lock"),
-    ) ||
-    scope.ref.endsWith(".") ||
-    scope.ref.includes("..") ||
-    scope.ref.includes("@{") ||
-    /[\u0000-\u0020\u007f~^:?*\[\\]/u.test(scope.ref)
-  )
-    throw new Error(
-      "Use a fully qualified Semgrep ref such as refs/heads/topic.",
-    );
+  requireSemgrepFullRef(scope.ref);
   const repository = repositoryFor(scope);
   const wanted = new Set(
     options.findingIds.map((id) =>
@@ -1114,7 +1118,7 @@ export function semgrepPlatformFindingRepository(
   )?.url;
 }
 
-function platformLocationPath(value: unknown) {
+export function platformLocationPath(value: unknown) {
   const path = text(value);
   const relative = relativePath(path);
   return relative && !relative.endsWith("/.") && repositoryFilePath(relative)

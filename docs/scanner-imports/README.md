@@ -15,13 +15,14 @@ guide. Otherwise, ask for a supported report. A fresh scan produces new results.
 | Guide                                                       | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | Inspector2 `ListFindings` JSON for one Code Security repository                 |
+| [AWS Continuum](continuum.md)                               | Code finding summaries or a detailed finding verified for one repository        |
 | [Black Duck SCA](blackduck.md)                              | BOM component vulnerabilities for one project version                           |
 | [Endor Labs](endor.md)                                      | Finding JSON from `endorctl`, or SARIF with finding UUIDs                       |
 | [GitHub code scanning](github-code-scanning.md)             | Alerts selected for one repository and Git ref                                  |
 | [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
 | [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                        |
 | [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                    |
-| [Semgrep Code](semgrep.md)                                  | CLI/CI JSON, self-contained SARIF, or selected Platform API pages (local SDK)   |
+| [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
 | [Snyk Open Source](snyk.md)                                 | CLI JSON, a Codex plugin export, or SARIF                                       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |

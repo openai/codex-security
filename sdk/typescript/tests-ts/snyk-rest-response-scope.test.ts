@@ -35,7 +35,7 @@ test("project and target JSON formatting preserves exact native numbers and text
   const report = snykRestFixture("open-source");
   const source = (members: string) => {
     const json = (resource: object) =>
-      JSON.stringify(resource).replace("{", `{${members},`);
+      `{${members},${JSON.stringify(resource).slice(1)}`;
     return normalizeSnykIssues({
       ...report,
       projectJson: json(project),
