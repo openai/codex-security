@@ -1340,7 +1340,7 @@ Each guide shows how to preview its input for a local repository. Follow the [sh
 to confirm the import and read the resulting records.
 
 Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `publish findings`,
-`findings imported`, `import sonar`, `import semgrep`, and `import github-advisories`. Only `1`
+`findings imported`, `import sonar`, `import semgrep`, `import snyk`, and `import github-advisories`. Only `1`
 enables these commands in help and schemas. The SDK's corresponding operations
 require the flag in their effective environment. Pure normalizers, file readers,
 and the existing `import github` alert collector remain available independently.
@@ -1455,7 +1455,14 @@ readback verify source-record identity and evidence. Codex assessment and
 visibility in the shared Cloud Findings view are separate. `cloudUrl`, when
 available, links to the destination repository in Cloud.
 
-### Import Snyk Open Source findings
+### Import Snyk findings
+
+For an existing monitored Snyk project, use
+`codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
+and save its output for `publish findings --to local --provider snyk`. Set
+`SNYK_TOKEN` with read access. The default product is Open Source. Select
+`--snyk-product code` for Code and `--snyk-api-origin` for a regional API
+(default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
 
 Use `--provider snyk` for Open Source SCA vulnerabilities. Native CLI JSON, plugin
 exports, and Open Source SARIF can produce different occurrence IDs. Use a

@@ -1,3 +1,4 @@
+import { canonicalNumber } from "./external-import-contract.js";
 import { CodexSecurityError } from "./errors.js";
 import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { importEnvironmentSetting } from "./external-imports-feature.js";
@@ -17,6 +18,15 @@ const wireJson = JSON as JSON & {
 };
 export function hostedNumberToken(value: unknown): string | undefined {
   return wireJson.isRawJSON(value) ? value.rawJSON : undefined;
+}
+
+/** Store native evidence by exact numeric value, independently of its wire spelling. */
+export function stringifyHostedEvidence(value: unknown): string {
+  return JSON.stringify(value, (_key, field: unknown) =>
+    wireJson.isRawJSON(field)
+      ? wireJson.rawJSON(canonicalNumber(field.rawJSON))
+      : field,
+  );
 }
 
 /** Keep vendor numeric IDs and evidence exact when a response is saved as JSON. */

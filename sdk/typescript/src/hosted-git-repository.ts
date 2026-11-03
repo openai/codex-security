@@ -240,7 +240,7 @@ export function hostedRepositoryUrlKey(
 }
 
 /** The Git HTTP Host and TLS server name can differ from the web URL's parsed IP literal. */
-function ambiguousGitIpHost(url: string): boolean {
+export function ambiguousGitIpHost(url: string): boolean {
   const host = URL.parse(url)?.hostname;
   if (!host || (!isIPv4(host) && !host.startsWith("["))) return false;
   const authority = /^https?:\/\/([^/?#]*)/iu.exec(url)?.[1] ?? "";

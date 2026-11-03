@@ -29,6 +29,7 @@ import {
   cloudRepositoryUrlKey,
   requireSafeJsonInteger,
   repositoryUrlKey,
+  validateExternalEvidence,
 } from "./external-import-contract.js";
 import type {
   ExternalFindingEvidence,
@@ -62,6 +63,11 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
+import {
+  type SnykIssuesFindings,
+  snykRestImportRepository,
+  snykRestCheckoutMatches,
+} from "./snyk-rest-findings.js";
 import {
   bundledPluginRoot,
   canonicalConfigPath,
@@ -548,15 +554,16 @@ async function requireMatchingRepository(
   strictSources: ReadonlyMap<string, Provider>,
   hostedSources: readonly ExternalSourceRepository[],
   platformFor: (source: ExternalSourceRepository, bound: boolean) => Provider,
+  snyk: ReturnType<typeof snykRestImportRepository>,
   protectedRoots: string[],
   environment: WorkbenchCommandOptions["environment"],
   signal?: AbortSignal,
   possibleSshHost?: string,
   fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<boolean> {
-  if (sources.length === 0 && hostedSources.length === 0) return false;
+  if (!snyk && sources.length === 0 && hostedSources.length === 0) return false;
   let allSourcesMatched = true;
-  if (hostedSources.length) {
+  if (snyk || hostedSources.length) {
     if (!(await hasGitMetadata(repository, signal))) return false;
     const remotes = await readHostedGitRemotes(
       repository,
@@ -567,6 +574,16 @@ async function requireMatchingRepository(
       environment,
       signal,
     );
+    if (snyk) {
+      if (
+        remotes &&
+        !remotes.some((remote) => snykRestCheckoutMatches(snyk, remote))
+      )
+        throw new CodexSecurityError(
+          `Imported repository ${JSON.stringify(snyk.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
+        );
+      return remotes !== undefined;
+    }
     allSourcesMatched = remotes !== undefined;
     if (remotes) {
       for (const source of hostedSources)
@@ -642,6 +659,7 @@ export function sonarCheckoutMatchesSource(
     new Map(),
     [],
     () => "sonar",
+    undefined,
     [...protectedRoots],
     environment,
     signal,
@@ -712,8 +730,8 @@ export async function prepareNormalizedLocalImport(
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
-  input: ExternalFindings,
-  options: NormalizedLocalImportOptions,
+  input: ExternalFindings & Partial<SnykIssuesFindings>,
+  options: NormalizedLocalImportOptions & { sourceRepositoryUrl?: string },
   dependencies: LocalExternalImportDependencies,
   readerSources = snapshotSourceRepositories(dependencies.sourceRepositories),
   parsedSources: readonly ExternalSourceRepository[] = [],
@@ -721,6 +739,17 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
+  if (!("snykRestContext" in current) && "snykRestContext" in input)
+    current.snykRestContext = structuredClone(input.snykRestContext);
+  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
+    for (const key of [
+      "sourceRepositoryUrl",
+      "sourceRepositoryPlatform",
+    ] as const)
+      if (key in input && !(key in current))
+        Object.assign(current, { [key]: structuredClone(input[key]) });
+  }
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -1143,6 +1172,36 @@ export async function prepareLocalImport(
       url: dependabotSource,
       platform: "github",
     });
+  const snyk = snykRestImportRepository(
+    current,
+    options.provider,
+    [
+      ...sources.keys(),
+      ...(options.sourceRepositoryUrl === undefined
+        ? []
+        : [options.sourceRepositoryUrl]),
+    ],
+    readerSources,
+    (finding, source) => {
+      finding.evidence.source_data = source;
+    },
+  );
+  if (snyk) {
+    // Preserve reader display fields while validating their complete native evidence.
+    for (const { evidence } of current.findings)
+      validateExternalEvidence(structuredClone(evidence), "local");
+  } else if (options.provider === "snyk" && current.sourceRepositoryUrl) {
+    const declared = { url: current.sourceRepositoryUrl };
+    const native = current.findings.flatMap((finding) =>
+      localFindingRepositories("snyk", finding),
+    );
+    for (const source of [declared, ...native])
+      if (!sources.has(source.url)) sources.set(source.url, source);
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "The normalized repository does not match the Snyk reader's repository.",
+      );
+  }
   const ordinarySources = [...sources.values()];
   // A reader can identify the VCS for both a hosted project and an ordinary row.
   const loosePlatformFor = localRepositoryPlatform(
@@ -1158,6 +1217,7 @@ export async function prepareLocalImport(
     strictSources,
     hosted,
     (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
+    snyk,
     workbenchOptions.protectedRoot,
     workbenchOptions.environment,
     dependencies.signal,

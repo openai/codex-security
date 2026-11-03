@@ -37,6 +37,7 @@ import {
   isSemgrepPlatformEvidence,
   semgrepPlatformReportRepository,
 } from "./semgrep-platform-findings.js";
+import { isSnykRestFinding, isSnykRestReport } from "./snyk-rest-findings.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import {
@@ -510,21 +511,24 @@ function storedFindingId(finding: ExternalFinding): string {
   return "";
 }
 
-function rejectLocalSemgrepReports(
+function rejectLocalScannerReports(
   input: ExternalFindings,
   provider: string,
 ): void {
   if (!input || (typeof input !== "object" && typeof input !== "function"))
     return;
+  const stored = (row: ExternalFinding) => ({
+    source_finding_id: storedFindingId(row),
+    evidence: row.evidence,
+  });
   const isPlatform = (row: ExternalFinding) => {
     if (!row) return false;
-    const id = storedFindingId(row);
-    const evidence = row.evidence;
+    const finding = stored(row);
     return (
-      /^semgrep-guardian:[0-9a-f]{64}$/u.test(id) ||
-      ownData(ownData(evidence, "source_data"), "format") ===
+      /^semgrep-guardian:[0-9a-f]{64}$/u.test(finding.source_finding_id) ||
+      ownData(ownData(finding.evidence, "source_data"), "format") ===
         guardianSelectionFormat ||
-      isSemgrepPlatformEvidence({ source_finding_id: id, evidence }, provider)
+      isSemgrepPlatformEvidence(finding, provider)
     );
   };
   const hasPlatformRows = (rows: ExternalFinding[]) =>
@@ -537,6 +541,8 @@ function rejectLocalSemgrepReports(
     throw new CodexSecurityError(
       "Semgrep Platform findings require a local import.",
     );
+  if (isSnykRestReport(input, (row) => row && isSnykRestFinding(stored(row))))
+    throw new CodexSecurityError("Snyk REST findings require a local import.");
 }
 
 export async function prepareExternalPublication(
@@ -547,7 +553,7 @@ export async function prepareExternalPublication(
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
   const parsed = await readExternalFindings(path, settings);
-  rejectLocalSemgrepReports(parsed.findings, settings.provider);
+  rejectLocalScannerReports(parsed.findings, settings.provider);
   return preparePublicationInput(
     parsed.publication ??
       normalizedPublicationInput(parsed.findings, settings.provider),
@@ -565,7 +571,7 @@ export async function prepareNormalizedExternalPublication(
 ): Promise<PreparedExternalPublication> {
   requireExternalImports(dependencies.environment);
   const settings = snapshotImportOptions(options);
-  rejectLocalSemgrepReports(input, settings.provider);
+  rejectLocalScannerReports(input, settings.provider);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
@@ -827,7 +833,7 @@ function normalizedPublicationInput(
     : undefined;
   if (reader) native = reader.snapshot;
   const original = historicalPublication(native);
-  if (original) rejectLocalSemgrepReports(original.parsed, provider);
+  if (original) rejectLocalScannerReports(original.parsed, provider);
   try {
     validatePublicationFindings(current, validateExternalEvidence);
   } catch (error) {
@@ -840,7 +846,7 @@ function normalizedPublicationInput(
     // Only the old selection can be reviewed when fresh validation failed.
     current = { read: original.parsed.read, findings: [], excluded: [] };
   }
-  rejectLocalSemgrepReports(current, provider);
+  rejectLocalScannerReports(current, provider);
   const identity = publicationIdentity(current);
   return {
     current,
@@ -1187,7 +1193,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, true)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalSemgrepReports({ ...parsed, findings: saved }, options.provider);
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     return content;
   }
 
@@ -1222,7 +1228,7 @@ async function preparePublicationInput(
       !verifiableLegacyMetadata(originalParsed, false)
     )
       throw unmatchedPreviousNumbers();
-    rejectLocalSemgrepReports({ ...parsed, findings: saved }, options.provider);
+    rejectLocalScannerReports({ ...parsed, findings: saved }, options.provider);
     content.legacyApproval = true;
     content.inputProjection = {
       identityFormat: 2,

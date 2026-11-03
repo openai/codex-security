@@ -232,6 +232,10 @@ import {
   GITHUB_ADVISORY_STATES,
   importGitHubAdvisories,
 } from "./github-advisories.js";
+import {
+  collectSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+} from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
 import { semgrepPlatformFormat } from "./semgrep-platform-findings.js";
 import {
@@ -2128,7 +2132,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
-  let escapeSemgrepOutput = false;
+  let escapeHostedOutput = false;
   let batchedVerification = false;
   let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
@@ -3985,7 +3989,7 @@ export async function main(
   });
   const imports = Cli.create("import", {
     description: importsEnabled
-      ? "Import Sonar security issues or read hosted Semgrep and GitHub findings."
+      ? "Import Sonar security issues or read hosted Semgrep, Snyk, and GitHub findings."
       : "Read GitHub code scanning alerts.",
   }).command("github", {
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -4069,7 +4073,7 @@ export async function main(
   });
   function registerOptInCollectors() {
     async function collect<T>(
-      provider: "GitHub advisory" | "Semgrep",
+      provider: "GitHub advisory" | "Semgrep" | "Snyk",
       fail: (error: {
         code: string;
         message: string;
@@ -4090,9 +4094,11 @@ export async function main(
         const diagnostic = interrupted
           ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
           : message;
-        errorOutput.write(
-          `codex-security: ${provider === "Semgrep" ? escapeTerminalText(diagnostic) : diagnostic}\n`,
-        );
+        const terminalDiagnostic =
+          provider === "Semgrep" || provider === "Snyk"
+            ? escapeTerminalText(diagnostic)
+            : diagnostic;
+        errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
         if (argv.includes("--full-output")) {
           structuredError = true;
           return fail({
@@ -4100,7 +4106,8 @@ export async function main(
               provider === "GitHub advisory"
                 ? "GITHUB_IMPORT_FAILED"
                 : "HOSTED_IMPORT_FAILED",
-            message: provider === "Semgrep" ? errorMessage(error) : message,
+            message:
+              provider === "GitHub advisory" ? message : errorMessage(error),
             exitCode,
           });
         }
@@ -4181,6 +4188,10 @@ export async function main(
       environment: dependencies.environment,
       fetch: dependencies.hostedScannerFetch,
     };
+    function setHostedOutputFormat(format?: string) {
+      escapeHostedOutput =
+        format === "md" || (format === "toon" && output.isTTY === true);
+    }
     const semgrepReport = z
       .object({
         format: z.literal(semgrepPlatformFormat),
@@ -4201,6 +4212,67 @@ export async function main(
         ),
       })
       .optional();
+    imports.command("snyk", {
+      description:
+        "Read Snyk Open Source or Code issues for one monitored project.",
+      hint: "Requires SNYK_TOKEN. Save complete --format json output and import it with publish findings --to local --provider snyk.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        project: z.string().min(1).describe("Snyk project ID."),
+      }),
+      options: z.object({
+        snykOrg: optionValue("--snyk-org").describe("Snyk organization ID."),
+        snykProduct: z
+          .enum(["open-source", "code"])
+          .default("open-source")
+          .describe("Snyk product to retrieve."),
+        snykApiOrigin: optionValue("--snyk-api-origin")
+          .optional()
+          .describe(
+            "Official regional Snyk API origin (default: https://api.snyk.io).",
+          ),
+        sourceRepositoryUrl: optionValue("--source-repository-url").describe(
+          "Explicit source-control repository mapping for the monitored project.",
+        ),
+      }),
+      output: z
+        .object({
+          format: z.literal(SNYK_REST_ISSUES_FORMAT),
+          apiVersion: z.string(),
+          apiOrigin: z.string(),
+          organizationId: z.string(),
+          projectId: z.string(),
+          product: z.enum(["open-source", "code"]),
+          sourceRepositoryUrl: z.string(),
+          complete: z.literal(true),
+          projectJson: z.string(),
+          targetJson: z.string(),
+          pages: z.array(
+            z.object({
+              startingAfter: z.string().nullable(),
+              responseJson: z.string(),
+            }),
+          ),
+        })
+        .optional(),
+      run: ({ args, options, error, format }) => {
+        setHostedOutputFormat(format);
+        return collect("Snyk", error, (signal) =>
+          collectSnykIssues(
+            {
+              projectId: args.project,
+              organizationId: options.snykOrg,
+              product: options.snykProduct,
+              apiOrigin: options.snykApiOrigin,
+              sourceRepositoryUrl: options.sourceRepositoryUrl,
+              signal,
+            },
+            http,
+          ),
+        );
+      },
+    });
     imports.command("semgrep", {
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
@@ -4232,8 +4304,7 @@ export async function main(
       }),
       output: semgrepReport,
       run: ({ args, options, error, format }) => {
-        escapeSemgrepOutput =
-          format === "md" || (format === "toon" && output.isTTY === true);
+        setHostedOutputFormat(format);
         return collect("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {
@@ -7244,7 +7315,9 @@ export async function main(
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     const optInCollector =
       command === "import" &&
-      ["github-advisories", "semgrep", "sonar"].includes(subcommand ?? "");
+      ["github-advisories", "semgrep", "snyk", "sonar"].includes(
+        subcommand ?? "",
+      );
     if (
       command === "import" &&
       subcommand !== "sonar" &&
@@ -7530,7 +7603,7 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (escapeSemgrepOutput)
+  if (escapeHostedOutput)
     frameworkOutput = escapeTerminalText(frameworkOutput, true);
   const writeUpdateNotice = () => {
     if (notice === undefined || batchedVerification) return;

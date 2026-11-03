@@ -17,6 +17,7 @@ const commands = [
   ["publish", "findings"],
   ["findings", "imported"],
   ["import", "github-advisories"],
+  ["import", "snyk"],
   ["import", "sonar"],
 ];
 
