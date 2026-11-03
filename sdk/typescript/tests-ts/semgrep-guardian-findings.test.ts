@@ -71,6 +71,10 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   expect(await fixture.read()).toHaveLength(0);
   expect((await preview.import()).counts.created).toBe(1);
 
+  // Guardian returns a string; the Web API can send the same digits as a JSON integer.
+  const webId = (JSON as JSON & { rawJSON(value: string): unknown }).rawJSON(
+    id,
+  );
   const web = await collectSemgrepPlatformFindings(
     { deployment, project, ref },
     {
@@ -81,7 +85,7 @@ test("a signed-in Guardian selection and Web API collection keep independent row
             ? {
                 findings: [
                   {
-                    id,
+                    id: webId,
                     repository: {
                       id: 4,
                       name: project,
@@ -107,10 +111,13 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
   const stored = await fixture.read();
   expect(stored).toHaveLength(2);
+  const platform = stored.find((item) =>
+    item.sourceFindingId.startsWith("semgrep-platform:"),
+  );
   expect(
-    stored.find((item) => item.sourceFindingId.startsWith("semgrep-platform:"))
-      ?.evidence.details?.code?.end_line,
-  ).toBe(5);
+    platform?.evidence.source_data?.["semgrepPlatformFindingJson"],
+  ).toContain(`"id":${id},`);
+  expect(platform?.evidence.details?.code?.end_line).toBe(5);
   expect(stored.every((item) => item.version === 1)).toBe(true);
 });
 
