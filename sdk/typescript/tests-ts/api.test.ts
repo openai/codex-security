@@ -116,6 +116,7 @@ import {
   progressMarker,
   nativeCommand,
   completedCommand,
+  waitForCostTracker,
   writeSession as writeUsageSession,
 } from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
@@ -15601,14 +15602,6 @@ if __name__ == "__main__":
         `${JSON.stringify({ type: "session_meta", payload: { id: "thread-1" } })}\n` +
           token({ input_tokens: 0, output_tokens: 0 }),
       );
-      let initialSeen!: () => void;
-      let overageSeen!: () => void;
-      const initialReady = new Promise<void>((resolve) => {
-        initialSeen = resolve;
-      });
-      const overageReady = new Promise<void>((resolve) => {
-        overageSeen = resolve;
-      });
       const costs: number[] = [];
       let receivedFinal = false;
       const aborts: boolean[] = [];
@@ -15625,13 +15618,16 @@ if __name__ == "__main__":
             return {
               events: (async function* (): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "thread-1" };
-                await initialReady;
+                await waitForCostTracker(() => costs.includes(0));
                 // Keep the final receipt adjacent to the file update without a timer gap.
                 appendFileSync(
                   rollout,
                   token({ input_tokens: 1_000_000, output_tokens: 100_000 }),
                 );
-                if (phase === "earlier live poll") await overageReady;
+                if (phase === "earlier live poll")
+                  await waitForCostTracker(() =>
+                    costs.some((cost) => cost > 5),
+                  );
                 receivedFinal = true;
                 yield {
                   type: "turn.completed",
@@ -15654,8 +15650,6 @@ if __name__ == "__main__":
           maxCostUsd: 5,
           onCost: (cost) => {
             costs.push(cost.estimatedUsd);
-            if (cost.estimatedUsd === 0) initialSeen();
-            if (cost.estimatedUsd > 5) overageSeen();
           },
         });
         if (phase === "earlier live poll") {

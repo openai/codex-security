@@ -4,6 +4,15 @@ import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
+export async function waitForCostTracker(check: () => boolean): Promise<void> {
+  // Synthetic scans have no Codex process to keep the unref'ed poll timer alive.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (check()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for the cost tracker.");
+}
+
 export const scanThreadId = "scan-thread";
 export const lowerUuid7Turn = "019f9e4d-b3ba-7000-8000-000000000001";
 export const childUuid7Thread = "019f9e4d-b3ba-7000-8000-000000000002";

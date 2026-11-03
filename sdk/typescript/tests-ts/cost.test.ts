@@ -37,6 +37,7 @@ import {
   parentFields,
   parentMetadata,
   taskEvent,
+  waitForCostTracker,
   writeSession,
   ownershipRollout,
   readPythonRolloutUsage,
@@ -55,13 +56,6 @@ const commandOutput = (middle: string) =>
 const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
   "codex-security-cost-",
 );
-async function waitFor(check: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (check()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error("Timed out waiting for the cost tracker.");
-}
 
 afterEach(cleanup);
 
@@ -3036,7 +3030,7 @@ describe("live scan cost tracking", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 250));
     expect(traversals).toBe(1);
     release!();
-    await waitFor(() => traversals === 2);
+    await waitForCostTracker(() => traversals === 2);
 
     expect(errors).toEqual(["session read failed"]);
     expect(traversals).toBe(2);
@@ -3138,7 +3132,9 @@ describe("live scan cost tracking", () => {
       await Promise.all(trackers.map((tracker) => tracker.refresh()));
       await writeSession(home, "worker-0", {}, { parent: "scan-0" });
       await writeSession(home, "worker-1", {}, { parent: "scan-1" });
-      await waitFor(() => workers.every((events) => events.length === 1));
+      await waitForCostTracker(() =>
+        workers.every((events) => events.length === 1),
+      );
       expect(workers).toEqual([
         [{ kind: "observed", worker: 1 }],
         [{ kind: "observed", worker: 1 }],
@@ -3184,7 +3180,7 @@ describe("live scan cost tracking", () => {
       onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
-    await waitFor(() => events.length === 4);
+    await waitForCostTracker(() => events.length === 4);
     await appendFile(
       parent,
       `${JSON.stringify({ type: "turn_context", payload: { instructions: "Check authorization" } })}\n`,
@@ -9857,17 +9853,12 @@ describe("live scan cost tracking", () => {
     const errors: unknown[] = [];
     const controller = new AbortController();
     let ownershipCalls = 0;
-    let finishPoll!: () => void;
-    const polled = new Promise<void>((resolve) => {
-      finishPoll = resolve;
-    });
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
       maxCostUsd: 1,
       resolveOwnedSessionPaths: async () => {
         ownershipCalls += 1;
-        finishPoll();
         return new Map([
           [root, "scan-thread"],
           [worker, "worker-thread"],
@@ -9876,7 +9867,6 @@ describe("live scan cost tracking", () => {
       onError: (error) => {
         errors.push(error);
         controller.abort(error);
-        finishPoll();
       },
     });
     try {
@@ -9886,7 +9876,7 @@ describe("live scan cost tracking", () => {
       const archive = join(home, "archived-worker.jsonl");
       await filesystem.rename(worker, archive);
       worker = archive;
-      await polled;
+      await waitForCostTracker(() => ownershipCalls > 0 || errors.length > 0);
       await tracker.refresh().catch((error) => errors.push(error));
       expect(controller.signal.aborted).toBe(false);
       expect(errors).toEqual([]);
