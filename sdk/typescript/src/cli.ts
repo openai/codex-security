@@ -10117,6 +10117,21 @@ async function executeScan(
         registeredScan = scan;
         scanDir = scan.scanDir;
       },
+      onLifecycle: verbose
+        ? (scan) =>
+            diagnostic("scan.lifecycle", {
+              scan_id: scan.scanId,
+              mode: scan.mode,
+              status: scan.status,
+              started_at: scan.startedAt,
+              finished_at: scan.finishedAt,
+              has_reportable_findings: scan.hasReportableFindings,
+              surface: scan.surface,
+              package_version: scan.packageVersion,
+              plugin_version: scan.pluginVersion,
+              mock: scan.mock,
+            })
+        : undefined,
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -10528,9 +10543,14 @@ async function executeScan(
     }
   }
 
+  const registration = {
+    registration_observed: registeredScan !== undefined,
+    scan_id: registeredScan?.scanId,
+  };
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
+      ...registration,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
@@ -10580,6 +10600,7 @@ async function executeScan(
         costLimitFailure === undefined
           ? undefined
           : formatScanCost(costLimitFailure.cost),
+      ...registration,
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
@@ -10632,6 +10653,7 @@ async function executeScan(
     diagnostic("scan.failed", {
       classification: "unknown",
       message: "Scan completed without a result.",
+      ...registration,
     });
     errorOutput.write("scan completed without a result\n");
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
