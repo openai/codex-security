@@ -881,7 +881,6 @@ for (const mode of ["standard", "deep"] as const) {
         await client.close();
       }
     },
-    30_000,
   );
 }
 
