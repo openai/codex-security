@@ -507,7 +507,7 @@ with ExitStack() as stack:
                 "terminal_deep_scan_for_target_snapshot": None,
                 "scan_target_identity": ("synthetic", "snapshot", 7, metadata[str(target)].st_ino),
                 "directory_snapshot_regular_file_count": 0,
-                "effective_deep_scan_config": {}, "now": timestamp,
+                "effective_deep_scan_config": {"settings": {}}, "now": timestamp,
                 "state_dir": root,
             }.items():
                 mocks.enter_context(patch.object(deep_fixture_dependency(name), name, return_value=value))
@@ -523,6 +523,7 @@ with ExitStack() as stack:
             deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
                 target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
                 user_context=None, model=None, reasoning_effort=None,
+                join_only=False, project_config_path=None, service_tier=None,
             ), "synthetic-thread")
         print(json.dumps({
             "generations": {row["id"]: row["repository_generation"] for row in connection.execute("SELECT id, repository_generation FROM scans")},
@@ -596,7 +597,7 @@ with ExitStack() as stack:
                     "require_scan": row, "require_workspace": workspace,
                     "require_owned_scan": (row, workspace),
                     "scan_target_identity": ("synthetic", None, 7, metadata[str(target)].st_ino),
-                    "effective_deep_scan_config": {},
+                    "effective_deep_scan_config": {"settings": {}},
                     "now": timestamp, "deep_scan_result": {},
                 }.items():
                     mocks.enter_context(patch.object(deep_fixture_dependency(function), function, return_value=value))
@@ -612,6 +613,7 @@ with ExitStack() as stack:
                     diff_head_revision=None, diff_content_digest=None, user_context=None,
                     target_summary=None, scan_root=None, model=None, reasoning_effort=None,
                     claim_token=None, workflow_version="synthetic",
+                    join_only=False, project_config_path=None, service_tier=None,
                 )
                 try:
                     if kind == "workspace":

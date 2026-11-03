@@ -396,6 +396,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
     set_finding_remediation.add_argument("--summary")
+    set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")
     set_finding_remediation.add_argument("--patch-digest")
     set_finding_remediation.add_argument("--base-revision")
@@ -412,7 +413,6 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")
