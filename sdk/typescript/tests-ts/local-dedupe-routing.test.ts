@@ -165,7 +165,7 @@ test("default embeddings retain historical key order and SDK number values and r
   await runWorkbench(options, ["local-dedupe"], JSON.stringify(prepare));
   const storedBody =
     `{"z":true,"findingId":${JSON.stringify(finding.findingId)},` +
-    '"extensions":{"😀":"astral","z":{"z":2,"a":1},"integer":9007199254740993,' +
+    '"extensions":{"😀":"astral","z":{"z":2,"a":1},"10":"ten","2":"two","integer":9007199254740993,' +
     '"\\ue000":"BMP","a":[{"z":4,"a":3}]},"a":false}';
   const stored = spawnSync(
     "node",
@@ -185,6 +185,8 @@ database.close();`,
   const expectedInput = JSON.stringify({
     a: false,
     extensions: {
+      "2": "two",
+      "10": "ten",
       a: [{ a: 3, z: 4 }],
       integer: 9007199254740992,
       z: { a: 1, z: 2 },
@@ -280,12 +282,18 @@ print(json.dumps({"action": request["action"], "arguments": sys.argv[1:]}))
   ).toEqual({ action: "embed", arguments: ["local-dedupe"] });
 });
 
-for (const failure of ["non-finite body", "BLOB finding ID"]) {
-  test(`native local dedupe emits no partial JSON when a stored ${failure} fails after commit`, async () => {
+for (const failure of [
+  "1e400",
+  "NaN",
+  "Infinity",
+  "-Infinity",
+  "BLOB finding ID",
+]) {
+  test(`native local dedupe commits before reporting a stored ${failure} response error`, async () => {
     const { options, prepare, finding, stateDirectory } = await fixture();
     await runWorkbench(options, ["local-dedupe"], JSON.stringify(prepare));
     const database = join(stateDirectory, "workbench.sqlite3");
-    function sql(script: string) {
+    function sql(script: string, ...args: string[]) {
       const result = spawnSync(
         "node",
         [
@@ -295,43 +303,44 @@ const database = new DatabaseSync(process.argv[1]);
 ${script}
 database.close();`,
           database,
-          finding.findingId,
+          ...args,
         ],
         { encoding: "utf8" },
       );
       expect(result.status, result.stderr).toBe(0);
       return result.stdout;
     }
-    let payload: Omit<typeof prepare, "repositoryId"> & {
-      repositoryId?: string;
-    } = prepare;
-    if (failure === "non-finite body") {
-      sql(`
-database.prepare("UPDATE findings SET details_json = ? WHERE id = ?")
-  .run('{"overflow":1e400}', process.argv[2]);
-database.exec("DELETE FROM finding_repositories");
-`);
-    } else {
-      sql(`
+    if (failure === "BLOB finding ID") {
+      sql(
+        `
 database.exec("DELETE FROM finding_repositories");
 database.prepare("UPDATE findings SET id = CAST(id AS BLOB) WHERE id = ?")
   .run(process.argv[2]);
-`);
-      payload = {
-        ...prepare,
-        repositoryId: undefined,
-        findings: [
-          {
-            ...finding,
-            findingId: `${finding.findingId}-new`,
-            fingerprints: {
-              ...finding.fingerprints,
-              primary: `${finding.fingerprints.primary}-new`,
-            },
-          },
-        ],
-      };
+`,
+        finding.findingId,
+      );
+    } else {
+      sql(
+        'database.prepare("UPDATE findings SET details_json = ? WHERE id = ?").run(...process.argv.slice(2));',
+        `{"evidence":[${failure}]}`,
+        finding.findingId,
+      );
     }
+    const newId = `${finding.findingId}-new`;
+    const payload = {
+      ...prepare,
+      repositoryId: undefined,
+      findings: [
+        {
+          ...finding,
+          findingId: newId,
+          fingerprints: {
+            ...finding.fingerprints,
+            primary: `${finding.fingerprints.primary}-new`,
+          },
+        },
+      ],
+    };
     const result = spawnSync(
       "node",
       [join(PLUGIN_ROOT, "mcp", "helpers.mjs"), "local-dedupe"],
@@ -342,12 +351,14 @@ database.prepare("UPDATE findings SET id = CAST(id AS BLOB) WHERE id = ?")
     );
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    if (failure === "non-finite body")
-      expect(result.stderr).toContain("non-finite");
-    else expect(result.stderr).toMatch(/key|blob|bytes/iu);
+    if (failure === "BLOB finding ID")
+      expect(result.stderr).toMatch(/key|blob|bytes/iu);
+    else expect(result.stderr).toContain("non-finite");
     expect(
       sql(
-        'console.log(database.prepare("SELECT COUNT(*) AS total FROM finding_repositories").get().total);',
+        `console.log(database.prepare("SELECT COUNT(*) AS total FROM findings f JOIN finding_repositories r ON r.finding_id = f.id WHERE f.id = ? AND r.repository_id = ?").get(...process.argv.slice(2)).total);`,
+        newId,
+        prepare.anchorRepositoryId,
       ).trim(),
     ).toBe("1");
   });

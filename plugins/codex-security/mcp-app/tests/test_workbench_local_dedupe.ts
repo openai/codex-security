@@ -511,7 +511,7 @@ test("vector norm admits the largest finite result and rejects its overflowing n
 test("cache hits skip body parsing while malformed cache misses roll back inserted findings", async (t) => {
   const { database, prepare } = await fixture(t);
   prepared(prepare([finding("old")]));
-  const body = '{"incomplete":';
+  const body = '{"evidence":[NaN,]}';
   database
     .prepare("UPDATE findings SET details_json = ? WHERE id = 'old'")
     .run(body);
@@ -532,19 +532,25 @@ test("cache hits skip body parsing while malformed cache misses roll back insert
   assert.deepEqual(snapshot(database), before);
 });
 
-test("historical numeric overflow reaches the response after preparation commits", async (t) => {
+test("legacy non-finite numbers reach the response after preparation commits", async (t) => {
   const { database, prepare } = await fixture(t);
   prepared(prepare([finding("old")]));
   database
     .prepare("UPDATE findings SET details_json = ? WHERE id = 'old'")
-    .run('{"findingId":"old","evidence":{"count":1e400}}');
+    .run(
+      String.raw`{"findingId":"old","evidence":[1e400,NaN,Infinity,-Infinity,9007199254740993,{"NaN":"quoted \"Infinity\""}]}`,
+    );
   const result = prepared(prepare([finding("new")]));
-  assert.equal(
-    (
-      result.findingsToEmbed.find((item) => item.findingId === "old")!
-        .evidence as { count: number }
-    ).count,
-    Infinity,
+  assert.deepEqual(
+    result.findingsToEmbed.find((item) => item.findingId === "old")!.evidence,
+    [
+      Infinity,
+      NaN,
+      Infinity,
+      -Infinity,
+      9007199254740993n,
+      { NaN: 'quoted "Infinity"' },
+    ],
   );
   assert.ok(database.prepare("SELECT id FROM findings WHERE id = 'new'").get());
 });

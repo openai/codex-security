@@ -95,8 +95,37 @@ function cacheKey(space: string, document: SQLOutputValue): string {
   return createHash("sha256").update(`${space}\0${text}`).digest("hex");
 }
 
+function parseStoredJson(text: string): unknown {
+  if (!text.includes("NaN") && !text.includes("Infinity"))
+    return parseJson(text);
+
+  // Python's json.loads accepted three extra number literals. Index bare values
+  // so JSON.parse still validates the structure and decodes strings normally.
+  const values: unknown[] = [];
+  try {
+    const indexed = text.replace(
+      /"(?:[^"\\]|\\[\s\S])*"?|[^\s"[\]{},:]+/gu,
+      (token) => {
+        if (token.startsWith('"')) return token;
+        const value =
+          token === "NaN" || token === "Infinity" || token === "-Infinity"
+            ? Number(token)
+            : parseJson(token);
+        return String(values.push(value) - 1);
+      },
+    );
+    return JSON.parse(indexed, (_key, value: unknown) =>
+      typeof value === "number" ? values[value] : value,
+    );
+  } catch (error) {
+    // Report malformed JSON against the original document.
+    if (error instanceof SyntaxError) return parseJson(text);
+    throw error;
+  }
+}
+
 function parseBody(document: SQLOutputValue): unknown {
-  if (typeof document === "string") return parseJson(document);
+  if (typeof document === "string") return parseStoredJson(document);
   if (!(document instanceof Uint8Array))
     throw new TypeError("Stored finding JSON must be text or bytes.");
   const bytes = Buffer.from(document);
@@ -130,7 +159,7 @@ function parseBody(document: SQLOutputValue): unknown {
   } catch (error) {
     throw new LocalDedupeError((error as Error).message);
   }
-  return parseJson(text.startsWith("\ufeff") ? text.slice(1) : text);
+  return parseStoredJson(text.startsWith("\ufeff") ? text.slice(1) : text);
 }
 
 function orderedFinding(value: unknown): unknown {
