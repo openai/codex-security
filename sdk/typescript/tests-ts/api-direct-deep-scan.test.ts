@@ -207,15 +207,26 @@ test.each(["configured", "managed"] as const)(
       ...runtimeEnvironment,
       CODEX_API_KEY: "synthetic-bun-scan-key",
     };
+    const postScanPrompt = "Read the completed scan in a code-mode cell.";
+    const followUp = mock(async (prompt: string) => {
+      expect(prompt).toBe(postScanPrompt);
+      return { events: completedEvents("owner") };
+    });
+    const codeMode = { direct_only_tool_namespaces: ["caller_tools"] };
     const parentTurn = mock(async (prompt: string) => {
       expect(prompt).toContain("start_codex_security_deep_scan");
-      throw new Error("parent route reached");
+      async function* events() {
+        yield { type: "thread.started", thread_id: "owner" };
+        throw new Error("parent route reached");
+      }
+      return { events: events() };
     });
     const client = new TestClient(
       {
         codexOverrides: {
           model: "gpt-6.1-sol",
           model_reasoning_effort: "high",
+          features: { code_mode: codeMode },
         },
       },
       {
@@ -238,9 +249,20 @@ test.each(["configured", "managed"] as const)(
             model_reasoning_effort: "high",
           });
           return {
-            startThread: (options) => {
-              expect(options.workingDirectory).toBe(scanDir);
+            startThread: (threadOptions) => {
+              expect(threadOptions.workingDirectory).toBe(scanDir);
               return { id: null, runStreamed: parentTurn };
+            },
+            resumeThread: (id, threadOptions) => {
+              expect(id).toBe("owner");
+              expect(threadOptions.workingDirectory).toBe(scanDir);
+              expect(options.config?.["features"]).toMatchObject({
+                code_mode: codeMode,
+              });
+              expect(options.configOverrides?.join("\n")).not.toContain(
+                "direct_only_tool_namespaces",
+              );
+              return { id, runStreamed: followUp };
             },
           };
         },
@@ -253,9 +275,11 @@ test.each(["configured", "managed"] as const)(
       await expect(
         client.run(repository, {
           mode: "deep",
+          postScanPrompt,
         }),
       ).rejects.toThrow("parent route reached");
       expect(parentTurn).toHaveBeenCalledTimes(1);
+      expect(followUp).toHaveBeenCalledTimes(1);
     } finally {
       await client.close();
     }
