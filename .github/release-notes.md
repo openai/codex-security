@@ -111,6 +111,7 @@
 - support AWS Continuum code findings ([#2264](https://github.com/openai/codex-security/pull/2264))
 - recognize Windows drive and UNC host casing ([#545](https://github.com/openai/codex-security/pull/545))
 - verify large saved scans in bounded requests ([#2251](https://github.com/openai/codex-security/pull/2251))
+- save generated patches for completed scans ([#2033](https://github.com/openai/codex-security/pull/2033))
 
 <!-- release-section: highlights:end -->
 
