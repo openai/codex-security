@@ -10,5 +10,6 @@ if args and args[0] in {"inspect-target", "inspect-setup"}:
     from workbench_setup import main
 else:
     from workbench_db import main
+    options["framed_input"] = True
 main(**options)
 `;

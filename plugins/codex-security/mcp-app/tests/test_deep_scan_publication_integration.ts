@@ -2,11 +2,13 @@ import { readJson } from "./support/json.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -48,7 +50,7 @@ type HostModule = Pick<
   > &
   Pick<
     typeof import("../src/deep-scan/finalization.ts"),
-    "readSelectedDeepScanDraft"
+    "readSelectedDeepScanDraft" | "resumeSelectedDeepScan"
   > &
   Pick<
     typeof import("../src/deep-scan/artifacts.ts"),
@@ -107,7 +109,7 @@ const host = (await importNativeModule({
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
-      'export { readSelectedDeepScanDraft } from "./src/deep-scan/finalization.ts";',
+      'export { readSelectedDeepScanDraft, resumeSelectedDeepScan } from "./src/deep-scan/finalization.ts";',
       'export { createDeepScanArtifacts } from "./src/deep-scan/artifacts.ts";',
       'export { parseDeepReduction, deepReductionToScanDraft } from "./src/deep-scan/artifact-validation.ts";',
     ].join("\n"),
@@ -121,6 +123,7 @@ const {
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   readSelectedDeepScanDraft,
+  resumeSelectedDeepScan,
   createDeepScanArtifacts,
   parseDeepReduction,
   deepReductionToScanDraft,
@@ -710,10 +713,15 @@ test("legacy terminal aggregate rejects late public drafts with both complete fl
     threatModel: { summary: "Selected aggregate" },
   };
   await assert.rejects(
-    recordCodexSecurityScanDraftViaWorkbench(context, draft, async (args) => {
-      await runWorkbench(args);
-      throw new Error("Synthetic lost publication response");
-    }),
+    recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft,
+      async (args, input) => {
+        assert.equal(input, undefined);
+        await runWorkbench(args, input);
+        throw new Error("Synthetic lost publication response");
+      },
+    ),
     /lost publication response/,
   );
   const published = await snapshot(run);
@@ -858,8 +866,8 @@ for (const status of ["failed", "interrupted"] as const) {
       recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
-        async (args) => {
-          await runWorkbench(args);
+        async (args, input) => {
+          await runWorkbench(args, input);
           throw new Error("Synthetic lost publication response");
         },
         undefined,
@@ -1041,6 +1049,54 @@ async function createFixture(
     },
   };
 }
+
+test("the coordinator rejects a reducer result replaced after validation", async (t) => {
+  const { FakeExecutor } = await import("./deep_scan_coordinator_fixture.ts");
+  const { run, store } = await createFixture(t, { maxDiscoveryRuns: 1 });
+  const claim = await store.claimCoordinator({
+    scanId: run.scanId,
+    threadId: owner,
+  });
+  const commitDedup = store.commitDedup.bind(store);
+  let replaced = false;
+  let acceptedSummary: string | undefined;
+  store.commitDedup = async (commit) => {
+    const draft = JSON.parse(await readFile(commit.resultManifestPath, "utf8"));
+    draft.threatModel = { summary: "Substituted after reducer validation" };
+    const replacement = commit.resultManifestPath + ".replacement";
+    await writeFile(replacement, JSON.stringify(draft));
+    await rename(replacement, commit.resultManifestPath);
+    replaced = true;
+    const receipt = await commitDedup(commit);
+    const saved = JSON.parse(
+      await readFile(receipt.committedMerge!.resultManifestPath, "utf8"),
+    );
+    acceptedSummary = saved.threatModel.summary;
+    return receipt;
+  };
+  const coordinator = new DeepScanCoordinator({
+    run: claim.run,
+    store,
+    pluginRoot,
+    threadId: owner,
+    executor: new FakeExecutor(),
+    heartbeatIntervalMs: 60_000,
+  });
+  coordinator.start();
+  const failure = await coordinator.wait(undefined, 30_000).then(
+    (result) => result?.error,
+    (error: Error) => error.message,
+  );
+  assert.equal(replaced, true);
+  assert.equal(acceptedSummary, undefined);
+  const persisted = await store.get(run.scanId, owner);
+  const reducer = persisted?.persistedWorkers?.find(
+    (worker) => worker.kind === "dedup",
+  );
+  assert.ok(reducer);
+  assert.equal(reducer.acceptedResultPath, undefined);
+  assert.match(failure ?? "", /validated reducer result/i);
+});
 
 async function commitReducers(
   fixture: PublicationFixture,
@@ -1626,6 +1682,12 @@ test("raw publication repeats the same staged paths without changing their bytes
       (flag) => args[args.indexOf(flag) + 1],
     );
     const staged = await Promise.all(stagedPaths.map((file) => readFile(file)));
+    const digest = createHash("sha256")
+      .update(staged[0])
+      .update("\0")
+      .update(staged[1])
+      .digest("hex");
+    assert.equal(input, digest);
     const first = await f.runWorkbench(args, input);
     const accepted = await snapshot(f.run);
     assert.deepEqual(
@@ -1646,24 +1708,60 @@ test("raw publication repeats the same staged paths without changing their bytes
 });
 
 for (const changed of ["draftPath", "checkpointPath"] as const) {
-  test(`publication acknowledgment must match the original ${changed}`, async (t) => {
+  test(`publication rejects a modified staged ${changed}`, async (t) => {
     const f = await publicationFixture(t);
-    const lost = new Error(
-      "Synthetic response loss after different staged input",
-    );
     const runner = publicationRunner(f, {
       async before(attempt, paths) {
         const document = JSON.parse(await readFile(paths[changed], "utf8"));
         document.threatModel = { summary: "Different staged input" };
         await writeFile(paths[changed], JSON.stringify(document));
       },
-      after() {
-        throw lost;
-      },
     });
-    await assert.rejects(f.publish(runner.run), (error) => error === lost);
+    await assert.rejects(
+      f.publish(runner.run),
+      /staged Deep Scan publication changed/,
+    );
     assert.equal(runner.requests.length, 1);
-    assert.equal(runner.writes(), 1);
+    assert.equal(runner.writes(), 0);
     assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
   });
 }
+
+test("resumed selected publication rejects an ordinary-file staging replacement", async (t) => {
+  const f = await publicationFixture(t, "deep-security-scan/v2");
+  await f.store.selectFinalization({
+    scanId: f.run.scanId,
+    coordinatorGeneration: 2,
+    reason: "saturated",
+    manifestPath: path.join(f.run.scanDir, "scan-manifest.json"),
+    resultPath: f.results[1],
+    omittedWorkerIds: [],
+  });
+  const runner = publicationRunner(f, {
+    async before(_attempt, { draftPath }) {
+      const draft = JSON.parse(await readFile(draftPath, "utf8"));
+      draft.manifest.scan.threatModel = { summary: "Substituted model" };
+      const replacement = draftPath + ".replacement";
+      await writeFile(replacement, JSON.stringify(draft));
+      await rename(replacement, draftPath);
+    },
+  });
+  const resume = (runWorkbench: RunArtifactWorkbench) =>
+    resumeSelectedDeepScan({
+      scanId: f.run.scanId,
+      threadId: owner,
+      pluginRoot,
+      signal: new AbortController().signal,
+      runWorkbench,
+    });
+  const before = await snapshot(f.run);
+  await assert.rejects(
+    resume(runner.run),
+    /staged Deep Scan publication changed/,
+  );
+  assert.equal(runner.writes(), 0);
+  assert.deepEqual(await snapshot(f.run), before);
+  assert.equal((await f.store.get(f.run.scanId, owner)).status, "running");
+  await resume(f.runWorkbench);
+  assert.equal((await f.store.get(f.run.scanId, owner)).status, "succeeded");
+});

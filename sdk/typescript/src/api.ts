@@ -3412,7 +3412,8 @@ export class CodexSecurity {
           threadId,
           pluginRoot: runtime.plugin.installedRoot,
           signal,
-          runWorkbench: (args) => workbench(workbenchOptions, args),
+          runWorkbench: (args, input) =>
+            workbench(workbenchOptions, args, input),
         });
         return {
           status: "completed" as const,
@@ -3959,7 +3960,8 @@ export class CodexSecurity {
               threadId: budgetRecovery.threadId,
               pluginRoot: budgetRecovery.pluginRoot,
               signal: completionSignal,
-              runWorkbench: (args) => workbench(completionOptions, args),
+              runWorkbench: (args, input) =>
+                workbench(completionOptions, args, input),
             });
           }
           const completion = await workbench(completionOptions, [

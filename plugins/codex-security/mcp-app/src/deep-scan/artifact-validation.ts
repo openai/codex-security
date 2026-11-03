@@ -50,6 +50,7 @@ export interface DeepReductionSources {
 }
 
 export interface ReducerArtifactValidation {
+  validatedResultSha256?: string;
   newFindings: number;
   result: DeepReductionInput;
 }
@@ -271,6 +272,7 @@ export async function validateReducerArtifacts(
     validateRetainedFindings(result, [], previous);
   }
   await validateWriteupFiles(artifacts, result);
+  let validatedResultSha256: string | undefined;
   if (input.sources) {
     const persisted = deepReductionForPersistence(
       result,
@@ -280,11 +282,13 @@ export async function validateReducerArtifacts(
       { root: artifactDir, repoRoot: artifacts.scanDir, layout: "reducer" },
       persisted,
     );
-    await writeJsonAtomic(resultPath, persisted);
+    const contents = await writeJsonAtomic(resultPath, persisted);
+    validatedResultSha256 = createHash("sha256").update(contents).digest("hex");
   }
   const assignments = previousFindingAssignments(result, previous);
   return {
     result,
+    validatedResultSha256,
     newFindings: result.findings.filter((finding) => !assignments.has(finding))
       .length,
   };

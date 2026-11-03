@@ -81,6 +81,7 @@ export interface DedupCommit {
   scanId: string;
   newFindings: number;
   resultManifestPath: string;
+  validatedResultSha256?: string;
   candidateLedgerPath?: string;
 }
 

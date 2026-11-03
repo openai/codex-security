@@ -33,7 +33,7 @@ def main(*, select_finalization: bool = False) -> None:
             backend._rename_handle = replace
         else:
             os.replace = replace
-    api["main"](select_finalization=select_finalization)
+    api["main"](select_finalization=select_finalization, framed_input=True)
 
 
 if __name__ == "__main__":

@@ -1638,22 +1638,20 @@ export async function preparePersistentOutputRoot(
 }
 
 const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
-import json, sys
-sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+import json, runpy, sys
+sys.argv = [sys.argv[1], *json.loads(sys.stdin.buffer.readline())]
 `;
-const WORKBENCH_SCRIPT_PROGRAM = String.raw`
-import runpy, sys
-sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
-`;
+const WORKBENCH_SCRIPT_PROGRAM =
+  'runpy.run_path(sys.argv[0], run_name="__main__")';
+const VALIDATED_DRAFT_PROGRAM =
+  'runpy.run_path(sys.argv[0])["main"](framed_input=True)';
 
 const ARCHIVE_READY = "codex-security-archive-ready\n";
 const ARCHIVE_REGISTRATION_PROGRAM = String.raw`
-import io, json, runpy, sys
+import io
 control = sys.stdin
 payload = json.loads(control.readline())
 sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="utf-8")
-sys.argv = sys.argv[1:]
 workbench = runpy.run_path(sys.argv[0])
 def before_archive():
     sys.stdout.buffer.write(b"codex-security-archive-ready\n")
@@ -1721,6 +1719,11 @@ export async function runWorkbench(
       : undefined;
     // Validate one JSON document before framing its unchanged source as payload.
     if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
+    const pythonProgram = archiveHandshake
+      ? ARCHIVE_REGISTRATION_PROGRAM
+      : arguments_[0] === "write-scan-draft" && input !== undefined
+        ? VALIDATED_DRAFT_PROGRAM
+        : WORKBENCH_SCRIPT_PROGRAM;
     const result = await runCodexCommand(
       { command },
       native
@@ -1731,10 +1734,7 @@ export async function runWorkbench(
             "utf8",
             "-B",
             "-c",
-            WORKBENCH_ARGUMENTS_PROGRAM +
-              (archiveHandshake
-                ? ARCHIVE_REGISTRATION_PROGRAM
-                : WORKBENCH_SCRIPT_PROGRAM),
+            WORKBENCH_ARGUMENTS_PROGRAM + pythonProgram,
             script,
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),

@@ -18,6 +18,7 @@ import {
   readArtifactText,
   readArtifactTextWithMetadata,
   replaceArtifactJson,
+  replaceArtifactText,
 } from "./artifact-io.js";
 import {
   acceptedDeepScanDraftInputSchema,
@@ -280,9 +281,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
           ? {}
           : { deepScanPublication: publication }),
       };
+      const draftContents = JSON.stringify(stagedDraft, null, 2) + "\n";
+      const checkpointContents = JSON.stringify(snapshot, null, 2) + "\n";
       await Promise.all([
-        replaceArtifactJson(checkpointPath, snapshot),
-        replaceArtifactJson(draftPath, stagedDraft),
+        replaceArtifactText(checkpointPath, checkpointContents),
+        replaceArtifactText(draftPath, draftContents),
       ]);
       const arguments_ = [
         "write-scan-draft",
@@ -293,6 +296,15 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         "--checkpoint-path",
         checkpointPath,
       ];
+      // Bind the selected projection to the bytes Workbench admits from both files.
+      const stagedDigest =
+        publication === undefined
+          ? undefined
+          : createHash("sha256")
+              .update(draftContents)
+              .update("\0")
+              .update(checkpointContents)
+              .digest("hex");
       if (expectedDigest !== undefined) {
         arguments_.push("--expected-draft-digest", expectedDigest);
       }
@@ -300,7 +312,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         arguments_.push("--claim-token", context.handoffClaimToken);
       }
       const publish = async () => {
-        const result = await runWorkbench(arguments_);
+        const result = await runWorkbench(arguments_, stagedDigest);
         return Array.isArray(result?.warnings)
           ? result.warnings.filter(
               (warning): warning is string => typeof warning === "string",

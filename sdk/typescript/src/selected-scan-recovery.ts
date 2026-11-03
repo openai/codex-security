@@ -266,7 +266,7 @@ export async function recoverSelectedScanStartup<T>(input: {
       threadId,
       pluginRoot,
       signal,
-      runWorkbench: (args) => input.workbench(command, args),
+      runWorkbench: (args, payload) => input.workbench(command, args, payload),
     });
     const budgetCost = snapshot.cost ?? lowerBound;
     const budgetError =

@@ -3,6 +3,7 @@ import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
+import { WORKBENCH_PYTHON } from "../src/server/workbench-process.ts";
 import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -564,27 +565,26 @@ function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
     releaseCoordinator = false,
   ) => {
     const invocation = releaseCoordinator
-      ? "release_coordinator=True"
+      ? "release_coordinator"
       : selectFinalization
-        ? "select_finalization=True"
+        ? "select_finalization"
         : withExecutionSettings
-          ? "with_execution_settings=True"
+          ? "with_execution_settings"
           : undefined;
-    const pythonArgs = invocation
-      ? [
-          "-c",
-          `import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](${invocation})`,
-          workbenchPath,
-          ...args,
-        ]
-      : [workbenchPath, ...args];
+    const pythonArgs = [
+      "-c",
+      WORKBENCH_PYTHON,
+      workbenchPath,
+      ...(invocation ? [invocation] : []),
+    ];
     const execution = execFileAsync(python, pythonArgs, {
       cwd: pluginRoot,
       env: environment,
       signal,
       ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
     });
-    execution.child.stdin?.end(input);
+    execution.child.stdin!.write(JSON.stringify(args) + "\n");
+    execution.child.stdin!.end(input);
     const { stdout } = await execution;
     return JSON.parse(stdout);
   };

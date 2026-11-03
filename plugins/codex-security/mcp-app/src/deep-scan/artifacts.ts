@@ -42,14 +42,16 @@ export async function writePrivateFile(
 export async function writeJsonAtomic(
   path: string,
   payload: unknown,
-): Promise<void> {
+): Promise<string> {
   await fs.mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+  const contents = `${JSON.stringify(payload, null, 2)}\n`;
+  await fs.writeFile(temporaryPath, contents, {
     encoding: "utf8",
     mode: 0o600,
   });
   await fs.rename(temporaryPath, path);
+  return contents;
 }
 
 export async function readJsonObject(

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { WORKBENCH_PYTHON } from "../src/server/workbench-process.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -175,7 +176,7 @@ export async function publishCoverageFixture(
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
   const workbenchAbort = new AbortController();
-  const runWorkbench = async (args: string[]) => {
+  const runWorkbench = async (args: string[], input?: string | Buffer) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
     if (args[0] === "begin-deep-scan") {
       args = [...args];
@@ -183,12 +184,10 @@ export async function publishCoverageFixture(
       assert.notEqual(version, -1);
       args[version + 1] = "deep-scan-mcp/v1";
     }
-    const command = [workbenchPath, ...args];
+    let program = WORKBENCH_PYTHON;
     if (interruptPublication && args[0] === "fail-scan") {
-      command.unshift(
-        "-c",
-        `
-import os, runpy, sys
+      program = `
+import os, sys
 sys.path.insert(0, os.path.dirname(sys.argv[1]))
 import workbench_saved_results
 
@@ -196,20 +195,23 @@ def interrupt_publication(*args, **kwargs):
     raise OSError("Synthetic publication interruption.")
 
 workbench_saved_results._write_prepared_scan_finalization = interrupt_publication
-sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
-`,
-      );
+${program}`;
     }
-    const { stdout } = await exec(process.env.PYTHON || "python3", command, {
-      signal: workbenchAbort.signal,
-      env: {
-        ...process.env,
-        CODEX_HOME: codexHome,
-        CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+    const execution = exec(
+      process.env.PYTHON || "python3",
+      ["-c", program, workbenchPath],
+      {
+        signal: workbenchAbort.signal,
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+        },
       },
-    });
-    return JSON.parse(stdout);
+    );
+    execution.child.stdin!.write(JSON.stringify(args) + "\n");
+    execution.child.stdin!.end(input);
+    return JSON.parse((await execution).stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let run = await store.begin({

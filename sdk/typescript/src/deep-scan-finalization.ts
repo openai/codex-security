@@ -1,7 +1,10 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-type WorkbenchRunner = (args: string[]) => Promise<Record<string, unknown>>;
+type WorkbenchRunner = (
+  args: string[],
+  input?: string,
+) => Promise<Record<string, unknown>>;
 
 /** Load the same publisher used by native Deep from the installed plugin. */
 export async function resumeSelectedDeepScan(input: {

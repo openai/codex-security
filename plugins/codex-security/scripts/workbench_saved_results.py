@@ -1326,7 +1326,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             ) from exc
         if not re.fullmatch(r"drafts/[0-9a-fA-F-]+\.json", relative):
             raise SystemExit("Scan draft must be inside the registered scan drafts directory.")
-        draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
+        draft, draft_contents = _read_scan_local_json_bytes(scan_dir, relative, "Staged scan draft")
         accepted_input = copy.deepcopy(draft)
         accepted_checkpoint = None
         manifest, findings, coverage = (
@@ -1361,6 +1361,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             checkpoint, checkpoint_contents = _read_scan_local_json_bytes(
                 scan_dir, checkpoint_relative, "Staged scan checkpoint"
             )
+        staged_digest = getattr(args, "validated_input_sha256", None)
+        if staged_digest is not None:
+            digest = hashlib.sha256(draft_contents)
+            digest.update(b"\0")
+            digest.update(checkpoint_contents or b"")
+            if checkpoint_contents is None or digest.hexdigest() != staged_digest:
+                raise SystemExit("The staged Deep Scan publication changed before admission.")
+        if checkpoint_contents is not None:
             accepted_checkpoint = checkpoint
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")

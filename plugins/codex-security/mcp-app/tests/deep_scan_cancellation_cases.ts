@@ -342,9 +342,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     assert.deepEqual(unexpectedErrors, []);
-    if (kind === undefined) {
-      assert.throws(() => process.kill(worker!.pid!, 0), { code: "ESRCH" });
-    }
+    assert.throws(() => process.kill(worker!.pid!, 0), { code: "ESRCH" });
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");

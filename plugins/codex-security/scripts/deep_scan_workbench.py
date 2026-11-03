@@ -1413,7 +1413,9 @@ def require_worker_transition(current: str, requested: str) -> None:
         raise SystemExit(f"Deep Scan worker cannot transition from {current} to {requested}.")
 
 
-def snapshot_accepted_result(scan: sqlite3.Row, worker: sqlite3.Row) -> tuple[str, str]:
+def snapshot_accepted_result(
+    scan: sqlite3.Row, worker: sqlite3.Row, validated_result_sha256: str | None = None
+) -> tuple[str, str]:
     source = deep_scan_path(
         scan, worker["result_manifest_path"], "Accepted worker result", kind="file"
     )
@@ -1425,6 +1427,9 @@ def snapshot_accepted_result(scan: sqlite3.Row, worker: sqlite3.Row) -> tuple[st
         "rb",
     ) as handle:
         contents = handle.read()
+    digest = hashlib.sha256(contents).hexdigest()
+    if validated_result_sha256 is not None and digest != validated_result_sha256:
+        raise SystemExit("The validated reducer result changed before acceptance.")
     semantic = json.loads(contents)
     if isinstance(semantic, dict):
         semantic.pop("handoffClaimToken", None)
@@ -1453,7 +1458,6 @@ def snapshot_accepted_result(scan: sqlite3.Row, worker: sqlite3.Row) -> tuple[st
                 "The accepted worker result does not match its current checkpoint head."
             )
     # Freeze direct results beside result.json. Only the draft writer confirms receipt ownership.
-    digest = hashlib.sha256(contents).hexdigest()
     destination = directory.parent / f"accepted-{digest}.json"
     relative = destination.relative_to(scan_dir).as_posix()
     if destination.exists():
@@ -1475,6 +1479,7 @@ def record_worker_attempt(
     observed_thread_id: str | None = None,
     error: str | None = None,
     end_reason: str | None = None,
+    validated_result_sha256: str | None = None,
 ) -> None:
     if worker["status"] == "queued" or worker["attempt"] < 1:
         return
@@ -1499,7 +1504,9 @@ def record_worker_attempt(
     )
     accepted_path = accepted_sha = None
     if status == "succeeded" and worker["result_manifest_path"]:
-        accepted_path, accepted_sha = snapshot_accepted_result(scan, worker)
+        accepted_path, accepted_sha = snapshot_accepted_result(
+            scan, worker, validated_result_sha256
+        )
     connection.execute(
         """
         INSERT INTO deep_scan_attempts (
@@ -2128,6 +2135,7 @@ def commit_deep_scan_dedup_locked(
             committed_worker,
             timestamp,
             observed_thread_id=committed_worker["sdk_thread_id"],
+            validated_result_sha256=getattr(args, "validated_input_sha256", None),
         )
         accepted_path, accepted_sha = worker_result_reference(connection, scan, committed_worker)
         result = deep_scan_result(connection, scan_id)

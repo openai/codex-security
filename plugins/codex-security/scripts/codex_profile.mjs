@@ -234,9 +234,18 @@ async function* execute(options, args, input, signal) {
     if (inputError) throw inputError;
   } finally {
     lines.close();
-    if (child.exitCode === null && child.signalCode === null) child.kill();
+    let forceTermination;
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+      // A consumer may finish the turn while the exec process is still running.
+      forceTermination = setTimeout(() => child.kill("SIGKILL"), 250);
+    }
     child.stdout.destroy();
     child.stderr.destroy();
-    await closed;
+    try {
+      await closed;
+    } finally {
+      clearTimeout(forceTermination);
+    }
   }
 }

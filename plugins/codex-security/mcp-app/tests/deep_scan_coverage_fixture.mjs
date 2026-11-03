@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { WORKBENCH_PYTHON } from "../src/server/workbench-process.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -75,14 +76,12 @@ export async function publishCoverageFixture(
   );
   const runWorkbench = async (args, input, selectFinalization = false) => {
     const script = path.join(pluginRoot, "scripts", "workbench_db.py");
-    const pythonArgs = selectFinalization
-      ? [
-          "-c",
-          "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
-          script,
-          ...args,
-        ]
-      : [script, ...args];
+    const pythonArgs = [
+      "-c",
+      WORKBENCH_PYTHON,
+      script,
+      ...(selectFinalization ? ["select_finalization"] : []),
+    ];
     const execution = exec(process.env.PYTHON || "python3", pythonArgs, {
       env: {
         ...process.env,
@@ -90,7 +89,8 @@ export async function publishCoverageFixture(
         CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       },
     });
-    if (input !== undefined) execution.child.stdin.end(input);
+    execution.child.stdin.write(JSON.stringify(args) + "\n");
+    execution.child.stdin.end(input);
     const { stdout } = await execution;
     return JSON.parse(stdout);
   };

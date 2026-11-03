@@ -3237,11 +3237,15 @@ def main(
     select_finalization: bool = False,
     with_execution_settings: bool = False,
     release_coordinator: bool = False,
+    framed_input: bool = False,
     before_archive: Callable[[], None] | None = None,
 ) -> None:
     # Workbench callers send UTF-8 even when Windows uses a legacy code page.
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__, execution_settings=with_execution_settings)
+    # The MCP process closes this private pipe after its argv frame and optional digest.
+    if framed_input and args.command in {"commit-deep-scan-dedup", "write-scan-draft"}:
+        args.validated_input_sha256 = sys.stdin.read() or None
     command_context = SimpleNamespace(
         **globals(),
         preserve_stopped_results=preserve_stopped_results_after_transition,

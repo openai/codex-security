@@ -1,6 +1,13 @@
 import { readReviewState } from "./support/review-state.js";
 import { execFileSync, spawn } from "node:child_process";
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
@@ -134,6 +141,7 @@ const outcomes = [
   "restart-deleted-target",
   "restart-changed-target",
   "restart-corrupt-selection",
+  "restart-replaced-staged-draft",
   "restart-unavailable-runtime",
   "restart-canceled-runtime",
   "canceled-before-publication",
@@ -315,6 +323,7 @@ for (const {
     let scanId = "";
     let workbenchOptions: Parameters<typeof runWorkbench>[0];
     let publicationFails = restart && !statusReadFault;
+    let replacedStagedDraft = false;
     let selectionReadLost = false;
     let resumeStatusInjected = false;
     let completedBeforePreparation = false;
@@ -500,6 +509,21 @@ for (const {
               cancellationFault === "status-read"
             ) {
               throw new Error("Synthetic lost cancellation status response");
+            }
+            if (
+              args[0] === "write-scan-draft" &&
+              outcome === "restart-replaced-staged-draft" &&
+              resumedStartup &&
+              !replacedStagedDraft
+            ) {
+              const path = args[args.indexOf("--draft-path") + 1]!;
+              const draft = JSON.parse(await readFile(path, "utf8"));
+              draft.findings.findings[0].remediation =
+                "Substituted remediation.";
+              const replacement = path + ".replacement";
+              await writeFile(replacement, JSON.stringify(draft));
+              await rename(replacement, path);
+              replacedStagedDraft = true;
             }
             if (args[0] === "write-scan-draft" && publicationFails) {
               publicationFails = false;
@@ -804,8 +828,8 @@ for (const {
                       scanId,
                       threadId,
                       pluginRoot: PLUGIN_ROOT,
-                      runWorkbench: (args) =>
-                        runWorkbench(workbenchOptions, args),
+                      runWorkbench: (args, input) =>
+                        runWorkbench(workbenchOptions, args, input),
                       signal: cancellation.signal,
                     });
                     await rejoinSelectedScanThroughMcp(
@@ -1294,14 +1318,21 @@ for (const {
         expect(await readFile(selectedPath)).toEqual(selectedBytes!);
         return;
       }
-      if (outcome === "restart-corrupt-selection") {
-        await expect(
-          client.run(repository, {
-            mode: "deep",
-            resumeScanId: scanId,
-            outputDir: scanDir,
-          }),
-        ).rejects.toThrow("changed after acceptance");
+      if (
+        outcome === "restart-corrupt-selection" ||
+        outcome === "restart-replaced-staged-draft"
+      ) {
+        const beforeResume = modelInputs.length;
+        const resumeOptions = {
+          mode: "deep" as const,
+          resumeScanId: scanId,
+          outputDir: scanDir,
+        };
+        await expect(client.run(repository, resumeOptions)).rejects.toThrow(
+          outcome === "restart-corrupt-selection"
+            ? "changed after acceptance"
+            : "staged Deep Scan publication changed",
+        );
         const pending = await runWorkbench(workbenchOptions!, [
           "get-scan",
           "--scan-id",
@@ -1314,6 +1345,19 @@ for (const {
         expect(commands).not.toContain("fail-scan");
         expect(modelInputs.filter((input) => input !== followUp)).toHaveLength(
           1,
+        );
+        if (outcome === "restart-corrupt-selection") return;
+        expect(replacedStagedDraft).toBe(true);
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        expect(modelInputs.slice(1, beforeResume)).toEqual([followUp]);
+        expect(modelInputs).toHaveLength(beforeResume);
+        const retry = await client.run(repository, {
+          ...resumeOptions,
+          postScanPrompt: followUp,
+        });
+        expect(modelInputs.slice(beforeResume)).toEqual([followUp]);
+        expect(retry.findings.findings[0]?.remediation).toBe(
+          "Validate the resolved destination before writing.",
         );
         return;
       }

@@ -399,7 +399,7 @@ export class DeepScanWorkerRunner {
       };
     }
     if (outcome.status === "canceled") throw abortError();
-    if (!reducerValidation) {
+    if (!reducerValidation?.validatedResultSha256) {
       throw new Error(
         `${reducerId} completed without validated reducer artifacts.`,
       );
@@ -409,6 +409,7 @@ export class DeepScanWorkerRunner {
       scanId: run.scanId,
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
+      validatedResultSha256: reducerValidation.validatedResultSha256,
     };
     const committed = await this.replayStoreMutation(
       "dedup_commit_replay",

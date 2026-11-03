@@ -322,7 +322,7 @@ export class WorkbenchDeepScanStore {
     );
   }
 
-  private writeCoordinatorHeartbeat(
+  private async writeCoordinatorHeartbeat(
     lease: { run: DeepScanRunState; heartbeatWrite?: Promise<void> },
     updatedAt: string,
   ): Promise<void> {
@@ -346,7 +346,7 @@ export class WorkbenchDeepScanStore {
       () => undefined,
       () => undefined,
     );
-    return operation;
+    await operation;
   }
 
   async cancel(scanId: string, threadId: string): Promise<JsonObject> {
@@ -419,6 +419,8 @@ export class WorkbenchDeepScanStore {
           candidateLedgerPath: commit.candidateLedgerPath || undefined,
           newFindingsCount: commit.newFindings,
         }),
+        false,
+        commit.validatedResultSha256,
       ),
     );
   }
