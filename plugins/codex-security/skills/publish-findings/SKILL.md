@@ -35,6 +35,10 @@ Local records remain unassessed source evidence, separate from `findings list` a
 
 Use `--provider inspector` and `--source-repository-url` with a complete Inspector2 ListFindings export for one Code Security repository. If it contains only a project ARN and name, pass the full `--inspector-project-arn ARN` verified for that Git URL in the SCM integration. Supply the same ARN when resuming a pending Cloud submission. Self-managed GitLab is supported locally.
 
+## AWS Continuum code findings
+
+Use `--provider continuum` and `--source-repository-url` for an AWS Continuum for Code Vulnerabilities export. Verify which repository owns each selected finding. Use `aws continuum get-code-finding` for a selected ID, or `list-code-findings` with automatic pagination when every row belongs to the requested repository. Reuse the same source key for that environment and repository. [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
+
 ## Black Duck SCA project-version vulnerabilities
 
 Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.

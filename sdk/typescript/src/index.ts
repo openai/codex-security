@@ -346,6 +346,10 @@ export {
   readBlackDuckFindings,
 } from "./blackduck-findings.js";
 export {
+  normalizeContinuumFindings,
+  readContinuumFindings,
+} from "./continuum-findings.js";
+export {
   normalizeInspectorFindings,
   readInspectorFindings,
 } from "./inspector-findings.js";
