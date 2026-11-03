@@ -96,6 +96,7 @@
 - accept a host-supplied severity rubric for Standard scans ([#2253](https://github.com/openai/codex-security/pull/2253))
 - submit selected scanner findings to the private inbox ([#2177](https://github.com/openai/codex-security/pull/2177))
 - apply native profiles across scan workflows ([#1018](https://github.com/openai/codex-security/pull/1018))
+- share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
 
 <!-- release-section: highlights:end -->
 
@@ -106,5 +107,6 @@
 Review migration steps for these breaking changes:
 
 - remove Daybreak latest alias pricing ([#2165](https://github.com/openai/codex-security/pull/2165))
+- share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
 
 <!-- release-section: upgrades:end -->
