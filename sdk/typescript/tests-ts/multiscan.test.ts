@@ -2637,10 +2637,11 @@ for (const modified of [
       "attempt-2",
     );
     git(paths.root, "clone", "--quiet", source.path, checkout);
+    const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     await rm(join(checkout, "src"), { recursive: true });
     const notes = modified
       ? "Preserve interrupted tracked notes.\n"
-      : "Original tracked notes.\n";
+      : await readFile(join(checkout, "README.md"), "utf8");
     if (modified === "deleted" || modified === "deleted-missing-index")
       await rm(join(checkout, "README.md"));
     else if (modified) await writeFile(join(checkout, "README.md"), notes);
@@ -2666,8 +2667,8 @@ for (const modified of [
     expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
       "Preserve untracked recovery data.\n",
     );
-    expect(await readFile(join(checkout, "src", "app.ts"), "utf8")).toBe(
-      await readFile(join(source.path, "src", "app.ts"), "utf8"),
+    expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+      expectedApp,
     );
     expect(runs).toHaveBeenCalledTimes(1);
   });
@@ -3832,6 +3833,7 @@ for (const staged of [false, true]) {
       "attempt-2",
     );
     git(paths.root, "clone", "--quiet", source.path, checkout);
+    const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     if (staged) git(checkout, "rm", "--quiet", "src/app.ts");
     else await rm(join(checkout, "src", "app.ts"));
     git(checkout, "rm", "--quiet", "README.md");
@@ -3845,7 +3847,7 @@ for (const staged of [false, true]) {
       skipped: 1,
     });
     expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
-      await readFile(join(source.path, "src", "app.ts")),
+      expectedApp,
     );
     expect(await readFile(join(checkout, "README.md"), "utf8")).toBe(
       "Preserve staged replacement content.\n",
@@ -4254,7 +4256,6 @@ for (const tracked of [false, true]) {
         paths.input,
         `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
       );
-      const expectedApp = await readFile(join(source.path, "src", "app.ts"));
       await runMultiscan(
         options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
       );
@@ -4279,6 +4280,7 @@ for (const tracked of [false, true]) {
       );
       await rm(checkout, { recursive: true, force: true });
       git(paths.root, "clone", "--quiet", source.path, checkout);
+      const expectedApp = await readFile(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src"), { recursive: true });
       const retained = "Keep unrelated retained note bytes.\n";
       await writeFile(join(checkout, "notes.log"), retained);
@@ -4350,6 +4352,7 @@ for (const missingCode of ["native", "ENOENT"]) {
         "attempt-2",
       );
       git(paths.root, "clone", "--quiet", source.path, checkout);
+      const expectedApp = await readFile(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src"), { recursive: true });
       if (obstructed)
         await writeFile(
@@ -4388,7 +4391,7 @@ for (const missingCode of ["native", "ENOENT"]) {
       } else {
         expect(outcome).toMatchObject({ completed: 1, skipped: 1 });
         expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
-          await readFile(join(source.path, "src", "app.ts")),
+          expectedApp,
         );
       }
       expect(await readFile(initial.resultsPath)).toEqual(ledger);

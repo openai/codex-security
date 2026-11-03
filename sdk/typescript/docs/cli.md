@@ -2680,17 +2680,32 @@ credentials out of the patch subprocess. URLs must match the selected workspace.
 finding IDs, `--scan`, and the Linear issue/project selectors above. Explicitly
 filter for completed Linear issues to check a finished backlog.
 
+The CLI selects findings from the workbench and loads their evidence from the
+saved scan artifacts. It measures the verification request with that evidence
+included. Large selections use multiple requests without splitting or further
+truncating any selected finding. The CLI prints verdicts in selection order
+after every request returns valid results. For these selections the CLI omits
+per-event progress and update notices so stderr cannot delay the verdicts.
+
+If one finding exceeds the input limit on its own, verification stops before
+the first request. The error reports its occurrence ID and required request
+size. To verify another open occurrence from that scan, run
+`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
-Authentication and execution failures print diagnostics on stderr and return
-`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message` with `--json`
-or `--format jsonl`. With JSON/JSONL `--full-output`, failures use an `ok: false`
-error envelope. Other formats retain stderr-only failures. Interruptions retain
-exit codes `130` and `143` without a result.
+With `--json` or `--format jsonl`, authentication and execution failures return
+`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
+`--full-output`, these failures use an `ok: false` error envelope. If a saved
+selection exceeds one request, the CLI sends the failure message only to the
+structured output. With `--token-count`, `--token-limit`, or `--token-offset`,
+stderr also carries the diagnostic so it remains available alongside a count
+or a partial result. Other formats report failures on stderr. Interruptions
+retain exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 

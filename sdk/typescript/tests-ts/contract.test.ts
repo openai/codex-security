@@ -89,7 +89,7 @@ describe("canonical scan contract", () => {
       )
     )
       return;
-    const scanDirectory = await temporaryDirectory();
+    const scanDirectory = await realpath(await temporaryDirectory());
     const alias = join(scanDirectory, "REPORT.md");
     const report = join(scanDirectory, "report.md");
     const manifest = (...paths: string[]) =>
@@ -121,7 +121,8 @@ describe("canonical scan contract", () => {
     let onList: (() => void) | undefined;
     mock.module("node:fs/promises", () => ({
       ...original,
-      readdir: async () => {
+      readdir: async (...args: Parameters<typeof original.readdir>) => {
+        if (args[0] !== scanDirectory) return original.readdir(...args);
         onList?.();
         return ["REPORT.md"];
       },

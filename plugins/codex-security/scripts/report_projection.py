@@ -103,6 +103,34 @@ def is_sealed_report(
     return False
 
 
+def csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and (
+        value.startswith(("'", "\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
+    )
+
+
 def _escape_markdown(value: str) -> str:
     # Locate whole URLs before matching code spans: a URL can contain backticks.
     urls = [match.span() for match in re.finditer(WWW_LINK_RE, value)]
