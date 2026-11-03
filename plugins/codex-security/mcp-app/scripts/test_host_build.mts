@@ -120,20 +120,30 @@ test("builds and loads the host runtime from standalone plugin source", async (t
     await mkdir(dirname(join(output, file)), { recursive: true });
     await copyFile(join(plugin, file), join(output, file));
   }
+  const env = {
+    ...process.env,
+    NODE_TEST_CONTEXT: undefined,
+    CODEX_SECURITY_TEST_PLUGIN_ROOT: output,
+  };
   runNode(
     [
       "--experimental-strip-types",
       "--test",
       "mcp-app/tests/test_plugin_bytecode.ts",
     ],
-    {
-      env: {
-        ...process.env,
-        NODE_TEST_CONTEXT: undefined,
-        CODEX_SECURITY_TEST_PLUGIN_ROOT: output,
-      },
-    },
+    { env },
   );
+  if (windows) {
+    runNode(
+      [
+        "--experimental-strip-types",
+        "--test",
+        "--test-name-pattern=^Deep worker runtime settings at the child-process boundary$",
+        "mcp-app/tests/test_deep_scan_executor.ts",
+      ],
+      { env },
+    );
+  }
 });
 
 test("rejects an unsupported native host before replacing existing output", async (t) => {

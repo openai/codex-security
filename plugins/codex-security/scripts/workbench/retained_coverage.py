@@ -48,6 +48,7 @@ from workbench.retained_records import (
 )
 from workbench.saved_coverage import (
     SavedCoverageOrigins,
+    SavedCoverageProjection,
     _coverage_rows,
     _has_candidate_metadata,
     _infer_saved_coverage_ids,
@@ -758,7 +759,7 @@ def merge_saved_results(
         for relative, _, worker_id in sources
         if relative in accepted_sources
     )
-    projection = prepare_saved_coverage_projection(
+    project_worker_coverage, legacy_surface_links = prepare_saved_coverage_projection(
         sources,
         parent,
         source_order,
@@ -768,7 +769,6 @@ def merge_saved_results(
             scan_dir, row, workers_by_id[owner], relative
         ),
     )
-    project_worker_coverage = projection.project_worker_coverage
 
     def retain_coverage_row(output, item, owner, field, original=None, qualified=False):
         retained = projection.retain_coverage_row(output, item, owner, field, original, qualified)
@@ -815,6 +815,10 @@ def merge_saved_results(
         for index, item in enumerate(_coverage_rows(draft["reviewState"], field), 1)
         if isinstance(item, dict)
     }
+
+    projection = SavedCoverageProjection(
+        project_worker_coverage, legacy_surface_links, projection_origins
+    )
 
     def project_record(
         field: str,
@@ -865,7 +869,6 @@ def merge_saved_results(
         )
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
-    source_owners = {relative: owner for relative, _, owner in all_sources}
     inferred_coverage_ids = _infer_saved_coverage_ids(all_sources)
 
     # A discarded local surface must not fall back to another source's reused ID.
@@ -2656,7 +2659,7 @@ def merge_saved_results(
             projection = type(initial_projection)(
                 initial_projection.project_worker_coverage,
                 initial_projection.legacy_surface_links,
-                sources,
+                projection_origins,
             )
         # Apply reconciled outcomes to coverage already copied from the parent too.
         for field in ("surfaces", "deferred"):

@@ -6,13 +6,12 @@ import uuid
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import add_worker, fail_scan, recover_scan_results
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import interrupt_publication, read_review_state, write_checkpoint
 
 
 def add_discovery_attempt(connection, scan, attempt, *, canonical_output=True):
-    result = add_worker(connection, scan)
+    result = scan.add_worker(connection)
     worker_id = result.parent.name
     if canonical_output:
         output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
@@ -65,10 +64,10 @@ def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, re
     with monkeypatch.context() as interrupted:
         if retry:
             interrupted.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
-        fail_scan(workbench_api, connection, scan)
-    recover_scan_results(workbench_api, connection, scan)
+        scan.fail()
+    scan.recover()
     published = read_review_state(connection, scan.scan_dir)
-    recover_scan_results(workbench_api, connection, scan)
+    scan.recover()
     assert read_review_state(connection, scan.scan_dir) == published
     return published
 
@@ -429,7 +428,7 @@ def test_selected_parent_projection_consumes_each_occurrence_once(
             "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
             ("deep-scan-mcp/v1", scan.scan_id),
         )
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker(workbench_db)
     worker_id = result.parent.name
     task = {"reason": "Synthetic repeated accepted review."}
     result.write_text(
@@ -489,7 +488,7 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
     workbench_api, workbench_db, publication_scan, monkeypatch, case
 ):
     scan = publication_scan()
-    result = add_worker(workbench_db, scan)
+    result = scan.add_worker(workbench_db)
     worker_id = result.parent.name
     surface = {
         "id": "source-surface",

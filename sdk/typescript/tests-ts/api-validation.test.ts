@@ -485,9 +485,13 @@ describe("CodexSecurity finding validation", () => {
       if (cancel === "signal") controller.abort();
       else await client.close();
       const error = await pending;
-      if (cancel === "signal")
+      if (cancel === "signal") {
         expect(error).toBeInstanceOf(ScanInterruptedError);
-      else
+        expect(error).toMatchObject({
+          message: `Codex Security scan was interrupted; output directory: ${options.outputDir}.`,
+          scanDir: options.outputDir,
+        });
+      } else
         expect((error as Error).message).toContain("CodexSecurity is closed");
     },
   );
