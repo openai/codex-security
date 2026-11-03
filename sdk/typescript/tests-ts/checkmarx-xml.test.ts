@@ -22,7 +22,7 @@ const report = (results: string) =>
      <Query id="12" name="SQL_Injection" cweId="89" Severity="High">${results}</Query>
    </CxXMLResults>`;
 
-test("projects the ordered flow and retains native triage and snippets for each CxSAST result", () => {
+test("retains native triage and ordered flow with snippets for each CxSAST result", () => {
   const output = normalize(report(result(13)));
   expect(output.read).toBe(1);
   expect(output.excluded).toEqual([]);
@@ -31,11 +31,7 @@ test("projects the ordered flow and retains native triage and snippets for each 
     title: "SQL_Injection",
     source_scan_id: "100",
     severity: "medium",
-    locations: [
-      { path: "src/input.ts", line: 5 },
-      { path: "src/query.ts", line: 13 },
-      { path: "src/db.ts", line: 22 },
-    ],
+    locations: [],
     details: {
       repository: { url: repository },
       source_status: "Recurrent",
@@ -49,12 +45,15 @@ test("projects the ordered flow and retains native triage and snippets for each 
       path: { SimilarityId: "-17" },
     },
   });
-  const nodes = evidence.source_data?.["nodes"] as Record<string, unknown>[];
-  expect(nodes[1]).toMatchObject({
-    FileName: "src/query.ts",
-    Line: "13",
-    Snippet: [{ Number: "13", Code: "work(a < b);" }],
-  });
+  expect(evidence.source_data?.["nodes"]).toMatchObject([
+    { FileName: "src/input.ts", Line: "5" },
+    {
+      FileName: "src/query.ts",
+      Line: "13",
+      Snippet: [{ Number: "13", Code: "work(a < b);" }],
+    },
+    { FileName: "src/db.ts", Line: "22" },
+  ]);
   expect(JSON.stringify(evidence)).not.toContain("report owner");
 });
 
@@ -109,9 +108,10 @@ test("handles empty reports and empty paths; rejects other XML and truncated rep
       '<Result FileName="src/app.ts" Line="7"><Path SimilarityId="-3"/></Result>',
     ),
   );
-  expect(one.findings[0]?.evidence.locations).toEqual([
-    { path: "src/app.ts", line: 7 },
-  ]);
+  expect(one.findings[0]?.evidence).toMatchObject({
+    locations: [],
+    source_data: { result: { FileName: "src/app.ts", Line: "7" }, nodes: [] },
+  });
   for (const input of [
     "<Other/>",
     "<CxXMLResults/>",

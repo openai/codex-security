@@ -19,11 +19,11 @@ Ask the **publish-findings** skill to preview a particular scan in your checkout
 For self-managed CxSAST, include the full team path and project name. If you
 already have a supported report, give Codex its path and skip collection.
 
-For Checkmarx One, Codex uses your signed-in vendor `cx` executable. Supply
-its absolute installation path if the name is ambiguous. If you set
-`CX_CONFIG_FILE_PATH`, use the absolute path to your trusted CLI configuration.
-For CxSAST, supply the absolute paths to your CxFlow JAR and trusted SAST-only
-configuration.
+Codex runs the collector with a trusted Python 3.10+ installation. For
+Checkmarx One, it uses your signed-in `cx` executable. If you set
+`CX_CONFIG_FILE_PATH`, use an absolute path. For CxSAST, it uses your Java
+executable, CxFlow JAR and SAST-only configuration. Provide their trusted
+absolute installation or configuration paths outside the scanned source tree.
 The profile must have the `CxXml` file writer enabled. The collector requests
 the existing scan in project mode and selects only the XML file writer.
 [Checkmarx One results](https://docs.checkmarx.com/en/34965-68640-results.html) · [CxFlow project retrieval](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Execution.md) · [CxFlow XML configuration](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Bug-Trackers-and-Feedback-Channels.md#cxxml)
@@ -37,16 +37,22 @@ any retries, or ask Codex to keep it for later use.
 
 ## Export one scan manually
 
-**Checkmarx One.** In a shell authenticated with the Checkmarx One CLI, set
-`scan_id` to the completed scan's ID and `report_dir` to a private directory
-outside the checkout. This retrieves the existing results. [Checkmarx One CLI results](https://docs.checkmarx.com/en/34965-68640-results.html)
+**Checkmarx One.** From a trusted directory outside the checkout, set `cx_path`
+to the absolute path of the signed-in Checkmarx CLI, `scan_id` to the chosen
+scan ID and `report_root` to a private directory outside the checkout.
+[Checkmarx One CLI results](https://docs.checkmarx.com/en/34965-68640-results.html)
 
 ```sh
-cx results show --scan-id "$scan_id" --report-format json \
-  --output-path "$report_dir" --output-name checkmarx-results
-report="$report_dir/checkmarx-results.json"
 source_key=checkmarx-one/example-tenant/example-project/main/sast
+report=
+report_dir=$(mktemp -d "$report_root/checkmarx.XXXXXXXX") &&
+  "$cx_path" results show --scan-id "$scan_id" --report-format json \
+    --output-path "$report_dir" --output-name checkmarx-results &&
+  report="$report_dir/checkmarx-results.json"
 ```
+
+Continue only after the export succeeds. In the preview, compare `report.scanId`
+with the scan ID you requested before confirming the import.
 
 The CLI JSON report contains `scanID`, `totalCount` and `results`. When a scan
 includes multiple engines, the import lists results from engines other than
@@ -94,8 +100,14 @@ with the ordered path nodes. For a path without nodes it uses the result's
 reported location. A source change that moves a node can create a new record.
 [Checkmarx similarity IDs](https://docs.checkmarx.com/en/34965-205026-similarity-id.html)
 
-Inspect the query, reported severity, triage state and path evidence in the
-preview. The scan ID identifies which run supplied the evidence. Imported
+The scan ID identifies which run supplied the evidence. Checkmarx can scan a
+repository, directory or archive. Both reports retain filenames and lines in
+`evidence.source_data`. Checkmarx One uses `row.data.nodes` and CxSAST uses
+`nodes` or `result` when the path has no nodes. The reader leaves `locations`
+empty. Verify how the scanned sources map to the checkout before using a
+reported path to investigate a finding.
+
+Inspect the query, reported severity and triage state in the preview. Imported
 findings start as `not_assessed`. Reimporting the same occurrence updates
 changed evidence, and an identical report produces unchanged records. Results
 omitted by a report filter stay stored. [Imported finding identity and evidence](schema-guide.md)

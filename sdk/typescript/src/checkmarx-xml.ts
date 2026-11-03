@@ -129,7 +129,6 @@ export function normalizeCheckmarxXml(
     rows,
     (row) => {
       const { query, result } = row;
-      const nodes = row.nodes.length ? row.nodes : [result];
       return checkmarxEvidence(
         {
           format: "cxsast-xml",
@@ -145,10 +144,6 @@ export function normalizeCheckmarxXml(
               ? "False positive"
               : text(result["state"]),
           cwe: query["cweId"],
-          nodes: nodes.map((node) => ({
-            fileName: node["FileName"],
-            line: node["Line"],
-          })),
           sourceData: row,
         },
         target,

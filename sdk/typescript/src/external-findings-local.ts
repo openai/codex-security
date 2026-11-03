@@ -37,7 +37,10 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
-import { checkmarxReportRepositories } from "./checkmarx-repository.js";
+import {
+  checkmarxReportRepositories,
+  checkmarxReportRepository,
+} from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -867,6 +870,19 @@ export async function prepareLocalImport(
       sources.set(
         source.url,
         options.inspectorProjectMap ? { url: source.url } : source,
+      );
+  }
+  const checkmarx = checkmarxReportRepository(
+    options.provider,
+    current.findings,
+    current.report,
+    "local",
+  );
+  if (checkmarx) {
+    sources.set(checkmarx, { url: checkmarx });
+    if (!sameRepositories(sources.keys()))
+      throw new Error(
+        "The retained Checkmarx report repository does not match the finding repository.",
       );
   }
   const sonarSources = sonarRepositoryUrls(

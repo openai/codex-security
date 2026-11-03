@@ -104,9 +104,7 @@ for (const [format, report] of [
       }),
     ).rejects.toThrow(/does not match/iu);
     const stored = await createAndReplayFinding(fixture);
-    expect(stored.evidence.locations).toEqual([
-      { path: "src/query.ts", line: 3 },
-    ]);
+    expect(stored.evidence.locations).toEqual([]);
     await writeFile(fixture.file, gzipSync(report("Medium")));
     expect((await updateStoredFinding(fixture, stored)).evidence.severity).toBe(
       "medium",

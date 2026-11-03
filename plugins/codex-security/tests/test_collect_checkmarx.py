@@ -24,6 +24,9 @@ ONE_SCAN = "00000000-0000-4000-8000-000000000001"
 def capture_dir(monkeypatch, tmp_path):
     directory = tmp_path / "private exports"
     directory.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.chdir(source)
     monkeypatch.setattr(tempfile, "tempdir", str(directory))
     monkeypatch.setenv("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS", "1")
     monkeypatch.delenv("CX_CONFIG_FILE_PATH", raising=False)
@@ -46,10 +49,43 @@ def executable(directory, name):
     return str(path)
 
 
+@pytest.mark.parametrize("product", ["one", "cxsast"])
+def test_refuses_launchers_inside_the_scan_source(
+    product, capture_dir, monkeypatch, tmp_path, capsys
+):
+    source = Path.cwd()
+    tools = source / "tools"
+    tools.mkdir()
+    if product == "one":
+        request = ["one", ONE_SCAN, "--cx", executable(tools, "cx")]
+    else:
+        # A checkout may be entered from a subdirectory, with its tool elsewhere in the tree.
+        (source / ".git").mkdir()
+        (source / ".git" / "HEAD").touch()
+        subdir = source / "src"
+        subdir.mkdir()
+        monkeypatch.chdir(subdir)
+        request = ["cxsast", "1234", "--java", executable(tools, "java")]
+    assert invoke(monkeypatch, *request) != 0
+    assert "outside the source checkout" in capsys.readouterr().err
+    if os.name != "nt":
+        alias = tmp_path / "configured-launcher"
+        alias.symlink_to(request[-1])
+        request[-1] = str(alias)
+        assert invoke(monkeypatch, *request) != 0
+        assert "outside the source checkout" in capsys.readouterr().err
+    assert not list(capture_dir.iterdir())
+
+
 def test_one_collects_exact_scan_to_a_fresh_private_path(
     capture_dir, monkeypatch, tmp_path, capsys
 ):
-    cx = executable(tmp_path, "vendor cx")
+    # Preserve the selected name for multicall launchers that dispatch on argv[0].
+    if os.name == "nt":
+        cx = executable(tmp_path, "vendor cx")
+    else:
+        cx = str(tmp_path / "vendor cx")
+        Path(cx).symlink_to(executable(tmp_path, "launcher"))
     config = tmp_path / "my cx config"
     config.touch()
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(config))
@@ -60,6 +96,7 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         out = Path(cwd)
         assert out.is_relative_to(capture_dir)
         assert kwargs.get("env", os.environ)["CX_CONFIG_FILE_PATH"] == str(config)
+        kwargs["stdout"].write("retrieved existing scan\n")
         assert list(map(str, args)) == [
             cx,
             "results",
@@ -81,7 +118,9 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
     monkeypatch.setattr(subprocess, "run", run)
     for _ in range(2):
         assert invoke(monkeypatch, *requested) == 0
-        saved = Path(capsys.readouterr().out.rstrip("\n"))
+        output = capsys.readouterr()
+        assert "retrieved existing scan" in output.err
+        saved = Path(output.out.rstrip("\n"))
         assert saved.is_absolute() and saved.parent.parent == capture_dir
         assert list(saved.parent.iterdir()) == [saved]
         assert json.loads(saved.read_text())["scanID"] == ONE_SCAN
@@ -142,7 +181,12 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
     install = tmp_path / "Java installation"
     install.mkdir()
     java = executable(install, "java")
-    monkeypatch.setenv("PATH", str(install))
+    if os.name != "nt":
+        launcher = Path(java).rename(install / "launcher")
+        Path(java).symlink_to(launcher)
+    # A PATH containing tools from the scan target does not select the launcher.
+    monkeypatch.setenv("PATH", str(tmp_path))
+    executable(tmp_path, "java")
     monkeypatch.setenv("CX_CONFIG_FILE_PATH", "unrelated-one-config.yaml")
     jar = tmp_path / "Cx Flow.jar"
     config = tmp_path / "private config.yml"
@@ -151,12 +195,19 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
 
     def run(args, *, cwd, **kwargs):
         args = list(map(str, args))
-        assert args[:3] == [java, "-jar", str(jar)]
+        assert args[:6] == [
+            java,
+            f"-Djava.io.tmpdir={cwd}",
+            f"-DLOG_PATH={cwd}",
+            "-Dfile.encoding=UTF-8",
+            "-jar",
+            str(jar),
+        ]
         assert {
             f"--spring.config.location={config}",
             "--project",
             "--scanId=1234",
-            "--cx-team=/CxServer/Example Team/",
+            "--cx-team=/CxServer/Example Team",
             "--cx-project=Example Project",
             "--app=Example Project",
             "--bug-tracker=CxXml",
@@ -191,6 +242,8 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         monkeypatch,
         "cxsast",
         "1234",
+        "--java",
+        java,
         "--jar",
         str(jar),
         "--config",

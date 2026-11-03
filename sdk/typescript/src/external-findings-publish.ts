@@ -55,7 +55,10 @@ import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
-import { checkmarxReportRepositories } from "./checkmarx-repository.js";
+import {
+  checkmarxReportRepositories,
+  checkmarxReportRepository,
+} from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -1756,6 +1759,10 @@ async function preparePublicationInput(
       ))
         requireDestination("Sonar source", url);
     }
+    requireDestination(
+      "Checkmarx source",
+      checkmarxReportRepository(options.provider, findings, report, "cloud"),
+    );
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
@@ -1764,7 +1771,8 @@ async function preparePublicationInput(
       ["checkmarx", checkmarxReportRepositories],
       ["continuum", continuumReportRepositories],
     ] as const) {
-      if (saved && options.provider !== provider) continue;
+      if (saved && options.provider !== provider && provider !== "checkmarx")
+        continue;
       for (const [id, source] of repositories(
         options.provider,
         findings,
@@ -1826,8 +1834,7 @@ async function preparePublicationInput(
   checkRepositories(parsed.findings, parsed.report);
   // A retry sends its saved projection, which may differ from today's reader.
   if (saved) {
-    // A common Sonar ref can supply missing row refs. Only use the report
-    // associated with the input digest in the saved checkpoint.
+    // Only use report scope associated with the input digest in the saved checkpoint.
     const report =
       saved.inputProjection?.inputDigest === inputDigest
         ? parsed.report

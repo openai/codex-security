@@ -1514,12 +1514,26 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
     source: { provider: "checkmarx", source_key: selected.sourceKey },
     items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
   });
+  const replayWithReport = (change: Record<string, unknown>) =>
+    prepareNormalizedExternalPublication(
+      { ...first.preview, report: { ...first.preview.report, ...change } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    replayWithReport({
+      sourceRepositoryUrl: "https://github.com/example/other",
+    }),
+  ).rejects.toThrow(/does not match the selected Cloud repository/i);
   f.state.repositoryUrl = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow(/does not match/i);
   expect(f.posts).toHaveLength(0);
   f.state.repositoryUrl = selected.sourceRepositoryUrl;
   f.state.loseResponse = true;
   await expect(first.publish()).rejects.toThrow("resume the saved request");
+  await expect(replayWithReport({ scanId: "different-scan" })).rejects.toThrow(
+    /does not match the retained report/i,
+  );
   f.state.repositoryUrl = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow(/does not match/i);
   expect(f.posts).toHaveLength(1);

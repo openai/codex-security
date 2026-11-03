@@ -27,7 +27,7 @@ function report(results: unknown[]) {
   return JSON.stringify({ scanID, results, totalCount: results.length });
 }
 
-test("projects SAST flow and vendor triage from mixed-engine CLI JSON", () => {
+test("retains native SAST flow and vendor triage from mixed-engine CLI JSON", () => {
   // A query ID emitted as a JSON integer can exceed JavaScript's exact range.
   const contents = report([{ type: "sca" }, sast, { type: "kics" }]).replace(
     '"queryId":101',
@@ -42,10 +42,7 @@ test("projects SAST flow and vendor triage from mixed-engine CLI JSON", () => {
     severity: "high",
     description: sast.description,
     source_scan_id: scanID,
-    locations: [
-      { path: "src/input.ts", line: 12 },
-      { path: "src/database.ts", line: 27 },
-    ],
+    locations: [],
     details: {
       repository: { url: repository },
       source_status: "RECURRENT",

@@ -59,7 +59,68 @@ test("normalized Checkmarx replay binds the retained occurrence to its repositor
         dependencies,
       ),
     ).rejects.toThrow(/checkmarx provider/i);
+    const unmarked = structuredClone(input);
+    delete unmarked.report;
+    delete unmarked.findings[0]!.evidence.source_data!["format"];
+    const relabeled = () =>
+      prepareNormalizedLocalImport(
+        unmarked,
+        { ...options, provider: "wiz" },
+        dependencies,
+      );
+    await expect(relabeled()).rejects.toThrow(/checkmarx provider/i);
+    delete unmarked.findings[0]!.evidence.source_data;
+    expect((await relabeled()).preview.findings).toHaveLength(1);
+
+    for (const change of [
+      { scanId: "another-scan" },
+      { sourceRepositoryUrl: "https://github.com/example/another" },
+      {
+        format:
+          input.report!["format"] === "cxsast-xml"
+            ? "checkmarx-one-json"
+            : "cxsast-xml",
+        projectId: "1",
+      },
+    ]) {
+      await expect(
+        prepare({ ...input, report: { ...input.report, ...change } }),
+      ).rejects.toThrow(
+        /retained Checkmarx report|does not match the retained report/i,
+      );
+    }
   }
+  const typed = {
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: "sdk-id",
+        evidence: { title: "Example", severity: "low" as const },
+      },
+    ],
+  };
+  expect((await prepare(typed)).preview.findings).toHaveLength(1);
+  await expect(prepare({ ...typed, report: normal.report })).rejects.toThrow(
+    /retained report/i,
+  );
+  const firstXml = xml("1");
+  await expect(
+    prepare({ ...firstXml, report: { ...firstXml.report, projectId: "2" } }),
+  ).rejects.toThrow(/retained report/i);
+  const empty = {
+    ...normal,
+    read: 0,
+    findings: [],
+    report: {
+      ...normal.report,
+      totalCount: 0,
+      sourceRepositoryUrl: "https://github.com/example/another",
+    },
+  };
+  await expect(prepare(empty)).rejects.toThrow(
+    /does not match a configured remote/i,
+  );
   const combined = [...xml("1").findings, ...xml("2").findings];
   await expect(
     prepare({ findings: combined, read: combined.length, excluded: [] }),

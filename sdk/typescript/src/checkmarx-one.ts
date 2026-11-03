@@ -61,12 +61,8 @@ export function normalizeCheckmarxOne(
       const row = record(value, "Checkmarx One result");
       const data = record(row["data"], "Checkmarx One SAST data");
       const queryId = data["queryId"];
-      const nodes = array(data["nodes"] ?? [], "Checkmarx One SAST nodes").map(
-        (value) => {
-          const node = record(value, "Checkmarx One SAST node");
-          return { fileName: node["fileName"], line: node["line"] };
-        },
-      );
+      for (const node of array(data["nodes"] ?? [], "Checkmarx One SAST nodes"))
+        record(node, "Checkmarx One SAST node");
       return checkmarxEvidence(
         {
           format: "checkmarx-one-json",
@@ -82,7 +78,6 @@ export function normalizeCheckmarxOne(
             row["vulnerabilityDetails"] ?? {},
             "Checkmarx One vulnerability details",
           )["cweId"],
-          nodes,
           sourceData: { row },
         },
         target,

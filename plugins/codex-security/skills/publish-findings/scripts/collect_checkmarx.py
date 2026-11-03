@@ -15,7 +15,21 @@ def installed_file(value: str) -> Path:
     path = Path(value)
     if not path.is_absolute() or not path.is_file():
         raise argparse.ArgumentTypeError("expected an absolute path to an existing file")
-    return path.resolve()
+    return path
+
+
+def installed_launcher(value: str) -> Path:
+    selected = installed_file(value)
+    source = Path.cwd().resolve()
+    for parent in (source, *source.parents):
+        if (parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file():
+            source = parent
+            break
+    # Inspect the resolved target, but invoke the selected name for multicall shims.
+    launcher = selected.parent.resolve() / selected.name
+    if any(path.is_relative_to(source) for path in (selected, launcher, launcher.resolve())):
+        raise argparse.ArgumentTypeError("use an installed launcher outside the source checkout")
+    return launcher
 
 
 def verify_one(report: Path, scan_id: str) -> None:
@@ -47,21 +61,6 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
         parser.ParseFile(stream)
 
 
-def java_executable() -> str:
-    java = shutil.which("java.exe" if os.name == "nt" else "java")
-    if not java or not Path(java).is_absolute():
-        raise ValueError("Put the installed Java runtime on PATH before running CxFlow.")
-    executable = Path(java).resolve()
-    cwd = Path.cwd().resolve()
-    if executable.parent == cwd or any(
-        executable.is_relative_to(parent)
-        and ((parent / ".git").is_file() or (parent / ".git" / "HEAD").is_file())
-        for parent in (cwd, *cwd.parents)
-    ):
-        raise ValueError("Use a Java installation outside the current checkout.")
-    return str(executable)
-
-
 def collect(args: argparse.Namespace) -> Path:
     output = Path(tempfile.mkdtemp(prefix="checkmarx-report-")).resolve()
     try:
@@ -88,15 +87,19 @@ def collect(args: argparse.Namespace) -> Path:
                     "cx_result",
                 ]
             else:
+                team = args.team.rstrip("/\\")
                 report = Path(work, "checkmarx-results.xml")
                 command = [
-                    java_executable(),
+                    str(args.java),
+                    f"-Djava.io.tmpdir={work}",
+                    f"-DLOG_PATH={work}",
+                    "-Dfile.encoding=UTF-8",
                     "-jar",
                     str(args.jar),
                     f"--spring.config.location={args.config}",
                     "--project",
                     f"--scanId={args.scan_id}",
-                    f"--cx-team={args.team}",
+                    f"--cx-team={team}",
                     f"--cx-project={args.project}",
                     f"--app={args.project}",
                     "--bug-tracker=CxXml",
@@ -133,9 +136,10 @@ def main() -> int:
     products = parser.add_subparsers(dest="product", required=True)
     one = products.add_parser("one", help="export an existing Checkmarx One scan")
     one.add_argument("scan_id")
-    one.add_argument("--cx", required=True, type=installed_file)
+    one.add_argument("--cx", required=True, type=installed_launcher)
     cxsast = products.add_parser("cxsast", help="retrieve an existing CxSAST scan with CxFlow")
     cxsast.add_argument("scan_id", type=int)
+    cxsast.add_argument("--java", required=True, type=installed_launcher)
     cxsast.add_argument("--jar", required=True, type=installed_file)
     cxsast.add_argument("--config", required=True, type=installed_file)
     cxsast.add_argument("--team", required=True)
