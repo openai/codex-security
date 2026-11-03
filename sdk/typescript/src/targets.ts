@@ -161,7 +161,14 @@ function requirePortableWindowsRepositoryPath(path: string): void {
   }
 }
 
+type ReadWorktreeGit = (
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<string>;
+
 interface GitWorktreeContext {
+  readGit?: ReadWorktreeGit;
   protectedRoot?: string;
   objectDirectory?: string;
   runGit?: (args: readonly string[]) => Promise<string>;
@@ -178,6 +185,7 @@ function worktreeGit(
       : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
   return (args: readonly string[]) =>
     options.runGit?.(args) ??
+    options.readGit?.(repository, args, signal) ??
     gitOutput(
       options.protectedRoot ?? repository,
       args,
@@ -852,7 +860,8 @@ export async function gitOutput(
         args[0] === "ls-files" ||
         (args[0] === "remote" &&
           (args.length === 1 ||
-            (args[1] === "get-url" && args[2] === "--all"))),
+            (args[1] === "get-url" &&
+              (args[2] === "--all" || args[2] === "--")))),
       sourceEnvironment,
     ),
     [
@@ -875,9 +884,14 @@ export async function gitOutput(
       maxBuffer: Infinity,
     },
   );
-  return typeof stdout === "string"
-    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
-    : stdout;
+  if (typeof stdout !== "string") return stdout;
+  // Git writes remote URLs to binary stdout even on Windows. Only the final LF
+  // is a delimiter; a preceding CR belongs to the configured URL.
+  const remoteUrl = args[0] === "remote" && args[1] === "get-url";
+  return stdout.replace(
+    process.platform === "win32" && !remoteUrl ? /\r?\n$/u : /\n$/u,
+    "",
+  );
 }
 
 export async function gitMarkerRoot(

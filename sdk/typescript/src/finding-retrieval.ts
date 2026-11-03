@@ -10,9 +10,9 @@ export interface FindingSourceSnapshot {
   snapshotDigest: string | null;
 }
 
-export interface FindingNeighborhood {
-  finding: Finding;
-  potentialDuplicates: Finding[];
+export interface FindingNeighborhood<T = Finding> {
+  finding: T;
+  potentialDuplicates: T[];
   /** Saved storage associations, separate from model-authored finding content. */
   repositoryIds?: Record<string, string[]>;
   /** Present only when the current body matches its persisted scan occurrence. */

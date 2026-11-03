@@ -8,12 +8,16 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
-from workbench_test_support import read_review_state, saved_draft, write_checkpoint
+from workbench_test_support import (
+    read_review_state,
+    saved_draft,
+    select_checkpoint,
+    write_checkpoint,
+)
 
 
 @pytest.mark.parametrize("reordered", [False, True])
@@ -37,8 +41,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
     output = tmp_path / "reviewer"
     result_path = output / "result.json"
     selected = write_checkpoint(output / "checkpoints", accepted)
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
+    head = select_checkpoint(output, selected)
     for path in (selected, result_path, head):
         os.utime(path, ns=(1_000_000_000, 1_000_000_000))
     pending = copy.deepcopy(accepted)
@@ -50,8 +53,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
     pending["coverage"]["deferred"] = [
         {"id": "task", "reason": "Check boundary", "surfaceIds": ["api"]}
     ]
-    unselected = write_checkpoint(output / "checkpoints", pending)
-    os.utime(unselected, ns=(2_000_000_000, 2_000_000_000))
+    write_checkpoint(output / "checkpoints", pending, mtime_ns=2_000_000_000)
     originals = {path: path.read_bytes() for path in output.rglob("*.json")}
     worker.update(status="succeeded", result_manifest_path=str(result_path))
     recovered = recover(tmp_path, saved, [worker])
@@ -71,7 +73,7 @@ def test_stopped_receipt_ownership_requires_a_matching_checkpoint(
     workbench_api, workbench_db, publication_scan, stop_scan, recorded, retry, archived
 ):
     scan = publication_scan()
-    initial = add_worker(workbench_db, scan)
+    initial = scan.add_worker()
     worker_id = initial.parent.name
     output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
     output.mkdir(parents=True)
@@ -209,7 +211,7 @@ def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
         draft["scanId"] = scan.scan_id
         draft["findings"][0]["locations"][0]["path"] = scope
     legacy["checkpoint"]["findings"][1]["locations"][0]["path"] = f"{scope}/generated"
-    initial = add_worker(workbench_db, scan)
+    initial = scan.add_worker()
     worker_id = initial.parent.name
     output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
     output.mkdir(parents=True)
@@ -220,8 +222,9 @@ def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
             (str(output), str(result), worker_id),
         )
     result.write_text(json.dumps(legacy["result"]))
-    checkpoint = write_checkpoint(result.parent / "checkpoints", legacy["checkpoint"])
-    os.utime(checkpoint, ns=(1_000_000_000, 1_000_000_000))
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints", legacy["checkpoint"], mtime_ns=1_000_000_000
+    )
     os.utime(result, ns=(2_000_000_000, 2_000_000_000))
     ref = "artifacts/evidence.txt"
     shared, local = scan.scan_dir / ref, result.parent / ref

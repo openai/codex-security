@@ -125,7 +125,9 @@ function readAssessment(path: string): unknown {
   const text =
     path === "-"
       ? decodePosixBytes(contents)
-      : decodeUtf8(contents).replace(/\r\n?/gu, "\n");
+      : decodeUtf8(contents)
+          .replace(/^\uFEFF/u, "")
+          .replace(/\r\n?/gu, "\n");
   try {
     const value = parseJson(text);
     // JSON syntax is already valid; check each object's decoded member names.

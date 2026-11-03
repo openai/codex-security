@@ -21,7 +21,6 @@ import type { JsonObject } from "../src/types.ts";
 const {
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
-  aggregateDiscoveryCoverage,
   aggregateSourceCoverage,
   deepReductionForPersistence,
   projectDiscoveryCoverage,
@@ -239,13 +238,19 @@ async function testLegacyDeferredPublication(root: string) {
     worker.resultPath,
     scanId,
   );
-  const coverage = aggregateDiscoveryCoverage(worker.artifacts, [
-    { ...worker, result: accepted },
-  ]);
+  const coverage = projectDiscoveryCoverage(
+    accepted.reviewState,
+    { id: worker.id, attempt: 1 },
+    "artifacts/deep_discovery/workers/discovery-0001/output",
+  );
   const parent = parseScanDraft({ ...result, reviewState: coverage });
   assert.deepEqual(
     parent.reviewState.deferred.map((row: { id: string }) => row.id),
-    ["first/review", "first/review-3", "first/review-2"],
+    [
+      "first-attempt-1-deferred-1",
+      "first-attempt-1-deferred-2",
+      "first-attempt-1-deferred-3",
+    ],
   );
   assert.deepEqual(
     parent.reviewState.deferred.map((row: { reason: string }) => row.reason),
@@ -712,13 +717,17 @@ async function testCoveragePublicationParity(root: string) {
       worker.resultPath,
       scanId,
     );
-    const coverage = aggregateDiscoveryCoverage(worker.artifacts, [
-      { ...worker, result: accepted },
-    ]);
+    const coverage = projectDiscoveryCoverage(
+      accepted.reviewState,
+      { id: worker.id, attempt: 1 },
+      "artifacts/deep_discovery/workers/discovery-0001/output",
+    );
     assert.deepEqual(coverage.deferred[0].receiptRefs, {
       external: "opaque metadata",
     });
-    assert.deepEqual(coverage.deferred[0].surfaceIds, ["first/api"]);
+    assert.deepEqual(coverage.deferred[0].surfaceIds, [
+      "first-attempt-1-surface-1",
+    ]);
     assert.deepEqual(coverage.explicitExclusions[0].receiptRefs, [
       "opaque/missing.md",
     ]);
