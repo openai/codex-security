@@ -2620,8 +2620,12 @@ removes the caller's subdirectory. Both flows preserve the selected Git context;
 local edits remain available for review.
 The assessment does not change the patch or merge state.
 
-Post-patch Git snapshots, including initialized submodules, use the patch's
-workspace permissions and configured Git filters.
+Git snapshots, including snapshots of initialized submodules, run configured Git
+filters with the workspace permissions from your Codex configuration. Configure
+additional writable roots and network access in your user configuration.
+For Git LFS storage outside the checkout, select the cache in your user or
+system Git configuration, pass it through Git's command environment, or grant
+the snapshot workspace write access to the cache.
 
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
@@ -2650,6 +2654,9 @@ Patch results are `verified`, `no_change`, `blocked`, or
 `failed`. Verified/already-fixed findings no longer fail the severity threshold.
 
 ### Create or resume a draft pull request
+
+For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
+Publication checks the source of `core.sshCommand` before it runs SSH.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
