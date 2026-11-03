@@ -25,6 +25,7 @@
     "win32": 1.7
   },
   "api-deep-composition.test.ts": {
+    "darwin": 713.7,
     "win32": 519.8
   },
   "api-deep-scan-advisory-routing.test.ts": {
@@ -1004,7 +1005,7 @@
   },
   "scan-resume.test.ts": {
     "linux": 93.9,
-    "darwin": 129.6,
+    "darwin": 965.2,
     "win32": 1611.1
   },
   "scan-skill-paths.test.ts": {
