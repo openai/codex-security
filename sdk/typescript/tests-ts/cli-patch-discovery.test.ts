@@ -39,6 +39,75 @@ async function repository(prefix: string) {
   return { root, git };
 }
 
+test.each([true, false])(
+  "patch checks a nested worktree's reciprocal registration (matches: %p)",
+  async (matches) => {
+    const selected = await repository("patch-worktree-");
+    const owner = await repository("patch-worktree-owner-");
+    const nested = join(selected.root, "nested");
+    const registered = matches ? nested : join(owner.root, "other");
+    owner.git("worktree", "add", "--detach", registered);
+    if (!matches) {
+      await mkdir(nested);
+      await writeFile(
+        join(nested, ".git"),
+        await readFile(join(registered, ".git")),
+      );
+    }
+    selected.git("add", "nested");
+    selected.git("commit", "-m", "Synthetic linked worktree");
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: selected.root,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async () => {
+        await writeFile(join(selected.root, "app.ts"), "after\n");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(matches ? 0 : 2);
+    if (matches) expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    else {
+      expect(outcome.stderr).toContain("Nested Git administration is outside");
+      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+        "before\n",
+      );
+    }
+  },
+);
+
+test("patch rejects an external object store selected by a checkout symlink before snapshot writes", async () => {
+  const selected = await repository("patch-object-store-");
+  const outside = await fixtures.create("patch-object-store-target-");
+  const objects = join(selected.root, ".git", "objects");
+  const storage = join(outside, "objects");
+  await rename(objects, storage);
+  await symlink(
+    storage,
+    objects,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await writeFile(join(selected.root, "app.ts"), "new snapshot content\n");
+  const blob = selected.git("hash-object", "app.ts");
+  let snapshots = 0;
+  let turns = 0;
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: selected.root,
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (options?.patchSnapshot) snapshots++;
+      return runGitRepositoryCommand(command, args, cwd, options);
+    },
+    onCodex: async () => {
+      turns++;
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  expect(outcome.stderr).toContain("Git object storage resolves outside");
+  expect(turns).toBe(0);
+  expect(snapshots).toBe(0);
+  expect(() => selected.git("cat-file", "-e", blob)).toThrow();
+});
+
 for (const raw of [false, true]) {
   test.skipIf(raw && process.platform !== "linux")(
     `patch discovery does not traverse symlinked ancestors of ordinary tracked files${raw ? " with raw bytes" : ""}`,

@@ -89,10 +89,12 @@ async function resolvePatchProfile(
         join(repository, "cache"),
         process.platform === "win32" ? "junction" : "dir",
       );
+    const selectedConfig = join(home, "selected.gitconfig");
     execFileSync(
       "git",
       [
         "config",
+        ...(optionalStorage === "selected" ? ["--file", selectedConfig] : []),
         "lfs.storage",
         optionalStorage === "selected" ||
         optionalStorage === "direct-administration"
@@ -106,7 +108,15 @@ async function resolvePatchProfile(
     controls = await capturePatchGitControls(
       repository,
       async (_root, checkout, args, options) =>
-        runGitRepositoryCommand("git", args, checkout, options),
+        runGitRepositoryCommand("git", args, checkout, {
+          ...options,
+          environment: {
+            ...(optionalStorage === "selected"
+              ? { GIT_CONFIG_GLOBAL: selectedConfig }
+              : {}),
+            ...options?.environment,
+          },
+        }),
       true,
     );
     expect(controls).toBeDefined();

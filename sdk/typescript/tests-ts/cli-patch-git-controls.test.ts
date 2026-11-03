@@ -431,7 +431,12 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
   for (const location of [
     "external",
     "external-alias",
+    "local-external",
+    "local-override",
+    "user-includes-checkout",
     "administration-alias",
+    "administration-objects",
+    "administration-tmp",
     "metadata-alias",
     "gitfile-alias",
     "nested-administration",
@@ -455,16 +460,67 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       let directory = repository;
       const environment: NodeJS.ProcessEnv = {};
       let storage = join(repository, ".git", "lfs");
-      if (location === "external") {
+      if (
+        [
+          "external",
+          "local-external",
+          "local-override",
+          "user-includes-checkout",
+        ].includes(location)
+      ) {
         storage = external;
-        git("config", "lfs.storage", storage);
+        const global = join(
+          await fixtures.create("patch-user-config-"),
+          "global",
+        );
+        environment["GIT_CONFIG_GLOBAL"] = global;
+        if (location === "external") {
+          git("config", "--file", global, "lfs.storage", storage);
+        } else if (location === "user-includes-checkout") {
+          const included = join(repository, "included.gitconfig");
+          git("config", "--file", included, "lfs.storage", storage);
+          git("config", "--file", global, "include.path", included);
+        } else {
+          if (location === "local-override")
+            git(
+              "config",
+              "--file",
+              global,
+              "lfs.storage",
+              join(repository, "allowed-cache"),
+            );
+          git("config", "lfs.storage", storage);
+        }
       } else if (location === "external-alias") {
         const alias = join(external, "alias");
         const target = join(external, "target");
         await mkdir(target);
         await symlink(target, alias, linkType);
         storage = join(alias, "storage");
-        git("config", "lfs.storage", storage);
+        environment["GIT_CONFIG_GLOBAL"] = join(
+          await fixtures.create("patch-user-config-"),
+          "global",
+        );
+        git(
+          "config",
+          "--file",
+          environment["GIT_CONFIG_GLOBAL"],
+          "lfs.storage",
+          storage,
+        );
+      } else if (
+        location === "administration-objects" ||
+        location === "administration-tmp"
+      ) {
+        await mkdir(storage);
+        await symlink(
+          external,
+          join(
+            storage,
+            location === "administration-objects" ? "objects" : "tmp",
+          ),
+          linkType,
+        );
       } else if (location === "administration-alias") {
         await symlink(external, storage, linkType);
       } else if (location === "metadata-alias") {
@@ -548,6 +604,22 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         location !== "selected-common-dir",
       );
       expect(controls).toBeDefined();
+      if (
+        [
+          "local-external",
+          "local-override",
+          "user-includes-checkout",
+          "administration-alias",
+          "administration-objects",
+          "administration-tmp",
+        ].includes(location)
+      ) {
+        expect(controls!.snapshotStoragePaths).toEqual([]);
+        expect(controls!.readOnlyPaths).not.toContain(await realpath(external));
+        expect(await readdir(external)).toEqual([]);
+        await controls!.validate();
+        return;
+      }
       const path = await realpath(storage);
       expect(controls!.snapshotStoragePaths).toContain(path);
       expect(controls!.readOnlyPaths).toContain(path);

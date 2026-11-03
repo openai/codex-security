@@ -271,6 +271,31 @@ async function markerDirectories(
   return common === undefined ? [gitDirectory] : [gitDirectory, common];
 }
 
+async function isRegisteredLinkedWorktree(
+  checkout: string,
+  directories: string[],
+): Promise<boolean> {
+  const [gitDirectory, common] = directories;
+  if (
+    !gitDirectory ||
+    !common ||
+    relative(join(common, "worktrees"), dirname(gitDirectory)) !== ""
+  )
+    return false;
+  // Git records the reciprocal checkout path in the common repository's
+  // worktree registration. A gitfile in the selected checkout cannot supply it.
+  const backlink = join(gitDirectory, "gitdir");
+  if (!(await lstat(backlink).catch(missing))?.isFile()) return false;
+  const registered = relativeFile(
+    gitDirectory,
+    controlPathText(await readFile(backlink)).replace(/[\r\n]+$/u, ""),
+  );
+  const marker = await realControlPath(registered).catch(missing);
+  return (
+    marker !== undefined && relative(join(checkout, ".git"), marker) === ""
+  );
+}
+
 // Git permits include files and hook directories that do not exist yet.
 async function canonicalPath(path: string): Promise<string> {
   // Match realpath's Windows separators when a path no longer exists.
@@ -429,6 +454,7 @@ export async function capturePatchGitControls(
     system: process.env["GIT_CONFIG_SYSTEM"],
     noSystem: process.env["GIT_CONFIG_NOSYSTEM"],
     xdgConfigHome: process.env["XDG_CONFIG_HOME"],
+    objectDirectory: process.env["GIT_OBJECT_DIRECTORY"],
     alternateObjectDirectories: process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
   },
 ): Promise<PatchGitControls | undefined> {
@@ -763,16 +789,16 @@ export async function capturePatchGitControls(
     if (disabled === "false")
       globalConfigurationPaths.push(configuration.system);
   }
+  const insideSelectedRoots = (path: string): boolean =>
+    inside(root, path) ||
+    [...administrationRoots.keys()].some((administration) =>
+      inside(administration, path),
+    );
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
-      if (administrationLinks.has(entry))
+      if (administrationLinks.has(entry)) {
         await rememberControl(entry, true, false);
-      const parent = dirname(entry);
-      if (
-        inside(root, parent) &&
-        ![...administrationRoots.keys()].some((path) => inside(path, parent)) &&
-        !administrationLinks.has(entry)
-      ) {
+      } else if (insideSelectedRoots(dirname(entry))) {
         await rememberControl(entry, true, false);
         return false;
       }
@@ -1062,7 +1088,7 @@ export async function capturePatchGitControls(
     for (const link of await directoryLinks(join(root, ".git")))
       administrationLinks.add(link);
   const discover = async (capture: boolean): Promise<void> => {
-    const pendingStoragePaths: string[] = [];
+    const pendingStoragePaths: { path: string; userSelected: boolean }[] = [];
     const protectedRoots = capture
       ? []
       : (
@@ -1203,6 +1229,7 @@ export async function capturePatchGitControls(
         );
       if (visited.has(canonical)) return;
       let naturalWorktree = true;
+      let commonDirectory = selectedDirectories[1]!;
       if (canonical !== root) {
         const directories = await markerDirectories(
           checkout,
@@ -1211,6 +1238,7 @@ export async function capturePatchGitControls(
           capture ? rememberAdministrationReference : undefined,
         );
         if (directories === undefined) return;
+        commonDirectory = directories.at(-1)!;
         const previous = nestedDirectories.get(canonical);
         if (
           !capture &&
@@ -1221,19 +1249,31 @@ export async function capturePatchGitControls(
           throw new Error(
             `Nested Git administration changed during the patch: ${checkout}`,
           );
+        if (
+          !capture &&
+          directories.some(
+            (path) => !protectedRoots.some((root) => inside(root, path)),
+          )
+        )
+          throw new Error(
+            `Patch selected Git metadata outside the pre-patch administration directories: ${checkout}`,
+          );
+        if (
+          directories.some(
+            (path) =>
+              !inside(root, path) &&
+              !selectedDirectories.some((selected) => inside(selected, path)),
+          ) &&
+          !(await isRegisteredLinkedWorktree(canonical, directories))
+        )
+          throw new Error(
+            `Nested Git administration is outside the selected repository and its registered worktrees: ${checkout}`,
+          );
         if (capture) {
           nestedDirectories.set(canonical, directories);
           for (const path of directories) await remember(path);
           for (const link of await directoryLinks(join(checkout, ".git")))
             administrationLinks.add(link);
-        } else if (
-          directories.some(
-            (path) => !protectedRoots.some((root) => inside(root, path)),
-          )
-        ) {
-          throw new Error(
-            `Patch selected Git metadata outside the pre-patch administration directories: ${checkout}`,
-          );
         }
         const config = join(directories.at(-1)!, "config");
         if ((await stat(config).catch(missing))?.isFIFO())
@@ -1256,6 +1296,23 @@ export async function capturePatchGitControls(
             "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
           );
       }
+      if (canonical === root && configuration.objectDirectory !== undefined) {
+        if (capture)
+          await rememberControl(
+            relativeFile(root, configuration.objectDirectory),
+            true,
+            false,
+          );
+      } else {
+        const objects = await canonicalPath(join(commonDirectory, "objects"));
+        if (
+          !inside(commonDirectory, objects) &&
+          !selectedDirectories.some((selected) => inside(selected, objects))
+        )
+          throw new Error(
+            `Git object storage resolves outside the selected Git administration: ${checkout}`,
+          );
+      }
       if (capture) {
         await captureReferences(checkout);
         const [common, storage] = await Promise.all([
@@ -1269,6 +1326,8 @@ export async function capturePatchGitControls(
             "config",
             "--includes",
             "--null",
+            "--show-scope",
+            "--show-origin",
             "--default=lfs",
             "--get",
             "lfs.storage",
@@ -1288,18 +1347,29 @@ export async function capturePatchGitControls(
               !failure.killed &&
               (failure.code === 128 || failure.status === 128)
             )
-              return "lfs";
+              return "";
             throw error;
           }),
         ]);
-        const configured = storage.replace(/\0$/u, "") || "lfs";
+        const [scope, origin, value] = storage.split("\0");
+        const configured = value || "lfs";
         const absolute =
           isAbsolute(configured) &&
           (process.platform !== "win32" || parse(configured).root.length > 1);
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        pendingStoragePaths.push(lfs);
+        // A user config can include a checkout file, whose values cannot grant
+        // snapshot writes to a directory outside the selected Git roots.
+        const userSelected =
+          (scope === "global" || scope === "system" || scope === "command") &&
+          !(
+            origin?.startsWith("file:") &&
+            insideSelectedRoots(
+              await canonicalPath(relativeFile(checkout, origin.slice(5))),
+            )
+          );
+        pendingStoragePaths.push({ path: lfs, userSelected });
       }
       let tracked: Buffer;
       let untracked: Buffer;
@@ -1439,18 +1509,20 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
-    for (const path of pendingStoragePaths) {
+    for (const { path, userSelected } of pendingStoragePaths) {
       try {
         const children = [join(path, "objects"), join(path, "tmp")];
         const canonical = await canonicalPath(path);
         const protectsAdministration = [...administrationRoots.keys()].some(
           (administration) => inside(canonical, administration),
         );
-        let prepare = !protectsAdministration;
+        let prepare =
+          !protectsAdministration &&
+          (userSelected || insideSelectedRoots(canonical));
         for (const candidate of [path, ...children])
           if (!(await canPrepareStorage(candidate))) prepare = false;
         if (!prepare) {
-          // Bind checkout links without preparing or granting their targets.
+          // Keep model write restrictions and let snapshots inherit host access.
           for (const child of children) {
             await rememberControl(child, true, false, true);
             modelOnlyReadOnlyPaths.add(controlPaths.get(child)!.canonical);

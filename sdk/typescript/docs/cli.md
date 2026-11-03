@@ -2618,6 +2618,9 @@ The assessment does not change the patch or merge state.
 Git snapshots, including snapshots of initialized submodules, run configured Git
 filters with the workspace permissions from your Codex configuration. Configure
 additional writable roots and network access in your user configuration.
+For Git LFS storage outside the checkout, select the cache in your user or
+system Git configuration, pass it through Git's command environment, or grant
+the snapshot workspace write access to the cache.
 
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.

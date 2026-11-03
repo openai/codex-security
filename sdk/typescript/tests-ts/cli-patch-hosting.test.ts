@@ -21,47 +21,71 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
-  test("publication preflight refuses a checkout-selected SSH command", async () => {
-    const { directory, git } = await publicationRepository();
-    const external = await fixtures.create("patch-ssh-config-");
-    const marker = join(external, "marker");
-    const script = join(external, "ssh.cjs");
-    await writeFile(
-      script,
-      "require('node:fs').writeFileSync(process.argv[2], 'ran'); process.exit(1);\n",
-    );
-    const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
-    git(
-      "config",
-      "core.sshCommand",
-      [process.execPath, script, marker].map(commandPath).join(" "),
-    );
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "git@github.example.test:example/repository.git",
-    );
-    const model = mock(async () => 0);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onCodex: model,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : "[]",
-      },
-      { localHosting: false },
-    );
-    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(outcome.exitCode, outcome.stderr).toBe(2);
-    expect(outcome.stderr).toContain("core.sshCommand");
-    expect(model).not.toHaveBeenCalled();
-  });
+  test.each(["local", "include"] as const)(
+    "publication preflight refuses a checkout-selected SSH command from %s",
+    async (source) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-ssh-config-");
+      const marker = join(external, "marker");
+      const script = join(external, "ssh.cjs");
+      await writeFile(
+        script,
+        "require('node:fs').writeFileSync(process.argv[2], 'ran'); process.exit(1);\n",
+      );
+      const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
+      const config = join(directory, "transport.gitconfig");
+      const environment: NodeJS.ProcessEnv = {};
+      if (source === "include") {
+        environment["GIT_CONFIG_GLOBAL"] = join(external, "user.gitconfig");
+        git(
+          "config",
+          "--file",
+          environment["GIT_CONFIG_GLOBAL"],
+          "include.path",
+          config,
+        );
+      }
+      git(
+        "config",
+        ...(source === "include" ? ["--file", config] : []),
+        "core.sshCommand",
+        [process.execPath, script, marker].map(commandPath).join(" "),
+      );
+      if (source === "include") {
+        git("add", "transport.gitconfig");
+        git("commit", "-m", "Synthetic checkout configuration");
+      }
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@github.example.test:example/repository.git",
+      );
+      const model = mock(async () => 0);
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: model,
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, {
+                  ...options,
+                  environment: { ...environment, ...options?.environment },
+                })
+              : "[]",
+        },
+        { localHosting: false },
+      );
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("core.sshCommand");
+      expect(model).not.toHaveBeenCalled();
+    },
+  );
 
   test.each(
     [false, true].flatMap((resume) =>
@@ -951,8 +975,8 @@ describe("patch change tracking", () => {
                 args.at(-1) === "core.sshCommand"
               ) {
                 if (coreCommand !== undefined)
-                  return `global\0${coreCommand}\0`;
-                return `command\0${args[args.indexOf("--default") + 1]}\0`;
+                  return `global\0file:${join(remote, "config")}\0${coreCommand}\0`;
+                return `command\0command line:\0${args[args.indexOf("--default") + 1]}\0`;
               }
               if (args[0] === "-c" && args[2] === "codex-security-ssh-config") {
                 sshLookups++;

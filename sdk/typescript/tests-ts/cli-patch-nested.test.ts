@@ -651,6 +651,7 @@ describe("patch change tracking", () => {
 
   test.each([
     "gitfile",
+    "unregistered-gitfile",
     "configured-worktree",
     "sparse-link-before",
     "sparse-link-during",
@@ -676,17 +677,17 @@ describe("patch change tracking", () => {
       const git = repositoryGit(root);
       const outside = repositoryGit(external);
       const sparseLink = kind.startsWith("sparse-link");
-      const metadata = repositoryGit(
-        kind === "gitfile" || sparseLink ? external : nested,
-      );
-      if (kind === "gitfile") {
+      const gitfile = kind.endsWith("gitfile");
+      const metadata = repositoryGit(gitfile || sparseLink ? external : nested);
+      if (gitfile) {
         await rm(join(nested, ".git"), { recursive: true });
         await writeFile(
           join(nested, ".git"),
           `gitdir: ${join(external, ".git")}\n`,
         );
       }
-      if (!sparseLink) metadata("config", "core.worktree", external);
+      if (!sparseLink && kind !== "unregistered-gitfile")
+        metadata("config", "core.worktree", external);
       git("add", "nested");
       git("commit", "-m", "Synthetic nested dependency");
       const linkExternal = () =>
@@ -729,7 +730,9 @@ describe("patch change tracking", () => {
           ? "ancestor worktree"
           : sparseLink
             ? "outside the selected repository"
-            : "worktree root does not match",
+            : gitfile
+              ? "Nested Git administration is outside the selected repository"
+              : "worktree root does not match",
       );
       expect(modelCalls).toBe(kind.endsWith("during") ? 1 : 0);
       expect(() => metadata("cat-file", "-e", blob)).toThrow();

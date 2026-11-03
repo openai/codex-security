@@ -9032,6 +9032,7 @@ async function publicationSshCommand(
       "config",
       "--null",
       "--show-scope",
+      "--show-origin",
       "--default",
       fallback,
       "--get",
@@ -9040,8 +9041,17 @@ async function publicationSshCommand(
     repository,
     { trim: false, environment: { GIT_CONFIG: undefined } },
   );
-  const [scope, command] = value.split("\0");
-  if (scope !== "system" && scope !== "global" && scope !== "command")
+  const [scope, origin, command] = value.split("\0");
+  if (
+    (scope !== "system" && scope !== "global" && scope !== "command") ||
+    (origin?.startsWith("file:") &&
+      !isOutsidePath(
+        relative(
+          await realpath(repository),
+          await realpath(resolve(repository, origin.slice(5))),
+        ),
+      ))
+  )
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
     );
@@ -11624,6 +11634,10 @@ async function runSkill(
           xdgConfigHome: environmentEntry(
             dependencies.environment,
             "XDG_CONFIG_HOME",
+          ),
+          objectDirectory: environmentEntry(
+            dependencies.environment,
+            "GIT_OBJECT_DIRECTORY",
           ),
           alternateObjectDirectories: environmentEntry(
             dependencies.environment,
