@@ -404,14 +404,14 @@ export async function preparePolicyOutputDirectory(
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -2191,8 +2191,7 @@ export async function validatePreparedOutputDir(
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
-  const entries = await readdir(canonical);
-  if (!allowNonempty && entries.length !== 0) {
+  if (!allowNonempty && (await readdir(canonical)).length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );
@@ -3323,17 +3322,21 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
-  const releaseCanceledPipes = () => {
+  let forceTermination: ReturnType<typeof setTimeout> | undefined;
+  const settleCanceledChild = () => {
     if (!commandSignal?.aborted) return;
-    if (child.exitCode === null && child.signalCode === null) return;
+    if (child.exitCode === null && child.signalCode === null) {
+      // spawn already sent SIGTERM. Give the command time to exit cleanly.
+      forceTermination ??= setTimeout(() => child.kill("SIGKILL"), 1_000);
+      return;
+    }
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
   };
-  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
-    once: true,
-  });
-  child.once("exit", releaseCanceledPipes);
+  commandSignal?.addEventListener("abort", settleCanceledChild, { once: true });
+  child.once("exit", settleCanceledChild);
+  if (commandSignal?.aborted) settleCanceledChild();
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3345,8 +3348,9 @@ export async function runCodexCommand(
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
-    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
-    child.removeListener("exit", releaseCanceledPipes);
+    clearTimeout(forceTermination);
+    commandSignal?.removeEventListener("abort", settleCanceledChild);
+    child.removeListener("exit", settleCanceledChild);
   }
 }
 
