@@ -9,7 +9,11 @@ import { readScannerJson, sarifRepositoryUrls } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
-import { normalizeSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import {
+  normalizeSnykFindings,
+  snykJsonProjectRepository,
+  snykRepositoryUrls,
+} from "./snyk-findings.js";
 import { normalizeSemgrepFindings } from "./semgrep-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
@@ -20,6 +24,7 @@ import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
+import { readContinuumFindings } from "./continuum-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
@@ -41,6 +46,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   blackduck: "blackduck",
   veracode: "veracode",
   sonar: "sonar",
+  continuum: "continuum",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -144,23 +150,33 @@ export async function readExternalFindings(
         ).map((url) => ({ url })),
       );
     }
-    if (isRecord(input)) {
-      if (
-        hasNoExternalRecords(findings) &&
-        options.provider === "snyk" &&
-        input["format"] === "snyk-findings-export/v1"
-      )
-        sourceRepositories = snykRepositoryUrls(input, {
-          normalizeGitRemote: false,
-        }).map((url) => ({ url }));
-      else if (input["version"] === "2.1.0" && Array.isArray(input["runs"])) {
-        const producer = (
-          { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
-        )[options.provider];
-        const urls = new Set(sourceRepositories.map(({ url }) => url));
-        for (const run of input["runs"])
-          for (const url of sarifRepositoryUrls(run, producer)) urls.add(url);
-        sourceRepositories = [...urls].map((url) => ({ url }));
+    const emptySnyk =
+      options.provider === "snyk" && hasNoExternalRecords(findings);
+    if (
+      emptySnyk &&
+      isRecord(input) &&
+      input["format"] === "snyk-findings-export/v1"
+    ) {
+      sourceRepositories = snykRepositoryUrls(input, {
+        normalizeGitRemote: false,
+      }).map((url) => ({ url }));
+    } else if (
+      isRecord(input) &&
+      input["version"] === "2.1.0" &&
+      Array.isArray(input["runs"])
+    ) {
+      const producer = (
+        { endor: "Endor", snyk: "Snyk", semgrep: "Semgrep" } as const
+      )[options.provider];
+      const urls = new Set(sourceRepositories.map(({ url }) => url));
+      for (const run of input["runs"])
+        for (const url of sarifRepositoryUrls(run, producer)) urls.add(url);
+      sourceRepositories = [...urls].map((url) => ({ url }));
+    } else if (emptySnyk) {
+      for (const project of Array.isArray(input) ? input : [input]) {
+        if (!isRecord(project)) continue;
+        const url = snykJsonProjectRepository(project);
+        if (url) sourceRepositories.push({ url });
       }
     }
     return { findings, sourceRepositories };
@@ -169,12 +185,14 @@ export async function readExternalFindings(
     return { findings: await readGitHubFindings(path, target) };
   if (
     options.provider === "inspector" ||
+    options.provider === "continuum" ||
     options.provider === "blackduck" ||
     options.provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
       inspector: readInspectorFindings,
+      continuum: readContinuumFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
     }[options.provider];

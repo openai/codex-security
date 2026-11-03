@@ -7,10 +7,17 @@ mean and how to interpret the result.
 
 ## Choose the record and source key
 
-A source record is identified by its destination repository, stored provider,
-source key and source finding ID. Use the same source key for each export of the
-same stream, such as an organization, project and branch. A date or run ID in
-the key creates a new set of records on each run.
+Private Cloud imports identify a record by its importing owner, provider, source
+key and vendor occurrence ID. Use a stable key for the vendor project or
+repository where those occurrence IDs are unique. Changing the assessment
+target preserves the record’s identity. The preview shows the format, size and
+digest of the report the CLI will upload. The receipt identifies a private job.
+Explicit assessment and publication produce a shared finding.
+
+The repository publisher identifies a record by destination repository,
+provider, source key and source finding ID. Use the same source key for each
+export of the same stream, such as an organization, project and branch. A
+date or run ID in the key creates a new set of records on each run.
 
 The reader derives the source finding ID from the export. The differences matter
 when a finding moves, an advisory affects several packages, or the export format
@@ -19,6 +26,7 @@ changes.
 | Report                                                                                          | What identifies one record                                                                                                                                                               |
 | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md)           | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
+| [AWS Continuum](continuum.md)                                                                   | Continuum finding ARN. A list summary and a detailed response for that ARN update the same record.                                                                                       |
 | [Wiz](wiz.md)                                                                                   | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
 | [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)             | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
 | [GitHub advisories](github-security-advisories.md)                                              | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
@@ -64,12 +72,12 @@ readers also apply the Cloud size limit to the evidence they return.
 repository path from the preview. Each record includes
 `sourceKey`, `sourceFindingId`, `version`, `evidence` and `assessment`.
 
-**Cloud.** Each item includes a `source_finding_id` and an `expected_version`.
+**Repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
 report for the imported evidence.
 
-Cloud allows up to 256 KiB and 20 levels of nesting per finding. The publisher
+The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
 these Cloud limits.
 
@@ -93,11 +101,16 @@ request before the response was lost.
    Preview the original export with `--dry-run --format json` using the same
    build, state directory, Cloud account, endpoint and import settings.
 2. Check `accountId`, `destination` and `resumed` in the preview. When `resumed`
-   is true, confirm the command to continue with the saved request IDs, bodies
-   and expected versions. When it is false, review the fresh submission before
+   is true, confirm the command to continue the saved submission. The
+   repository publisher also preserves the original expected versions. When it is false, review the fresh submission before
    confirming. If a repository reset retires the old submission and preparation
    returns an error, run `--dry-run` again and review the new destination and
    environment before confirming.
+
+For a failed or cancelled private job, a fresh preview identifies the previous
+job and confirmation starts a new attempt. A lost response from an active job
+reuses its original request IDs. After an inbox reset, review the new format,
+size and digest before confirming.
 
 With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
