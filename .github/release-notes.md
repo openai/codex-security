@@ -97,6 +97,7 @@
 - submit selected scanner findings to the private inbox ([#2177](https://github.com/openai/codex-security/pull/2177))
 - apply native profiles across scan workflows ([#1018](https://github.com/openai/codex-security/pull/1018))
 - share sealed scan reads with tracking ([#1846](https://github.com/openai/codex-security/pull/1846))
+- skip the old position of moved DOCX text ([#2256](https://github.com/openai/codex-security/pull/2256))
 
 <!-- release-section: highlights:end -->
 
