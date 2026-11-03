@@ -16,15 +16,15 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
-  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifResultContext,
+  sarifRunResults,
   stableId,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 export interface SemgrepImportOptions {
@@ -228,15 +228,11 @@ export function normalizeSemgrepSarif(
       )
         throw new Error("Semgrep SARIF contains scan error notifications.");
     }
-    const context = sarifResultContext(document, run, tool, driver, "Semgrep");
-    return array(run["results"] ?? [], "Semgrep results").map((result) => ({
-      result,
-      ...context,
-    }));
+    return sarifRunResults(document, run, tool, driver, "Semgrep");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, selectRunContext, ...context }) => {
+    ({ result: value, context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -250,23 +246,13 @@ export function normalizeSemgrepSarif(
           "This adapter supports Semgrep SAST; Supply Chain reports need separate qualification.",
         );
       const ruleId = requiredText(result["ruleId"], "Semgrep ruleId");
-      const selectedRule = rulesById.get(ruleId) ?? undefined;
-      if (rulesById.size > 0 && !selectedRule)
+      const selectedRule = context.rulesById.get(ruleId) ?? undefined;
+      if (context.rulesById.size > 0 && !selectedRule)
         throw new Error(
           "Semgrep result must reference exactly one rule in its run.",
         );
       const rule = selectedRule?.rule;
-      const ruleIndex = selectedRule?.index;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Semgrep ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Semgrep rule reference");
-        if (!matchesSarifRuleReference(ref, ruleId, selectedRule))
-          throw new Error("Inconsistent or external Semgrep rule reference.");
-      }
+      validateSarifRuleReference(result, ruleId, selectedRule, "Semgrep");
       const { physical, artifact } = primarySarifLocation(result);
       const rawPath = sarifArtifactUri(artifact, context.runContext);
       const region = record(physical["region"], "Semgrep region");
@@ -329,23 +315,12 @@ export function normalizeSemgrepSarif(
                 ? "suppressed"
                 : null,
           },
-          source_data: structuredClone({
-            ...context,
-            runContext: selectRunContext(
-              result,
-              rule,
-              context.driverContext,
-              context.toolContext,
-              context.documentContext,
-            ),
-            ...(rule ? { rule } : {}),
-            result,
-          }),
+          source_data: context.sourceData(result, rule),
         },
         target,
       );
     },
-    ({ result, runContext }) => sarifIdentity(result, runContext),
+    ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
   );
 }

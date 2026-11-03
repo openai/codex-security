@@ -6,7 +6,6 @@ import {
   array,
   hasSarifExternalPropertyReferences,
   indexSarifRules,
-  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -15,6 +14,7 @@ import {
   stableId,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 function snykIdentity(value: unknown, project: string | null): string {
@@ -212,6 +212,24 @@ export function snykRepositoryUrls(
         : repository,
     ];
   }
+  const project = source["project"];
+  if (
+    isRecord(project) &&
+    typeof project["ok"] === "boolean" &&
+    text(project["packageManager"]) &&
+    isRecord(source["vulnerability"])
+  ) {
+    // A remote Snyk test puts its GitHub URL and optional ref in the same
+    // path field that local scans use for a directory or npm package name.
+    const repository = text(project["path"])?.split("#", 1)[0];
+    if (
+      repository &&
+      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+        repository,
+      )
+    )
+      return [repository];
+  }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
   const driver = source["driver"];
@@ -302,16 +320,8 @@ export function normalizeSnykSarif(
       const match = rulesById.get(id);
       if (!match)
         throw new Error("Result must reference exactly one rule in its run.");
-      const { rule, index } = match;
-      if (result["ruleIndex"] !== undefined && result["ruleIndex"] !== index)
-        throw new Error("Result ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Rule reference");
-        if (!matchesSarifRuleReference(ref, id, match))
-          throw new Error(
-            "Result uses an inconsistent or external rule reference.",
-          );
-      }
+      const { rule } = match;
+      validateSarifRuleReference(result, id, match, "Snyk");
       const help = requiredText(
         record(rule["help"], "Rule help")["markdown"],
         "Rule help markdown",

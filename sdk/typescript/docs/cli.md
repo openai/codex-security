@@ -170,7 +170,8 @@ and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
 Choose a compatible model available to your project and select Daybreak Blue
-explicitly:
+explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
+with built-in pricing so the scan can enforce the limit.
 
 ```bash
 codex-security scan /path/to/repository \
@@ -183,11 +184,8 @@ Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan
 The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
-The previously documented `gpt-daybreak-blue-latest` alias is
-[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
-Use a current model available to your project. `access_programs.cyber` is a
-Responses API field; use the supported selector instead of passing it as a
-`--codex` configuration key.
+`access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
+instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
@@ -881,6 +879,24 @@ explicit saved scan ID. Exact-path `latest` lookup still works without Git.
 Repeat `--codex KEY=VALUE` for supported native settings. Quote strings as TOML:
 `--codex 'model_reasoning_effort="high"'`. Repeated or conflicting keys are
 rejected, including a `--model` or `--effort` flag plus its native equivalent.
+
+To select a Codex file profile, put its settings in
+`$CODEX_HOME/review.config.toml` (or `~/.codex/review.config.toml` when
+`CODEX_HOME` is unset), then run:
+
+```bash
+npx @openai/codex-security scan . --codex 'profile="review"'
+```
+
+In the SDK, set `codexOverrides: { profile: "review" }`. In a project config,
+set `codex.profile: review`. The profile file uses top-level Codex TOML keys.
+Its settings override scanner defaults. Explicit scan settings take precedence.
+Relative file paths, including `model_instructions_file`, resolve from the
+profile directory. Saved launches retain the profile name and reload its settings.
+Include custom provider definitions in the file so the scan
+can use them from its isolated Codex home. An absent file contributes no
+settings. Existing inline `profiles` tables still work.
+
 Choose plugins with `--plugin-path`; native plugin and marketplace overrides are
 rejected. New and resumed Deep Scans require the current plugin's direct engine,
 worker provider snapshot, and isolated worker configuration capabilities. Update
@@ -1409,6 +1425,32 @@ The [Wiz guide](https://github.com/openai/codex-security/blob/main/docs/scanner-
 SAST findings, repository secrets, or IaC findings. The format reference below
 describes the fields to preserve when preparing those exports.
 
+#### Review the Cloud destination
+
+The preview shows which Cloud destination will receive the selected records.
+When the deployment advertises private import for the scanner, the CLI puts a
+report in the signed-in account’s **private findings inbox**. The preview
+identifies its format and byte count. For complete Endor findings and Wiz
+vulnerability JSON exports, the CLI sends the original bytes when Cloud
+advertises the format and every record matches the reviewed selection. Other
+selections and in-memory collectors use `security.findings.v1`. The CLI
+attaches the selected repository and connector as a suggested assessment
+target. Review the selection, exclusions, source key and destination before
+confirming.
+
+The job receipt contains the file and job identifiers and record counts. To
+share a finding, open it in Cloud, assess it against a pinned repository
+revision, and explicitly publish a reportable assessment. An import can
+finish with record errors. Check the error and unprocessed counts in the
+receipt.
+
+Repeat the same command to recover an interrupted private import. The CLI
+checks the report digest, reuses its saved request IDs, and reads an accepted
+job even when new uploads are disabled. Resetting the inbox requires a new
+preview and confirmation. Deployments and scanners using the repository
+publisher continue to show the repository destination and per-finding receipts.
+An in-flight repository publication resumes on its original protocol.
+
 #### Select findings and a destination
 
 Acquire selected findings through an authorized Wiz connection and save the
@@ -1698,12 +1740,19 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-Omitting `--rubric` runs classification with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
-from severity; missing proof alone does not justify a downgrade. An explicit
-`--rubric` replaces the default policy completely. Rubrics and repeatable
-`--knowledge-base` context accept text, PDF, DOCX, and directories.
+from severity; missing proof alone does not justify a downgrade.
+
+Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` to fetch the current default
+from Statsig once per reclassification. Only the exact value `1` enables the
+request. It sends the config name without findings or account identifiers.
+If the request fails, times out, or returns an invalid rubric, the built-in
+rubric is used. An explicit `--rubric` (SDK `rubricPath`) skips the lookup and
+uses your policy for every review. Rubrics and repeatable `--knowledge-base`
+context accept text, PDF, DOCX, and directories.
+
 Each finding is classified three times by default. `--runs N` accepts
 an integer from 1 through 10; SDK options use `classificationRuns` with the same
 default and bounds. Each review runs in an independent read-only turn using the
@@ -1807,7 +1856,7 @@ await publishScan(scanDirectory, {
 
 `classifySeverity()` accepts `findingId`, `title`, `summary`, and available
 evidence/metadata. Imported reports may lack severity or occurrence IDs; omitting
-`rubricPath` uses the built-in policy even when a scanner severity is present.
+`rubricPath` uses the selected default policy even when a scanner severity is present.
 Scan wrappers persist checkpoints (including for
 external directories), accept `reprocess: true`, and treat `findingIds: []` as an
 empty selection. Use the same `CODEX_SECURITY_STATE_DIR` for classification and
@@ -2116,7 +2165,8 @@ marks shortened text. Other template columns keep their original values.
 
 The output defaults to `servicenow-avit.csv`. Upload the completed file in the
 same ServiceNow screen. Each upload creates a new penetration-test form for the
-application. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
+application. If the submission result is unclear, check its status and log notes
+on the Vulnerability Integration Push Queues page before uploading again. See [ServiceNow's upload instructions](https://www.servicenow.com/docs/r/security-management/application-vulnerability-response/ingest-vulnerabilities-manually-avr.html).
 
 ### Export a threat model
 

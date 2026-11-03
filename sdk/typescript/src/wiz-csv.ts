@@ -3,7 +3,7 @@ import Papa from "papaparse";
 import { text } from "./scanner-import.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
-import type { VendorFinding } from "./wiz-findings.js";
+import type { ExternalFinding } from "./external-findings.js";
 
 const profile = "wiz-code-vulnerability-csv";
 const requiredHeaders = [
@@ -86,7 +86,7 @@ export function wizCsvFinding(
   row: Record<string, unknown>,
   sourceFindingId: string,
   target: ExternalImportTarget = "cloud",
-): VendorFinding {
+): ExternalFinding {
   repositoryUrl(row);
   const name = text(row["Name"]);
   const packageName = text(row["DetailedName"]);

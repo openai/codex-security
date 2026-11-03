@@ -7,10 +7,17 @@ mean and how to interpret the result.
 
 ## Choose the record and source key
 
-A source record is identified by its destination repository, stored provider,
-source key and source finding ID. Use the same source key for each export of the
-same stream, such as an organization, project and branch. A date or run ID in
-the key creates a new set of records on each run.
+Private Cloud imports identify a record by its importing owner, provider, source
+key and vendor occurrence ID. Use a stable key for the vendor project or
+repository where those occurrence IDs are unique. Changing the assessment
+target preserves the record’s identity. The preview shows the format, size and
+digest of the report the CLI will upload. The receipt identifies a private job.
+Explicit assessment and publication produce a shared finding.
+
+The repository publisher identifies a record by destination repository,
+provider, source key and source finding ID. Use the same source key for each
+export of the same stream, such as an organization, project and branch. A
+date or run ID in the key creates a new set of records on each run.
 
 The reader derives the source finding ID from the export. The differences matter
 when a finding moves, an advisory affects several packages, or the export format
@@ -47,18 +54,29 @@ defines the fields the reader can populate.
 | `details`                      | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
 | `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
+Use finite JSON numbers in evidence and report metadata. Supply integers outside
+JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
+primitive numbers in plain data fields for predictable JSON exports. Supply
+precise decimals as strings if converting a `JSON.rawJSON()` number to a
+JavaScript number would round its value.
+
+When you supply normalized findings to the SDK, new imports use their JSON
+representation. For example, `new Number(7)` exports as `7`. If its `toJSON()`
+returns `9`, the new import uses `9`. The GitHub code-scanning and advisory
+readers also apply the Cloud size limit to the evidence they return.
+
 ## Operate the two destinations
 
 **Local.** Run `codex-security findings imported PATH --format json` with the
 repository path from the preview. Each record includes
 `sourceKey`, `sourceFindingId`, `version`, `evidence` and `assessment`.
 
-**Cloud.** Each item includes a `source_finding_id` and an `expected_version`.
+**Repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
 report for the imported evidence.
 
-Cloud allows up to 256 KiB and 20 levels of nesting per finding. The publisher
+The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
 these Cloud limits.
 
@@ -82,17 +100,31 @@ request before the response was lost.
    Preview the original export with `--dry-run --format json` using the same
    build, state directory, Cloud account, endpoint and import settings.
 2. Check `accountId`, `destination` and `resumed` in the preview. When `resumed`
-   is true, confirm the command to continue with the saved request IDs, bodies
-   and expected versions. When it is false, review the fresh submission before
+   is true, confirm the command to continue the saved submission. The
+   repository publisher also preserves the original expected versions. When it is false, review the fresh submission before
    confirming. If a repository reset retires the old submission and preparation
    returns an error, run `--dry-run` again and review the new destination and
    environment before confirming.
+
+For a failed or cancelled private job, a fresh preview identifies the previous
+job and confirmation starts a new attempt. A lost response from an active job
+reuses its original request IDs. After an inbox reset, review the new format,
+size and digest before confirming.
 
 With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Changing the findings prepares a new submission.
+Use the same SDK version throughout a submission when possible.
+
+After an SDK upgrade, retry with the original input. An older SDK could approve
+different bytes from those its JSON export contained. When the SDK verifies
+the old selection and request bytes, it resumes with the original request IDs
+and skips batches that already have receipts. If it cannot verify the original
+request, it preserves the checkpoint and stops before uploading. A saved JSON
+export can lose information from the original SDK input. If a getter makes it
+impossible to identify which findings were approved, the SDK can also stop a
+new submission for the same source and destination.
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

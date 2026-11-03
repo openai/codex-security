@@ -113,9 +113,6 @@ importers:
       json5:
         specifier: 2.2.3
         version: 2.2.3
-      minimatch:
-        specifier: 10.2.6
-        version: 10.2.6
       prettier:
         specifier: 3.9.10
         version: 3.9.10
