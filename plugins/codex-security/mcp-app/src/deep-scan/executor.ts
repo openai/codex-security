@@ -43,6 +43,7 @@ import {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
+  errorMessage,
 } from "./errors.js";
 import {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
@@ -430,7 +431,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         if (cleanupErrors.length === 1) throw cleanupErrors[0];
         throw new AggregateError(
           cleanupErrors,
-          "Deep Scan worker cleanup failed.",
+          cleanupErrors.map(errorMessage).join("\n"),
         );
       }
     }

@@ -41,6 +41,7 @@ import childProcess, {
   type SpawnOptions,
   type ChildProcess,
 } from "node:child_process";
+import { promises as fs } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -128,6 +129,25 @@ const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 
 try {
+  await test("Deep worker reports both worker and cleanup failures", async (t) => {
+    t.mock.method(fs, "rm", async () => {
+      throw new Error("fixture cleanup failed");
+    });
+    const root = await temporaryDirectories.create("worker-cleanup-");
+    const executor = new CodexSdkWorkerExecutor({
+      artifactContext: {
+        repoRoot: root,
+        pluginRoot: root,
+        scanId: "fixture",
+        includePaths: ["src"],
+      },
+    });
+    await assert.rejects(
+      executor.run(workerRequest(path.join(root, "prompt.md"), root)),
+      /without verified parent sandbox metadata[\s\S]+fixture cleanup failed/,
+    );
+  });
+
   await test("Deep worker lifecycle", async (t) => {
     await check(
       t,

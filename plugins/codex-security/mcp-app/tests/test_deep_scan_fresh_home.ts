@@ -141,6 +141,15 @@ test("Deep workers support first-use Codex homes", async (t) => {
                     process.umask(previousUmask);
                     previousUmask = undefined;
                   }
+                  assert.equal(
+                    path.toNamespacedPath(command),
+                    path.toNamespacedPath(fixture.executablePath),
+                  );
+                  return originalSpawn(
+                    process.execPath,
+                    [fixture.executablePath, ...args],
+                    options,
+                  );
                 }
                 return originalSpawn(command, args, options);
               }) as typeof childProcess.spawn;

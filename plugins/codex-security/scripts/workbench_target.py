@@ -67,8 +67,11 @@ def git_output(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    offline: bool = False,
 ) -> str | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
+    completed = git_command(
+        target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
+    )
     output = os.fsdecode(completed.stdout)
     if sys.platform == "win32" and output.endswith("\r\n"):
         output = output[:-2]
@@ -443,6 +446,7 @@ def git_command(
     stdin_file: BinaryIO | None = None,
     pathspec_environment: dict[str, str] | None = None,
     ignore_config_file: bool = False,
+    offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -470,6 +474,9 @@ def git_command(
     # Local inspection must not fetch objects through a configured transport.
     environment["GIT_NO_LAZY_FETCH"] = "1"
     environment["GIT_ALLOW_PROTOCOL"] = ""
+    if offline:
+        # Remediation and source-scope reads bind the original object IDs.
+        environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
     command = [
         executable or "git",
