@@ -515,5 +515,10 @@
     "statements": [
       "ALTER TABLE workspaces\n        ADD COLUMN target_path_unvalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (target_path_unvalidated IN (0, 1));"
     ]
+  },
+  {
+    "version": 64,
+    "name": "retain checkout roots for Git discovery",
+    "statements": ["ALTER TABLE security_targets ADD COLUMN git_checkout_root TEXT;"]
   }
 ]

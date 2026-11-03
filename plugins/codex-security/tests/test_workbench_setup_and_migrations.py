@@ -107,6 +107,7 @@ EXPECTED_MIGRATIONS = [
     (61, "persist repository identities"),
     (62, "stabilize Linux repository generations"),
     (63, "distinguish unvalidated workspace targets"),
+    (64, "retain checkout roots for Git discovery"),
 ]
 
 
@@ -1105,6 +1106,62 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
         apply_migrations(connection)
 
     backfill.assert_called_once_with(connection)
+
+
+@pytest.mark.cross_platform
+def test_registration_retains_the_widest_observed_checkout(tmp_path: Path) -> None:
+    connection, migrate = create_historical_database(64)
+    with closing(connection):
+        migrate(connection)
+        target = tmp_path / "checkout" / "nested" / "target"
+        target.mkdir(parents=True)
+        register = migrate.__globals__["ensure_security_target"]
+
+        def registered_root() -> str | None:
+            target_id = register(connection, str(target))
+            return connection.execute(
+                "SELECT git_checkout_root FROM security_targets WHERE id = ?", (target_id,)
+            ).fetchone()[0]
+
+        assert registered_root() == str(target)
+        subprocess.run(["git", "init", "-q", str(target.parent)], check=True)
+        assert registered_root() == str(target.parent)
+        outer = target.parents[1]
+        subprocess.run(["git", "init", "-q", str(outer)], check=True)
+        assert registered_root() == str(outer)
+        (outer / ".git").rename(tmp_path / "retired-git-dir")
+        assert registered_root() == str(outer)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("legacy_registration", ["target", "workspace"])
+def test_checkout_root_is_not_inferred_from_legacy_paths(
+    tmp_path: Path, legacy_registration: str
+) -> None:
+    target = tmp_path / "nested" / "target"
+    initialize_git_repository(target.parent)
+    target.mkdir()
+    connection, migrate = create_historical_database(64)
+    with closing(connection):
+        if legacy_registration == "target":
+            connection.execute(
+                "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
+                "VALUES ('old', ?, 'Old target', 'created', 'updated')",
+                (str(target),),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO workspaces (id, target_path, created_at, updated_at) "
+                "VALUES ('old', ?, 'created', 'updated')",
+                (str(target),),
+            )
+        migrate(connection)
+        for _ in range(2):
+            assert (
+                connection.execute("SELECT git_checkout_root FROM security_targets").fetchone()[0]
+                is None
+            )
+            migrate.__globals__["ensure_security_target"](connection, str(target))
 
 
 @pytest.mark.cross_platform
@@ -2872,7 +2929,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 63
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 64
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"
@@ -3124,9 +3181,9 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
         host_git = shutil.which("git")
         assert host_git is not None
         monkeypatch.setenv("CODEX_SECURITY_GIT", host_git)
-    git_available = configured or unavailable == "bounded-missing"
+    # The healthy legacy target has a saved Git identity but no recorded checkout root.
     expected_identity = (
-        identity.value if git_available else None if migration == "pre-release" else stored_identity
+        identity.value if configured else None if migration == "pre-release" else stored_identity
     )
     for _ in range(2):
         apply_migrations(connection)

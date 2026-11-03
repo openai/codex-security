@@ -1,5 +1,13 @@
-import { mkdir, realpath, rm, symlink } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import {
+  mkdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { dependencies, capture } from "./cli-fixtures.js";
@@ -10,7 +18,12 @@ import {
   scopedTemporaryDirectory,
   temporaryDirectory,
 } from "./support/temporary-directories.js";
-import { workbenchCommand } from "./support/workbench-command.js";
+import {
+  scanRegistrationArguments,
+  workbenchCommand,
+} from "./support/workbench-command.js";
+import { git } from "./git-fixture.js";
+import { runCommand } from "./support/shell.js";
 
 const savedAliasFindings = String.raw`
 import sqlite3, sys
@@ -182,6 +195,85 @@ test.skipIf(process.platform !== "linux")(
           (finding: { scanId: string }) => finding.scanId,
         ),
       ).toEqual(savedMatch ? ["alias"] : []);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "scans list excludes tools in a former checkout and forwards configured Git",
+  async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "history-checkout-tools-",
+    );
+    const repository = join(temp.path, "repository");
+    const linked = join(temp.path, "linked");
+    const former = join(temp.path, "former");
+    const target = join(former, "component");
+    await mkdir(repository);
+    await mkdir(target, { recursive: true });
+    for (const checkout of [repository, former]) {
+      git(checkout, "init", "-q");
+      git(checkout, "commit", "--allow-empty", "-qm", "Synthetic history");
+    }
+    git(repository, "worktree", "add", "--quiet", "--detach", linked);
+    const state = join(temp.path, "state");
+    const workbench = workbenchCommand(pythonExecutable(false)!, state);
+    const scanDir = join(temp.path, "scan");
+    await mkdir(scanDir, { mode: 0o700 });
+    const scan = await workbench(
+      scanRegistrationArguments(repository, scanDir),
+    );
+    await workbench([
+      "create-workspace",
+      "--workspace-id",
+      "00000000-0000-4000-8000-000000000001",
+      "--target-path",
+      target,
+    ]);
+    await rename(join(former, ".git"), join(temp.path, "old-git"));
+    git(target, "init", "-q");
+    const tools = join(former, "bin");
+    await mkdir(tools);
+    for (const tool of ["git", "python3"]) {
+      await writeFile(join(tools, tool), '#!/bin/sh\n: > "$0-ran"\nexit 1\n', {
+        mode: 0o700,
+      });
+    }
+    const configured = join(temp.path, "selected-git");
+    await symlink(Bun.which("git")!, join(temp.path, "git"));
+    await writeFile(
+      configured,
+      '#!/bin/sh\n: > "$0-ran"\nexec "${0%/*}/git" "$@"\n',
+      { mode: 0o700 },
+    );
+    const cli = new URL("../src/cli.ts", import.meta.url).href;
+    for (const binding of [undefined, configured, ""]) {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: [tools, process.env["PATH"]].join(delimiter),
+        CODEX_SECURITY_STATE_DIR: state,
+        CODEX_SECURITY_GIT: binding,
+        XDG_CACHE_HOME: join(temp.path, "cache"),
+      };
+      delete env["PYTHON"];
+      const result = await runCommand(
+        process.execPath,
+        [
+          "-e",
+          `const { main } = await import(${JSON.stringify(cli)}); process.exitCode = await main(["scans", "list", "--json"]);`,
+        ],
+        { env, cwd: linked },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        JSON.parse(result.stdout).scans.map(
+          (row: { scanId: string }) => row.scanId,
+        ),
+      ).toEqual(binding === "" ? [] : [scan["scanId"]]);
+      expect(existsSync(join(tools, "git-ran"))).toBe(false);
+      expect(existsSync(join(tools, "python3-ran"))).toBe(false);
+      if (binding === configured)
+        expect(existsSync(configured + "-ran")).toBe(true);
     }
   },
 );

@@ -859,7 +859,7 @@ export async function gitMarkerRoot(
       const code = (error as NodeJS.ErrnoException).code;
       if (
         search !== "outermost" ||
-        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(code ?? "")
       )
         throw error;
       const parent = dirname(candidate);
@@ -900,7 +900,8 @@ async function walkGitMarkers(
       if (
         code !== "ENOENT" &&
         code !== "ENOTDIR" &&
-        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+        (search !== "outermost" ||
+          !["EACCES", "EPERM", "ELOOP"].includes(code ?? ""))
       )
         throw error;
     }

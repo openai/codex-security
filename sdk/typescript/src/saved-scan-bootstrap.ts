@@ -2,6 +2,7 @@ import { isRecord } from "./record.js";
 import type { JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
+import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
 import {
@@ -28,6 +29,23 @@ interface ScanTarget {
   protectPython?: boolean;
 }
 
+interface SavedCheckout {
+  target_path: string;
+  checkout_root: string | null;
+  git_evidence: number;
+}
+
+interface SavedBoundaries {
+  byTarget: Map<string, string | null>;
+  roots: string[];
+  complete: boolean;
+}
+
+export interface SavedToolDiscovery {
+  protectedRoots: readonly string[];
+  allowPathLookup: boolean;
+}
+
 interface BootstrapDatabase {
   exec(sql: string): unknown;
   prepare(sql: string): {
@@ -37,7 +55,7 @@ interface BootstrapDatabase {
   close(): void;
 }
 
-/** Read only enough history to protect Python discovery; the workbench still validates the scan. */
+/** Read saved checkout boundaries before starting tools. The workbench validates the scan. */
 export async function savedScanWorkbench(
   requestedId: string | { workflowId: string },
   options: {
@@ -50,13 +68,14 @@ export async function savedScanWorkbench(
   SavedScanDependencies["runWorkbench"] & {
     environment: ProcessEnvironment;
     readonly protectedRoots: readonly string[];
+    readonly nodeDiscovery: SavedToolDiscovery;
   }
 > {
   options.signal?.throwIfAborted();
   const environment: ProcessEnvironment = workbenchEnvironment(
     options.environment,
   );
-  const targets = await readTargets(
+  const { targets, checkouts } = await readTargets(
     requestedId,
     environment,
     options.currentDirectory,
@@ -95,6 +114,10 @@ export async function savedScanWorkbench(
   );
   const protectedRoots = [
     ...callerRoots,
+    ...liveTargets.flatMap((row) => {
+      const root = checkouts.byTarget.get(row.target_path);
+      return root ? [root] : [];
+    }),
     ...liveTargets.map((row) => row.target_path),
     ...(
       await Promise.all(
@@ -104,16 +127,11 @@ export async function savedScanWorkbench(
       )
     ).flat(),
   ];
-  const discoveryProtectedRoots = [
-    ...targets.map((row) => row.target_path),
-    ...(
-      await Promise.all(
-        targets.map((row) =>
-          gitProtectionRoots(row.target_path, options.signal),
-        ),
-      )
-    ).flat(),
-  ];
+  const discoveryProtectedRoots = await savedDiscoveryRoots(
+    checkouts,
+    [options.currentDirectory, ...targets.map((row) => row.target_path)],
+    options.signal,
+  );
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
     args,
@@ -138,6 +156,7 @@ export async function savedScanWorkbench(
       environment,
       protectedRoot: protectedRoots,
       discoveryProtectedRoots,
+      allowPathLookup: checkouts.complete,
       currentDirectory: options.currentDirectory,
       signal,
     });
@@ -223,6 +242,10 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, {
     environment,
     protectedRoots: [options.currentDirectory, ...protectedRoots],
+    nodeDiscovery: {
+      protectedRoots: discoveryProtectedRoots,
+      allowPathLookup: checkouts.complete,
+    },
   });
 }
 
@@ -231,7 +254,82 @@ async function readTargets(
   environment: ProcessEnvironment,
   currentDirectory: string,
   signal?: AbortSignal,
-): Promise<ScanTarget[]> {
+): Promise<{ targets: ScanTarget[]; checkouts: SavedBoundaries }> {
+  try {
+    const latest = requestedId === "latest";
+    const snapshot = readSnapshot(
+      workbenchDatabasePath(environment),
+      (database) => {
+        const targets = latest
+          ? completedScans(database)
+          : exactTargets(database, requestedId);
+        const checkouts = savedCheckouts(
+          database,
+          latest ? undefined : targets.map((row) => row.target_path),
+        );
+        return { targets, checkouts };
+      },
+    );
+    if (latest)
+      snapshot.targets = await latestTargets(
+        snapshot.targets,
+        currentDirectory,
+        environment,
+        snapshot.checkouts,
+        signal,
+      );
+    return snapshot;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof CodexSecurityError) throw error;
+    throw new CodexSecurityError(
+      `Could not read saved scan targets before Python discovery: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+function workbenchDatabasePath(environment: ProcessEnvironment): string {
+  return join(codexSecurityStateDirectory(environment), "workbench.sqlite3");
+}
+
+/** @internal Read executable exclusions before launching an ordinary history command. */
+export async function savedCheckoutBoundaries(
+  environment: ProcessEnvironment,
+): Promise<SavedBoundaries | undefined> {
+  const path = workbenchDatabasePath(environment);
+  try {
+    await access(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return readSnapshot(path, (database) => savedCheckouts(database));
+}
+
+/** @internal Exclude both recorded checkout roots and the currently visible checkouts. */
+export async function savedDiscoveryRoots(
+  checkouts: SavedBoundaries | undefined,
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const targets = [...new Set(paths)];
+  const currentRoots = await Promise.all(
+    targets.map((path) => gitProtectionRoots(path, signal)),
+  );
+  return [
+    ...new Set([
+      ...(checkouts?.roots ?? []),
+      ...targets,
+      ...currentRoots.flat(),
+    ]),
+  ];
+}
+
+function readSnapshot<T>(
+  path: string,
+  select: (database: BootstrapDatabase) => T,
+): T {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
   const Database = (
@@ -248,7 +346,7 @@ async function readTargets(
   let database: BootstrapDatabase | undefined;
   try {
     database = new Database(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+      path,
       // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
       // Open only an existing file there; query_only still prevents SQL data/schema writes.
       bun
@@ -261,64 +359,110 @@ async function readTargets(
     );
     database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
-    if (typeof requestedId !== "string") {
-      const columns = readRows<{ name: string }>(
-        database,
-        "PRAGMA table_info(finding_workflows)",
-      );
-      const scanId = columns.some((column) => column.name === "scan_id")
-        ? "workflow.scan_id"
-        : "json_extract(workflow.state_json, '$.scanId')";
-      return readRows<ScanTarget>(
-        database,
-        `SELECT scans.id, scans.target_path FROM scans
-        JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
-        requestedId.workflowId,
-      );
-    }
-    if (requestedId === "latest")
-      return await latestTargets(
-        database,
-        currentDirectory,
-        environment,
-        signal,
-      );
-    // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
-    const compact = trimBoundary(
-      requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
-      "{",
-      "}",
-    ).replaceAll("-", "");
-    if (/^[0-9a-f]{32}$/i.test(compact)) {
-      const id = compact
-        .toLowerCase()
-        .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
-      return readRows<ScanTarget>(
-        database,
-        "SELECT id, target_path FROM scans WHERE id = ?",
-        id,
-      );
-    }
-    if (requestedId.length < 8)
-      throw new CodexSecurityError(
-        "Scan ID prefixes must be at least eight characters.",
-      );
-    return readRows<ScanTarget>(
-      database,
-      "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
-      requestedId.length,
-      requestedId.toLowerCase(),
-    );
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (error instanceof CodexSecurityError) throw error;
-    throw new CodexSecurityError(
-      `Could not read saved scan targets before Python discovery: ${errorMessage(error)}`,
-      { cause: error },
-    );
+    // Select scans and their saved boundaries from the same snapshot.
+    database.exec("BEGIN");
+    return select(database);
   } finally {
     database?.close();
   }
+}
+
+function exactTargets(
+  database: BootstrapDatabase,
+  requestedId: string | { workflowId: string },
+): ScanTarget[] {
+  if (typeof requestedId !== "string") {
+    const scanId = tableColumns(database, "finding_workflows").has("scan_id")
+      ? "workflow.scan_id"
+      : "json_extract(workflow.state_json, '$.scanId')";
+    return readRows<ScanTarget>(
+      database,
+      `SELECT scans.id, scans.target_path FROM scans
+        JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
+      requestedId.workflowId,
+    );
+  }
+  // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
+  const compact = trimBoundary(
+    requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
+    "{",
+    "}",
+  ).replaceAll("-", "");
+  if (/^[0-9a-f]{32}$/i.test(compact)) {
+    const id = compact
+      .toLowerCase()
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
+    return readRows<ScanTarget>(
+      database,
+      "SELECT id, target_path FROM scans WHERE id = ?",
+      id,
+    );
+  }
+  if (requestedId.length < 8)
+    throw new CodexSecurityError(
+      "Scan ID prefixes must be at least eight characters.",
+    );
+  return readRows<ScanTarget>(
+    database,
+    "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+    requestedId.length,
+    requestedId.toLowerCase(),
+  );
+}
+
+function tableColumns(database: BootstrapDatabase, table: string): Set<string> {
+  return new Set(
+    readRows<{ name: string }>(database, `PRAGMA table_info(${table})`).map(
+      (row) => row.name,
+    ),
+  );
+}
+
+/** Read registered boundaries and legacy Git evidence without executing repository tools. */
+function savedCheckouts(
+  database: BootstrapDatabase,
+  selectedPaths?: string[],
+): SavedBoundaries {
+  const scan = tableColumns(database, "scans");
+  const registry = tableColumns(database, "security_targets");
+  const filter = (column: string) =>
+    selectedPaths === undefined
+      ? ""
+      : ` WHERE ${column} IN (${selectedPaths.map(() => "?").join(", ")})`;
+  const sources = [];
+  if (scan.has("target_path"))
+    sources.push(
+      `SELECT target_path, NULL AS checkout_root,
+      (${scan.has("repository_generation") ? "repository_generation IS NOT NULL" : "0"} OR
+       ${scan.has("target_revision") ? "target_revision <> 'unversioned'" : "0"}) AS git_evidence
+    FROM scans${filter("target_path")}`,
+    );
+  if (registry.has("current_path")) {
+    sources.push(`SELECT current_path AS target_path,
+      ${registry.has("git_checkout_root") ? "git_checkout_root" : "NULL"} AS checkout_root,
+      ${registry.has("repository_identity") ? "repository_identity IS NOT NULL" : "0"} AS git_evidence
+      FROM security_targets${filter("current_path")}`);
+  }
+  const rows =
+    sources.length === 0
+      ? []
+      : readRows<SavedCheckout>(
+          database,
+          `SELECT target_path, MAX(checkout_root) AS checkout_root, MAX(git_evidence) AS git_evidence
+     FROM (${sources.join(" UNION ALL ")}) GROUP BY target_path`,
+          ...sources.flatMap(() => selectedPaths ?? []),
+        );
+  return {
+    byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
+    roots: [
+      ...new Set(
+        rows.flatMap((row) => (row.checkout_root ? [row.checkout_root] : [])),
+      ),
+    ],
+    complete: rows.every(
+      (row) => !row.git_evidence || row.checkout_root !== null,
+    ),
+  };
 }
 
 function readRows<T>(
@@ -336,18 +480,9 @@ function readRows<T>(
   }
 }
 
-async function latestTargets(
-  database: BootstrapDatabase,
-  directory: string,
-  environment: ProcessEnvironment,
-  signal?: AbortSignal,
-): Promise<ScanTarget[]> {
-  const columns = new Set(
-    readRows<{ name: string }>(database, "PRAGMA table_info(scans)").map(
-      (column) => column.name,
-    ),
-  );
-  const scans = readRows<
+function completedScans(database: BootstrapDatabase): ScanTarget[] {
+  const columns = tableColumns(database, "scans");
+  return readRows<
     ScanTarget & {
       updated_at: string;
       progress_updated_at: string;
@@ -376,6 +511,15 @@ async function latestTargets(
         compareOrderKeys(right.startedKey, left.startedKey) ||
         compareOrderKeys(left.id, right.id),
     );
+}
+
+async function latestTargets(
+  scans: ScanTarget[],
+  directory: string,
+  environment: ProcessEnvironment,
+  checkouts: SavedBoundaries,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
   const paths = [...new Set(scans.map((scan) => scan.target_path))];
   const related = new Map<string, { originFallback: boolean }>();
   for (const path of paths)
@@ -386,26 +530,15 @@ async function latestTargets(
   const caller = await gitMarkerRoot(directory, signal, "outermost");
   if (caller !== null) {
     // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
-    const hasTargets =
-      readRows(database, "PRAGMA table_info(security_targets)").length > 0;
-    const protectedPaths = readRows<{ target_path: string }>(
-      database,
-      hasTargets
-        ? "SELECT current_path AS target_path FROM security_targets UNION SELECT target_path FROM scans"
-        : "SELECT DISTINCT target_path FROM scans",
-    ).map((target) => target.target_path);
-    const protectedRoots = [
-      ...(await gitProtectionRoots(directory, signal)),
-      ...protectedPaths,
-      ...(
-        await Promise.all(
-          protectedPaths.map((path) => gitProtectionRoots(path, signal)),
-        )
-      ).flat(),
-    ];
+    const protectedRoots = await savedDiscoveryRoots(
+      checkouts,
+      [directory, ...checkouts.byTarget.keys()],
+      signal,
+    );
     const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");
     const inspected =
-      configured === ""
+      configured === "" ||
+      (!checkouts.complete && !isAbsolute(configured ?? ""))
         ? { executable: null, environment }
         : await inspectTrustedExecutable(
             configured ?? "git",

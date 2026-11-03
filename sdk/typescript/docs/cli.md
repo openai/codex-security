@@ -2059,6 +2059,13 @@ Keep the same state directory across linked worktrees. Changing it selects
 separate history, artifacts, and a dedicated Codex sign-in. `--scan-root`
 filters recorded artifact paths; it does not import another directory's scans.
 
+The workbench records the outer checkout directory when it registers a target.
+A later nested checkout cannot make tools from that directory eligible for
+automatic discovery. For older Git history that lacks a recorded checkout
+directory, set `CODEX_SECURITY_GIT` to the absolute path of a trusted Git
+executable outside the checkouts. If you use a system Python instead of the
+Codex managed runtime, set `PYTHON` to the absolute path of your interpreter.
+
 Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
 Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
 compressed sessions are unavailable to `scans logs`, feedback attachments, and

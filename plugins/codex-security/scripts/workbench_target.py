@@ -141,7 +141,7 @@ def _resolve_git_executable(
     configured: str | None,
     *,
     discovery_roots: Iterable[Path] = (),
-    recorded_git_roots: Iterable[Path] = (),
+    recorded_git_roots: Iterable[Path] | None = (),
     excluded_roots: Iterable[Path] = (),
 ) -> str | None:
     windows = sys.platform == "win32"
@@ -163,15 +163,13 @@ def _resolve_git_executable(
     try:
         repositories = [_protected_repository_root(protected_root)]
         if configured is None:
-            recorded = set(recorded_git_roots)
+            # A legacy Git target has no trustworthy boundary to exclude from PATH.
+            if recorded_git_roots is None:
+                return None
+            for root in recorded_git_roots:
+                repositories.extend(_historical_repository_roots(root))
             for root in discovery_roots:
-                historical_roots = tuple(_historical_repository_roots(root))
-                if root in recorded and not any(
-                    os.path.lexists(repository / ".git") for repository in historical_roots
-                ):
-                    # A surviving target is not the boundary of its former Git checkout.
-                    return None
-                for repository in historical_roots:
+                for repository in _historical_repository_roots(root):
                     if not repository.is_dir():
                         # A missing target without enclosing Git metadata cannot bound its
                         # former checkout. Treat ambient Git as unavailable rather than
@@ -220,7 +218,7 @@ def _resolve_git_executable(
 def scoped_git_discovery(
     protected_roots: Callable[[], Iterable[Path]],
     *,
-    recorded_git_roots: Callable[[], Iterable[Path]] = lambda: (),
+    recorded_git_roots: Callable[[], Iterable[Path] | None] = lambda: (),
     excluded_roots: Callable[[], Iterable[Path]] = lambda: (),
 ) -> Iterator[None]:
     """Pin ambient Git when an operation first needs to inspect repository targets."""

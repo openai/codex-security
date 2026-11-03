@@ -24,7 +24,7 @@ from filesystem_identity import (
     serialize_filesystem_identity,
     stored_filesystem_identity_matches,
 )
-from workbench_target import git_bytes, git_output, git_worktree_context
+from workbench_target import _protected_repository_root, git_bytes, git_output, git_worktree_context
 
 
 def stable_target_id(target: Path) -> str:
@@ -981,21 +981,45 @@ class RegisteredRepositoryTarget:
     repository_generation: str | None
 
 
+def _record_checkout_root(
+    connection: sqlite3.Connection, row: sqlite3.Row, state: RepositoryTargetState, inserted: bool
+) -> None:
+    if "git_checkout_root" not in row.keys():
+        return
+    previous = row["git_checkout_root"]
+    # Migrations and old rows cannot attest to the former boundary of a checkout.
+    if previous is None and (not inserted or state.has_historical_scans):
+        return
+    target = Path(state.target_path)
+    if (
+        state.metadata is None
+        or not stat.S_ISDIR(state.metadata.st_mode)
+        or state.resolved_path != state.target_path
+    ):
+        return
+    try:
+        root = _protected_repository_root(target)
+    except (OSError, RuntimeError):
+        return
+    if previous is None or root in Path(previous).parents:
+        connection.execute(
+            "UPDATE security_targets SET git_checkout_root = ? "
+            "WHERE id = ? AND current_path = ? AND git_checkout_root IS ?",
+            (str(root), state.target_id, state.target_path, previous),
+        )
+
+
 def register_security_target(
     connection: sqlite3.Connection, target_path: str, *, verify_ownership: bool = True
 ) -> RegisteredRepositoryTarget:
-    supports_identity = supports_repository_identity(connection)
-    target_query = (
-        "SELECT id, repository_identity FROM security_targets WHERE current_path = ?"
-        if supports_identity
-        else "SELECT id FROM security_targets WHERE current_path = ?"
-    )
+    target_query = "SELECT * FROM security_targets WHERE current_path = ?"
     existing = connection.execute(target_query, (target_path,)).fetchone()
+    inserted = False
     if existing is None:
         target_id = stable_target_id(Path(target_path))
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         # Leave repository_identity NULL until the guarded binding below succeeds.
-        connection.execute(
+        insert = connection.execute(
             """
             INSERT OR IGNORE INTO security_targets (
                 id, current_path, display_name, created_at, updated_at
@@ -1003,6 +1027,7 @@ def register_security_target(
             """,
             (target_id, target_path, Path(target_path).name, timestamp, timestamp),
         )
+        inserted = insert.rowcount == 1
         existing = connection.execute(target_query, (target_path,)).fetchone()
         if existing is None:
             existing = connection.execute(
@@ -1012,7 +1037,7 @@ def register_security_target(
                 raise SystemExit("The repository target changed while it was being registered.")
             target_path = existing["current_path"]
     target_id = str(existing["id"])
-    if not supports_identity:
+    if "repository_identity" not in existing.keys():
         return RegisteredRepositoryTarget(target_id, None)
     try:
         state = _inspect_repository_target(
@@ -1055,6 +1080,8 @@ def register_security_target(
             )
             if verify_ownership:
                 state.require_owner()
+    if verify_ownership:
+        _record_checkout_root(connection, existing, state, inserted)
     return RegisteredRepositoryTarget(
         target_id, state.live_identity if state.ownership_matches and not state.missing else None
     )

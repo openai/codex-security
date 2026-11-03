@@ -1326,7 +1326,7 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     saved = surviving if recorded else surviving / "missing"
     with WORKBENCH_TARGET["scoped_git_discovery"](
         lambda: (repository, saved),
-        recorded_git_roots=lambda: (saved,) if recorded else (),
+        recorded_git_roots=lambda: None if recorded else (),
     ):
         assert trusted_git_executable(repository) is None
 
@@ -1334,7 +1334,7 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(historical / name))
     with WORKBENCH_TARGET["scoped_git_discovery"](
         lambda: (repository, saved),
-        recorded_git_roots=lambda: (saved,) if recorded else (),
+        recorded_git_roots=lambda: None if recorded else (),
     ):
         assert trusted_git_executable(repository) == str(historical / name)
 
@@ -1533,13 +1533,14 @@ def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
-@pytest.mark.parametrize("migrate", [False, True])
+@pytest.mark.parametrize(("migrate", "configured"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("spelling", ["absolute", "tilde"])
 def test_new_workspace_skips_git_in_its_unregistered_checkout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     workbench_api: dict[str, Any],
     migrate: bool,
+    configured: bool,
     spelling: str,
 ) -> None:
     host_git = shutil.which("git")
@@ -1583,6 +1584,8 @@ def test_new_workspace_skips_git_in_its_unregistered_checkout(
         WORKBENCH_GIT_MARKER=str(marker),
         WORKBENCH_HOST_GIT=host_git,
     )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = host_git
     script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
     requested_path = (
         str(repository)
@@ -1608,11 +1611,14 @@ def test_new_workspace_skips_git_in_its_unregistered_checkout(
     assert json.loads(completed.stdout)["targetPath"] == str(repository)
     assert not marker.exists()
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        identities = connection.execute(
-            "SELECT repository_identity FROM security_targets"
-        ).fetchall()
+        identities = dict(
+            connection.execute("SELECT current_path, repository_identity FROM security_targets")
+        )
         assert len(identities) == (2 if migrate else 1)
-        assert all(row[0] for row in identities)
+        if migrate:
+            assert identities[str(saved)] is not None
+        # After migration the saved identity has no recorded executable boundary.
+        assert (identities[str(repository)] is not None) is (configured or not migrate)
 
 
 def test_git_discovery_does_not_invoke_through_repository_directory_alias(

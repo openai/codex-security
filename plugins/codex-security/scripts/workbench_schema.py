@@ -61,7 +61,7 @@ def apply_migrations(
         connection,
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *discovery_roots],
-            recorded_git_roots=lambda: recorded_git_target_paths(connection),
+            recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
             excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
@@ -91,7 +91,7 @@ def apply_migrations(
                     or should_backfill_targets
                 )
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 63):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 63, 64):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -154,8 +154,8 @@ def unvalidated_workspace_paths(connection: sqlite3.Connection) -> list[Path]:
     ]
 
 
-def recorded_git_target_paths(connection: sqlite3.Connection) -> set[Path]:
-    """Recover which saved targets have positive Git evidence without executing Git."""
+def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | None:
+    """Return saved checkout boundaries, or None for Git history that predates them."""
     paths: set[Path] = set()
     for table, column, evidence_columns in (
         ("security_targets", "current_path", {"repository_identity": "IS NOT NULL"}),
@@ -177,7 +177,23 @@ def recorded_git_target_paths(connection: sqlite3.Connection) -> set[Path]:
                     f"AND ({' OR '.join(evidence)})"
                 )
             )
-    return paths
+    target_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
+    }
+    boundaries = (
+        {
+            Path(target): Path(root)
+            for target, root in connection.execute(
+                "SELECT current_path, git_checkout_root FROM security_targets "
+                "WHERE git_checkout_root IS NOT NULL"
+            )
+        }
+        if "git_checkout_root" in target_columns
+        else {}
+    )
+    if paths.difference(boundaries):
+        return None
+    return set(boundaries.values())
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:

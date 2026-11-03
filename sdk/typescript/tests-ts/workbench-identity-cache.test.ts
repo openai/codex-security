@@ -1362,11 +1362,10 @@ with ExitStack() as stack:
         def cursor(row):
             return SimpleNamespace(fetchone=lambda: row)
         ignored = Mock()
-        ignored.execute.side_effect = [cursor(None), None, cursor({
+        ignored.execute.side_effect = [cursor(None), SimpleNamespace(rowcount=0), cursor({
             "id": "actual-target", "repository_identity": None,
         })]
-        with patch.object(state, "supports_repository_identity", return_value=True), \
-             patch.object(state, "stable_target_id", return_value="proposed-target"), \
+        with patch.object(state, "stable_target_id", return_value="proposed-target"), \
              patch.object(state, "_inspect_repository_target", return_value=inspected("actual-target", historical=True)) as inspect, \
              patch.object(state, "_bind_unscanned_repository_identity") as guarded_bind:
             ignored_id = state.ensure_security_target(ignored, path)
@@ -1379,8 +1378,7 @@ with ExitStack() as stack:
                 cursor({"id": "actual-target", "repository_identity": None}),
                 cursor({"id": "actual-target", "repository_identity": stored}),
             ]
-            with patch.object(state, "supports_repository_identity", return_value=True), \
-                 patch.object(state, "_inspect_repository_target", side_effect=[
+            with patch.object(state, "_inspect_repository_target", side_effect=[
                      inspected("actual-target"),
                      inspected("actual-target", stored, historical=True, owner=owner),
                  ]) as inspect, \
@@ -2008,7 +2006,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
     expect(result["migrations"]).toEqual(
-      Array.from({ length: 63 }, (_, index) => index + 1),
+      Array.from({ length: 64 }, (_, index) => index + 1),
     );
   },
 );

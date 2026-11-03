@@ -6,6 +6,7 @@ import type {
   FindingSearchScope,
 } from "../finding-retrieval.js";
 import { CodexSecurityError } from "../errors.js";
+import type { SavedToolDiscovery } from "../saved-scan-bootstrap.js";
 import { workflowDigest } from "../finding-workflow.js";
 import {
   bundledPluginRoot,
@@ -48,6 +49,7 @@ export class LocalDeduplication {
     private readonly signal?: AbortSignal,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     embedding?: FindingEmbeddingBinding,
+    private readonly nodeDiscovery?: SavedToolDiscovery,
   ) {
     const endpoint =
       environmentEntry(environment, "CODEX_SECURITY_EMBEDDINGS_URL") ||
@@ -136,6 +138,14 @@ export class LocalDeduplication {
   private async command(payload: { action: string; [key: string]: unknown }) {
     this.signal?.throwIfAborted();
     this.options ??= (async () => {
+      // Bun finds Node on PATH. Native Node helpers use the running process executable.
+      if (
+        process.versions["bun"] &&
+        this.nodeDiscovery?.allowPathLookup === false
+      )
+        throw new CodexSecurityError(
+          "Could not establish the saved checkout boundary for Node.js discovery. Run local deduplication with Node.js.",
+        );
       const environment = workbenchEnvironment(this.environment);
       return {
         pluginRoot: await bundledPluginRoot(),
@@ -143,6 +153,7 @@ export class LocalDeduplication {
         environment,
         signal: this.signal,
         protectedRoot: [
+          ...(this.nodeDiscovery?.protectedRoots ?? []),
           this.repositoryPath,
           ...(await gitProtectionRoots(this.repositoryPath, this.signal)),
           ...(await gitProtectionRoots(process.cwd(), this.signal)),

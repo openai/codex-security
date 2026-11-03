@@ -197,6 +197,8 @@ export interface PluginPythonOptions {
   protectedRoot?: string | readonly string[];
   /** @internal Additional roots excluded only from ambient interpreter discovery. */
   discoveryProtectedRoots?: readonly string[];
+  /** @internal Ambient PATH lookup requires a known boundary for saved Git targets. */
+  allowPathLookup?: boolean;
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -3162,24 +3164,21 @@ export async function resolvePluginPython(
     ...callerDirectories,
     ...(options.discoveryProtectedRoots ?? []),
   ];
-  if (options.configuredPath !== undefined) {
+  const missingBoundaryMessage =
+    "Could not establish the saved checkout boundary for Python discovery. Set PYTHON to an absolute trusted interpreter.";
+  const configured =
+    options.configuredPath ?? environmentValue(environment, "PYTHON");
+  if (configured !== undefined) {
+    const explicit = isPythonPathCandidate(configured);
+    if (!explicit && options.allowPathLookup === false)
+      throw new PluginPythonUnavailableError(missingBoundaryMessage);
     return await requirePython(
-      options.configuredPath,
-      "configured plugin Python",
+      configured,
+      options.configuredPath !== undefined
+        ? "configured plugin Python"
+        : "PYTHON",
       environment,
-      isPythonPathCandidate(options.configuredPath)
-        ? protectedRoot
-        : discoveryRoots,
-      options.signal,
-    );
-  }
-  const inherited = environmentValue(environment, "PYTHON");
-  if (inherited) {
-    return await requirePython(
-      inherited,
-      "PYTHON",
-      environment,
-      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
+      explicit ? protectedRoot : discoveryRoots,
       options.signal,
     );
   }
@@ -3215,6 +3214,8 @@ export async function resolvePluginPython(
     }
   }
 
+  if (options.allowPathLookup === false)
+    throw new PluginPythonUnavailableError(missingBoundaryMessage);
   for (const candidate of process.platform === "win32"
     ? ["python", "python3", "py"]
     : ["python3", "python"]) {

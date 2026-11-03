@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
+    create_workspace,
     fail_scan,
     get_scan,
     initialize_git_repository,
@@ -1664,6 +1666,53 @@ def test_semantic_scan_comparison_rejects_cross_target_scans(tmp_path: Path) -> 
         assert "same repository target" in rejected["stderr"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable fixture")
+@pytest.mark.parametrize("legacy", [False, True], ids=["retained", "legacy"])
+def test_history_ignores_git_from_saved_checkout_after_nested_reinitialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool
+) -> None:
+    host_git = shutil.which("git")
+    assert host_git is not None
+    state, original, requested = (tmp_path / name for name in ("state", "original", "requested"))
+    initialize_git_repository(original)
+    initialize_git_repository(requested)
+    saved = original / "surviving" / "component"
+    saved.mkdir(parents=True)
+    monkeypatch.chdir(requested)
+    monkeypatch.setenv("CODEX_SECURITY_GIT", host_git)
+    create_workspace(state, str(uuid.uuid4()), "--target-path", str(saved))
+    current = create_cli_scan(state, tmp_path / "scans", requested, complete=False)
+
+    if legacy:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            updated = connection.execute(
+                "UPDATE security_targets SET git_checkout_root = NULL "
+                "WHERE current_path = ? AND repository_identity IS NOT NULL",
+                (str(saved),),
+            )
+            assert updated.rowcount == 1
+
+    (original / ".git").rename(tmp_path / "previous-metadata")
+    subprocess.run([host_git, "init", "-q", str(saved)], check=True)
+    # An unscanned target can be registered again after its Git generation changes.
+    create_workspace(state, str(uuid.uuid4()), "--target-path", str(saved))
+    executable = original / "git"
+    executable.write_text('#!/bin/sh\nprintf ran > "$0.ran"\nexec "$WORKBENCH_HOST_GIT" "$@"\n')
+    executable.chmod(0o700)
+    monkeypatch.setenv("WORKBENCH_HOST_GIT", host_git)
+    monkeypatch.setenv("PATH", str(original), prepend=os.pathsep)
+    query = ("list-scans", "--repository", str(requested))
+    pinned = run_workbench(state, *query)
+    assert [scan["scanId"] for scan in pinned["scans"]] == [current["scanId"]]
+    assert not (original / "git.ran").exists()
+
+    monkeypatch.delenv("CODEX_SECURITY_GIT")
+    listed = run_workbench(state, *query)
+    assert not (original / "git.ran").exists()
+    if not legacy:
+        assert [scan["scanId"] for scan in listed["scans"]] == [current["scanId"]]
+
+
 def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -2829,7 +2878,7 @@ def test_repository_generation_migration_preserves_null_history(
             == expected
         )
         assert [dict(row) for row in connection.execute("SELECT * FROM scans")] == before
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 63
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 64
         # A completed migration, including an unverifiable binding, does not probe
         # local repositories again on a database reopen.
         with monkeypatch.context() as no_probes:
@@ -2977,7 +3026,7 @@ def test_repository_generation_migration_keeps_released_null_history_local(
         assert {name: after[name] for name in before} == before
         assert after["repository_generation"] is None
         assert after["completion_sequence"] == 1
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 63
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 64
         scope = target_state.RepositoryIdentityCache(connection).scope_for_path(str(repository))
         assert scope.available and scope.contains(after)
         assert after["id"] == scan["scanId"]
@@ -3039,7 +3088,7 @@ def test_repository_generation_returns_after_offline_migration(
         offline = tmp_path / "offline"
         repository.rename(offline)
         workbench.apply_migrations(connection)
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 63
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 64
         assert (
             connection.execute(
                 "SELECT repository_generation FROM scans WHERE id=?", (scan["scanId"],)

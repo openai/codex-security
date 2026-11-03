@@ -49,9 +49,12 @@ scan must be complete, with sealed artifacts. Review that reads source also
 requires its local checkout.
 Local `latest` lookup verifies the checkout generation and component scope.
 Non-Git targets can match by exact path; Git history and matching across worktrees
-or clones require a Git executable outside all saved scan targets. If Git is
-unavailable or an unrelated historical target includes its installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
-saved scan ID instead.
+or clones require a Git executable outside the saved checkout directories. If an
+older Git target has no recorded checkout directory, set `CODEX_SECURITY_GIT` to
+an absolute, trusted Git executable. If you use system Python, set `PYTHON` to
+its absolute path. You can also select the scan directly with
+`codex-security dedupe --scan SCAN_ID`. When running local deduplication on
+older history, use Node.js if Bun cannot locate a trusted Node.js helper.
 By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service. Explicit
 `--findings-url` retains the existing remote lookup and publication behavior.

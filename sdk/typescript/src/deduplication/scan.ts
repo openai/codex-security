@@ -12,7 +12,10 @@ import {
   resolveCompletedScan,
   type SavedScanDependencies,
 } from "../saved-scan.js";
-import { savedScanWorkbench } from "../saved-scan-bootstrap.js";
+import {
+  savedScanWorkbench,
+  type SavedToolDiscovery,
+} from "../saved-scan-bootstrap.js";
 import { CodexReviewRunner, reviewSqliteHome } from "./codex-review.js";
 import { mkdir } from "node:fs/promises";
 import { isWithin } from "../trusted-executable.js";
@@ -163,6 +166,7 @@ export async function deduplicateScanInternal(
       : dependencies,
     pluginRoot,
     false,
+    bootstrap?.nodeDiscovery,
   );
 }
 
@@ -174,6 +178,7 @@ async function deduplicateResolvedScan(
   dependencies: DeduplicateScanDependencies,
   pluginRoot: string,
   bindRepository: boolean,
+  nodeDiscovery?: SavedToolDiscovery,
 ): Promise<DeduplicateScanResult> {
   const environment = dependencies.environment ?? process.env;
   if (options.embedding !== undefined && options.findingsUrl !== undefined)
@@ -207,6 +212,7 @@ async function deduplicateResolvedScan(
           options.signal,
           workbench,
           options.embedding,
+          nodeDiscovery,
         )
       : undefined;
   const client =

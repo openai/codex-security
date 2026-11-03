@@ -366,9 +366,20 @@ for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
 }
 
 test.skipIf(process.platform === "win32")(
-  "saved-scan dedupe excludes repository Node when invoking native findings helpers",
+  "saved-scan dedupe excludes Node from the saved checkout when invoking native findings helpers",
   async () => {
-    const f = await fixture();
+    const f = await fixture(true);
+    const component = join(f.repository, "component");
+    await mkdir(join(component, "src"), { recursive: true });
+    await writeFile(
+      join(component, "src", "extract.py"),
+      "# Synthetic fixture\n",
+    );
+    git(f.repository, "add", ".");
+    git(f.repository, "commit", "-qm", "Add component");
+    const scan = await f.scan("component-scan", component);
+    await rename(join(f.repository, ".git"), join(f.root, "old-git"));
+    git(component, "init", "--quiet");
     const executable = join(f.repository, "node");
     const marker = join(f.root, "node-probed");
     await writeFile(
@@ -376,21 +387,35 @@ test.skipIf(process.platform === "win32")(
       '#!/bin/sh\nprintf probed > "$TEST_NODE_PROBE"\nexit 1\n',
     );
     await chmod(executable, 0o700);
-    const result = await deduplicateScanInternal(
-      f.first.scanId,
-      { embedding: f.embedding },
-      {
-        environment: {
-          ...f.environment,
-          PYTHON: f.python,
-          PATH: [f.repository, f.environment.PATH].join(delimiter),
-          TEST_NODE_PROBE: marker,
+    const deduplicate = () =>
+      deduplicateScanInternal(
+        scan.scanId,
+        { embedding: f.embedding },
+        {
+          environment: {
+            ...f.environment,
+            PYTHON: f.python,
+            PATH: [f.repository, f.environment.PATH].join(delimiter),
+            TEST_NODE_PROBE: marker,
+          },
+          reviewer: f.reviewer,
+          fetch: rejecting("Unexpected HTTP request"),
         },
-        reviewer: f.reviewer,
-        fetch: rejecting("Unexpected HTTP request"),
-      },
+      );
+    expect((await deduplicate()).deduplicationStatus).toBe("completed");
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
-    expect(result.deduplicationStatus).toBe("completed");
+    try {
+      db.query(
+        "UPDATE security_targets SET git_checkout_root = NULL WHERE current_path = ?",
+      ).run(component);
+    } finally {
+      db.close();
+    }
+    await expect(deduplicate()).rejects.toThrow(
+      "Run local deduplication with Node.js",
+    );
     expect(existsSync(marker)).toBe(false);
   },
 );
@@ -681,6 +706,91 @@ test.skipIf(process.platform === "win32")(
         })
       ).scanId,
     ).toBe(f.second.scanId);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "a replacement nested checkout cannot supply Git or Python from its former parent",
+  async () => {
+    const f = await fixture(true);
+    const outer = join(f.root, "former-checkout");
+    const component = join(outer, "src");
+    git(f.root, "clone", "--quiet", f.repository, outer);
+    const scanId = await registerScan(
+      { ...f, repository: component },
+      join(f.root, "component-scan"),
+    );
+    const caller = join(f.root, "caller");
+    git(f.repository, "worktree", "add", "--quiet", "--detach", caller);
+    await rename(join(outer, ".git"), join(f.root, "former-git-metadata"));
+    git(component, "init", "--quiet");
+
+    const gitProbe = join(f.root, "git-probed");
+    const pythonProbe = join(f.root, "python-probed");
+    const hostGit = (await inspectTrustedExecutable("git", f.environment, []))
+      .executable!;
+    await writeFile(
+      join(outer, "git"),
+      '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nexec "$TEST_HOST_GIT" "$@"\n',
+      { mode: 0o700 },
+    );
+    await writePythonProbe(join(outer, "python3"));
+    const options = {
+      environment: {
+        ...f.environment,
+        PATH: outer + delimiter + f.environment.PATH,
+        TEST_HOST_GIT: hostGit,
+        TEST_GIT_PROBE: gitProbe,
+        TEST_PYTHON_PROBE: pythonProbe,
+      },
+      pluginRoot: PLUGIN_ROOT,
+      currentDirectory: caller,
+    };
+    async function latest(configured?: string) {
+      const workbench = await savedScanWorkbench("latest", {
+        ...options,
+        environment: {
+          ...options.environment,
+          PYTHON: f.python,
+          CODEX_SECURITY_GIT: configured,
+        },
+      });
+      return resolveCompletedScan("latest", {
+        currentDirectory: () => caller,
+        runWorkbench: workbench,
+      });
+    }
+    expect((await latest()).scanId).toBe(f.second.scanId);
+    expect(existsSync(gitProbe)).toBe(false);
+
+    async function getById() {
+      const workbench = await savedScanWorkbench(scanId, {
+        ...options,
+        environment: { ...options.environment, PYTHON: "python3" },
+      });
+      return workbench(["get-scan", "--scan-id", scanId]);
+    }
+    expect((await getById())["scan"]).toMatchObject({ scanId });
+    expect(existsSync(pythonProbe)).toBe(false);
+
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.query(
+        "UPDATE security_targets SET git_checkout_root = NULL WHERE current_path = ?",
+      ).run(component);
+    } finally {
+      db.close();
+    }
+    for (const configured of [undefined, "git"])
+      await expect(latest(configured)).rejects.toThrow(
+        "codex-security dedupe --scan SCAN_ID",
+      );
+    await expect(getById()).rejects.toThrow("absolute trusted interpreter");
+    expect((await latest(hostGit)).scanId).toBe(f.second.scanId);
+    expect(existsSync(gitProbe)).toBe(false);
+    expect(existsSync(pythonProbe)).toBe(false);
   },
 );
 
@@ -979,7 +1089,7 @@ test("latest and workflow selectors ignore unrelated history enclosing trusted P
       "2026-01-01T00:00:00Z",
     );
     db.query(
-      "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
+      "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL, target_revision = 'unversioned' WHERE id = ?",
     ).run(dirname(trustedPython), "unrelated-target", f.second.scanId);
   } finally {
     db.close();
@@ -1331,7 +1441,7 @@ for (const kind of ["non-Git", "symlinked"] as const) {
           "2026-01-01T00:00:00Z",
         );
         db.query(
-          "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
+          "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL, target_revision = 'unversioned' WHERE id = ?",
         ).run(target, "non-git-target", f.second.scanId);
       } finally {
         db.close();
@@ -1444,29 +1554,22 @@ for (const kind of ["missing", "symlinked"] as const) {
     test.skipIf(process.platform === "win32")(
       `saved ${kind} targets still protect their enclosing checkout from ${source}`,
       async () => {
-        const f = await fixture(true);
-        const target = join(f.repository, "deleted-component", "nested");
+        const f = await workspace(true);
+        const target = join(f.repository, "src");
+        const scanId = await registerScan(
+          { ...f, repository: target },
+          join(f.root, "scan"),
+        );
+        await rename(target, join(f.root, "removed-component"));
         if (kind === "symlinked") {
           const destination = join(f.root, "external-target");
           await mkdir(destination);
-          await mkdir(dirname(target), { recursive: true });
           await symlink(destination, target);
         }
         const python = join(f.repository, "python3");
         const marker = join(f.root, "missing-target-probed");
         await writePythonProbe(python);
-        const db = new Database(
-          join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-        );
-        try {
-          db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
-            target,
-            f.first.scanId,
-          );
-        } finally {
-          db.close();
-        }
-        const workbench = await savedScanWorkbench(f.first.scanId, {
+        const workbench = await savedScanWorkbench(scanId, {
           environment: {
             ...f.environment,
             TEST_PYTHON_PROBE: marker,
@@ -1477,15 +1580,13 @@ for (const kind of ["missing", "symlinked"] as const) {
           pluginRoot: PLUGIN_ROOT,
           currentDirectory: f.root,
         });
-        const result = workbench(["get-scan", "--scan-id", f.first.scanId]);
+        const result = workbench(["get-scan", "--scan-id", scanId]);
         if (source === "PYTHON")
           await expect(result).rejects.toThrow(
             "PYTHON interpreter is unavailable or unusable",
           );
         else {
-          expect((await result)["scan"]).toMatchObject({
-            scanId: f.first.scanId,
-          });
+          expect((await result)["scan"]).toMatchObject({ scanId });
           expect(workbench.environment["PYTHON"]).not.toBe(python);
         }
         expect(existsSync(marker)).toBe(false);
@@ -1523,7 +1624,7 @@ test.skipIf(process.platform === "win32")(
         "2026-01-01T00:00:00Z",
       );
       db.query(
-        "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL WHERE id = ?",
+        "UPDATE scans SET target_path = ?, target_id = ?, repository_generation = NULL, target_revision = 'unversioned' WHERE id = ?",
       ).run(target, "inaccessible-target", f.second.scanId);
     } finally {
       db.close();

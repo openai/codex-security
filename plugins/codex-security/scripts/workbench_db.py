@@ -88,7 +88,7 @@ from workbench_scan_start import (
 from workbench_schema import (
     MIGRATIONS,
     migration_target_paths,
-    recorded_git_target_paths,
+    recorded_git_checkout_roots,
     unvalidated_workspace_paths,
 )
 from workbench_schema import (
@@ -3153,7 +3153,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         ) as connection,
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *command_targets],
-            recorded_git_roots=lambda: recorded_git_target_paths(connection),
+            recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
             excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
