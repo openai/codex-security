@@ -2,27 +2,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-/** @type {import("../../src/remediation.js").FindingVerificationCheck[]} */
-export const passedChecks = [
-  {
-    name: "Authorization regression tests",
-    status: "passed",
-    command: "bun test tests/authorization.test.ts",
-    evidence: "Original request rejected; legitimate control passed.",
-  },
-  {
-    name: "Static assessment of equivalent authorization paths",
-    status: "passed",
-    evidence: "All handlers in guard.ts use the shared authorization check.",
-  },
-];
-
 /** @type {import("../../src/remediation.js").FindingVerification} */
 export const verificationResult = {
   id: "finding-1",
   status: "fixed",
   evidence: "Original request rejected; legitimate control passed.",
-  checks: passedChecks,
 };
 
 /**
@@ -167,10 +151,11 @@ export async function exerciseRemediationProtocol(
     if (!cancel) {
       if (input.operation === "patch")
         assert.equal(result.patch.status, "verified");
-      else {
-        assert.equal(result.verification.status, "fixed");
-        assert.deepEqual(result.verification.checks, passedChecks);
-      }
+      else
+        assert.deepEqual(result.verification, {
+          ...verificationResult,
+          id: input.finding.id,
+        });
     }
     return result;
   } finally {

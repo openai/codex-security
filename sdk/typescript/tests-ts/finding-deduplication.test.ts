@@ -40,7 +40,7 @@ import type { JsonObject } from "../src/config.js";
 import { fail } from "./support/errors.js";
 
 const document = await readJson<FindingsDocument>(
-  join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  join(PLUGIN_ROOT, "examples/legacy-completed-scan/findings.json"),
 );
 function entry(index: number): Finding {
   return {

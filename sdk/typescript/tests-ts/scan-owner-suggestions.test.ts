@@ -56,7 +56,6 @@ test.each(["git_revision", "git_diff"] as const)(
     const documents = {
       "scan-manifest.json": result.manifest,
       "findings.json": result.findings,
-      "coverage.json": result.coverage,
     };
     for (const [name, document] of Object.entries(documents))
       await writeFile(join(result.scanDir, name), JSON.stringify(document));

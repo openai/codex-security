@@ -39,7 +39,7 @@ describe("scan output schema", () => {
         {
           properties: {
             findings: { type: "object" },
-            coverage: { type: "object" },
+            review: { type: "object" },
             scanDir: { type: "string" },
             reportPath: { type: "string" },
           },
@@ -272,7 +272,8 @@ test.each(retainedThreatModels)(
         },
       },
       findings: original.findings,
-      coverage: original.coverage,
+      mode: original.mode,
+      review: original.review,
       scanDir: original.scanDir,
       threadId: original.threadId,
       turnResult: original.turnResult,

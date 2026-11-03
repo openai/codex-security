@@ -13,6 +13,7 @@ const files = execFileSync(
     "README.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
+    "RELEASING.md",
     ":(glob)docs/**/*.md",
     "github-action/README.md",
     "docker/README.md",

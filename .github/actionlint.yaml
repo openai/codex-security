@@ -1,9 +1,14 @@
 paths:
-  .github/workflows/{container-release,node-github-release,node-release-cut,node-release,release-progress}.yml:
+  .github/workflows/{container-publish,node-github-release,node-ci,node-release-cut,node-release-pr,node-release,publish-wolfi,release-progress}.yml:
     ignore:
-      # actionlint 1.7.12 predates GitHub's queue: max support. Keep release queuing.
+      # actionlint 1.7.12 predates GitHub's queue: max support. Keep the supported queue setting.
       # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
       - '^unexpected key "queue" for "concurrency" section\.'
+  .github/workflows/native-artifacts.yml:
+    ignore:
+      # actionlint 1.7.12 predates GitHub’s reference to the defining workflow's commit.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsuses
+      - '^specifying action "\$/\.github/actions/native-cache-key" in invalid format because ref is missing\.'
   .github/workflows/invoice-desk-scan.yml:
     ignore:
       # actionlint 1.7.12 predates GitHub's job-level cache permissions.

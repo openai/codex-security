@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-import re
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,22 +17,6 @@ from finalize_scan_contract import (
     path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
 
 
 def capture_receipt_checkpoints(
@@ -116,7 +99,7 @@ def retain_recorded_receipt_ownership(
             continue
         if payload_digest(draft) in recorded.get(directory, set()):
             continue
-        surfaces = draft["coverage"].get("surfaces", [])
+        surfaces = draft["reviewState"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
                 surface["provenance"].pop("scanReceiptRefs", None)
@@ -240,7 +223,7 @@ def _generic_surface_updates(
 
     saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
     for relative, draft, owner in sources:
-        rows = draft["coverage"].get("surfaces", [])
+        rows = draft["reviewState"].get("surfaces", [])
         for row in rows if isinstance(rows, list) else []:
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault(record_key("surfaces", owner, row), []).append(
@@ -270,7 +253,7 @@ def _generic_surface_updates(
                 == record_order(latest_source, key[0], latest_surface)
             )
         for relative, draft, owner in sources:
-            rows = draft["coverage"].get("surfaces", [])
+            rows = draft["reviewState"].get("surfaces", [])
             for row in rows if isinstance(rows, list) else []:
                 if (
                     isinstance(row, dict)
@@ -296,7 +279,7 @@ def _generic_surface_updates(
                     normalized = _require_portable_relative_path(ref, "Saved coverage receipt")
                     receipt_paths.setdefault(normalized.lower(), normalized)
     for relative, draft, owner in sources:
-        current = draft["coverage"].get("surfaces", [])
+        current = draft["reviewState"].get("surfaces", [])
         for surface in current if isinstance(current, list) else []:
             if not isinstance(surface, dict):
                 continue

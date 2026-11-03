@@ -1,8 +1,10 @@
+import { finished, type Readable, type Writable } from "node:stream";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import {
   ErrorCode,
   type JSONRPCMessage,
+  type RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
 
 // The native client's rmcp transport drops lines above 16 MiB, including the LF,
@@ -10,6 +12,41 @@ import {
 const NATIVE_STDIO_LINE_LIMIT_BYTES = 16 * 1024 * 1024;
 
 export class CodexSecurityStdioTransport extends StdioServerTransport {
+  private readonly stdout: Writable;
+  private readonly resultReceipts = new Map<
+    RequestId,
+    () => Promise<unknown>
+  >();
+
+  constructor(
+    stdin?: Readable,
+    stdout: Writable = process.stdout,
+    options?: ConstructorParameters<typeof StdioServerTransport>[2],
+  ) {
+    super(stdin, stdout, options);
+    this.stdout = stdout;
+  }
+
+  afterResultSent(
+    id: RequestId,
+    signal: AbortSignal,
+    receipt: () => Promise<unknown>,
+  ) {
+    if (signal.aborted) return;
+    const attachedReceipt = async () => {
+      if (!signal.aborted) await receipt();
+    };
+    this.resultReceipts.set(id, attachedReceipt);
+    signal.addEventListener(
+      "abort",
+      () => {
+        if (this.resultReceipts.get(id) === attachedReceipt)
+          this.resultReceipts.delete(id);
+      },
+      { once: true },
+    );
+  }
+
   override async send(message: JSONRPCMessage): Promise<void> {
     if (
       !("result" in message || "error" in message) ||
@@ -18,8 +55,16 @@ export class CodexSecurityStdioTransport extends StdioServerTransport {
       return super.send(message);
     }
 
-    const bytes = Buffer.byteLength(serializeMessage(message), "utf8");
-    if (bytes <= NATIVE_STDIO_LINE_LIMIT_BYTES) return super.send(message);
+    const receipt = this.resultReceipts.get(message.id);
+    this.resultReceipts.delete(message.id);
+    const line = serializeMessage(message);
+    const bytes = Buffer.byteLength(line, "utf8");
+    if (bytes <= NATIVE_STDIO_LINE_LIMIT_BYTES) {
+      if (!receipt || !("result" in message)) return super.send(message);
+      await this.writeResult(line);
+      await receipt();
+      return;
+    }
 
     return super.send({
       jsonrpc: "2.0",
@@ -31,6 +76,27 @@ export class CodexSecurityStdioTransport extends StdioServerTransport {
           "For paged reads, reduce the requested page byte budget and retry the same page. " +
           "The operation may already have completed; check its result before repeating a write.",
       },
+    });
+  }
+
+  private writeResult(line: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // A disconnected stdout can close without invoking the write callback.
+      const cleanup = finished(this.stdout, { readable: false }, (error) => {
+        cleanup();
+        reject(
+          error ?? new Error("stdout closed before the MCP result was written"),
+        );
+      });
+      this.stdout.write(line, (error) => {
+        if (error) {
+          // Keep the error listener for the stream event emitted after this callback.
+          reject(error);
+        } else if (!this.stdout.destroyed) {
+          cleanup();
+          resolve();
+        }
+      });
     });
   }
 }

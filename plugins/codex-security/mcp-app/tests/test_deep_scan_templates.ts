@@ -33,7 +33,7 @@ const rendered = renderDiscoveryPrompt({ ...discoveryInput });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
-assert.match(rendered, /coverage\.deferred/);
+assert.match(rendered, /reviewState\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
 const { scope, ...expectedContext } = discoveryInput;
 assert.deepEqual(discoveryContext, {
@@ -60,7 +60,7 @@ const dedupContext = firstJsonBlock(dedup);
 assert.doesNotMatch(dedup, /\bcoverage\b/i);
 assert.match(
   dedup,
-  /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
+  /record_codex_security_deep_reduction\(\{ scanId, findings, retainedFindingRefs\?, threatModel\?, scope\? \}\)/,
 );
 assert.deepEqual(dedupContext, {
   reducerLabel: "dedup-0001",

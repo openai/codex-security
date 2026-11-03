@@ -6,11 +6,16 @@ import os
 
 import pytest
 from test_deep_scan_deadline_recovery import worker_finding
-from test_deep_scan_stop_conditions import canceled_discovery_output, complete, finish
+from test_deep_scan_stop_conditions import canceled_discovery_output, finish
 from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
 from test_deep_scan_stop_conditions import publication_scan as publication_scan
 from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
-from workbench_test_support import saved_draft, write_checkpoint
+from workbench_test_support import (
+    read_review_state,
+    saved_draft,
+    select_checkpoint,
+    write_checkpoint,
+)
 
 
 @pytest.mark.parametrize("source", ["result", "checkpoint", "archived-checkpoint"])
@@ -43,8 +48,8 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
             findings=[earlier, rejected],
             deferred=[{"id": "review", "reason": "Review remains."}],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     sibling = worker_finding(scan, "latest-valid-sibling")
     latest = saved_draft(
         scan.scan_id,
@@ -68,14 +73,12 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
         result.write_text(json.dumps(latest))
     else:
         result = write_checkpoint(output / "checkpoints", latest)
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": result.name}))
-        os.utime(head, ns=(300, 300))
+        select_checkpoint(output, result, mtime_ns=300)
     os.utime(result, ns=(200, 200))
     original = {path: path.read_bytes() for path in (checkpoint, result)}
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     terminal = marker is True or marker == "omitted"
     invalid = not isinstance(marker, bool) and marker != "omitted"
@@ -85,7 +88,7 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
     assert rejected["title"] not in titles
     if not terminal or source == "result":
         assert (earlier["title"] in titles) == (not terminal)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(row["reason"] == "Review remains." for row in coverage["deferred"]) == (not terminal)
     assert (
         any(
@@ -102,8 +105,15 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
         )
 
 
-@pytest.mark.parametrize("source", ["result", "checkpoint", "archived-result"])
-@pytest.mark.parametrize("invalid", ["rationale", "code_evidence", "sourceFindingIds"])
+# Each source feeds the same per-finding validator. Exercise each rejection in isolation.
+@pytest.mark.parametrize(
+    ("source", "invalid"),
+    [
+        ("result", "rationale"),
+        ("checkpoint", "code_evidence"),
+        ("archived-result", "sourceFindingIds"),
+    ],
+)
 def test_deadline_validates_each_recovered_finding_against_the_completed_contract(
     workbench_api, workbench_db, deadline_scan, source, invalid
 ):
@@ -124,8 +134,8 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
                 {"id": "finished", "reason": "Separate review remains."},
             ],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     sibling = worker_finding(scan, "valid-worker-sibling")
     malformed = worker_finding(scan, "malformed-worker-finding")
     malformed["provenance"]["candidateId"] = "malformed-worker-finding"
@@ -159,24 +169,19 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
     )
     if source == "checkpoint":
         result = write_checkpoint(output / "checkpoints", latest)
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": result.name}))
-        os.utime(head, ns=(300, 300))
+        select_checkpoint(output, result, mtime_ns=300)
     else:
         result = output / "result.json"
         result.write_text(json.dumps(latest))
     os.utime(result, ns=(200, 200))
     original = {path: path.read_bytes() for path in (checkpoint, result)}
     if source == "archived-result":
-        selected = write_checkpoint(output / "checkpoints", latest)
-        os.utime(selected, ns=(200, 200))
-        head = output / "checkpoint-head.json"
-        head.write_text(json.dumps({"checkpoint": selected.name}))
-        os.utime(head, ns=(300, 300))
+        selected = write_checkpoint(output / "checkpoints", latest, mtime_ns=200)
+        select_checkpoint(output, selected, mtime_ns=300)
         original[selected] = selected.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert {finding["title"] for finding in findings} == {
@@ -186,7 +191,7 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
     }
     retained = next(finding for finding in findings if finding["title"] == sibling["title"])
     assert retained["provenance"]["workerId"] == worker_id
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(row["reason"] == "Review remains." for row in coverage["deferred"])
     assert not any(row["reason"] == "Separate review remains." for row in coverage["deferred"])
     surfaces = {row["label"]: row for row in coverage["surfaces"]}
@@ -221,7 +226,7 @@ def test_deadline_recovers_optional_worker_model_without_losing_findings(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 2
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
@@ -295,10 +300,10 @@ def test_deadline_applies_existing_nonblank_surface_label_contract(
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 2
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
     assert len(surfaces) == bool(label.strip())
     if surfaces:
@@ -338,31 +343,28 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         draft["coverage"][field] = [{"id": "review", "reason": text}]
     if field == "resolvedDeferred":
         draft["complete"] = True
-        previous = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft(scan.scan_id, deferred=[{"id": "review", "reason": "Review pending."}]),
+            mtime_ns=100,
         )
-        os.utime(previous, ns=(100, 100))
-    checkpoint = write_checkpoint(output / "checkpoints", draft)
-    os.utime(checkpoint, ns=(200, 200))
+    checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=200)
     if field == "resolvedDeferred":
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+        select_checkpoint(output, checkpoint)
     original = checkpoint.read_bytes()
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == (1 if malformed and field == "finding" else 2)
     assert any("well-formed Unicode" in warning for warning in completed["warnings"]) == malformed
     if field == "resolvedDeferred":
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(workbench_db, scan.scan_dir)
         assert any(row["reason"] == "Review pending." for row in coverage["deferred"]) == malformed
     elif not malformed:
         document = (
-            findings
-            if field == "finding"
-            else json.loads((scan.scan_dir / "coverage.json").read_text())
+            findings if field == "finding" else read_review_state(workbench_db, scan.scan_dir)
         )
         assert text in json.dumps(document, ensure_ascii=False)
     assert checkpoint.read_bytes() == original
@@ -386,8 +388,8 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
                 {"id": "sibling", "reason": "Valid sibling review pending."},
             ],
         ),
+        mtime_ns=100,
     )
-    os.utime(previous, ns=(100, 100))
     draft = saved_draft(
         scan.scan_id,
         complete=True,
@@ -399,23 +401,22 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
     checkpoint = write_checkpoint(output / "checkpoints", draft)
     result = output / "result.json"
     result.write_text(json.dumps(draft))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    head = select_checkpoint(output, checkpoint)
     for path in (checkpoint, result, head):
         os.utime(path, ns=(200, 200))
     original = {path: path.read_bytes() for path in (previous, checkpoint, result)}
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     invalid = not reason.strip()
     assert completed["progress"]["status"] == "complete"
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = {row["reason"] for row in coverage["deferred"]}
     assert ("First review pending." in pending) == invalid
     assert "Valid sibling review pending." not in pending
     report = (scan.scan_dir / "report.md").read_text()
-    assert ("First review pending." in report) == invalid
+    assert "First review pending." not in report
     assert "Valid sibling review pending." not in report
     assert any("expected a non-empty string" in warning for warning in completed["warnings"]) == (
         invalid
@@ -487,8 +488,8 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
                 {"id": "finished", "reason": "Separate review remains."},
             ],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     invalid_surface = copy.deepcopy(surface)
     if malformed == "surface":
         invalid_surface.pop("label")
@@ -521,7 +522,7 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     )
     if selected_head:
         result = write_checkpoint(output / "checkpoints", terminal)
-        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": result.name}))
+        select_checkpoint(output, result)
     else:
         result = output / "result.json"
         result.write_text(json.dumps(terminal))
@@ -529,12 +530,12 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     original = {path: path.read_bytes() for path in (checkpoint, result)}
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["title"] == finding["title"] for row in findings) == terminal_findings
     assert all(row["title"] != rejected["title"] for row in findings)
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert any(
         row.get("workerId") == worker_id and row["label"] == surface["label"]
         for row in coverage["surfaces"]
@@ -574,7 +575,7 @@ def test_optional_export_failure_does_not_block_deadline(
         )
 
     finish(workbench_api, workbench_db, scan, terminal_reason="capped")
-    completed = complete(workbench_api, workbench_db, scan)
+    completed = scan.complete()
 
     assert completed["progress"]["status"] == "complete"
     assert "automatic SARIF export failed" in capsys.readouterr().err
@@ -583,16 +584,16 @@ def test_optional_export_failure_does_not_block_deadline(
 
 
 def test_standard_parent_closure_preserves_unrelated_task_without_id(
-    workbench_api, workbench_db, publication_scan
+    workbench_db, publication_scan
 ):
     scan = publication_scan(mode="standard")
     scan.coverage["resolvedDeferred"] = [{"id": "finished", "reason": "Review completed."}]
     scan.coverage["deferred"] = [{"reason": "Unrelated pending review."}]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
-    complete(workbench_api, workbench_db, scan)
+    scan.complete()
 
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(workbench_db, scan.scan_dir)
     assert len(coverage["deferred"]) == 1
     assert coverage["deferred"][0]["id"]
     assert coverage["deferred"][0]["reason"] == "Unrelated pending review."

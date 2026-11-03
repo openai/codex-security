@@ -242,25 +242,27 @@ def test_readback_replay_preserves_the_accepted_receipt_url(tmp_path: Path, oper
     assert issues(state, scan_dir, "inspect")["receipts"] == [expected]
 
 
-@pytest.mark.parametrize(
-    "destination",
-    [
+def test_destination_scope_is_part_of_receipt_identity(tmp_path: Path) -> None:
+    scan_dir, validated = source(tmp_path)
+    state = tmp_path / "state"
+    accepted = receipt_for(validated)
+    issues(state, scan_dir, "record", receipts=[accepted])
+    destinations = (
         {"type": "linear", "teamId": "different-team"},
         {"type": "linear", "teamId": "team-example", "projectId": "project-example"},
         JIRA,
         {"type": "github-issue", "hostname": "github.com", "repository": "example/repo"},
         {"type": "github-advisory", "hostname": "github.com", "repository": "example/repo"},
-    ],
-)
-def test_destination_scope_is_part_of_receipt_identity(tmp_path: Path, destination: dict) -> None:
-    scan_dir, validated = source(tmp_path)
-    state = tmp_path / "state"
-    accepted = receipt_for(validated)
-    issues(state, scan_dir, "record", receipts=[accepted])
-    assert issues(state, scan_dir, "inspect", destination=destination)["receipts"] == []
-    issues(state, scan_dir, "record", destination=destination, receipts=[accepted])
-    assert len(issues(state, scan_dir, "inspect", destination=destination)["receipts"]) == 1
-    assert len(issues(state, scan_dir, "inspect")["receipts"]) == 1
+    )
+    for destination in destinations:
+        inspected = issues(state, scan_dir, "inspect", destination=destination)
+        assert inspected["receipts"] == [], destination
+        issues(state, scan_dir, "record", destination=destination, receipts=[accepted])
+
+    expected = [{**accepted, "scanId": validated["manifest"]["scan"]["id"]}]
+    for destination in (LINEAR, *destinations):
+        inspected = issues(state, scan_dir, "inspect", destination=destination)
+        assert inspected["receipts"] == expected, destination
 
 
 def test_same_issue_can_track_a_later_occurrence(tmp_path: Path) -> None:

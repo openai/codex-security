@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.6.0",
+  "version": "0.8.2",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -59,7 +59,7 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --run clean && node scripts/generate-deep-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs",
+    "build": "node --run clean && node scripts/generate-plugin-defaults.mjs && tsc -p tsconfig.build.json && node scripts/generate-project-config-schema.mjs",
     "build:ci": "tsc -p tsconfig.ci.json",
     "build:evals": "node --run build && tsc -p ../../evals/tsconfig.json",
     "build:examples": "tsc -p tsconfig.examples.json",
@@ -78,14 +78,14 @@
     "test:mcp": "node --run build:plugin && pnpm --dir ../../plugins/codex-security/mcp-app run test:mcp",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
-    "types": "node scripts/generate-deep-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm run generate:external-import-models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
+    "types": "node scripts/generate-plugin-defaults.mjs --check && node scripts/generate-project-config-schema.mjs --check && pnpm run generate:models:check && pnpm run generate:external-import-models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
-    "@inquirer/prompts": "8.7.3",
-    "@linear/sdk": "98.0.0",
+    "@inquirer/prompts": "8.7.4",
+    "@linear/sdk": "99.0.0",
     "@octokit/core": "7.0.8",
-    "@openai/codex": "0.164.0",
-    "@openai/codex-sdk": "0.164.0",
+    "@openai/codex": "0.166.0",
+    "@openai/codex-sdk": "0.166.0",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
     "incur": "0.7.1",
@@ -104,8 +104,8 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@stryker-mutator/core": "10.0.0",
-    "@types/bun": "1.4.3",
+    "@stryker-mutator/core": "10.1.1",
+    "@types/bun": "1.4.4",
     "@types/node": "26.6.5",
     "@types/papaparse": "5.5.2",
     "@types/react": "19.3.0",
@@ -116,7 +116,6 @@
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "16.0.0",
     "json5": "2.2.3",
-    "minimatch": "10.2.6",
     "prettier": "3.9.10",
     "typescript": "7.0.2"
   }

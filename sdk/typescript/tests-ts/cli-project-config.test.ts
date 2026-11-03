@@ -1,5 +1,4 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
@@ -21,6 +20,7 @@ import {
 } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
+import { git } from "./git-fixture.js";
 import {
   capture,
   dependencies,
@@ -69,26 +69,16 @@ async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
   rowModes: readonly string[],
 ) {
-  execFileSync("git", ["init", "-q", input.repository]);
-  execFileSync("git", [
-    "-C",
+  git(input.repository, "init", "-q");
+  git(
     input.repository,
-    "-c",
-    "user.name=Test",
-    "-c",
-    "user.email=test@example.test",
-    "-c",
-    "commit.gpgsign=false",
     "commit",
+    "--no-gpg-sign",
     "--allow-empty",
     "-qm",
     "fixture",
-  ]);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  );
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -568,30 +558,11 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     join(input.repository, "lib", "index.ts"),
     "export const value = 2;\n",
   );
-  for (const args of [
-    ["init", "-q", input.repository],
-    ["-C", input.repository, "config", "--local", "core.autocrlf", "false"],
-    ["-C", input.repository, "add", "."],
-    [
-      "-C",
-      input.repository,
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.test",
-      "-c",
-      "commit.gpgsign=false",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-  ])
-    execFileSync("git", args);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  git(input.repository, "init", "-q");
+  git(input.repository, "config", "--local", "core.autocrlf", "false");
+  git(input.repository, "add", ".");
+  git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -1515,6 +1486,34 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     },
     failOnSeverity: "high",
   });
+  const nativeProject = JSON.parse(
+    await readFile(input.config, "utf8"),
+  ) as Record<string, JsonObject>;
+  delete nativeProject["codex"]!["profiles"];
+  delete nativeProject["codex"]!["model"];
+  await writeFile(input.config, JSON.stringify(nativeProject));
+  await writeFile(
+    join(ambient, "review.config.toml"),
+    'model = "synthetic-native-model"\nmodel_provider = "openrouter"\nmodel_reasoning_effort = "high"\n',
+  );
+  Object.assign(environment, {
+    OPENROUTER_API_KEY: "synthetic-cli-provider-key",
+  });
+  const nativeCli = createCliTest(main);
+  expect(
+    await nativeCli.runCli(
+      ["scan", "-c", input.config, "--dry-run", "--json"],
+      deps,
+    ),
+    nativeCli.stderr.text(),
+  ).toBe(0);
+  expect(JSON.parse(nativeCli.stdout.text())).toMatchObject({
+    model: "synthetic-native-model",
+    modelProvider: "openrouter",
+    reasoningEffort: "high",
+  });
+  expect(createCodex).not.toHaveBeenCalled();
+  expect(prepareRuntime).not.toHaveBeenCalled();
 });
 
 test.each([undefined, "2.5"])(
