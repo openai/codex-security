@@ -148,6 +148,7 @@ def test_diff_registration_keeps_unknown_total_for_missing_local_objects(
     git("config", "remote.origin.promisor", "true")
     git("config", "remote.origin.partialCloneFilter", "blob:none")
     missing = target / ".git" / "objects" / oid[:2] / oid[2:]
+    missing.chmod(0o600)  # Git marks loose objects read-only on Windows.
     missing.unlink()
 
     state_dir = tmp_path / "state"
