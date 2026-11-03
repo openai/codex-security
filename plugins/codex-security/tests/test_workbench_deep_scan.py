@@ -97,6 +97,12 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER record_scan_admission_insert")
+        connection.execute("DROP TRIGGER record_scan_admission_update")
+        connection.execute("DROP TABLE scan_admissions")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN admission_sequence")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN scan_sequence")
+        connection.execute("ALTER TABLE finding_decisions DROP COLUMN decision_sequence")
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )
