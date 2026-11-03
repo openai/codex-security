@@ -5,8 +5,8 @@ import type { Finding } from "./models.js";
 import { bundledPluginRoot, type runWorkbench } from "./runtime.js";
 import {
   FindingWorkflow,
+  scanArtifactDigest,
   workflowDestination,
-  workflowDigest,
 } from "./finding-workflow.js";
 import {
   PublicationTelemetryRecorder,
@@ -151,7 +151,7 @@ async function publishScanToCustomAttempt(
   await workflow.bind({
     scanId: manifest.scan.id,
     scanDir: canonicalDirectory,
-    artifactDigest: workflowDigest(contract),
+    artifactDigest: scanArtifactDigest(contract),
     destination: workflowDestination(options.findingsUrl),
   });
   await workflow.complete("scan", null);

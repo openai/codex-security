@@ -410,7 +410,12 @@ describe("patch risk assessment contract", () => {
     expect(validate(payload).status).not.toBe(0);
   });
 
-  test("preserves the ordered auto-merge gates", () => {
+  test("preserves the ordered auto-merge gates", async () => {
+    const helperSource = new URL(
+      "../../../plugins/codex-security/mcp-app/src/helpers/validate-patch-risk-assessment.ts",
+      import.meta.url,
+    );
+    const { validatePatchRiskAssessment } = await import(helperSource.href);
     const cases: Array<[string, (value: Assessment) => void]> = [
       [
         "impact.rating",
@@ -490,18 +495,19 @@ describe("patch risk assessment contract", () => {
     const payload = assessment();
     payload.workflowLabel = "auto_merge_candidate";
     payload.impact.rating = "low";
-    expect(validate(payload).status).toBe(0);
+    expect(validatePatchRiskAssessment(payload)).toEqual([]);
+    const combined = structuredClone(payload);
     for (const [field, mutate] of cases) {
       const changed = structuredClone(payload);
       mutate(changed);
-      const result = validate(changed);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
+      expect(validatePatchRiskAssessment(changed)).toContain(
         `auto_merge_candidate gate failed: ${field}`,
       );
-      mutate(payload);
+      mutate(combined);
     }
-    expect(validate(payload).stderr.trim().split("\n")).toEqual([
+    const result = validate(combined);
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim().split("\n")).toEqual([
       "merge requires confirmed applicability",
       ...cases.map(([field]) => `auto_merge_candidate gate failed: ${field}`),
     ]);
@@ -703,16 +709,17 @@ describe("patch risk assessment contract", () => {
     try {
       const original =
         JSON.stringify(assessment(), null, 2).replaceAll("\n", "\r\n") + "\r\n";
+      const marked = "\uFEFF" + original;
       for (const name of ["assessment with spaces.json", "-1", "- item", "-"]) {
         const path = join(outside, name);
-        await writeFile(path, original);
+        await writeFile(path, marked);
         const result = validateText("not stdin", outside, [
           name.startsWith("-") ? `./${name}` : name,
         ]);
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toBe("");
         expect(result.stderr).toBe("");
-        expect(await readFile(path, "utf8")).toBe(original);
+        expect(await readFile(path, "utf8")).toBe(marked);
         expect(validateText("", outside, ["--", name]).status).toBe(
           name === "-" ? 1 : 0,
         );

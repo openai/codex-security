@@ -24,8 +24,15 @@ function captureTransport() {
   };
 }
 
-test("stdio preserves ordinary result and error responses exactly", async () => {
+test("stdio preserves ordinary responses and acknowledges only the first successful send", async () => {
   const { transport, lines } = captureTransport();
+  const acknowledged: (number | string)[] = [];
+  const signal = new AbortController().signal;
+  for (const id of [0, ""]) {
+    transport.afterResultSent(id, signal, async () => {
+      acknowledged.push(id);
+    });
+  }
   const messages: JSONRPCMessage[] = [
     { jsonrpc: "2.0", id: 0, result: { text: 'A quote: " and a newline:\n' } },
     {
@@ -36,9 +43,14 @@ test("stdio preserves ordinary result and error responses exactly", async () => 
   ];
   for (const message of messages) await transport.send(message);
   assert.deepEqual(lines, messages.map(serializeMessage));
+  assert.deepEqual(acknowledged, [0]);
+  for (const id of [0, ""]) {
+    await transport.send({ jsonrpc: "2.0", id, result: {} });
+  }
+  assert.deepEqual(acknowledged, [0]);
 });
 
-test("stdio counts UTF-8 JSON escaping and the LF at the native line boundary", async () => {
+test("stdio counts UTF-8 JSON escaping and the LF at the native line boundary", async (t) => {
   for (const bytes of [nativeLineLimitBytes, nativeLineLimitBytes + 1]) {
     const { transport, lines } = captureTransport();
     const message = {
@@ -53,6 +65,12 @@ test("stdio counts UTF-8 JSON escaping and the LF at the native line boundary", 
     assert.equal(Buffer.byteLength(serialized), bytes);
     assert.ok(serialized.length < bytes);
 
+    const acknowledge = t.mock.fn(async () => {});
+    transport.afterResultSent(
+      message.id,
+      new AbortController().signal,
+      acknowledge,
+    );
     await transport.send(message);
     assert.equal(lines.length, 1);
     if (bytes === nativeLineLimitBytes) {
@@ -70,7 +88,80 @@ test("stdio counts UTF-8 JSON escaping and the LF at the native line boundary", 
         response.error.message,
         /operation may already have completed/,
       );
+      await transport.send({ jsonrpc: "2.0", id: message.id, result: {} });
     }
+    assert.equal(
+      acknowledge.mock.callCount(),
+      bytes === nativeLineLimitBytes ? 1 : 0,
+    );
+  }
+});
+
+test("aborting before or during a backpressured send leaves the result unacknowledged", async (t) => {
+  for (const abortBeforeSend of [true, false]) {
+    let finishWrite: (() => void) | undefined;
+    const stdout = new Writable({
+      highWaterMark: 1,
+      write(_chunk, _encoding, callback) {
+        finishWrite = callback;
+      },
+    });
+    const transport = new CodexSecurityStdioTransport(
+      new PassThrough(),
+      stdout,
+    );
+    const waiter = new AbortController();
+    const acknowledge = t.mock.fn(async () => {});
+    transport.afterResultSent(1, waiter.signal, acknowledge);
+    if (abortBeforeSend) waiter.abort();
+    const sending = transport.send({ jsonrpc: "2.0", id: 1, result: {} });
+    assert.equal(stdout.writableNeedDrain, true);
+    assert.equal(acknowledge.mock.callCount(), 0);
+    if (!abortBeforeSend) waiter.abort();
+    assert.ok(finishWrite);
+    finishWrite();
+    await sending;
+    assert.equal(acknowledge.mock.callCount(), 0);
+  }
+});
+
+test("a failed or disconnected stdout write leaves the result unacknowledged", async (t) => {
+  for (const disconnect of [false, true]) {
+    let finishWrite!: (error?: Error | null) => void;
+    const lines: string[] = [];
+    const stdout = new Writable({
+      highWaterMark: disconnect ? 1 : 1024,
+      write(chunk: Buffer, _encoding, callback) {
+        lines.push(chunk.toString("utf8"));
+        finishWrite = callback;
+      },
+    });
+    const transport = new CodexSecurityStdioTransport(
+      new PassThrough(),
+      stdout,
+    );
+    const acknowledge = t.mock.fn(async () => {});
+    transport.afterResultSent(1, new AbortController().signal, acknowledge);
+    const message: JSONRPCMessage = { jsonrpc: "2.0", id: 1, result: {} };
+    const sending = transport.send(message);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stdout.writableNeedDrain, disconnect);
+    assert.equal(acknowledge.mock.callCount(), 0);
+
+    const rejected = assert.rejects(
+      sending,
+      disconnect ? /close/i : /write failure/,
+    );
+    if (disconnect) {
+      stdout.destroy();
+      await rejected;
+      finishWrite();
+    } else {
+      finishWrite(new Error("write failure"));
+      await rejected;
+    }
+    assert.equal(acknowledge.mock.callCount(), 0);
+    assert.deepEqual(lines, [serializeMessage(message)]);
   }
 });
 

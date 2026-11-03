@@ -15,13 +15,17 @@ process.once("exit", () =>
 
 export async function importModule(options: BuildOptions) {
   const result = await build({
+    // Bundled CommonJS dependencies such as yaml load Node builtins.
+    banner: {
+      js: 'const require = process.getBuiltinModule("node:module").createRequire(import.meta.url);',
+    },
     bundle: true,
     format: "esm",
     platform: "node",
     write: false,
     ...options,
   });
-  const contents = result.outputFiles![0].contents;
+  const contents = result.outputFiles![0]!.contents;
   // Keep content-based module identity without embedding the bundle in stacks.
   const digest = createHash("sha256").update(contents).digest("hex");
   const modulePath = join(moduleDirectory, `${digest}.mjs`);

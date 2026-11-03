@@ -377,15 +377,17 @@ class FinalizerSarifCases:
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_streams_source(self) -> None:
-        source_path = self.scan_dir / "extract.py"
-        source_path.write_text("line 1\nline 2\n", encoding="utf-8")
-        with mock.patch.object(Path, "read_text", side_effect=AssertionError("not streamed")):
-            with source_path.open("r", encoding="utf-8") as handle:
-                line_hashes = FINALIZER._github_line_hashes(handle)
-        self.assertEqual(line_hashes[1], "a4060029c94de37e:1")
+        class ShortReads(io.StringIO):
+            def read(self, size: int = -1) -> str:
+                if size <= 0:
+                    raise AssertionError("expected a bounded source read")
+                return super().read(min(size, 3))
+
+        with ShortReads("line 1\nline 2\n") as source:
+            self.assertEqual(FINALIZER._github_line_hashes(source)[1], "a4060029c94de37e:1")
 
     def test_sarif_line_hash_includes_lines_beyond_previous_limit(self) -> None:
-        source = io.StringIO("line\n" * 100_001)
+        source = io.StringIO("\n" * 100_000 + "source\n")
 
         self.assertIn(100_001, FINALIZER._github_line_hashes(source, {100_001}))
 
@@ -396,7 +398,8 @@ class FinalizerSarifCases:
         findings = []
         for index in range(2):
             relative_path = f"src/extract-{index}.py"
-            (source_root / relative_path).write_text(" " * (6 * 1024 * 1024) + "x")
+            # The two files together exceed the former 10 MiB source budget.
+            (source_root / relative_path).write_text(" " * (5 * 1024 * 1024) + "x")
             finding = self.sarif_finding(f"fingerprint-{index}", str(index))
             finding["locations"][0] = {"path": relative_path, "startLine": 1}
             findings.append(finding)

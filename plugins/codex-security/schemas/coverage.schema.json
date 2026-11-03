@@ -73,7 +73,18 @@
           "reason": { "type": "string", "minLength": 1 },
           "paths": {
             "type": "array",
-            "items": { "type": "string", "minLength": 1 }
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "oneOf": [
+                {},
+                {
+                  "type": "string",
+                  "$comment": "invalidSealedDeferredPath",
+                  "pattern": "^(?:/|[A-Za-z]:)|(?:^|/)\\.\\.(?:/|$)|[\\\\\\x00-\\x1f]|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?:^|[^\\ud800-\\udbff])[\\udc00-\\udfff]"
+                }
+              ]
+            }
           },
           "surfaceIds": {
             "type": "array",

@@ -1,15 +1,27 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  snapshotNormalizedFindings,
+  type ExternalFindings,
+} from "../src/external-findings.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
 import { listLocalExternalFindings } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { readExternalFindings } from "../src/external-findings-read.js";
-import { validateExternalEvidence } from "../src/external-import-contract.js";
+import {
+  validateExternalEvidence,
+  validateExternalEvidenceJson,
+} from "../src/external-import-contract.js";
 import type {
   ExternalFindingEvidence,
   Provider,
 } from "../src/external-import-models.js";
+import {
+  temporaryDirectory,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import {
@@ -184,46 +196,26 @@ const formats: [string, Provider, () => string][] = [
 ];
 
 test.each(formats)(
-  "%s persists large local evidence while Cloud retains its size limit",
+  "%s retains large evidence locally and excludes it from Cloud",
   async (_name, provider, contents) => {
-    const fixture = await localFindingsFixture({ remote: repositoryUrl });
+    const directory = await temporaryDirectory("scanner-limits-");
     try {
-      const file = join(fixture.root, "scanner-report");
+      const file = join(directory, "scanner-report");
       await writeFile(file, contents());
-      const options = {
-        provider,
-        repository: fixture.repository,
-        sourceKey: "synthetic-project",
-        sourceRepositoryUrl: repositoryUrl,
-      };
-      const dependencies = { environment: fixture.environment };
+      const options = { provider, sourceRepositoryUrl: repositoryUrl };
       const cloud = await readExternalFindings(file, options);
       expect(cloud.findings.findings).toEqual([]);
       expect(cloud.findings.excluded).toHaveLength(1);
       expect(cloud.findings.excluded[0]!.reason).toContain("256 KiB");
 
-      const prepared = await prepareLocalExternalImport(
-        file,
-        options,
-        dependencies,
-      );
-      expect(prepared.preview.excluded).toEqual([]);
-      expect(prepared.preview.findings).toHaveLength(1);
+      const local = await readExternalFindings(file, options, "local");
+      expect(local.findings.excluded).toEqual([]);
+      expect(local.findings.findings).toHaveLength(1);
       expect(
-        JSON.stringify(prepared.preview.findings[0]!.evidence.source_data),
+        JSON.stringify(local.findings.findings[0]!.evidence.source_data),
       ).toContain(retainedEvidence);
-      expect((await prepared.import()).counts).toEqual({
-        created: 1,
-        updated: 0,
-        unchanged: 0,
-      });
-      const stored = await listLocalExternalFindings(options, dependencies);
-      expect(stored).toHaveLength(1);
-      expect(stored[0]!.evidence).toEqual(
-        prepared.preview.findings[0]!.evidence,
-      );
     } finally {
-      await fixture.dispose();
+      await removeTemporaryDirectory(directory);
     }
   },
 );
@@ -232,6 +224,7 @@ let nested: Record<string, unknown> = { leaf: "retained" };
 for (let index = 0; index < 24; index++) nested = { child: nested };
 
 const evidenceLimits: [string, Partial<ExternalFindingEvidence>][] = [
+  ["raw evidence size", { source_data: { retainedEvidence } }],
   ["UTF-8 field bytes", { title: "é".repeat(257) }],
   ["description length", { description: "x".repeat(65537) }],
   [
@@ -255,104 +248,262 @@ const evidenceLimits: [string, Partial<ExternalFindingEvidence>][] = [
   ["JSON depth", { source_data: nested }],
 ];
 
-test.each(evidenceLimits)(
-  "local imports retain %s above Cloud's contract",
-  async (_name, fields) => {
-    const fixture = await localFindingsFixture({ remote: repositoryUrl });
-    try {
-      const input = {
-        ...normalized(),
-        evidence: { ...normalized().evidence, ...fields },
-      };
-      const file = join(fixture.root, "normalized.jsonl");
-      await writeFile(file, JSON.stringify(input));
-      const options = {
-        provider: "wiz" as const,
-        repository: fixture.repository,
-        sourceKey: "synthetic-project",
-      };
-      const dependencies = { environment: fixture.environment };
-      const prepared = await prepareLocalExternalImport(
-        file,
+test("local SQLite preserves each oversized evidence field and Cloud rejects each one before authentication", async () => {
+  await using fixture = await localFindingsFixture({ remote: repositoryUrl });
+  const inputs = evidenceLimits.map(([id, fields]) => ({
+    source_finding_id: id,
+    evidence: { ...normalized().evidence, ...fields },
+  }));
+  const file = join(fixture.root, "normalized.jsonl");
+  await writeFile(
+    file,
+    inputs.map((record) => JSON.stringify(record)).join("\n"),
+  );
+  const options = {
+    provider: "wiz" as const,
+    repository: fixture.repository,
+    sourceKey: "synthetic-project",
+  };
+  const dependencies = { environment: fixture.environment };
+  const prepared = await prepareLocalExternalImport(
+    file,
+    options,
+    dependencies,
+  );
+  expect(prepared.preview.excluded).toEqual([]);
+  expect((await prepared.import()).counts.created).toBe(inputs.length);
+  const stored = new Map(
+    (await listLocalExternalFindings(options, dependencies)).map((finding) => [
+      finding.sourceFindingId,
+      finding.evidence,
+    ]),
+  );
+  expect(stored.size).toBe(inputs.length);
+  for (const { source_finding_id, evidence } of prepared.preview.findings)
+    expect(stored.get(source_finding_id)).toEqual(evidence);
+
+  const cloud = await readExternalFindings(file, options);
+  expect(cloud.findings.findings).toEqual([]);
+  expect(cloud.findings.excluded.map((item) => item.source_finding_id)).toEqual(
+    inputs.map((input) => input.source_finding_id),
+  );
+  const credentials = mock(async () => {
+    throw new Error("Unexpected credential access");
+  });
+  for (const [index, input] of inputs.entries()) {
+    expect(stored.get(input.source_finding_id)).toMatchObject(
+      evidenceLimits[index]![1],
+    );
+    expect(() =>
+      validateExternalEvidence(structuredClone(input.evidence)),
+    ).toThrow();
+    await expect(
+      prepareNormalizedExternalPublication(
+        { read: 1, findings: [input], excluded: [] },
         options,
-        dependencies,
-      );
-      expect(prepared.preview.excluded).toEqual([]);
-      const imported = await prepared.import();
-      expect(imported.counts.created).toBe(1);
-      const stored = await listLocalExternalFindings(options, dependencies);
-      expect(stored[0]!.evidence).toEqual(
-        prepared.preview.findings[0]!.evidence,
-      );
-      expect(stored[0]!.evidence).toMatchObject(fields);
-      expect(() =>
-        validateExternalEvidence(structuredClone(input.evidence)),
-      ).toThrow();
-      const cloud = await readExternalFindings(file, options);
-      expect(cloud.findings.findings).toEqual([]);
-      expect(cloud.findings.excluded).toHaveLength(1);
-      const credentials = mock(async () => {
-        throw new Error("Unexpected credential access");
-      });
-      await expect(
-        prepareNormalizedExternalPublication(
-          { read: 1, findings: [input], excluded: [] },
-          options,
-          { credentials },
-        ),
-      ).rejects.toThrow();
-      expect(credentials).not.toHaveBeenCalled();
-    } finally {
-      await fixture.dispose();
-    }
-  },
-);
+        { ...dependencies, credentials },
+      ),
+    ).rejects.toThrow();
+  }
+  expect(credentials).not.toHaveBeenCalled();
+});
 
 test.each(["wiz", "endor"] as const)(
   "%s local imports preserve source identities longer than Cloud accepts",
   async (provider) => {
-    const fixture = await localFindingsFixture();
-    try {
-      const identity = "x".repeat(513);
-      const input =
-        provider === "wiz"
-          ? { ...normalized(), source_finding_id: identity }
-          : { ...endorFinding(), uuid: identity };
-      const file = join(fixture.root, "normalized.jsonl");
-      await writeFile(file, JSON.stringify(input));
-      const options = {
-        provider,
-        repository: fixture.repository,
-        sourceKey: "synthetic-project",
-      };
-      const dependencies = { environment: fixture.environment };
-      const prepared = await prepareLocalExternalImport(
-        file,
+    await using fixture = await localFindingsFixture();
+    const identity = "x".repeat(513);
+    const input =
+      provider === "wiz"
+        ? { ...normalized(), source_finding_id: identity }
+        : { ...endorFinding(), uuid: identity };
+    const file = join(fixture.root, "normalized.jsonl");
+    await writeFile(file, JSON.stringify(input));
+    const options = {
+      provider,
+      repository: fixture.repository,
+      sourceKey: "synthetic-project",
+    };
+    const dependencies = { environment: fixture.environment };
+    const prepared = await prepareLocalExternalImport(
+      file,
+      options,
+      dependencies,
+    );
+    expect(prepared.preview.excluded).toEqual([]);
+    expect((await prepared.import()).counts.created).toBe(1);
+    const stored = await listLocalExternalFindings(options, dependencies);
+    expect(stored[0]!.sourceFindingId).toBe(identity);
+    const cloud = await readExternalFindings(file, options);
+    expect(cloud.findings.excluded[0]!.reason).toContain("512");
+    const credentials = mock(async () => {
+      throw new Error("Unexpected credential access");
+    });
+    await expect(
+      prepareNormalizedExternalPublication(
+        { read: 1, findings: prepared.preview.findings, excluded: [] },
         options,
-        dependencies,
-      );
-      expect(prepared.preview.excluded).toEqual([]);
-      expect((await prepared.import()).counts.created).toBe(1);
-      const stored = await listLocalExternalFindings(options, dependencies);
-      expect(stored[0]!.sourceFindingId).toBe(identity);
-      const cloud = await readExternalFindings(file, options);
-      expect(cloud.findings.excluded[0]!.reason).toContain("512");
-      const credentials = mock(async () => {
-        throw new Error("Unexpected credential access");
-      });
-      await expect(
-        prepareNormalizedExternalPublication(
-          { read: 1, findings: prepared.preview.findings, excluded: [] },
-          options,
-          { credentials },
-        ),
-      ).rejects.toThrow("512");
-      expect(credentials).not.toHaveBeenCalled();
-    } finally {
-      await fixture.dispose();
+        { ...dependencies, credentials },
+      ),
+    ).rejects.toThrow("512");
+    expect(credentials).not.toHaveBeenCalled();
+  },
+);
+
+test.each([1e-7, 0.00001])(
+  "Cloud counts the serialized numeric value %s at the evidence byte limit",
+  (score) => {
+    const limit = 256 * 1024;
+    const padding =
+      limit - validateExternalEvidenceJson({ scores: [score] }, "cloud");
+    for (const value of [
+      new Number(score),
+      { hidden: 0.00001, toJSON: () => score },
+      { toJSON: () => Object.assign(new Number(1), { valueOf: () => score }) },
+    ]) {
+      expect(
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding),
+      ).toBe(limit);
+      expect(() =>
+        validateExternalEvidenceJson({ scores: [value] }, "cloud", padding + 1),
+      ).toThrow("256 KiB");
     }
   },
 );
+
+test("Cloud measures caller fields at their exported numeric size", () => {
+  const limit = 256 * 1024;
+  const padding =
+    limit - validateExternalEvidenceJson({ score: 1e-7 }, "cloud");
+  const score = Object.assign(new Number(1), { toJSON: () => 1e-7 });
+  class Metrics {
+    score = score;
+  }
+  for (const input of [
+    { score },
+    new Metrics(),
+    {
+      get score() {
+        return score;
+      },
+    },
+  ]) {
+    expect(validateExternalEvidenceJson(input, "cloud", padding)).toBe(limit);
+    expect(() =>
+      validateExternalEvidenceJson(input, "cloud", padding + 1),
+    ).toThrow("256 KiB");
+  }
+});
+
+test("local reports and findings need only fit in separate JSON strings", () => {
+  const padding = "x".repeat(3_000);
+  const observations: string[] = [];
+  const report = {
+    toJSON(key: string) {
+      observations.push(key);
+      return {
+        padding,
+        toJSON() {
+          throw new Error("Report was serialized twice");
+        },
+      };
+    },
+  };
+  const input: ExternalFindings = {
+    report,
+    get findings() {
+      observations.push("findings");
+      return [
+        {
+          ...normalized(),
+          evidence: { ...normalized().evidence, source_data: { padding } },
+        },
+      ];
+    },
+    read: 1,
+    excluded: [],
+  };
+  const stringify = JSON.stringify;
+  // Exercise the string boundary in CI without allocating hundreds of MiB.
+  const bounded = spyOn(JSON, "stringify").mockImplementation((...args) => {
+    const json: string = Reflect.apply(stringify, JSON, args);
+    if (json?.length > 4_000) throw new RangeError("Invalid string length");
+    return json;
+  });
+  try {
+    const snapshot = snapshotNormalizedFindings(input);
+    expect(snapshot.report).toEqual({ padding });
+    expect(snapshot.findings[0]!.evidence.source_data).toEqual({ padding });
+    expect(observations).toEqual(["report", "findings"]);
+  } finally {
+    bounded.mockRestore();
+  }
+});
+
+test("local numeric evidence and GitHub batches fit in a 64 MiB Node heap", () => {
+  const sdk = join(import.meta.dir, "..");
+  function run(entrypoint: string, script: string) {
+    const source = execFileSync(
+      process.execPath,
+      [
+        "build",
+        join(sdk, "src", entrypoint + ".ts"),
+        "--target=node",
+        "--format=cjs",
+        "--packages=external",
+      ],
+      { encoding: "utf8" },
+    );
+    return execFileSync(
+      "node",
+      ["--max-old-space-size=64", "--input-type=commonjs"],
+      {
+        input: `${source}\n{${script}}`,
+        cwd: sdk,
+        encoding: "utf8",
+      },
+    );
+  }
+  const direct = run(
+    "external-import-contract",
+    `
+    const samples = Array.from({length: 400_000}, (_, index) => index % 10);
+    const input = {title: "Samples", severity: "low", source_data: {samples}};
+    const result = module.exports.validateExternalEvidence(input, "local");
+    process.stdout.write(String(result.source_data.samples.length));
+  `,
+  );
+  expect(direct).toBe("400000");
+
+  for (const kind of ["alert", "advisory"] as const) {
+    const alert = kind === "alert";
+    const record = alert ? importedAlert() : importedAdvisory();
+    const reader = alert
+      ? "normalizeGitHubCodeScanningAlerts"
+      : "normalizeGitHubAdvisories";
+    const samples = alert
+      ? "Array(650_000).fill(1)"
+      : "Buffer.alloc(512 * 1024)";
+    const retained = run(
+      "github-findings",
+      `
+      const record = ${JSON.stringify(record)};
+      const samples = ${samples};
+      const score = Object.assign(new Number(7), {toJSON: () => 9});
+      record.${kind}.samples = samples;
+      record.${kind}.score = score;
+      if (Array.isArray(samples)) samples[samples.length - 1] = score;
+      const result = module.exports.${reader}([record], "local");
+      const row = result.findings[0].evidence.source_data.${kind};
+      const values = Array.isArray(row.samples) ? row.samples : row.samples.data;
+      process.stdout.write(JSON.stringify([values.length, values.at(-1), row.score]));
+    `,
+    );
+    expect(JSON.parse(retained)).toEqual(
+      alert ? [650_000, 9, 9] : [524_288, 0, 9],
+    );
+  }
+});
 
 test("local evidence validation keeps structure, paths, links and numeric integrity", () => {
   const circular: Record<string, unknown> = {};
@@ -387,44 +538,40 @@ test("local evidence validation keeps structure, paths, links and numeric integr
 });
 
 test("large local records still require distinct identities and matching repository provenance", async () => {
-  const fixture = await localFindingsFixture({ remote: repositoryUrl });
-  try {
-    const input = {
-      ...normalized(),
-      evidence: { ...normalized().evidence, source_data: { retainedEvidence } },
-    };
-    const file = join(fixture.root, "normalized.jsonl");
-    const options = {
-      provider: "wiz" as const,
-      repository: fixture.repository,
-      sourceKey: "synthetic-project",
-    };
-    const dependencies = { environment: fixture.environment };
-    await writeFile(
-      file,
-      [input, input].map((finding) => JSON.stringify(finding)).join("\n"),
-    );
-    await expect(
-      prepareLocalExternalImport(file, options, dependencies),
-    ).rejects.toThrow("Duplicate source");
-    await writeFile(
-      file,
-      JSON.stringify({
-        ...input,
-        evidence: {
-          ...input.evidence,
-          details: {
-            kind: "sast",
-            repository: { url: "https://github.com/example/other" },
-          },
+  await using fixture = await localFindingsFixture({ remote: repositoryUrl });
+  const input = {
+    ...normalized(),
+    evidence: { ...normalized().evidence, source_data: { retainedEvidence } },
+  };
+  const file = join(fixture.root, "normalized.jsonl");
+  const options = {
+    provider: "wiz" as const,
+    repository: fixture.repository,
+    sourceKey: "synthetic-project",
+  };
+  const dependencies = { environment: fixture.environment };
+  await writeFile(
+    file,
+    [input, input].map((finding) => JSON.stringify(finding)).join("\n"),
+  );
+  await expect(
+    prepareLocalExternalImport(file, options, dependencies),
+  ).rejects.toThrow("Duplicate source");
+  await writeFile(
+    file,
+    JSON.stringify({
+      ...input,
+      evidence: {
+        ...input.evidence,
+        details: {
+          kind: "sast",
+          repository: { url: "https://github.com/example/other" },
         },
-      }),
-    );
-    await expect(
-      prepareLocalExternalImport(file, options, dependencies),
-    ).rejects.toThrow("does not match");
-    expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
-  } finally {
-    await fixture.dispose();
-  }
+      },
+    }),
+  );
+  await expect(
+    prepareLocalExternalImport(file, options, dependencies),
+  ).rejects.toThrow("does not match");
+  expect(await listLocalExternalFindings(options, dependencies)).toEqual([]);
 });

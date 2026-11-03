@@ -41,7 +41,7 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
         "scanDir": str(scan_dir),
         "manifest": manifest,
         "findings": findings,
-        "coverage": coverage,
+        "review": FINALIZER.review_summary(coverage),
     }
 
 
@@ -53,19 +53,14 @@ def receipt(validated: dict[str, Any]) -> dict[str, Any]:
         "scanDir": str(scan_dir),
         "manifestPath": str(scan_dir / "scan-manifest.json"),
         "findingsPath": str(scan_dir / scan["findingsRef"]),
-        "coveragePath": str(scan_dir / scan["coverageRef"]),
         "reportPath": str(scan_dir / "report.md"),
     }
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-dir", required=True, type=Path)
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(argv)
     try:
         validated = validate_contract(args.scan_dir)
     except (OSError, ValueError, RecursionError) as exc:

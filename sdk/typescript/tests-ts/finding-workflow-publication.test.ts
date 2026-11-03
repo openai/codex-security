@@ -411,6 +411,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       runWorkbench: history,
       reviewer,
       fetch,
+      waitForRetry: async () => {},
     };
     await expect(
       deduplicateScanInternal(document.scanId, options, dependencies),

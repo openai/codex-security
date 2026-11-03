@@ -76,7 +76,9 @@ Completion describes operation execution; finding counts do not measure accuracy
 A terminal `reusedResult: true` identifies a cached workflow return. The summary
 counts these as `reusedAttempts`; exclude them from new-work, finding-yield, and
 usage-coverage denominators. Older receipts without the field have unrecorded
-reuse status. Surface and deferred counts are model-reported workflow coverage.
+reuse status. Completed scans report the finding count and whether the scan
+manifest records completion. Older receipts can also contain model-reported
+reviewed surface and deferred counts.
 
 Resuming a saved scan keeps its operation ID but creates a new attempt ID.
 `usageScopeId` identifies cumulative accounting across those attempts. Do not sum

@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -237,6 +238,8 @@ function extractedArchiveFiles() {
   );
   try {
     chmodSync(extractionRoot, 0o700);
+    const fileList = join(extractionRoot, "members.list");
+    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
     try {
       tar([
         "-m",
@@ -249,11 +252,14 @@ function extractedArchiveFiles() {
         "-",
         "-C",
         extractionRoot,
-        ...logicalSizes.keys(),
+        "--null",
+        "-T",
+        fileList,
       ]);
     } finally {
       privateExtractionDirectories(extractionRoot);
     }
+    rmSync(fileList);
 
     const archiveFiles = new Map();
     let expandedBytes = 0;
