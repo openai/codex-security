@@ -6,7 +6,12 @@ import { fileURLToPath } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
 import { parse, stringify } from "smol-toml";
 import type { JsonObject } from "../../src/config.js";
-import { fakeCodexSource } from "../../../../plugins/codex-security/mcp-app/tests/support/fake-codex-source.ts";
+const { createFakeCodexFixture } = await import(
+  new URL(
+    "../../../../plugins/codex-security/mcp-app/tests/deep_scan_native_fixture.ts",
+    import.meta.url,
+  ).href
+);
 const { importModule } = await import(
   new URL(
     "../../../../plugins/codex-security/mcp-app/tests/import-module.ts",
@@ -42,22 +47,11 @@ async function assertWorkerReplay(
   await writeFile(join(home, "config.toml"), "");
   const workerConfig = join(root, "worker-runtime.toml");
   await writeFile(workerConfig, stringify({ worker_runtime: config }));
-  const marker = join(root, "worker-invocation.json");
-  const fake = join(root, "worker-codex.mjs");
   const profile = {
     extends: ":read-only",
     filesystem: { ":root": "read" },
     network: { enabled: false },
   };
-  await writeFile(
-    fake,
-    fakeCodexSource(
-      profile,
-      true,
-      { account: null, requiresOpenaiAuth: false },
-      join(root, "worker-preflight.json"),
-    ),
-  );
   const prompt = join(root, "worker-prompt.md");
   await writeFile(prompt, "Synthetic replay settings check.");
   const node = process.execPath;
@@ -67,15 +61,26 @@ async function assertWorkerReplay(
     CODEX_SECURITY_CONFIG_PATH: join(home, "config.toml"),
     CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfig,
     CODEX_SECURITY_SCAN_DIR: join(root, "scan"),
-    FAKE_CODEX_MARKER: marker,
     OPENAI_API_KEY: undefined,
     CODEX_API_KEY: undefined,
   };
   const previous = Object.fromEntries(
-    Object.keys(environment).map((name) => [name, process.env[name]]),
+    [...Object.keys(environment), "FAKE_CODEX_MARKER"].map((name) => [
+      name,
+      process.env[name],
+    ]),
   );
   const spawn = childProcess.spawn;
   try {
+    const fixture = await createFakeCodexFixture(
+      async () => root,
+      profile,
+      true,
+      {
+        account: null,
+        requiresOpenaiAuth: false,
+      },
+    );
     for (const [key, value] of Object.entries(environment)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -88,7 +93,7 @@ async function assertWorkerReplay(
       spawn(
         command,
         command === node || command === toNamespacedPath(node)
-          ? [fake, ...args]
+          ? [fixture.executablePath, ...args]
           : args,
         options,
       )) as typeof childProcess.spawn;
@@ -107,8 +112,11 @@ async function assertWorkerReplay(
           signal: new AbortController().signal,
         });
         assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
-        const { argv } = JSON.parse(await readFile(marker, "utf8")) as {
+        const { argv, thread } = JSON.parse(
+          await readFile(fixture.markerPath, "utf8"),
+        ) as {
           argv: string[];
+          thread: { method: string; params: { threadId?: string } };
         };
         let selected: JsonObject = {};
         for (let index = 0; index < argv.length; index++)
@@ -135,7 +143,11 @@ async function assertWorkerReplay(
           ],
           profile,
         );
-        assert.equal(argv.includes("resume"), resumeThreadId !== undefined);
+        assert.equal(
+          thread.method,
+          resumeThreadId ? "thread/resume" : "thread/start",
+        );
+        assert.equal(thread.params.threadId, resumeThreadId);
         // Existing coordinators retain their launch snapshot when a source file changes.
         await writeFile(
           workerConfig,
