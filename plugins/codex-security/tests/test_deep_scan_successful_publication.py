@@ -1138,7 +1138,7 @@ def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
     out_of_scope_source,
 ):
     scan = publication_scan(paths=[scope])
-    result_path = add_worker(workbench_db, scan)
+    result_path = scan.add_worker()
     accepted = copy.deepcopy(scan.findings[0])
     for key in ("findingId", "occurrenceId", "fingerprints"):
         accepted.pop(key, None)
@@ -1151,7 +1151,7 @@ def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
     if source_kind == "dedup":
         result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=[accepted])))
         os.utime(result_path, ns=(1_000_000_000, 1_000_000_000))
-        result_path = add_worker(workbench_db, scan)
+        result_path = scan.add_worker()
         with workbench_db:
             workbench_db.execute(
                 "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
@@ -1182,11 +1182,11 @@ def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
 
         with monkeypatch.context() as patch:
             patch.setattr(saved, "_write_prepared_scan_finalization", fail)
-            stopped = fail_scan(workbench_api, workbench_db, scan, "Interrupted.")
+            stopped = scan.fail("Interrupted.")
         assert stopped["resultsRecoveryNeeded"]
-        recover_scan_results(workbench_api, workbench_db, scan)
+        scan.recover()
     else:
-        fail_scan(workbench_api, workbench_db, scan, "Interrupted.")
+        scan.fail("Interrupted.")
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 1
     expected = parent if scope == "subdir" else accepted
@@ -1200,7 +1200,7 @@ def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
         )
     names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
-    recover_scan_results(workbench_api, workbench_db, scan)
+    scan.recover()
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert result_path.read_bytes() == worker_bytes
 
@@ -1209,10 +1209,10 @@ def test_stopped_exact_file_filters_replays_before_identity_reconciliation(
 @pytest.mark.parametrize("excluded_source", ["worker", "parent_first", "parent_last"])
 @pytest.mark.parametrize("parent_kind", ["canonical", "checkpoint", "reducer"])
 def test_stopped_scope_retains_identity_ambiguity_from_excluded_findings(
-    workbench_api, workbench_db, publication_scan, worker_stronger, excluded_source, parent_kind
+    workbench_db, publication_scan, worker_stronger, excluded_source, parent_kind
 ):
     scan = publication_scan(paths=["subdir/extract.py"])
-    result_path = add_worker(workbench_db, scan)
+    result_path = scan.add_worker()
     parent = copy.deepcopy(scan.findings[0])
     for key in ("findingId", "occurrenceId", "fingerprints"):
         parent.pop(key, None)
@@ -1260,7 +1260,7 @@ def test_stopped_scope_retains_identity_ambiguity_from_excluded_findings(
             head.write_text(json.dumps({"checkpoint": selected_parent.name}))
             os.utime(head, ns=(1_000_000_000, 1_000_000_000))
         else:
-            selected_parent = add_worker(workbench_db, scan)
+            selected_parent = scan.add_worker()
             with workbench_db:
                 workbench_db.execute(
                     "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
@@ -1275,7 +1275,7 @@ def test_stopped_scope_retains_identity_ambiguity_from_excluded_findings(
     result_path.write_text(json.dumps(saved_draft(scan.scan_id, findings=worker_findings)))
     os.utime(result_path, ns=(2_000_000_000, 2_000_000_000))
     original = result_path.read_bytes()
-    fail_scan(workbench_api, workbench_db, scan, "Interrupted.")
+    scan.fail("Interrupted.")
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert [finding["locations"] for finding in findings] == [
         parent["locations"],
@@ -1284,7 +1284,7 @@ def test_stopped_scope_retains_identity_ambiguity_from_excluded_findings(
     assert findings[0]["identity"] != findings[1]["identity"]
     names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
-    recover_scan_results(workbench_api, workbench_db, scan)
+    scan.recover()
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
     assert result_path.read_bytes() == original
     if selected_parent:
