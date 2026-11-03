@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import discoveryTemplate from "../../../references/deep-scan/discovery.md";
 import dedupTemplate from "../../../references/deep-scan/dedup.md";
+import type { DeepScanRunState } from "./types.js";
 
 export function deepRoleDigests() {
   return {
@@ -16,6 +17,7 @@ export interface DiscoveryPromptInput {
   scope: string;
   includePaths?: readonly string[];
   userContext?: string;
+  severityRubric?: DeepScanRunState["severityRubric"];
   workerLabel: string;
   subagents: number;
 }
@@ -33,6 +35,7 @@ export function renderDiscoveryPrompt(
     targetPath: input.targetPath,
     includePaths: input.includePaths ?? [input.scope],
     userContext: input.userContext ?? null,
+    severityRubric: input.severityRubric,
     workerLabel: input.workerLabel,
     subagents: input.subagents,
   });
@@ -51,10 +54,12 @@ export function renderDiscoveryPrompt(
 export function renderDedupPrompt(
   reducerLabel: string,
   claimedWorkerIds: string[],
+  severityRubric?: DeepScanRunState["severityRubric"],
 ): string {
   const context = formattedJson({
     reducerLabel,
     claimedWorkerIds,
+    severityRubric,
   });
   return dedupTemplate.replaceAll("{{DEDUP_CONTEXT_JSON}}", () => context);
 }

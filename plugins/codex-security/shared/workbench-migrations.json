@@ -479,6 +479,18 @@
   },
   {
     "version": 59,
+    "name": "retain the launching Deep Scan service tier",
+    "statements": ["ALTER TABLE deep_scan_runs ADD COLUMN service_tier TEXT;"]
+  },
+  {
+    "version": 60,
+    "name": "record classification rubric provenance",
+    "statements": [
+      "ALTER TABLE scan_severity_classifications ADD COLUMN rubric_binding_json TEXT;"
+    ]
+  },
+  {
+    "version": 61,
     "name": "record scan and worker instruction digests",
     "statements": [
       "ALTER TABLE scans ADD COLUMN instruction_digest TEXT;",

@@ -9,8 +9,10 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md": [
+    "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
     "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
+    "848eb40d42b0bf9cf21748b9927d031b0461a4443f63e3954139f9801f41c3f6",
   ],
   "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",

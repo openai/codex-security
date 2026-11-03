@@ -1,5 +1,18 @@
 [
   [
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 61 WHERE version = 59' AS value",
+    "FROM schema_migrations WHERE version = 59 AND name = 'record scan and worker instruction digests';"
+  ],
+  [
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (58, 59) AND name = 'record classification rubric provenance';"
+  ],
+  [
     "-- Move checkpoint previews before source-scope history checks.",
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",

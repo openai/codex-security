@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { classificationRunsSchema } from "./severity-review.js";
+import { severityRubricSchema } from "./severity-rubric.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
@@ -16,6 +17,7 @@ import {
   spawn,
 } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { errorMonitor } from "node:events";
 import {
   accessSync,
   constants,
@@ -134,19 +136,15 @@ import {
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
-import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
-import {
-  classifySeverityRecords,
-  type ClassifySeverityRecordsInput,
-} from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
-import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  verificationBatches,
+  VerificationFindingTooLargeError,
   VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
@@ -407,6 +405,7 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
+const TOKEN_OUTPUT_OPTION = /^--token-(?:count|limit|offset)(?:=|$)/u;
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -1121,6 +1120,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  rubricPath?: string;
+  severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
@@ -1180,6 +1181,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
@@ -1212,6 +1214,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
+  readonly signal?: AbortSignal;
   context?: string;
   contextFile?: string;
   knowledgeBasePath?: string;
@@ -1572,15 +1575,17 @@ export async function runCodexSkillCommand(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory)),
+          ...(await enclosingGitWorktreeRoots(directory, output.signal)),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
-        releaseCredentialHome =
-          await acquireCodexSecurityCredentialHomeLock(codexHome);
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          codexHome,
+          output.signal,
+        );
         let credentialsAvailable: boolean;
         const ambientAuthConfig = await readCodexHomeConfig(selected);
         credentialConfig = await readCodexHomeConfig({
@@ -1621,9 +1626,10 @@ export async function runCodexSkillCommand(
           CODEX_HOME: codexHome,
           CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(selected),
         };
+        output.signal?.throwIfAborted();
         if (
           !credentialsAvailable &&
-          !(await accountStatus(command, selected)).authenticated
+          !(await accountStatus(command, selected, output.signal)).authenticated
         ) {
           throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
         }
@@ -1636,10 +1642,10 @@ export async function runCodexSkillCommand(
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
-          const removeSignals = listenForAbort(
-            DEFAULT_DEPENDENCIES,
-            controller,
-          );
+          const signal = output.signal ?? controller.signal;
+          const removeSignals = output.signal
+            ? undefined
+            : listenForAbort(DEFAULT_DEPENDENCIES, controller);
           try {
             args = [
               ...args,
@@ -1649,15 +1655,14 @@ export async function runCodexSkillCommand(
                 selected,
                 directory,
                 ambientConfig,
-                controller.signal,
+                signal,
               )),
             ];
           } catch (error) {
-            if (controller.signal.aborted)
-              return controller.signal.reason === "SIGINT" ? 130 : 143;
+            if (signal.aborted) return signal.reason === "SIGINT" ? 130 : 143;
             throw error;
           } finally {
-            removeSignals();
+            removeSignals?.();
           }
         }
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
@@ -1712,6 +1717,7 @@ export async function runCodexSkillCommand(
         expandHome(configuredHome, processEnvironment),
       );
     }
+    output?.signal?.throwIfAborted();
     const invocation = spawn(
       executablePathForSpawn(command.command),
       [...args],
@@ -1750,11 +1756,12 @@ export async function runCodexSkillCommand(
         forcedTermination = undefined;
         if (invocation.exitCode === null && invocation.signalCode === null) {
           invocation.kill("SIGKILL");
+        } else {
+          forceStatusCompletion?.();
         }
         forceCaptureCompletion?.();
         invocation.stdout?.destroy();
         invocation.stderr?.destroy();
-        forceStatusCompletion?.();
       }, CHILD_TERMINATION_GRACE_MS);
     };
     const onInterrupt = (): void => {
@@ -1763,6 +1770,18 @@ export async function runCodexSkillCommand(
     const onTerminate = (): void => {
       requestTermination("SIGTERM");
     };
+    const signal = output?.signal;
+    const onAbort = (): void => {
+      // A process signal also invokes the handlers below in the same turn.
+      queueMicrotask(() => {
+        if (requestedSignal === null && forceStatusCompletion !== null) {
+          requestTermination(
+            signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+          );
+        }
+      });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
     try {
@@ -1865,6 +1884,7 @@ export async function runCodexSkillCommand(
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       forceStatusCompletion = null;
       forceCaptureCompletion = null;
+      signal?.removeEventListener("abort", onAbort);
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
     }
@@ -1964,6 +1984,49 @@ async function skillDaybreakConfigOverrides(
   return overrides;
 }
 
+function writeOptionalVerificationDiagnostic(
+  stream: Writable,
+  message: string,
+): void {
+  try {
+    if (!(stream instanceof NodeWritable)) {
+      stream.write(message);
+    } else if (stream.writable) {
+      stream.write(message, (error) => {
+        // Node calls the write callback before emitting its error. A stalled
+        // write needs no listener, and other consumers still receive the event.
+        if (
+          error &&
+          !stream.closed &&
+          stream.errored === error &&
+          !stream.listenerCount("error")
+        )
+          stream.once("error", () => {});
+      });
+    }
+  } catch {}
+}
+
+function guardDisconnectedVerificationTerminal(stream: Writable): void {
+  if (stream !== process.stderr || !stream.isTTY) return;
+  const stderr = process.stderr;
+  if (!stderr.listeners(errorMonitor).includes(handleDisconnectedResize)) {
+    stderr.on(errorMonitor, handleDisconnectedResize);
+  }
+}
+
+// Node refreshes the TTY size on SIGWINCH even after main() returns. Handle
+// only a disconnected terminal's resize when no other consumer handles it.
+function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
+  if (
+    error.code === "EIO" &&
+    error.syscall === "getWindowSize" &&
+    process.stderr.listenerCount("error") === 0
+  ) {
+    process.stderr.once("error", () => {});
+  }
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
@@ -1977,13 +2040,16 @@ export async function main(
       : argv[0] === "verify-fix"
         ? "verify"
         : undefined;
+  const recordsCommand =
+    argv[0] === "dedupe" ||
+    argv[0] === "validate" ||
+    argv[0] === "classify-severity"
+      ? argv[0]
+      : undefined;
   const hostedCommand =
     argv[0] === "scan" || remediationOperation !== undefined;
   if (
-    (((argv[0] === "dedupe" ||
-      argv[0] === "validate" ||
-      argv[0] === "classify-severity") &&
-      argv.includes("--records")) ||
+    ((recordsCommand !== undefined && argv.includes("--records")) ||
       (hostedCommand &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
@@ -2021,36 +2087,21 @@ export async function main(
     const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
-      const runProtocol =
-        argv[0] === "scan"
-          ? runHostedScanProtocol
-          : argv[0] === "validate"
-            ? runValidationRecordsProtocol
-            : runRecordsProtocol;
+      const input = dependencies.recordsInput ?? process.stdin;
       const code =
-        argv[0] === "classify-severity"
-          ? await runHostRecordsProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              (value, options) =>
-                classifySeverityRecords(value as ClassifySeverityRecordsInput, {
-                  ...options,
-                  classificationRuns,
-                }),
-              controller.signal,
-            )
+        recordsCommand !== undefined
+          ? await runHostRecordsProtocol(recordsCommand, input, output, {
+              signal: controller.signal,
+              classificationRuns,
+            })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
-                dependencies.recordsInput ?? process.stdin,
+                input,
                 output,
                 controller.signal,
                 remediationOperation,
               )
-            : await runProtocol(
-                dependencies.recordsInput ?? process.stdin,
-                output,
-                controller.signal,
-              );
+            : await runHostedScanProtocol(input, output, controller.signal);
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -2069,6 +2120,8 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
+  let batchedVerification = false;
+  let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedOutput: string | undefined;
   let structuredError = false;
@@ -4614,6 +4667,11 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          rubric: optionValue("--rubric")
+            .optional()
+            .describe(
+              "Use this Markdown file to grade findings. Takes precedence over the default severity rubric.",
+            ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append scan instructions from FILE."),
@@ -4786,6 +4844,10 @@ export async function main(
           outcome = await runScan(
             {
               ...settings,
+              rubricPath:
+                options.rubric === undefined
+                  ? undefined
+                  : resolveCliPath(directory, options.rubric),
               codexOverrides: config.codexOverrides,
               projectConfig: provenance,
               workflowId: options.workflowId,
@@ -6112,8 +6174,16 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options, error: incurError }) {
-        const diagnostics = captureOutput();
-        let failureReported = false;
+        let workerDiagnostic: string | undefined;
+        const structured = format === "json" || format === "jsonl";
+        const reportDiagnostic = async (chunk: string): Promise<void> => {
+          if (structured) {
+            if (!batchedVerification || frameworkFlags.tokenOutput)
+              deferredVerificationDiagnostic = chunk;
+          } else {
+            await writeCliOutput(errorOutput, chunk).catch(() => {});
+          }
+        };
         try {
           if (options.host)
             throw new CodexSecurityError("Use verify-fix --host alone.");
@@ -6132,6 +6202,7 @@ export async function main(
             );
           }
 
+          if (savedFindings) guardDisconnectedVerificationTerminal(errorOutput);
           const selected = savedFindings
             ? await selectSavedFindings(
                 positionals,
@@ -6163,75 +6234,112 @@ export async function main(
           }
           const repository =
             selected?.repository ?? dependencies.currentDirectory();
-          let results: FindingVerification[] = [];
+          const results: FindingVerification[] = [];
           if (identifiers.length > 0) {
             const environment =
               imports.length === 0
                 ? undefined
                 : withoutLinearCredentials(dependencies.environment);
-            const response = captureOutput();
-            const progress = new FindingProgressPresenter(
-              errorOutput,
-              dependencies,
-              repository,
-              identifiers.length,
-            );
-            progress.startVerification();
-            const verificationErrors = new NodeWritable({
-              write(chunk, _encoding, callback) {
-                diagnostics.stream.write(chunk);
-                progress.stop();
-                void writeCliOutput(errorOutput, chunk).then(
-                  () => callback(),
-                  callback,
+            const batches = selected
+              ? await verificationBatches(
+                  selected.findings,
+                  await bundledPluginRoot(),
+                  options.verificationMode,
+                )
+              : [undefined];
+            // Multi-batch verification can outlive its stderr reader. Keep
+            // optional progress off that execution path so terminal failures
+            // and backpressure cannot prevent a complete stdout result.
+            batchedVerification = batches.length > 1;
+            const progress = batchedVerification
+              ? undefined
+              : new FindingProgressPresenter(
+                  errorOutput,
+                  dependencies,
+                  repository,
+                  identifiers.length,
                 );
-              },
-            });
+            const controller = batchedVerification
+              ? new AbortController()
+              : undefined;
+            const removeSignals =
+              controller && listenForAbort(dependencies, controller);
             try {
-              exitCode = await runSkill(
-                "verify-fix",
-                selected === undefined ? [...positionals, ...imports] : [],
-                options,
-                response.stream,
-                verificationErrors,
-                dependencies,
-                {
-                  directory: repository,
-                  ...(selected === undefined
-                    ? {}
-                    : { findings: selected.findings }),
-                  auth: options.auth,
-                  verificationIds: identifiers,
-                  verificationMode: options.verificationMode,
-                  environment,
-                  onEvent: progress.observe.bind(progress),
-                },
-              );
-              if (exitCode !== 0) {
+              progress?.startVerification();
+              for (const findings of batches) {
+                const batchIds =
+                  findings?.map(({ occurrenceId }) => occurrenceId) ??
+                  identifiers;
+                const response = captureOutput();
+                const diagnostics = captureOutput();
+                const verificationErrors = progress
+                  ? new NodeWritable({
+                      write(chunk, _encoding, callback) {
+                        diagnostics.stream.write(chunk);
+                        progress.stop();
+                        void writeCliOutput(errorOutput, chunk).then(
+                          () => callback(),
+                          callback,
+                        );
+                      },
+                    })
+                  : diagnostics.stream;
+                exitCode = await runSkill(
+                  "verify-fix",
+                  selected === undefined ? [...positionals, ...imports] : [],
+                  options,
+                  response.stream,
+                  verificationErrors,
+                  dependencies,
+                  {
+                    directory: repository,
+                    findings,
+                    auth: options.auth,
+                    verificationIds: batchIds,
+                    signal: controller?.signal,
+                    verificationMode: options.verificationMode,
+                    environment,
+                    onEvent: progress?.observe.bind(progress),
+                  },
+                );
                 if (exitCode === 130 || exitCode === 143) {
                   frameworkExit = exitCode;
                   return undefined;
                 }
-                failureReported = diagnostics.text().trim().length > 0;
-                throw new CodexSecurityError(
-                  diagnostics.text().trim() ||
-                    `Codex verification failed with exit code ${exitCode}.`,
+                controller?.signal.throwIfAborted();
+                if (exitCode !== 0) {
+                  const diagnostic = diagnostics.text();
+                  const message = diagnostic.trim();
+                  if (message) workerDiagnostic = diagnostic;
+                  throw new CodexSecurityError(
+                    message ||
+                      `Codex verification failed with exit code ${exitCode}.`,
+                  );
+                }
+                results.push(
+                  ...parseFindingVerifications(response.text(), batchIds),
                 );
+                progress?.complete(results);
               }
-
-              results = parseFindingVerifications(response.text(), identifiers);
-              progress.complete(results);
               exitCode = results.some(({ status }) => status === "inconclusive")
                 ? 2
                 : results.some(({ status }) => status === "still_vulnerable")
                   ? 1
                   : 0;
+            } catch (error) {
+              if (!controller?.signal.aborted) throw error;
             } finally {
-              progress.stop();
+              progress?.stop();
+              removeSignals?.();
+            }
+            if (controller?.signal.aborted) {
+              exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
+              frameworkExit = exitCode;
+              return undefined;
             }
           }
 
-          if (format === "json" || format === "jsonl") {
+          if (structured) {
             return {
               repository,
               ...(selected === undefined ? {} : { scanId: selected.scanId }),
@@ -6247,9 +6355,14 @@ export async function main(
           return undefined;
         } catch (error) {
           exitCode = 2;
+          if (error instanceof VerificationFindingTooLargeError)
+            batchedVerification = true;
           const message = errorMessage(error);
-          if (!failureReported)
-            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
+          if (workerDiagnostic === undefined || batchedVerification)
+            await reportDiagnostic(
+              workerDiagnostic ??
+                `codex-security: ${diagnosticValue(message)}\n`,
+            );
           return finishScan(
             { exitCode, error: message },
             format,
@@ -7300,7 +7413,7 @@ export async function main(
     const failureArguments = ["render", "--format", filteredScanFailure.format];
     for (let index = 0; index < argv.length; index += 1) {
       const argument = argv[index]!;
-      if (!/^--token-(?:count|limit|offset)(?:=|$)/u.test(argument)) continue;
+      if (!TOKEN_OUTPUT_OPTION.test(argument)) continue;
       const separator = argument.indexOf("=");
       if (separator !== -1)
         failureArguments.push(
@@ -7322,11 +7435,13 @@ export async function main(
     renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
-  if (notice !== undefined) {
+  const writeUpdateNotice = () => {
+    if (notice === undefined || batchedVerification) return;
     try {
       errorOutput.write(formatUpdateNotice(notice));
     } catch {}
-  }
+  };
+  if (deferredVerificationDiagnostic === undefined) writeUpdateNotice();
   if (frameworkExit !== undefined) {
     if (disabledImportInvocation && exitCode === 0) {
       reportPublicationError(externalImportsDisabledMessage, undefined);
@@ -7346,7 +7461,8 @@ export async function main(
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&
-    filteredScanFailure === undefined
+    filteredScanFailure === undefined &&
+    deferredVerificationDiagnostic === undefined
   )
     return exitCode;
   try {
@@ -7386,6 +7502,22 @@ export async function main(
   } catch (error) {
     errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
     return 2;
+  } finally {
+    if (deferredVerificationDiagnostic !== undefined) {
+      // Token output can omit the diagnostic. Otherwise a buffered stderr
+      // write is optional once the complete structured failure is on stdout.
+      if (frameworkFlags.tokenOutput) {
+        await writeCliOutput(errorOutput, deferredVerificationDiagnostic).catch(
+          () => {},
+        );
+      } else {
+        writeOptionalVerificationDiagnostic(
+          errorOutput,
+          deferredVerificationDiagnostic,
+        );
+      }
+      writeUpdateNotice();
+    }
   }
 }
 
@@ -7604,6 +7736,10 @@ async function prepareScanArgumentsFromRecipe(
   }
   const safetyIdentifier = recipe["safetyIdentifier"];
   const postScanPrompt = recipe["postScanPrompt"];
+  const severityRubric =
+    operation === "rerun"
+      ? severityRubricSchema.optional().parse(recipe["severityRubric"])
+      : undefined;
   if (
     (safetyIdentifier !== undefined && typeof safetyIdentifier !== "string") ||
     (postScanPrompt !== undefined && typeof postScanPrompt !== "string")
@@ -7632,6 +7768,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
     ownerSuggestions: ownerSuggestions.data,
+    ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
@@ -7673,6 +7810,7 @@ function frameworkOutputFlags(argv: readonly string[]) {
   let hideDisabledRoute = false;
   let fullOutput = false;
   let rawCollector = false;
+  let tokenOutput = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
     if (
@@ -7684,6 +7822,7 @@ function frameworkOutputFlags(argv: readonly string[]) {
       hideDisabledRoute = true;
     if (value === "--full-output") fullOutput = true;
     if (value === "--json") rawCollector = true;
+    if (TOKEN_OUTPUT_OPTION.test(value)) tokenOutput = true;
     if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
       const operand = argv[++index];
       if (value === "--format")
@@ -7691,7 +7830,11 @@ function frameworkOutputFlags(argv: readonly string[]) {
           operand === "json" || operand === "jsonl" || operand === "yaml";
     }
   }
-  return { hideDisabledRoute, rawCollector: rawCollector && !fullOutput };
+  return {
+    hideDisabledRoute,
+    rawCollector: rawCollector && !fullOutput,
+    tokenOutput,
+  };
 }
 
 function cliValueOptions(
@@ -8928,6 +9071,7 @@ async function runSkill(
       providerResolved: provider !== undefined || validate,
     },
   );
+  options.signal?.throwIfAborted();
   return dependencies.runCodex(
     [
       ...(appServer
@@ -8997,6 +9141,7 @@ async function runSkill(
     ],
     {
       command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
+      signal: options.signal,
       auth: options.auth ?? "auto",
       directory,
       modelProvider: provider,
@@ -9866,6 +10011,12 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      ...(arguments_.rubricPath === undefined
+        ? {}
+        : { rubricPath: arguments_.rubricPath }),
+      ...(arguments_.severityRubric === undefined
+        ? {}
+        : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}

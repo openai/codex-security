@@ -100,6 +100,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ParentProgressSource,
   type ScanSessionEvent,
   type ScanUsageObservation,
   type ScanWorkerEvent,
@@ -108,6 +109,13 @@ import type { ScanTokenUsage } from "./cost-model.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
+import {
+  getDefaultSeverityRubric,
+  readSeverityRubricFile,
+  severityRubricInstructions,
+  severityRubricSchema,
+  type SeverityRubricSnapshot,
+} from "./severity-rubric.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -336,6 +344,10 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** Explicit policy for the initial scan and its workers. */
+  severityRubric?: SeverityRubricSnapshot;
+  /** Markdown policy file to capture when starting a new scan. */
+  rubricPath?: string;
   /** @internal Reuse captured knowledge inputs for related operations or resume. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
@@ -641,6 +653,7 @@ interface LocalScanInputs extends Omit<
   stateDirectory: string;
   deepScanConfiguration?: ResolvedDeepScanConfig;
   prompts: ScanPromptSettings;
+  retryRecipe?: JsonObject;
 }
 
 export interface CodexSecurityMetadata {
@@ -749,10 +762,14 @@ export class CodexSecurity {
       throw new CodexSecurityError(
         "Use runHostedScan with an executor for hosted execution.",
       );
+    options = {
+      ...options,
+      severityRubric: options.severityRubric && { ...options.severityRubric },
+    };
     return await this.#trackOperation(() =>
       options.workflowId === undefined
-        ? this.#run(repository, { ...options })
-        : this.#runWorkflow(repository, { ...options }, options.workflowId),
+        ? this.#run(repository, options)
+        : this.#runWorkflow(repository, options, options.workflowId),
     );
   }
 
@@ -793,6 +810,8 @@ export class CodexSecurity {
               ? undefined
               : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
+          severityRubric: undefined,
+          rubricPath: undefined,
           signal: undefined,
           auth: undefined,
           archiveExisting: undefined,
@@ -813,7 +832,7 @@ export class CodexSecurity {
       let metadata = state.stages.scan.result as ScanMetadata | undefined;
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
-        const scan = await workflow.registeredScan(state.scanId);
+        const { scan, recipe } = await workflow.registeredScan(state.scanId);
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
@@ -822,6 +841,7 @@ export class CodexSecurity {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
           };
+        else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
       if (completed) {
         const contract = await loadContract(state.scanDir, {
@@ -1979,7 +1999,9 @@ export class CodexSecurity {
     let scanProgressTracker: ScanProgressTracker | null = null;
     let savedProviderProfile: ProviderProfile | undefined;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
-    let customValidationComplete = false;
+    const customValidation = {
+      status: "pending" as "pending" | "running" | "complete",
+    };
     let completionCost: ScanCost | null = null;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
@@ -2317,31 +2339,63 @@ export class CodexSecurity {
       let reviewedFileCount = 0;
       let latestPhase: ScanProgress["phase"] = "preflight";
       let reviewItems: ScanProgress["reviewItems"];
-      const reportProgress = (progress: ScanProgress): void => {
+      let lastProgress: string | null = null;
+      const progressKey = (progress: ScanProgress): string =>
+        `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}:${progress.reviewItems?.completed}:${progress.reviewItems?.total}`;
+      const reportProgress = (
+        progress: ScanProgress,
+        source?: ParentProgressSource,
+      ): void => {
+        const liveEvent =
+          source?.reconciled === true ? undefined : source?.event;
         if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
+          liveEvent !== undefined &&
+          !tracker.recordParentProgress(progress, liveEvent)
+        )
+          return;
+        const inventory =
+          source?.inventory === true ||
+          (progress.phase === "discovery" &&
+            reviewedFileCount === 0 &&
+            progress.filesCompleted === 0);
+        const filesTotal = inventory ? progress.filesTotal : scopeFileCount;
+        if (
+          filesTotal === null ||
+          progress.filesTotal > filesTotal ||
+          (source?.inventory !== true &&
+            progress.filesCompleted < reviewedFileCount)
         ) {
+          if (liveEvent !== undefined) tracker.deferParentInventory(liveEvent);
           return;
         }
+        if (inventory) {
+          scopeFileCount = filesTotal;
+          tracker.setExpectedFilesTotal(filesTotal);
+        }
         reviewedFileCount = progress.filesCompleted;
+        if (liveEvent !== undefined)
+          tracker.acceptParentProgress(progress, liveEvent);
         if (
+          source !== undefined ||
           mode === "deep" ||
           scanPhaseSchema.options.indexOf(progress.phase) >
             scanPhaseSchema.options.indexOf(latestPhase)
         ) {
           latestPhase = progress.phase;
         }
-        notifyObserver(
-          options,
-          "onProgress",
-        )({
+        const update = {
           ...progress,
-          phase: latestPhase,
-          filesTotal: scopeFileCount,
+          phase:
+            customValidation.status === "running"
+              ? ("validation" as const)
+              : latestPhase,
+          filesTotal,
           ...(reviewItems === undefined ? {} : { reviewItems }),
-        });
+        };
+        const key = progressKey(update);
+        if (lastProgress === key) return;
+        lastProgress = key;
+        notifyObserver(options, "onProgress")(update);
       };
       const reportWorkerStatus = (status: ScanWorkerStatus): void => {
         if (mode !== "deep") {
@@ -2408,12 +2462,20 @@ export class CodexSecurity {
         onProgress:
           options.onProgress === undefined
             ? undefined
-            : (progress) =>
-                reportProgress({
-                  ...progress,
-                  // Worker counts belong to the parent scan's current phase.
-                  phase: mode === "deep" ? progress.phase : latestPhase,
-                }),
+            : (progress, source) =>
+                reportProgress(
+                  {
+                    ...progress,
+                    // Only worker counts use the last accepted parent phase.
+                    phase:
+                      mode === "deep" ||
+                      (source !== undefined &&
+                        (source.reconciled !== true || !source.worker))
+                        ? progress.phase
+                        : latestPhase,
+                  },
+                  source,
+                ),
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
@@ -2549,6 +2611,28 @@ export class CodexSecurity {
       }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
+      let severityRubric: SeverityRubricSnapshot | undefined;
+      if (
+        this.#dependencies.hostedScan === undefined &&
+        options.resumeScanId === undefined
+      ) {
+        if (inputs.retryRecipe !== undefined)
+          severityRubric = severityRubricSchema
+            .optional()
+            .parse(inputs.retryRecipe["severityRubric"]);
+        else if (options.severityRubric !== undefined)
+          severityRubric = severityRubricSchema.parse(options.severityRubric);
+        else if (options.rubricPath !== undefined)
+          severityRubric = await readSeverityRubricFile(
+            resolve(expandHome(options.rubricPath)),
+            protectedRoot,
+          );
+        else
+          severityRubric = await getDefaultSeverityRubric({
+            environment: this.#dependencies.environment,
+            signal,
+          });
+      }
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
@@ -2572,6 +2656,8 @@ export class CodexSecurity {
         };
       }
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
+      if (severityRubric !== undefined)
+        recipe["severityRubric"] = severityRubric;
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,
         scanKnowledge,
@@ -2697,6 +2783,9 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
+        severityRubric = severityRubricSchema
+          .optional()
+          .parse(savedRecipe["severityRubric"]);
         if (
           isRecord(savedInputs) &&
           workflowDigest(savedInputs["knowledgeBase"]) !==
@@ -2871,6 +2960,7 @@ export class CodexSecurity {
         customDiscovery?.prompt,
         modelProvider,
         options.ownerSuggestions,
+        severityRubric,
       );
       checkOpen();
       const feedback = await workbench(
@@ -3039,6 +3129,7 @@ export class CodexSecurity {
           ),
         )}`;
       }
+      tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             codexOptions,
@@ -3120,12 +3211,14 @@ export class CodexSecurity {
               scanId,
               pluginRoot: runtime.plugin.installedRoot,
               prompt: options.validationPrompt,
+              severityRubric,
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
                 // This turn follows the primary scan's reporting phase.
                 scanProgressTracker?.stop();
                 latestPhase = "validation";
+                customValidation.status = "running";
                 if (scopeFileCount !== null)
                   reportProgress({
                     phase: "validation",
@@ -3165,7 +3258,7 @@ export class CodexSecurity {
                 return turn.finalResponse;
               },
             });
-            customValidationComplete = true;
+            customValidation.status = "complete";
           }
           budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
@@ -3222,18 +3315,11 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: (progress) => {
-          if (
-            progress.phase === "discovery" &&
-            progress.filesCompleted === 0 &&
-            reviewedFileCount === 0 &&
-            progress.filesTotal !== scopeFileCount
-          ) {
-            scopeFileCount = progress.filesTotal;
-            tracker.setExpectedFilesTotal(scopeFileCount);
-          }
-          reportProgress(progress);
-        },
+        onProgressItem:
+          options.onProgress === undefined
+            ? undefined
+            : (event) => tracker.recordParentItem(event),
+        onProgress: reportProgress,
         onWorkerStatus: reportWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
@@ -3600,7 +3686,7 @@ export class CodexSecurity {
       if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
-          !customValidationComplete
+          customValidation.status !== "complete"
         ) {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
@@ -5069,7 +5155,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -5113,8 +5200,15 @@ export async function runScanEvents(
         )) {
           notifyObserver(options, "onActivity")(activity);
         }
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
+          notifyObserver(
+            {
+              onProgress: (update) => options.onProgress?.(update, { event }),
+              onObserverError: options.onObserverError,
+            },
+            "onProgress",
+          )(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
@@ -5387,6 +5481,7 @@ function scanPrompt(
   discoveryPrompt?: string,
   modelProvider?: unknown,
   ownerSuggestions = false,
+  severityRubric?: SeverityRubricSnapshot,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -5469,6 +5564,7 @@ function scanPrompt(
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]),
+    ...(severityRubric ? [severityRubricInstructions(severityRubric)] : []),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),

@@ -55,6 +55,7 @@ import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
+import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
@@ -1757,8 +1758,12 @@ async function preparePublicationInput(
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
-    if (!saved || options.provider === "veracode") {
-      for (const [id, source] of veracodeReportRepositories(
+    for (const [provider, repositories] of [
+      ["veracode", veracodeReportRepositories],
+      ["continuum", continuumReportRepositories],
+    ] as const) {
+      if (saved && options.provider !== provider) continue;
+      for (const [id, source] of repositories(
         options.provider,
         findings,
         "cloud",
@@ -1788,6 +1793,7 @@ async function preparePublicationInput(
         !projected &&
         options.provider !== "inspector" &&
         options.provider !== "veracode" &&
+        options.provider !== "continuum" &&
         options.provider !== "sonar"
       )
         continue;

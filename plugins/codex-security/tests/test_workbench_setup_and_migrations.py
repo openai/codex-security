@@ -101,7 +101,9 @@ EXPECTED_MIGRATIONS = [
     (56, "recover unfinished legacy headless deep scans"),
     (57, "freeze stopped scan checkpoint selections"),
     (58, "record the final Deep Scan reviewed surface count"),
-    (59, "record scan and worker instruction digests"),
+    (59, "retain the launching Deep Scan service tier"),
+    (60, "record classification rubric provenance"),
+    (61, "record scan and worker instruction digests"),
 ]
 
 
@@ -895,6 +897,25 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
         assert connection.execute(
             "SELECT details_json != '{}' FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
         ).fetchone() == (1,)
+
+
+def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
+    workbench_api,
+) -> None:
+    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 61)
+    connection, migrate = create_historical_database(59, ((59, *digest_migration[1:]),))
+    digest = "sha256:" + "a" * 64
+    try:
+        insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
+        migrate(connection)
+        assert (
+            migration_name_row(connection, 59)["name"]
+            == "retain the launching Deep Scan service tier"
+        )
+        assert migration_name_row(connection, 61)["name"] == digest_migration[1]
+        assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])

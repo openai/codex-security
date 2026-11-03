@@ -524,7 +524,9 @@ class RemediationRequest:
     occurrence_id: str
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
-    def _run(self, command: str, *args: str, check: bool = True) -> dict[str, object]:
+    def _run(
+        self, command: str, *args: str, check: bool = True, input_text: str | None = None
+    ) -> dict[str, object]:
         return run_workbench(
             self.state_dir,
             command,
@@ -534,13 +536,20 @@ class RemediationRequest:
             self.id,
             *args,
             check=check,
+            input_text=input_text,
         )
 
     def start(self, token: str, *, check: bool = True) -> dict[str, object]:
         return self._run("request-finding-remediation", "--action-token", token, check=check)
 
     def update(
-        self, token: str, version: str, state: str, *args: str, check: bool = True
+        self,
+        token: str,
+        version: str,
+        state: str,
+        *args: str,
+        check: bool = True,
+        input_text: str | None = None,
     ) -> dict[str, object]:
         return self._run(
             "set-finding-remediation",
@@ -552,6 +561,7 @@ class RemediationRequest:
             state,
             *args,
             check=check,
+            input_text=input_text,
         )
 
     def generate(
@@ -955,10 +965,12 @@ def windows_file_backend() -> mock.Mock:
         payload: bytes,
         *,
         expected_root_identity: tuple[int, int] | None = None,
+        replace_existing: bool = True,
     ) -> None:
         path = scan_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        with path.open("wb" if replace_existing else "xb") as handle:
+            handle.write(payload)
 
     def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
         (scan_dir / relative_path).unlink(missing_ok=True)

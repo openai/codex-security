@@ -784,6 +784,28 @@ Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
 planning and authentication choices. Custom `createSecurity` clients receive
 absolute targets; saved plans and component receipts retain relative paths.
 
+### Choose a severity rubric
+
+Standalone Standard and Deep scans grade findings with the bundled rubric by
+default. Set `CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1` to fetch the
+current default from Statsig once when starting a scan. If that lookup fails,
+the scan uses the bundled rubric.
+
+```bash
+CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 codex-security scan .
+codex-security scan . --mode deep --rubric ./severity.md
+```
+
+An explicit Markdown file takes precedence and skips the lookup, even when
+opted in. The SDK accepts `rubricPath` or a `severityRubric` snapshot with
+`markdown`, a positive integer `revision`, and the SHA-256 of the exact UTF-8
+Markdown. A supplied snapshot takes precedence over a file.
+
+The scan saves the rubric text in its local launch recipe. Retrying a Standard
+scan with the same `--workflow-id`, resuming a Deep scan, or rerunning a scan
+with a saved rubric reuses that copy even if the remote default or file changes.
+Older scans without a saved rubric continue to resume using their existing workflow.
+
 ### Set investigation time
 
 ```bash
@@ -1740,7 +1762,7 @@ The [records protocol](classify-severity-records.md) accepts immutable Markdown 
 report snapshots and delegates model execution to the host.
 
 For saved findings, use exactly one of `--scan` (ID, prefix, or `latest`) and `--scan-dir`.
-By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts).
+By default, saved findings are classified with the [built-in severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md).
 It evaluates attacker access, boundary crossing, additional harm, and evidence for
 Critical, High, Medium, Low, and Informational findings. Confidence remains separate
 from severity; missing proof alone does not justify a downgrade.
@@ -1772,6 +1794,12 @@ Assessments contain `decision` (`assessed` or `excluded`), normalized `level`,
 the original `rubricLabel`, rationale, confidence, and a `reviewTrigger` for
 missing facts that could change the result. Exclusions have a null level.
 Finding/occurrence IDs and input hashes bind each assessment to its evidence.
+
+For a single rubric document, the classification result reports the SHA-256 of
+the exact UTF-8 text supplied to the reviewer in `rubricSha256`. For multiple
+documents it reports the digest of the ordered text collection. A bundled or
+remote default also records its `rubricRevision`. Older saved results retain
+their original digest and may omit the revision.
 
 Successful assessments checkpoint immediately in local SQLite. Retries reuse
 matching evidence, rubric, context hashes, and classification run count; failed/canceled runs keep completed
@@ -2650,17 +2678,32 @@ credentials out of the patch subprocess. URLs must match the selected workspace.
 finding IDs, `--scan`, and the Linear issue/project selectors above. Explicitly
 filter for completed Linear issues to check a finished backlog.
 
+The CLI selects findings from the workbench and loads their evidence from the
+saved scan artifacts. It measures the verification request with that evidence
+included. Large selections use multiple requests without splitting or further
+truncating any selected finding. The CLI prints verdicts in selection order
+after every request returns valid results. For these selections the CLI omits
+per-event progress and update notices so stderr cannot delay the verdicts.
+
+If one finding exceeds the input limit on its own, verification stops before
+the first request. The error reports its occurrence ID and required request
+size. To verify another open occurrence from that scan, run
+`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
-Authentication and execution failures print diagnostics on stderr and return
-`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message` with `--json`
-or `--format jsonl`. With JSON/JSONL `--full-output`, failures use an `ok: false`
-error envelope. Other formats retain stderr-only failures. Interruptions retain
-exit codes `130` and `143` without a result.
+With `--json` or `--format jsonl`, authentication and execution failures return
+`status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
+`--full-output`, these failures use an `ok: false` error envelope. If a saved
+selection exceeds one request, the CLI sends the failure message only to the
+structured output. With `--token-count`, `--token-limit`, or `--token-offset`,
+stderr also carries the diagnostic so it remains available alongside a count
+or a partial result. Other formats report failures on stderr. Interruptions
+retain exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 
