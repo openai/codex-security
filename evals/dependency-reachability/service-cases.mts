@@ -63,6 +63,8 @@ function archiveCase(
   );
   return {
     id,
+    cve: "CVE-2025-14874",
+    component: "nodemailer",
     suite: "mailparser",
     repository: "nodemailer/mailparser",
     revision: mail390,

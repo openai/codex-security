@@ -18,6 +18,7 @@ function overlay(item: ReachabilityCase, destination: string) {
 test("each case and each fetched overlay has a stable identity", () => {
   assert.equal(new Set(cases.map(({ id }) => id)).size, cases.length);
   for (const item of cases) {
+    assert.match(item.cve, /^CVE-\d{4}-\d{4,}$/u, item.id);
     assert.match(item.revision, /^[a-f0-9]{40}$/u, item.id);
     const targets = item.stage.map(({ destination }) => destination);
     assert.equal(new Set(targets).size, targets.length, item.id);
@@ -113,7 +114,14 @@ test("Pillow independently varies the release and the calling operation", () => 
   assert.notDeepEqual(fixed.stage, decode.stage);
   assert.equal(encode.revision, decode.revision);
   assert.equal(encode.version, decode.version);
-  assert.deepEqual(encode.stage, decode.stage);
+  assert.notDeepEqual(
+    overlay(encode, "service/media.py"),
+    overlay(decode, "service/media.py"),
+  );
+  assert.deepEqual(
+    encode.stage.filter((file) => file.destination !== "service/media.py"),
+    decode.stage.filter((file) => file.destination !== "service/media.py"),
+  );
   assert.notEqual(encode.question, decode.question);
   assert.equal(decode.verdict, "exploitable");
   assert.equal(fixed.verdict, "ruled_out");

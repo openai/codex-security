@@ -1,0 +1,12 @@
+backend:
+  auth:
+    keys:
+      - secret: ${BACKEND_SECRET}
+
+catalog:
+  readonly: true
+  locations:
+    - type: file
+      target: /app/catalog/template.yaml
+      rules:
+        - allow: [Template]

@@ -304,6 +304,7 @@ export async function runStructuredTurn(
   let usage;
   let completed = false;
   let failure;
+  let streamError;
   try {
     for await (const event of events) {
       const warning =
@@ -330,7 +331,8 @@ export async function runStructuredTurn(
       } else if (event.type === "turn.failed") {
         failure = new Error(event.error!.message);
       } else if (event.type === "error") {
-        failure = new Error(event.message);
+        // Transport retries also emit errors. Retain the diagnostic if the turn never completes.
+        streamError = new Error(event.message);
       }
     }
   } catch (error) {
@@ -338,7 +340,9 @@ export async function runStructuredTurn(
   }
   if (failure) throw failure;
   combinedSignal.throwIfAborted();
-  if (!completed) throw new Error("Eval stream ended before turn.completed");
+  if (!completed)
+    throw streamError ?? new Error("Eval stream ended before turn.completed");
+  if (!finalResponse) throw new Error("Eval turn completed without an answer");
   return { finalResponse, usage };
 }
 

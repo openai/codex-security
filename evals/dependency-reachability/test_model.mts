@@ -53,32 +53,52 @@ test("stages the production skill with its references outside the source checkou
   );
 });
 
-test("a fatal stream error after an answer cannot pass the case", async () => {
-  const codex: EvalCodex = {
-    startThread() {
-      return {
-        async runStreamed() {
-          return {
-            events: (async function* () {
-              yield {
-                type: "item.completed",
-                item: { type: "agent_message", text: "{}" },
-              };
-              yield { type: "error", message: "fixture transport failed" };
-              yield { type: "turn.completed" };
-            })(),
-          };
-        },
-      };
-    },
-  };
-  await assert.rejects(
-    runStructuredTurn(
+const answer = {
+  type: "item.completed",
+  item: { type: "agent_message", text: "{}" },
+};
+const retry = { type: "error", message: "fixture connection retry" };
+const completed = { type: "turn.completed" };
+const failed = { type: "turn.failed", error: { message: "fixture failure" } };
+
+for (const { name, events, error } of [
+  {
+    name: "accepts a completed answer after a retry",
+    events: [retry, answer, completed],
+  },
+  {
+    name: "a failed turn cannot pass after an answer",
+    events: [retry, answer, failed],
+    error: /fixture failure/,
+  },
+  {
+    name: "preserves the error if a retry never completes",
+    events: [answer, retry],
+    error: /fixture connection retry/,
+  },
+  {
+    name: "requires an answer from a completed turn",
+    events: [completed],
+    error: /without an answer/,
+  },
+]) {
+  test(name, async () => {
+    const codex: EvalCodex = {
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            yield* events;
+          })(),
+        }),
+      }),
+    };
+    const result = runStructuredTurn(
       { repo: "/repo", runtime: "/runtime" },
       codex,
       "case",
       {},
-    ),
-    /fixture transport failed/,
-  );
-});
+    );
+    if (error) await assert.rejects(result, error);
+    else assert.equal((await result).finalResponse, "{}");
+  });
+}

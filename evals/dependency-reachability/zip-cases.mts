@@ -24,9 +24,12 @@ function bundleCase(id: string, byName: boolean): ReachabilityCase {
       destination: "bundle/index-mail.cjs",
     },
     nodemailerFile("package.json"),
+    nodemailerFile("lib/addressparser/index.js"),
   ];
   return {
     id,
+    cve: "CVE-2025-14874",
+    component: "nodemailer",
     suite: "mailparser",
     repository: "nodemailer/mailparser",
     revision: mail390,

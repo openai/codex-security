@@ -58,6 +58,43 @@ test("requires an independent grounded verdict for both configured services", ()
   }
 });
 
+test("requires a version citation inside the installed linkify-it record", () => {
+  const checkout = new Map(files);
+  for (const use of result.uses) {
+    const path = `${use.location}/package-lock.json`;
+    // Make the adjacent package's version match too, so the path and version
+    // string alone cannot distinguish any of the three records.
+    checkout.set(
+      path,
+      files
+        .get(path)!
+        .replace('"version": "2.1.0"', `"version": "${use.version}"`),
+    );
+  }
+  for (const line of [9, 13, 14, 22]) {
+    const uses = result.uses.map((use) => ({
+      ...use,
+      evidence: use.evidence.map((entry) =>
+        entry.path.endsWith("package-lock.json")
+          ? cite(entry.path, line)
+          : entry,
+      ),
+    }));
+    const grade = gradeCommand({ ...result, uses }, checkout);
+    const installed = line === 13 || line === 14;
+    assert.equal(grade.pass, installed, `version citation on line ${line}`);
+    assert.deepEqual(
+      grade.uses.map((use) => use.errors),
+      installed
+        ? [[], []]
+        : [
+            ["Missing resolved version evidence"],
+            ["Missing resolved version evidence"],
+          ],
+    );
+  }
+});
+
 test("requires the build link between the service lockfile and the running application", () => {
   const withoutImage = reviews.evidence.filter((e) => e.path !== "Dockerfile");
   for (const evidence of [

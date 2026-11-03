@@ -1,93 +1,64 @@
 # Dependency reachability eval
 
-The acceptance case runs the public CLI from a fresh copy of a small application.
-The CLI uses the bundled `attack-path-analysis` skill. The only user input is
-a CVE identifier.
+The default eval runs 23 checks against fresh snapshots of MailParser, Pillow,
+and Backstage. Each check invokes the shipped CLI with only a CVE identifier.
+The CLI fetches the advisory from OSV and runs the bundled `attack-path-analysis`
+skill. The checkout combines pinned upstream source with synthetic application
+and deployment files. Case IDs, caller descriptions, and expected answers stay
+outside the checkout.
 
 ```sh
-codex-security exploitability check CVE-2026-48801 --json
+codex-security exploitability check CVE-2025-14874 --json
 ```
 
-Two services share an HTTP handler but install different versions of
-`linkify-it`. The command has to discover both uses and distinguish the
-affected service from the fixed one. Compose records which service builds
-use which lockfiles. Whether either service is currently running is unknown.
-[OSV advisory](https://osv.dev/vulnerability/GHSA-22p9-wv53-3rq4)
+The goal is to reduce command wall time and token use while preserving the
+accuracy of the verdicts and the evidence for each dependency use.
 
-## Run the command eval
+| Package | CVE | What varies across snapshots |
+| --- | --- | --- |
+| Nodemailer | CVE-2025-14874 | Mail routing, a downstream patch, attachment processing, and which archived message or ZIP member a consumer reads. |
+| linkify-it | CVE-2026-48801 | MailParser options, input handling, and whether the receiver implementation is available. |
+| glibc | CVE-2024-2961 | The conversion direction used by MailParser's native charset decoder. |
+| libwebp | CVE-2023-4863 | Image decoding versus encoding, the library bundled in a wheel, and the build loaded by a serving process during rollout. |
+| vm2 | CVE-2023-37466 | How the Backstage starter handles a user-supplied task parameter in a full v1.14.1 checkout. |
 
-Use Node.js 22.22+ and Git. From the repository root, install and build the CLI.
+## Run the CLI eval
+
+Use Node.js 22.22+, Git, and the same model credentials you use with the CLI.
+From the repository root, download the verified universal native artifact for
+the checkout's native sources. Replace `RUN_ID` and `native-universal-COMMIT`
+with the ID and artifact name from the successful GitHub Actions run.
+[Native package inputs](../../plugins/codex-security/native/README.md#package-inputs)
 
 ```sh
+gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 ```
 
-Run the live acceptance case with the same model credentials as the CLI.
-It fetches the public advisory from OSV and consumes model usage. No upstream clones
-or running services are needed.
+For a quick check with no upstream clones, select `mixed-services` explicitly.
+This standalone smoke case checks whether the command finds both services using
+a shared HTTP handler and distinguishes their installed versions of `linkify-it`.
+It runs separately from the 23 checks. Live runs access OSV and consume model usage.
 
 ```sh
-node --experimental-strip-types evals/dependency-reachability/run.mts
+node --experimental-strip-types evals/dependency-reachability/run.mts --case mixed-services
 ```
 
-The runner invokes the shipped CLI entrypoint with closed stdin in a temporary
-checkout. Its JSON output is graded outside that checkout. A pass requires the
-overall verdict, a separate verdict and version for each service, configured
-deployment status, and citations grounding the results. The report in
-`reports/command-*/report.json` records the actual invocation, source revision,
-fixture digest, command wall time, response, individual grades, and token usage
-when available. Command errors and grading failures both exit nonzero.
-
-## Historical skill baseline
-
-The original 23 cases measure the production `attack-path-analysis` skill
-when the caller and entry point are given. They remain available as
-component-level tests. Their historical scores and costs have a different
-input and denominator from the direct command eval.
-
-Each case gives the caller's entry point and permissions, the advisory, and a
-snapshot of the application. Where processing spans services, the analysis has
-to discover that from the source and deployment configuration. Paired cases get
-the same question. The case IDs, expected verdicts, and grading criteria stay
-outside the model's readable directories.
-
-| Cases | What varies |
-| --- | --- |
-| [MailParser](cases.mts) (9) | Routing, parser options, a backported fix, and a receiver whose implementation is missing. |
-| [Pillow wheels](cases.mts) (3) | Decoding or encoding with the same library, and decoding after the wheel updates libwebp. |
-| [Backstage](cases.mts) (1) | Whether a task parameter becomes executable JavaScript in the full v1.14.1 checkout (8,794 files). |
-| [Pillow deployments](rollout-cases.mts) (3) | Which libwebp build the serving process loaded and whether retained package records identify it. |
-| [Mail attachments](sanitizer-cases.mts) (2) | Whether an attachment can change the headers seen by the parser. |
-| [Archived mail](service-cases.mts) (3) | Which stored message the subscribed consumer reads and which headers survive. |
-| [ZIP imports](zip-cases.mts) (2) | Whether validation and processing select the same ZIP member when names repeat. The verdict covers the advisory's input prerequisite. |
-
-The package sources and fixes are pinned public revisions. The application code
-and deployment records added to those checkouts are synthetic.
-[Nodemailer fix](https://github.com/nodemailer/nodemailer/compare/v7.0.10...v7.0.11) · [Alpine backport](https://github.com/alpinelinux/aports/commit/29a91ff19585ca3eebd4bf53d275f600a093a73d) · [Backstage advisory](https://github.com/backstage/backstage/security/advisories/GHSA-wg6p-jmpc-xjmr)
-
-### Run the scoped cases
-
-Install the shared eval dependencies and type-check the harness.
-
-```sh
-pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-pnpm --dir evals/triage-finding install --frozen-lockfile
-pnpm --dir sdk/typescript run build:evals
-```
-
-The runner reads local Git objects from `<repo-root>/<owner>/<repository>`.
-For a quick run, the MailParser backport case needs only two clones.
+The 23 checks read pinned Git objects from `--repos DIR`, under
+`<owner>/<repository>`. For one MailParser backport check, two clones suffice.
 
 ```sh
 repos="$(mktemp -d)"
 mkdir -p "$repos/nodemailer"
 git clone --no-checkout https://github.com/nodemailer/mailparser.git "$repos/nodemailer/mailparser"
 git clone --no-checkout https://github.com/nodemailer/nodemailer.git "$repos/nodemailer/nodemailer"
-node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport
+node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos" --case address-backport
 ```
 
-To run all cases, add the remaining repositories and omit the case selector.
+Add the remaining repositories and omit the selector to run all 23 checks.
 
 ```sh
 mkdir -p "$repos/python-pillow" "$repos/backstage" "$repos/alpinelinux"
@@ -95,39 +66,56 @@ git clone --no-checkout https://github.com/python-pillow/Pillow.git "$repos/pyth
 git clone --no-checkout https://github.com/python-pillow/pillow-wheels.git "$repos/python-pillow/pillow-wheels"
 git clone --branch v1.14.1 --single-branch --no-checkout https://github.com/backstage/backstage.git "$repos/backstage/backstage"
 git clone --no-checkout https://github.com/alpinelinux/aports.git "$repos/alpinelinux/aports"
-node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos"
+node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos"
 ```
 
-Use `--suite mailparser`, `--suite pillow`, or `--suite backstage` to select
-one project. `--suite challenge` selects the ten downstream patch, attachment,
-archived mail, and ZIP cases. Each model run uses a fresh read-only snapshot,
-the pinned Codex SDK and CLI, and xhigh reasoning. Omit `--model` to use the
-default. Model runs consume usage on the caller's Codex account or API key.
-[Shared eval runtime](../secret-discovery/README.md#run)
+Use `--case ID` for one snapshot or `--suite mailparser`, `--suite pillow`, or
+`--suite backstage` for one project. `--suite challenge` selects the ten patch,
+attachment, archived-mail, and ZIP cases. Checks run sequentially by default.
+Set `--jobs N` to run up to N commands concurrently.
 
-### Compare scoped candidates
+## Grade and compare runs
 
-Append a trusted local command after `--`. It runs in a copy of the snapshot
-with the caller's OS permissions, reads the question and output instructions
-from stdin, and writes one JSON answer to stdout. Diagnostics can go to stderr.
+For each of the 23 cases, the grader looks for the expected dependency use in
+the CLI report. That use must identify the component, version, verdict, and
+location, explain its reasoning, and cite the deciding lines in the snapshot.
+Other uses can have different verdicts. The grader checks the overall status
+for consistency with the reported uses. The smoke case requires both service
+verdicts and their deployment evidence. A failed grade or CLI error exits
+nonzero.
+
+Each `reports/command-*/report.json` records the command, source revision,
+snapshot digest, per-case grade, command wall time, and token usage when
+available. Compare the same cases, snapshot digests, model settings, and job
+count across runs. Check pass counts and individual use grades alongside time
+and input, cached input, and output tokens. Unavailable usage is reported as
+`null`.
+
+## Historical skill baseline
+
+`run-skill-baseline.mts` runs the skill directly on the 23 caller-scoped
+questions. It supplies the entry point, caller permissions, and advisory.
+Earlier scores used those scoped prompts and earlier fixture digests. Use
+fresh CLI runs to measure changes to the CVE-only command.
 
 ```sh
-node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport -- /absolute/path/to/adapter
+node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport
 ```
 
-A full pass requires the expected verdict (`exploitable`, `ruled_out`, or
-`unknown`), the bare dependency version, a reason, and source citations for
-each deciding step. The grader verifies repository-relative paths, inclusive
-line ranges, and exact quotes against the original snapshot. [Grader](grade.mts)
+Use `--help` for case and suite selectors. To compare a trusted local adapter,
+append `-- /absolute/path/to/adapter`. It runs in a copy of the snapshot,
+reads the scoped question and output instructions from stdin, and writes one
+JSON answer to stdout. The scoped grader checks the verdict, dependency
+version, and exact source quotes. Baseline reports are written to
+`reports/run-*/report.json`. [Shared eval runtime](../secret-discovery/README.md#run)
 
-Compare runs in `reports/run-*/report.json`. Each report separates verdict,
-version, and citation accuracy, records snapshot and prompt hashes, and times
-analysis separately from staging. SDK runs also record token usage when available.
-The runner exits successfully when all selected cases pass.
+## Deterministic checks
 
-CI runs the deterministic checks without model calls or upstream clones.
+CI runs these checks without model calls or upstream clones.
 
 ```sh
+pnpm --dir evals/triage-finding install --frozen-lockfile
+pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types --test evals/dependency-reachability/test_*.mts
 python3 -B -m unittest discover -s evals/dependency-reachability/fixtures/zip -p test_catalog.py
 ```

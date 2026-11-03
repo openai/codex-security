@@ -48,7 +48,9 @@ export const answerSchema = {
   },
 };
 
-function isCitation(value: unknown): value is Citation {
+function isCitationRange(
+  value: unknown,
+): value is Omit<Citation, "code"> & { code?: unknown } {
   return (
     isRecord(value) &&
     typeof value.path === "string" &&
@@ -57,9 +59,7 @@ function isCitation(value: unknown): value is Citation {
     typeof value.endLine === "number" &&
     Number.isSafeInteger(value.endLine) &&
     value.startLine > 0 &&
-    value.endLine >= value.startLine &&
-    typeof value.code === "string" &&
-    value.code.trim().length > 0
+    value.endLine >= value.startLine
   );
 }
 
@@ -85,30 +85,32 @@ async function sourceLines(root: string, path: string): Promise<string[]> {
   return contents.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n");
 }
 
-export async function gradeAnswer(
-  answer: unknown,
-  expected: {
-    verdict: Verdict;
-    version: string;
-    evidenceGroups: readonly EvidenceGroup[];
-  },
+export async function gradeEvidence(
+  evidence: unknown,
+  groups: readonly EvidenceGroup[],
   repoRoot: string,
+  format: "quotes" | "ranges",
 ) {
-  const result = isRecord(answer) ? answer : {};
-  const verdictCorrect = result.verdict === expected.verdict;
-  const versionCorrect = result.dependency_version === expected.version;
   const root = await realpath(repoRoot);
   const sources = new Map<string, string[]>();
   const verified: Citation[] = [];
   const errors: string[] = [];
-  if (!Array.isArray(result.evidence) || !result.evidence.length) {
+  if (!Array.isArray(evidence) || !evidence.length) {
     errors.push("Expected a nonempty evidence array");
   } else {
-    for (const [index, entry] of result.evidence.entries()) {
-      if (!isCitation(entry)) {
+    for (const [index, entry] of evidence.entries()) {
+      if (!isCitationRange(entry)) {
         errors.push(
-          `Evidence ${index + 1} needs a path, positive line range, and source quote`,
+          `Evidence ${index + 1} needs a path and positive line range`,
         );
+        continue;
+      }
+      const quote =
+        typeof entry.code === "string"
+          ? entry.code.replaceAll("\r\n", "\n").replace(/\n$/u, "")
+          : undefined;
+      if (format === "quotes" && !quote?.trim()) {
+        errors.push(`Evidence ${index + 1} needs a source quote`);
         continue;
       }
       try {
@@ -117,10 +119,13 @@ export async function gradeAnswer(
           source = await sourceLines(root, entry.path);
           sources.set(entry.path, source);
         }
-        const code = entry.code.replaceAll("\r\n", "\n").replace(/\n$/u, "");
+        const code = source
+          .slice(entry.startLine - 1, entry.endLine)
+          .join("\n");
         if (
           entry.endLine > source.length ||
-          source.slice(entry.startLine - 1, entry.endLine).join("\n") !== code
+          !code.trim() ||
+          (format === "quotes" && code !== quote)
         ) {
           errors.push(
             `Source mismatch at ${entry.path}:${entry.startLine}-${entry.endLine}`,
@@ -135,7 +140,7 @@ export async function gradeAnswer(
       }
     }
   }
-  for (const group of expected.evidenceGroups) {
+  for (const group of groups) {
     const supported = group.some((anchor) =>
       verified.some(
         (citation) =>
@@ -150,6 +155,27 @@ export async function gradeAnswer(
       errors.push(`Missing source evidence: ${choices.join(" or ")}`);
     }
   }
+  return errors;
+}
+
+export async function gradeAnswer(
+  answer: unknown,
+  expected: {
+    verdict: Verdict;
+    version: string;
+    evidenceGroups: readonly EvidenceGroup[];
+  },
+  repoRoot: string,
+) {
+  const result = isRecord(answer) ? answer : {};
+  const verdictCorrect = result.verdict === expected.verdict;
+  const versionCorrect = result.dependency_version === expected.version;
+  const errors = await gradeEvidence(
+    result.evidence,
+    expected.evidenceGroups,
+    repoRoot,
+    "quotes",
+  );
   const evidenceCorrect = errors.length === 0;
   if (!verdictCorrect) errors.push(`Expected verdict ${expected.verdict}`);
   if (!versionCorrect)

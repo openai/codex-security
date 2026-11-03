@@ -3,9 +3,10 @@
 Model-based evaluations live here so they can evolve with the plugin without
 being embedded in its source tree or shipped npm runtime.
 
-- [Dependency reachability](dependency-reachability/README.md) invokes the public CLI
-  with a CVE alone and checks the reported uses in a mixed-version deployment.
-  It also retains the historical caller-scoped skill cases.
+- Dependency reachability runs 23 public CLI checks across five CVEs, grades
+  the expected dependency uses, and records command wall time and token usage.
+  It also includes a standalone two-service smoke case and the historical
+  caller-scoped skill baseline. [Setup and cases](dependency-reachability/README.md)
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
 - [Deep reducer](deep-reducer/README.md): optional model evaluation of real IPC

@@ -59,11 +59,14 @@ function rolloutCase(
     "Can this request trigger the advisory? Report the upstream libwebp version used for the request.";
   return {
     id,
+    cve: "CVE-2023-4863",
+    component: "libwebp",
     suite: "pillow",
     repository: "python-pillow/Pillow",
     revision: "6e28ed1f36d0eb74053af54e1eddc9c29db698cd",
     question,
     version: "1.3.1",
+    versionAliases: missing ? [] : [revision],
     verdict,
     stage: [
       ...stage,

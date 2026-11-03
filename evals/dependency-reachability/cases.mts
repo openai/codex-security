@@ -33,12 +33,15 @@ export type StageFile =
 
 export interface ReachabilityCase {
   id: string;
+  cve: string;
+  component: string;
   suite: Suite;
   repository: Repository;
   revision: string;
   question: string;
   verdict: Verdict;
   version: string;
+  versionAliases?: readonly string[];
   evidenceGroups: readonly EvidenceGroup[];
   stage: readonly StageFile[];
 }
@@ -73,6 +76,8 @@ function pillowCase(
   ];
   return {
     id,
+    cve: "CVE-2023-4863",
+    component: "libwebp",
     suite: "pillow",
     repository: "python-pillow/Pillow",
     revision,
@@ -86,6 +91,10 @@ function pillowCase(
     evidenceGroups:
       operation === decode
         ? [
+            excerpts(
+              "service/media.py",
+              'Image.open(BytesIO(environ["wsgi.input"].read()))',
+            ),
             versionSources,
             excerpts(
               webpPlugin,
@@ -99,6 +108,10 @@ function pillowCase(
             ),
           ]
         : [
+            excerpts(
+              "service/media.py",
+              'Image.frombytes("RGB", (64, 64), pixels)',
+            ),
             versionSources,
             excerpts(
               webpPlugin,
@@ -108,6 +121,24 @@ function pillowCase(
             excerpts(webpNative, "WebPEncode(&config, &pic)"),
           ],
     stage: [
+      {
+        kind: "fixture",
+        source:
+          operation === decode
+            ? "fixtures/rollout/app.py"
+            : "fixtures/media/encode.py",
+        destination: "service/media.py",
+      },
+      {
+        kind: "json",
+        destination: "service/deployment.json",
+        value: {
+          command: ["gunicorn", "--chdir", "service", "media:application"],
+          wheels: [
+            `Pillow-${fixed ? "10.0.1" : "10.0.0"}-cp312-cp312-manylinux_2_28_x86_64.whl`,
+          ],
+        },
+      },
       {
         kind: "git",
         repository: "python-pillow/pillow-wheels",
@@ -233,12 +264,16 @@ const mailSource = {
 } as const;
 const linkCase = {
   ...mailSource,
+  cve: "CVE-2026-48801",
+  component: "linkify-it",
   revision: mail392,
   question: links,
   version: "5.0.0",
 };
 const addressCase = {
   ...mailSource,
+  cve: "CVE-2025-14874",
+  component: "nodemailer",
   revision: mail390,
   question: addresses,
   version: "7.0.10",
@@ -371,6 +406,8 @@ export const cases: readonly ReachabilityCase[] = [
   {
     ...mailSource,
     id: "native-charset",
+    cve: "CVE-2024-2961",
+    component: "glibc",
     revision: mail392,
     question: charset,
     verdict: "ruled_out",
@@ -385,12 +422,23 @@ export const cases: readonly ReachabilityCase[] = [
   },
   {
     id: "task-parameter",
+    cve: "CVE-2023-37466",
+    component: "vm2",
     suite: "backstage",
     repository: "backstage/backstage",
     revision: "99d7a6f42d71e86578c89c0669a3d962088ed8ae",
     verdict: "ruled_out",
     version: "3.9.19",
-    stage: [],
+    stage: [
+      "compose.yaml",
+      "app-config.yaml",
+      "portal.conf",
+      "template.yaml",
+    ].map((name) => ({
+      kind: "fixture",
+      source: `fixtures/backstage/${name}`,
+      destination: `portal/${name}`,
+    })),
     question:
       "Assess CVE-2023-37466 in vm2 for the starter app's example-nodejs-template. " +
       "Assume the backend and its dependencies are built from this checkout and its lockfile. " +
@@ -405,11 +453,16 @@ export const cases: readonly ReachabilityCase[] = [
         "vm2@npm:3.9.19",
         '"vm2@npm:^3.9.18":\n  version: 3.9.19',
       ),
-      excerpts(
-        "packages/create-app/templates/default-app/examples/template/template.yaml",
-        "parameters.name",
-        "url: ./content",
-      ),
+      excerpts("portal/portal.conf", "location = /api/scaffolder/v2/tasks"),
+      [
+        ...excerpts("portal/app-config.yaml", "readonly: true"),
+        ...excerpts(
+          "portal/compose.yaml",
+          "/app/catalog/template.yaml:ro",
+          "/app/catalog/content:ro",
+        ),
+      ],
+      excerpts("portal/template.yaml", "parameters.name", "url: ./content"),
       excerpts(
         scaffolder + "service/router.ts",
         "values = req.body.values",

@@ -5,7 +5,6 @@ import { isRecord } from "../../sdk/typescript/src/record.ts";
 
 export const cve = "CVE-2026-48801";
 export const fixture = join(import.meta.dirname, "fixtures", "command");
-export const commandArgs = ["exploitability", "check", cve, "--json"];
 
 // Read the original fixture once. A path returned by the CLI can only select
 // a file in this map, never a file elsewhere on the grading host.
@@ -52,7 +51,31 @@ function citedText(entry: unknown, files: ReadonlyMap<string, string>) {
     return;
   const lines = source.replace(/\r?\n$/u, "").split(/\r?\n/u);
   if (startLine < 1 || endLine < startLine || endLine > lines.length) return;
-  return { path, text: lines.slice(startLine - 1, endLine).join("\n") };
+  return {
+    path,
+    startLine,
+    endLine,
+    text: lines.slice(startLine - 1, endLine).join("\n"),
+  };
+}
+
+// The fixture uses npm's pretty-printed lockfile. Only the installed package
+// entry establishes the resolved version, even when the root pins it exactly.
+function installedVersionLines(lockfile: string, version: string): number[] {
+  const lines = lockfile.split(/\r?\n/u);
+  const start = lines.indexOf('    "node_modules/linkify-it": {');
+  const evidence: number[] = [];
+  if (start < 0) return evidence;
+  for (let i = start + 1; lines[i]?.startsWith("      "); i++) {
+    const field = lines[i]!.replace(/,$/u, "");
+    if (
+      field === `      "version": "${version}"` ||
+      field ===
+        `      "resolved": "https://registry.npmjs.org/linkify-it/-/linkify-it-${version}.tgz"`
+    )
+      evidence.push(i + 1);
+  }
+  return evidence;
 }
 
 export function gradeCommand(
@@ -97,9 +120,19 @@ export function gradeCommand(
       if (citations.includes(undefined)) issues.push("Invalid source citation");
       const cites = (path: string, text: string) =>
         citations.some((e) => e?.path === path && e.text.includes(text));
+      const lockPath = `${service}/package-lock.json`;
+      const versionLines = installedVersionLines(
+        files.get(lockPath) ?? "",
+        version,
+      );
       if (
-        !cites(`${service}/package-lock.json`, `"${version}"`) &&
-        !cites(`${service}/package-lock.json`, `linkify-it-${version}.tgz`)
+        !citations.some(
+          (e) =>
+            e?.path === lockPath &&
+            versionLines.some(
+              (line) => e.startLine <= line && line <= e.endLine,
+            ),
+        )
       )
         issues.push("Missing resolved version evidence");
       if (!cites("compose.yaml", `SERVICE: ${service}`))
