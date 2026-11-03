@@ -165,7 +165,7 @@ def verify_cxsast(report: Path, scan_id: str, project: str, team: str) -> None:
         parser.ParseFile(stream)
 
 
-def collect(args: argparse.Namespace, source: Path | None) -> None:
+def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
     temp = Path(tempfile.gettempdir())
     if in_source(temp, source):
         raise ValueError(
@@ -241,11 +241,11 @@ def collect(args: argparse.Namespace, source: Path | None) -> None:
                     "--cx-xml.file-name-format=checkmarx-results.xml",
                 ]
             # Reserve stdout for the report path and pass vendor diagnostics to stderr.
-            result = subprocess.run(
+            returncode = run_vendor(
                 command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr
             )
-            if result.returncode:
-                raise ValueError(f"The Checkmarx tool exited with status {result.returncode}.")
+            if returncode:
+                raise ValueError(f"The Checkmarx tool exited with status {returncode}.")
             if report.is_symlink() or not report.is_file():
                 raise ValueError("The Checkmarx tool did not produce the requested report.")
             if args.product == "one":
@@ -288,11 +288,39 @@ def main() -> int:
         if not re.search(r"[^\s/\\]", args.team) or not args.project.strip():
             parser.error("Select a nonblank CxSAST team path and project.")
 
+    pending_signal = None
+    defer_termination = False
+
     def terminate(signum, _frame):
-        # Unwind subprocess.run so it kills and reaps the vendor before capture cleanup.
-        raise SystemExit(128 + signum)
+        nonlocal pending_signal
+        if pending_signal is None:
+            pending_signal = signum
+            if not defer_termination:
+                raise SystemExit(128 + signum)
+
+    def run_vendor(command, **kwargs):
+        nonlocal defer_termination
+        child = None
+        # Popen can have spawned the child before it returns the handle needed for cleanup.
+        defer_termination = True
+        try:
+            child = subprocess.Popen(command, **kwargs)
+            defer_termination = False
+            if pending_signal is not None:
+                raise SystemExit(128 + pending_signal)
+            return child.wait()
+        except BaseException:
+            defer_termination = True
+            if child is not None:
+                child.kill()
+                child.wait()
+            raise
+        finally:
+            defer_termination = False
 
     signals = [signal.SIGTERM]
+    if signal.getsignal(signal.SIGINT) != signal.SIG_IGN:
+        signals.append(signal.SIGINT)
     if os.name == "posix" and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
         signals.append(signal.SIGHUP)
     previous = {number: signal.signal(number, terminate) for number in signals}
@@ -304,7 +332,7 @@ def main() -> int:
             args.java = installed_launcher(args.java, source)
             args.jar = installed_file(args.jar, source)
             args.config = installed_file(args.config, source)
-        collect(args, source)
+        collect(args, source, run_vendor)
     except (ValueError, OSError, expat.ExpatError) as error:
         print(error, file=sys.stderr)
         return 1

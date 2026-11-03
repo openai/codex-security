@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from xml.etree.ElementTree import Element, ElementTree
 
 import pytest
@@ -41,6 +42,14 @@ def invoke(monkeypatch, *args):
     except SystemExit as exit:
         return exit.code
     return 0
+
+
+def mock_vendor(monkeypatch, run):
+    def popen(*args, **kwargs):
+        result = run(*args, **kwargs)
+        return SimpleNamespace(wait=lambda: result.returncode)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
 
 
 def executable(directory, name):
@@ -206,7 +215,7 @@ def test_omitted_source_protects_only_an_enclosing_checkout(capture_dir, monkeyp
         (Path(cwd) / "cx_result.json").write_text(json.dumps({"scanID": ONE_SCAN}))
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    mock_vendor(monkeypatch, run)
     request = ["one", ONE_SCAN, "--cx", cx]
     assert invoke(monkeypatch, *request) == 0
     assert Path(capsys.readouterr().out.strip()).is_relative_to(temp)
@@ -278,7 +287,7 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         (out / "vendor-log.txt").write_text("vendor diagnostic")
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    mock_vendor(monkeypatch, run)
     for _ in range(2):
         assert invoke(monkeypatch, *requested) == 0
         output = capsys.readouterr()
@@ -308,7 +317,7 @@ def test_one_discards_failed_exports(failure, capture_dir, monkeypatch, tmp_path
             kwargs["stdout"].write("vendor error while fetching the scan\n")
         return subprocess.CompletedProcess(args, 1 if failure == "nonzero exit" else 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    mock_vendor(monkeypatch, run)
     assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", cx) != 0
     output = capsys.readouterr()
     assert not output.out
@@ -332,7 +341,7 @@ def test_one_refuses_before_vendor_invocation(refusal, capture_dir, monkeypatch,
     def unexpected(*args, **kwargs):
         pytest.fail(f"Collector invoked the vendor CLI with {refusal}")
 
-    monkeypatch.setattr(subprocess, "run", unexpected)
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
     assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", cx) != 0
     output = capsys.readouterr()
     assert not output.out
@@ -429,7 +438,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
             ElementTree(Element("CxXMLResults", attributes)).write(path)
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    mock_vendor(monkeypatch, run)
     code = invoke(
         monkeypatch,
         "cxsast",
@@ -499,7 +508,6 @@ def test_one_checks_default_profile_from_account_home(
     lookup, capture_dir, monkeypatch, tmp_path, capsys
 ):
     import pwd
-    from types import SimpleNamespace
 
     account = tmp_path / "account"
     account.mkdir()
@@ -520,7 +528,9 @@ def test_one_checks_default_profile_from_account_home(
 
         monkeypatch.setattr(Path, "open", open_file)
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("unexpected cx invocation"))
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *a, **kw: pytest.fail("unexpected cx invocation")
+    )
     assert (
         invoke(
             monkeypatch,
@@ -548,7 +558,7 @@ def test_one_accepts_the_same_scan_uuid_in_server_spelling(
         (Path(cwd) / "cx_result.json").write_text(json.dumps({"scanID": scan}))
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    mock_vendor(monkeypatch, run)
     assert invoke(monkeypatch, "one", scan.upper(), "--cx", executable(tmp_path, "cx")) == 0
     saved = Path(capsys.readouterr().out.strip())
     assert json.loads(saved.read_text())["scanID"] == scan
@@ -559,7 +569,9 @@ def test_one_accepts_the_same_scan_uuid_in_server_spelling(
 def test_one_rejects_invalid_uuid_before_vendor_lookup(
     scan_id, capture_dir, monkeypatch, tmp_path, capsys
 ):
-    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("unexpected cx invocation"))
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *a, **kw: pytest.fail("unexpected cx invocation")
+    )
     assert invoke(monkeypatch, "one", scan_id, "--cx", executable(tmp_path, "cx")) != 0
     assert "scan UUID" in capsys.readouterr().err
     assert not list(capture_dir.iterdir())
@@ -579,7 +591,7 @@ def test_cxsast_rejects_unselected_scope_before_vendor_lookup(
 ):
     cxsast_args[cxsast_args.index(option) + 1] = name
     monkeypatch.setattr(
-        subprocess, "run", lambda *a, **kw: pytest.fail("unexpected CxFlow invocation")
+        subprocess, "Popen", lambda *a, **kw: pytest.fail("unexpected CxFlow invocation")
     )
     assert invoke(monkeypatch, *cxsast_args) != 0
     assert "CxSAST team path and project" in capsys.readouterr().err
@@ -605,12 +617,18 @@ def test_cancellation_reaps_vendor_and_removes_partial_report(
     monkeypatch.setenv("VENDOR_PID_FILE", str(pid_file))
     monkeypatch.setenv("TMPDIR", str(capture_dir))
     monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), os.environ["PATH"]]))
-    result = subprocess.run(
-        [sys.executable, "-I", "-S", str(SCRIPT), "one", ONE_SCAN, "--cx", bash],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        timeout=10,
-    )
+    signum = getattr(signal, name)
+    # A caught signal becomes SIG_DFL on exec, even when pytest was started with nohup.
+    previous = signal.signal(signum, lambda *_: None)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(SCRIPT), "one", ONE_SCAN, "--cx", bash],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    finally:
+        signal.signal(signum, previous)
     pid = int(pid_file.read_text())
     try:
         os.kill(pid, 0)
@@ -619,6 +637,54 @@ def test_cancellation_reaps_vendor_and_removes_partial_report(
     else:
         os.kill(pid, signal.SIGKILL)
         pytest.fail("vendor survived collector cancellation")
-    assert result.returncode == 128 + getattr(signal, name)
+    assert result.returncode == 128 + signum
     assert not result.stdout
     assert not list(capture_dir.iterdir())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="exercises POSIX termination signals")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP", "SIGINT"])
+@pytest.mark.native_macos
+def test_cancellation_before_popen_returns_reaps_vendor(
+    name, capture_dir, monkeypatch, tmp_path, capfd
+):
+    popen = subprocess.Popen
+    child = None
+    signum = getattr(signal, name)
+
+    def launch(command, **kwargs):
+        nonlocal child
+        child = popen([sys.executable, "-I", "-S", "-c", "import time; time.sleep(30)"], **kwargs)
+        signal.raise_signal(signum)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    previous = signal.signal(signum, lambda *_: None)
+    try:
+        assert (
+            invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) == 128 + signum
+        )
+        assert child is not None and child.returncode == -signal.SIGKILL
+        assert not capfd.readouterr().out
+        assert not list(capture_dir.iterdir())
+    finally:
+        signal.signal(signum, previous)
+        if child is not None:
+            child.kill()
+            child.wait()
+
+
+@pytest.mark.cross_platform
+def test_preserves_an_ignored_interrupt(capture_dir, monkeypatch, tmp_path):
+    def run(args, *, cwd, **kwargs):
+        assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+        (Path(cwd) / "cx_result.json").write_text(json.dumps({"scanID": ONE_SCAN}))
+        return subprocess.CompletedProcess(args, 0)
+
+    mock_vendor(monkeypatch, run)
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        assert invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) == 0
+        assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, previous)
