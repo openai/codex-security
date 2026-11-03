@@ -183,7 +183,7 @@ test.each(cases)(
           deepScanConfigPath,
         }),
         // Exercise routing independently of the host's Bun capability fallback.
-        supportsDirectDeepScan: async () => true,
+        canRunDirectDeepScan: () => true,
         createCodex: (options) => {
           expect(options.config).toMatchObject({
             model: "gpt-6.1-sol",

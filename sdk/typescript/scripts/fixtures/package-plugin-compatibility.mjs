@@ -77,7 +77,7 @@ const client = new CodexSecurity(
                     const plugin = env.CODEX_SECURITY_PLUGIN_ROOT;
                     const scanDir = env.CODEX_SECURITY_SCAN_DIR;
                     await cp(
-                      join(plugin, "examples", "completed-scan"),
+                      join(plugin, "examples", "legacy-completed-scan"),
                       scanDir,
                       { recursive: true },
                     );
@@ -95,10 +95,10 @@ const client = new CodexSecurity(
                     manifest.scan.producer.version = metadata.version;
                     delete manifest.scan.sealedAt;
                     delete manifest.scan.artifacts;
-                    manifest.scan.scope.context = " ";
+                    manifest.scan.scope.context = "Synthetic archive review.";
                     manifest.scan.threatModel = {
                       summary: "Archive input",
-                      assumptions: [" "],
+                      assumptions: ["Archive entry names are untrusted."],
                     };
                     manifest.scan.target = {
                       kind: env.CODEX_SECURITY_TARGET_KIND,
@@ -114,30 +114,21 @@ const client = new CodexSecurity(
                         delete finding.findingId;
                         delete finding.occurrenceId;
                         delete finding.fingerprints;
-                        finding.locations[0].path = "src/./extract.py";
-                        finding.locations[0].role = " ";
+                        finding.locations[0].role = "sink";
                       }
                       if (name === "coverage.json") {
                         document.openQuestions = [
                           "What deployment controls apply?",
                         ];
-                        document.surfaces = ["HTTP API", "ArchiveSurface"].map(
+                        document.surfaces = ["http-api", "archive-surface"].map(
                           (id) => ({
                             ...document.surfaces[0],
                             id,
-                            notes: " ",
-                            riskArea: " ",
+                            notes: "Archive handling was reviewed.",
+                            riskArea: "filesystem",
                           }),
                         );
                         delete document.surfaces[1].receiptRefs;
-                        document.surfaces.push({
-                          label: "Unidentified surface",
-                          disposition: "reported",
-                        });
-                        document.completeness = "partial";
-                        document.deferred = [
-                          { reason: "Deployment review remains." },
-                        ];
                       }
                       await writeFile(file, JSON.stringify(document));
                     }
@@ -183,34 +174,22 @@ try {
     await realpath(scanEnvironment.CODEX_SECURITY_PLUGIN_ROOT),
     await realpath(selectedPlugin),
   );
+  await assert.rejects(readFile(join(result.scanDir, "coverage.json")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(result.review, { excludedPaths: [] });
   assert.equal(result.manifest.scan.status, "completed");
   assert.ok(result.manifest.scan.sealedAt);
-  assert.deepEqual(
-    result.coverage.surfaces.map((surface) => surface.id),
-    ["HTTP API", "ArchiveSurface"],
-  );
+  assert.equal(result.manifest.scan.coverageRef, undefined);
+  assert.equal(result.manifest.scan.reviewState, undefined);
   assert.equal(turns.length, 2);
   assert.equal(result.findings.findings.length, 1);
-  assert.equal(
-    result.findings.findings[0].locations[0].path,
-    "src/./extract.py",
-  );
-  assert.equal(result.findings.findings[0].locations[0].role, " ");
-  assert.equal(result.coverage.surfaces[0].notes, " ");
-  assert.equal(result.coverage.surfaces[0].riskArea, " ");
-  assert.equal(result.coverage.completeness, "partial");
-  // Main normalizes absent receipt references without changing review disposition.
-  assert.equal(result.coverage.surfaces[1].disposition, "reported");
-  assert.deepEqual(result.coverage.surfaces[1].receiptRefs, []);
-  assert.deepEqual(result.coverage.deferred, []);
-  assert.ok(
-    result.coverage.openQuestions.length > 0 &&
-      result.coverage.openQuestions.every(
-        (entry) => entry.question === "What deployment controls apply?",
-      ),
-  );
-  assert.equal(result.manifest.scan.scope.context, " ");
-  assert.deepEqual(result.manifest.scan.threatModel.assumptions, [" "]);
+  assert.equal(result.findings.findings[0].locations[0].path, "src/extract.py");
+  assert.equal(result.findings.findings[0].locations[0].role, "sink");
+  assert.equal(result.manifest.scan.scope.context, "Synthetic archive review.");
+  assert.deepEqual(result.manifest.scan.threatModel.assumptions, [
+    "Archive entry names are untrusted.",
+  ]);
   const saved = await runWorkbench(
     {
       python: scanEnvironment.PYTHON,
@@ -229,7 +208,7 @@ try {
       scanDir: result.scanDir,
       turns: turns.length,
       status: saved.scan.progress.status,
-      coverageIds: result.coverage.surfaces.map((surface) => surface.id),
+      review: result.review,
     }),
   );
 } finally {

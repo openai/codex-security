@@ -21,10 +21,19 @@
           "type": "string",
           "enum": ["standard", "deep"]
         },
+        "max_time_minutes": {
+          "description": "Investigation minutes: advisory in Standard (default: unset); enforced Deep discovery limit (default and maximum: 5760). Scans may finish early; reporting may run longer.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "cyber_access_program": {
           "description": "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
           "type": "string",
           "enum": ["standard", "daybreak_blue", "daybreak_red"]
+        },
+        "owner_suggestions": {
+          "description": "Generate optional owner-suggestions.json after a committed scan (default: false).",
+          "type": "boolean"
         },
         "scope": {
           "description": "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
@@ -138,7 +147,8 @@
             },
             "max_time_hours": {
               "default": 96,
-              "description": "Maximum deep-scan discovery hours (default: 96; maximum: 96).",
+              "deprecated": true,
+              "description": "Deprecated Deep-only alias for maxTimeMinutes / --max-time, in hours (default: 96; maximum: 96).",
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 96

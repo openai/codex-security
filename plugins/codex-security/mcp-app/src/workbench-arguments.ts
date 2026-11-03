@@ -12,8 +12,12 @@ export function workbenchArgs(
     if (value === undefined || value === false) continue;
     const flag = `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
     (Array.isArray(value) ? value : [value]).forEach((item) => {
-      args.push(flag);
-      if (item !== true) args.push(String(item));
+      if (item === true) args.push(flag);
+      else {
+        const scalar = String(item);
+        if (scalar.startsWith("-")) args.push(`${flag}=${scalar}`);
+        else args.push(flag, scalar);
+      }
     });
   }
   return args;

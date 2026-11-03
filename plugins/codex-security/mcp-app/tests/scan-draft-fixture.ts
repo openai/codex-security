@@ -7,8 +7,7 @@ export function workerDraft<Finding extends Record<string, unknown>>(
   return {
     scanId,
     findings,
-    coverage: {
-      completeness: "complete" as const,
+    reviewState: {
       surfaces: [],
       explicitExclusions: [],
       deferred: [],

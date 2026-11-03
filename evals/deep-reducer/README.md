@@ -2,7 +2,7 @@
 
 This optional model eval runs one reducer against synthetic persisted worker findings and a previous aggregate. It uses the pinned Codex CLI, its external code-mode host, the production reducer prompt, and the production artifact tool handlers. It does not launch a repository scan.
 
-The fixture has a 32 MiB individual semantic field containing quotes, backslashes, newlines, and Unicode. Its old duplicated MCP response is about 114 MiB. The first input read deliberately returns that old response; all subsequent calls use the production paged implementation. The IPC error comes from the real transport, not a mocked error message.
+The fixture has a 32 MiB individual semantic field containing quotes, backslashes, newlines, and Unicode. Its old duplicated MCP response is about 114 MiB. The first input read deliberately returns that old response; all subsequent calls use the production paged implementation. The production stdio transport reports an explicit response-size error before Codex's native transport would discard the response and leave the request waiting.
 
 The grader requires a smaller byte budget on the retry with the same cursor and reference, byte-bounded subsequent pages, one successful result submission, every source accounted for exactly once, complete original payloads matching their SHA-256 hashes, and preservation of the previous finding identity and synthesized history.
 
@@ -19,7 +19,9 @@ The command prints the path to an ignored directory under `evals/deep-reducer/re
 
 ## Deterministic regression test
 
-The same fixture, real transport, and grading helpers live under `plugins/codex-security/mcp-app/tests/support/reducer-paging/`. The normal MCP test suite exercises them with scripted model responses from a local HTTP provider, a private temporary Codex home, and no model credentials or external model requests. It additionally asserts the exact transport diagnostic and checks that the grader rejects missing input pages and collapsed independent findings.
+The same fixture, real transport, and grading helpers live under `plugins/codex-security/mcp-app/tests/support/reducer-paging/`. The normal MCP test suite exercises both the production stdio response-size error and the native 64 MiB code-mode IPC error. The latter uses a local streamable HTTP MCP server so the oversized response reaches the later IPC boundary. Both cases require the same complete evidence preservation and recovery checks; neither simulates the error.
+
+The tests use scripted model responses from a local HTTP provider, a private temporary Codex home, and no model credentials or external model requests. They additionally assert the actual transport diagnostics and check that the grader rejects missing input pages and collapsed independent findings.
 
 Run that test directly from the repository root:
 

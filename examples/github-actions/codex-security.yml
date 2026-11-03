@@ -32,7 +32,7 @@ jobs:
       security-events: write
       actions: read
     env:
-      CODEX_SECURITY_VERSION: "0.1.27"
+      CODEX_SECURITY_VERSION: "0.8.2"
       BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
       # Report-only by default. Set to "high" to fail on high/critical findings.
       FAIL_ON_SEVERITY: ""
@@ -94,6 +94,7 @@ jobs:
             --model "$BEDROCK_MODEL_ID"
             --mode standard
             --effort high
+            --codex 'responses_api_metadata.codex_security_integration="github_actions_workflow"'
             --output-dir "$RUNNER_TEMP/codex-security-scan"
             --json
           )
@@ -108,8 +109,8 @@ jobs:
           echo "exit-code=$scan_status" >> "$GITHUB_OUTPUT"
           exit "$scan_status"
 
-      # A policy violation (1) is still a completed scan. An incomplete/error
-      # result (2) must not replace code-scanning alerts with a partial report.
+      # A policy violation (1) is still a completed scan. An execution failure
+      # (2) must not replace code-scanning alerts with retained failure output.
       - name: Export completed findings as SARIF
         id: sarif
         if: ${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}
@@ -138,5 +139,5 @@ jobs:
             ${{ runner.temp }}/codex-security-result.json
             ${{ runner.temp }}/codex-security.sarif
             ${{ runner.temp }}/codex-security-scan/report.md
-            ${{ runner.temp }}/codex-security-scan/coverage.json
+            ${{ runner.temp }}/codex-security-scan/scan-manifest.json
             ${{ runner.temp }}/codex-security-scan/findings.json

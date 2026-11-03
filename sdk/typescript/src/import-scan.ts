@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { CodexSecurityConfig } from "./config.js";
 import { loadContract, sameCheckedFileDevice } from "./contract.js";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./findings-import.js";
 import { ScanResult } from "./result.js";
 import {
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityStateDirectory,
   expandHome,
@@ -64,6 +66,7 @@ export interface ImportScanDependencies {
   environment?: ProcessEnvironment;
   runWorkbench?: typeof runWorkbench;
   resolvePluginPython?: typeof resolvePluginPython;
+  onWarning?: (warning: string) => void;
 }
 
 const IMPORT_DESCRIPTION =
@@ -141,6 +144,29 @@ export async function importScan(
       options.format,
       pluginRoot,
     );
+    const helper = (
+      await import(
+        pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+      )
+    ).default;
+    try {
+      helper.parseCurrentFindings(
+        findings.map((finding) => {
+          // Import assigns new identities and retains source metadata as provenance.
+          const { findingId, occurrenceId, fingerprints, writeup, ...content } =
+            finding;
+          return {
+            ...content,
+            provenance: { source: `${options.format}_import` },
+          };
+        }),
+      );
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Imported findings do not match the current scan-draft finding contract: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
     signal?.throwIfAborted();
     await validateOutputDir(options.outputDir, options.archiveExisting);
     if (options.dryRun) {
@@ -253,6 +279,22 @@ export async function importScan(
             runtimeStatus: "imported",
             limitations: [IMPORT_DESCRIPTION],
           },
+          mode: "repository",
+          reviewState: {
+            surfaces: findings.length
+              ? [
+                  {
+                    id: "import",
+                    label: basename(inputPath),
+                    disposition: "reported",
+                    receiptRefs: [sourceRef],
+                    notes: IMPORT_DESCRIPTION,
+                  },
+                ]
+              : [],
+            explicitExclusions: [],
+            deferred: [],
+          },
           extensions: {
             import: {
               format: options.format,
@@ -263,23 +305,6 @@ export async function importScan(
         },
       },
       "findings.json": { findings: bound },
-      "coverage.json": {
-        completeness: "unknown",
-        inventoryStrategy: "custom",
-        surfaces: findings.length
-          ? [
-              {
-                id: "import",
-                label: basename(inputPath),
-                disposition: "reported",
-                receiptRefs: [sourceRef],
-                notes: IMPORT_DESCRIPTION,
-              },
-            ]
-          : [],
-        explicitExclusions: [],
-        deferred: [],
-      },
     };
     for (const [name, document] of Object.entries(documents)) {
       await writeFile(
@@ -328,7 +353,7 @@ export async function importScan(
         "fail-scan",
         "--scan-id",
         activeScan.id,
-        `--message=${errorMessage(error).slice(0, 2400)}`,
+        `--message=${errorMessage(error)}`,
       ]).catch(() => undefined);
     }
     if (signal?.aborted) {
@@ -340,6 +365,14 @@ export async function importScan(
     }
     throw error;
   } finally {
-    await cleanupSdkDirectory(workspace);
+    await cleanupSdkDirectory(workspace).catch((error: unknown) => {
+      void Promise.resolve()
+        .then(() =>
+          dependencies.onWarning?.(
+            `Could not clean up after the Codex Security import: ${errorMessage(error)}`,
+          ),
+        )
+        .catch(() => {});
+    });
   }
 }

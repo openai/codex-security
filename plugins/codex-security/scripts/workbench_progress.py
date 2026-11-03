@@ -1,7 +1,6 @@
 """Progress transition helpers for the Codex Security workbench."""
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,45 +11,6 @@ from deep_scan_workbench import require_current_coordinator
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
-
-MAX_PREFLIGHT_ISSUES = 32
-
-
-def _preflight_issue_text(value: Any, maximum: int, label: str) -> str:
-    if not isinstance(value, str):
-        raise SystemExit(f"Preflight issue {label} must be text.")
-    normalized = value.strip()
-    # Match JavaScript's UTF-16 code-unit length.
-    if not normalized or len(normalized.encode("utf-16-le", errors="surrogatepass")) // 2 > maximum:
-        raise SystemExit(f"Preflight issue {label} must contain 1 to {maximum} characters.")
-    return normalized
-
-
-def preflight_issues_json(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise SystemExit("Preflight issues must be valid JSON.") from exc
-    if not isinstance(payload, list) or len(payload) > MAX_PREFLIGHT_ISSUES:
-        raise SystemExit(
-            f"Preflight issues must be an array of at most {MAX_PREFLIGHT_ISSUES} objects."
-        )
-    expected_keys = {"capability", "reason", "severity", "status"}
-    for index, issue in enumerate(payload):
-        label = f"{index + 1}"
-        if not isinstance(issue, dict) or set(issue) != expected_keys:
-            raise SystemExit(
-                f"Preflight issue {label} must contain capability, reason, severity, and status."
-            )
-        severity = issue.get("severity")
-        status = issue.get("status")
-        if severity not in {"block", "warn"} or status not in {"fail", "unknown"}:
-            raise SystemExit(f"Preflight issue {label} has an invalid severity or status.")
-        for field, maximum in (("capability", 128), ("reason", 1200)):
-            issue[field] = _preflight_issue_text(issue.get(field), maximum, f"{label} {field}")
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 def reportable_count(
@@ -115,10 +75,6 @@ def update_progress(
     scan_id = require_uuid(args.scan_id, "scan-id")
     model = optional_text(args.model, maximum=200)
     reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-    preflight_issues = (
-        sys.stdin.read() if args.preflight_issues_json_stdin else args.preflight_issues_json
-    )
-    serialized_preflight_issues = preflight_issues_json(preflight_issues)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = wb.now()
@@ -142,11 +98,6 @@ def update_progress(
         )
         if args.deep_review_pass is not None and scan["mode"] != "deep":
             raise SystemExit("Only Deep Scan can record a deep review pass.")
-        if serialized_preflight_issues is not None:
-            if scan["mode"] == "deep":
-                raise SystemExit("Deep Scan preflight progress is owned by its coordinator.")
-            if scan["phase"] != "preflight" or args.phase not in {None, "preflight"}:
-                raise SystemExit("Preflight issues can only be updated during preflight.")
         progress = connection.execute(
             "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
         ).fetchone()
@@ -194,7 +145,6 @@ def update_progress(
             updates.extend(["preflight_checks_total = ?", "preflight_checks_completed = ?"])
             values.extend([phase_total, phase_completed])
         for column, value in (
-            ("preflight_issues_json", serialized_preflight_issues),
             ("review_items_total", args.review_items_total),
             ("review_items_completed", args.review_items_completed),
             (

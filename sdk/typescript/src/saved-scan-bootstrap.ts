@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
@@ -44,7 +45,10 @@ export async function savedScanWorkbench(
     signal?: AbortSignal;
   },
 ): Promise<
-  SavedScanDependencies["runWorkbench"] & { environment: ProcessEnvironment }
+  SavedScanDependencies["runWorkbench"] & {
+    environment: ProcessEnvironment;
+    readonly protectedRoots: readonly string[];
+  }
 > {
   options.signal?.throwIfAborted();
   const environment: ProcessEnvironment = workbenchEnvironment(
@@ -157,7 +161,10 @@ export async function savedScanWorkbench(
     }
     return result;
   };
-  return Object.assign(workbench, { environment });
+  return Object.assign(workbench, {
+    environment,
+    protectedRoots: [options.currentDirectory, ...protectedRoots],
+  });
 }
 
 async function readTargets(
@@ -356,15 +363,33 @@ async function latestTargets(
         related.add(target.id);
     }
   }
-  const scans = readRows<ScanTarget>(
+  const scans = readRows<
+    ScanTarget & {
+      updated_at: string;
+      progress_updated_at: string;
+      started_at: string;
+    }
+  >(
     database,
-    `SELECT scans.id, scans.target_path,
+    `SELECT scans.id, scans.target_path, scans.updated_at, scans.started_at,
+        progress.updated_at AS progress_updated_at,
         ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
-      ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
-        scans.started_at DESC, scans.id`,
-  );
+      ORDER BY scans.id`,
+  )
+    .map((scan) => ({
+      ...scan,
+      updatedAt:
+        compareTimestamps(scan.updated_at, scan.progress_updated_at) > 0
+          ? scan.updated_at
+          : scan.progress_updated_at,
+    }))
+    .sort(
+      (a, b) =>
+        compareTimestamps(b.updatedAt, a.updatedAt) ||
+        compareTimestamps(b.started_at, a.started_at),
+    );
   for (const scan of scans) {
     signal?.throwIfAborted();
     if (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import runpy
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -26,10 +27,8 @@ def test_config_and_state_share_blank_home_semantics(tmp_path, monkeypatch, conf
             expected = Path(configured)
         monkeypatch.setenv("CODEX_HOME", configured)
     deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
-    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
     storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
     assert deep["config_path"]() == expected / "codex-security" / "config.toml"
-    assert preflight["DEFAULT_CONFIG"] == expected / "config.toml"
     assert storage["state_dir"]() == expected / "state" / "plugins" / "codex-security"
 
 
@@ -81,10 +80,17 @@ def test_config_and_storage_preserve_literal_home_spaces(tmp_path, monkeypatch, 
     settings = deep["resolve_deep_scan_config"](8)
     assert settings["workers"] == 7
     assert settings["maxTimeHours"] == 0.25
-    preflight = runpy.run_path(str(SCRIPTS / "config_preflight.py"))
-    assert preflight["DEFAULT_CONFIG"].resolve() == home / "config.toml"
-    assert preflight["DEFAULT_CONFIG"].read_text(encoding="utf-8") == 'model = "synthetic"\n'
     storage = runpy.run_path(str(SCRIPTS / "workbench" / "storage.py"))
     selected_state = storage["state_dir"]()
     assert selected_state == state
     assert (selected_state / "existing-state.txt").read_text(encoding="utf-8") == "selected state\n"
+
+
+def test_toml_loader_uses_tomli_when_the_stdlib_module_is_missing(monkeypatch):
+    fallback = ModuleType("tomli")
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    monkeypatch.setitem(sys.modules, "tomli", fallback)
+
+    namespace = runpy.run_path(str(SCRIPTS / "workbench" / "runtime_toml.py"))
+
+    assert namespace["tomllib"] is fallback

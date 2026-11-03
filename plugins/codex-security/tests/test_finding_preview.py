@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import json
-import runpy
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
+from workbench_test_support import load_script
 
-FINDING_PREVIEW_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "finding_preview.py"
+preview = load_script("finding_preview")
 
 pytestmark = pytest.mark.cross_platform
 
 
 def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     compact = {
         "severity": {"level": "high", "rationale": "Synthetic impact"},
         "confidence": {"level": "high", "rationale": "Synthetic validation"},
@@ -32,13 +30,13 @@ def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
         ],
     }
 
-    bounded = preview["bounded_finding_details"](finding)
+    bounded = preview.bounded_finding_details(finding)
 
     assert {key: bounded[key] for key in compact} == compact
     assert bounded["codeEvidence"]
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode())
-        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+        <= preview.FINDING_DETAILS_PREVIEW_BYTES
     )
 
 
@@ -57,7 +55,6 @@ def test_compact_finding_fields_survive_verbose_code_evidence() -> None:
 def test_verbose_finding_metadata_retains_diagnostics_and_report(
     metadata: str, value: object
 ) -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     finding = {
         "identity": {"anchor": "example-finding"},
         "status": "validated",
@@ -69,7 +66,7 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(
         metadata: value,
     }
 
-    bounded = preview["bounded_finding_details"](finding)
+    bounded = preview.bounded_finding_details(finding)
 
     assert {key: bounded[key] for key in finding if key != metadata} == {
         key: value for key, value in finding.items() if key != metadata
@@ -82,16 +79,13 @@ def test_verbose_finding_metadata_retains_diagnostics_and_report(
         assert bounded[metadata]["rationale"]
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode())
-        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+        <= preview.FINDING_DETAILS_PREVIEW_BYTES
     )
 
 
-@pytest.mark.parametrize("length", [2_000, 20_000])
 @pytest.mark.parametrize("extra_metadata", [False, True])
-def test_multiple_verbose_metadata_sections_each_retain_a_preview(
-    length: int, extra_metadata: bool
-) -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
+def test_multiple_verbose_metadata_sections_each_retain_a_preview(extra_metadata: bool) -> None:
+    length = 20_000
     finding = {
         "severity": {"level": "high", "rationale": "s" * length},
         "confidence": {"level": "high", "rationale": "c" * length},
@@ -106,7 +100,7 @@ def test_multiple_verbose_metadata_sections_each_retain_a_preview(
             taxonomy={"category": "t" * length},
         )
 
-    bounded = preview["bounded_finding_details"](finding)
+    bounded = preview.bounded_finding_details(finding)
 
     assert set(bounded) == set(finding)
     for key in ("severity", "confidence"):
@@ -117,18 +111,17 @@ def test_multiple_verbose_metadata_sections_each_retain_a_preview(
     assert bounded["validation"] == finding["validation"]
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode())
-        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+        <= preview.FINDING_DETAILS_PREVIEW_BYTES
     )
 
 
 def test_nested_attack_path_stays_within_its_preview_budget() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     attack_path = {
         f"branch-{branch}": {f"node-{node}": "\n😀" * 40 for node in range(3)}
         for branch in range(3)
     }
 
-    bounded = preview["bounded_finding_details"]({"attackPath": attack_path})["attackPath"]
+    bounded = preview.bounded_finding_details({"attackPath": attack_path})["attackPath"]
 
     assert bounded["branch-0"]["node-0"] == "\n😀" * 40
     assert len(json.dumps(bounded, separators=(",", ":")).encode()) <= 4_000
@@ -136,7 +129,6 @@ def test_nested_attack_path_stays_within_its_preview_budget() -> None:
 
 
 def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     scalar_finding = {
         "attackPath": {
             "impact": "Native memory corruption is possible.",
@@ -144,7 +136,7 @@ def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> 
         }
     }
 
-    bounded = preview["bounded_finding_details"](scalar_finding)
+    bounded = preview.bounded_finding_details(scalar_finding)
 
     assert bounded["attackPath"]["impact"] == {"rationale": "Native memory corruption is possible."}
     assert bounded["attackPath"]["likelihood"] == {"level": "medium"}
@@ -161,19 +153,18 @@ def test_bounded_finding_details_normalizes_scalar_attack_path_assessments() -> 
             "likelihood": None,
         }
     }
-    structured = preview["bounded_finding_details"](structured_finding)
+    structured = preview.bounded_finding_details(structured_finding)
 
     assert structured["attackPath"]["impact"] == structured_finding["attackPath"]["impact"]
     assert structured["attackPath"]["likelihood"] is None
 
-    missing = preview["bounded_finding_details"]({"attackPath": {"summary": "An upload is read."}})
+    missing = preview.bounded_finding_details({"attackPath": {"summary": "An upload is read."}})
 
     assert "impact" not in missing["attackPath"]
     assert "likelihood" not in missing["attackPath"]
 
 
 def test_nested_attack_path_string_arrays_survive_without_relaxing_section_depth() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {
         "attackPath": {
             "dataflow": {
@@ -185,7 +176,7 @@ def test_nested_attack_path_string_arrays_survive_without_relaxing_section_depth
     }
     finding = deepcopy(original)
 
-    bounded = preview["bounded_finding_details"](finding)
+    bounded = preview.bounded_finding_details(finding)
 
     assert bounded == {
         "attackPath": {
@@ -200,7 +191,6 @@ def test_nested_attack_path_string_arrays_survive_without_relaxing_section_depth
 
 
 def test_bounded_finding_details_merges_root_cause_aliases() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {
         "rootCause": {"code": "SELECT * FROM users"},
         "root_cause": {
@@ -211,7 +201,7 @@ def test_bounded_finding_details_merges_root_cause_aliases() -> None:
         },
     }
 
-    bounded = preview["bounded_finding_details"](original)
+    bounded = preview.bounded_finding_details(original)
 
     assert bounded["rootCause"] == {
         "code": "SELECT * FROM users",
@@ -223,7 +213,6 @@ def test_bounded_finding_details_merges_root_cause_aliases() -> None:
 
 
 def test_bounded_finding_details_ignores_malformed_root_cause_alias() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {
         "rootCause": {"summary": 42},
         "root_cause": {
@@ -233,7 +222,7 @@ def test_bounded_finding_details_ignores_malformed_root_cause_alias() -> None:
         "code_evidence": [{"id": "legacy-source", "code": "legacy_source()"}],
     }
 
-    bounded = preview["bounded_finding_details"](original)
+    bounded = preview.bounded_finding_details(original)
 
     assert bounded["rootCause"] == {
         "evidenceRefs": ["legacy-source"],
@@ -243,7 +232,6 @@ def test_bounded_finding_details_ignores_malformed_root_cause_alias() -> None:
 
 
 def test_bounded_finding_details_strips_invalid_legacy_evidence_fields() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
     original = {
         "code_evidence": [
             {
@@ -257,7 +245,7 @@ def test_bounded_finding_details_strips_invalid_legacy_evidence_fields() -> None
         ]
     }
 
-    bounded = preview["bounded_finding_details"](original)
+    bounded = preview.bounded_finding_details(original)
 
     assert bounded["code_evidence"] == [{"id": "legacy-source", "code": "dangerous_call()"}]
     assert original["code_evidence"][0]["startLine"] == 0
@@ -265,8 +253,7 @@ def test_bounded_finding_details_strips_invalid_legacy_evidence_fields() -> None
 
 
 def test_bounded_finding_details_reserves_core_sections() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
-    bounded = preview["bounded_finding_details"](
+    bounded = preview.bounded_finding_details(
         {
             "attackPath": {
                 "blindspots": ["x" * 20_000],
@@ -321,23 +308,22 @@ def test_bounded_finding_details_reserves_core_sections() -> None:
     assert bounded["attackPath"]["preconditions"] == ["Automatic extraction is enabled."]
     assert bounded["attackPath"]["evidenceRefs"] == ["evidence-0"]
     assert bounded["writeup"] == {"reportPath": "findings/archive-traversal/archive-traversal.md"}
-    assert len(bounded["codeEvidence"]) == preview["FINDING_CODE_EVIDENCE_LIMIT"]
+    assert len(bounded["codeEvidence"]) == preview.FINDING_CODE_EVIDENCE_LIMIT
     assert bounded["codeEvidence"][0]["role"] == "user_input"
     assert all(
         len(json.dumps(item["code"], separators=(",", ":")).encode("utf-8"))
-        <= preview["FINDING_CODE_EVIDENCE_SNIPPET_BYTES"]
+        <= preview.FINDING_CODE_EVIDENCE_SNIPPET_BYTES
         for item in bounded["codeEvidence"]
     )
     assert (
         len(json.dumps(bounded, separators=(",", ":")).encode("utf-8"))
-        <= preview["FINDING_DETAILS_PREVIEW_BYTES"]
+        <= preview.FINDING_DETAILS_PREVIEW_BYTES
     )
 
 
 def test_bounded_finding_details_keeps_guidance_and_both_evidence_aliases() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
 
-    bounded = preview["bounded_finding_details"](
+    bounded = preview.bounded_finding_details(
         {
             "codeEvidence": [
                 {"id": "canonical", "code": "canonical_source()"},
@@ -358,9 +344,8 @@ def test_bounded_finding_details_keeps_guidance_and_both_evidence_aliases() -> N
 
 
 def test_bounded_finding_details_deduplicates_evidence_before_limiting() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
 
-    bounded = preview["bounded_finding_details"](
+    bounded = preview.bounded_finding_details(
         {
             "codeEvidence": [
                 {"id": "shared", "code": "canonical_shared()"},
@@ -386,9 +371,8 @@ def test_bounded_finding_details_deduplicates_evidence_before_limiting() -> None
 
 
 def test_bounded_finding_details_filters_malformed_evidence_before_limiting() -> None:
-    preview = runpy.run_path(str(FINDING_PREVIEW_SCRIPT))
 
-    bounded = preview["bounded_finding_details"](
+    bounded = preview.bounded_finding_details(
         {
             "code_evidence": [
                 None,
@@ -401,3 +385,73 @@ def test_bounded_finding_details_filters_malformed_evidence_before_limiting() ->
     )
 
     assert bounded["code_evidence"] == [{"id": "valid", "code": "valid_source()"}]
+
+
+def test_large_code_preview_bounds_sizing_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_size = preview.json_size
+    probe_lengths: list[int] = []
+
+    def observed_size(value: object) -> int:
+        if isinstance(value, str):
+            probe_lengths.append(len(value))
+        return original_size(value)
+
+    monkeypatch.setattr(preview, "json_size", observed_size)
+    finding = {
+        "preventiveControls": ["Keep the authorization check centralized."],
+        "codeEvidence": [
+            {
+                "id": "source",
+                "label": "Missing check",
+                "path": "example.py",
+                "startLine": 1,
+                "code": "x" * (64 * 1024),
+                "explanation": "The resource is returned without authorization.",
+            }
+        ],
+        "attackPath": {"narrative": "The request reaches the protected resource."},
+        "validation": {"summary": "An unauthorized request succeeds."},
+        "rootCause": {"summary": "The authorization check is missing."},
+        "remediationTests": ["Reject an unauthorized request."],
+    }
+    original = deepcopy(finding)
+    expected = {
+        "rootCause": original["rootCause"],
+        "validation": original["validation"],
+        "attackPath": original["attackPath"],
+        "codeEvidence": [{**original["codeEvidence"][0], "code": "x" * 1_498}],
+        "remediationTests": original["remediationTests"],
+        "preventiveControls": original["preventiveControls"],
+    }
+
+    bounded = preview.bounded_finding_details(finding)
+
+    assert bounded == expected
+    encoded = json.dumps(bounded, separators=(",", ":")).encode("ascii")
+    assert encoded == json.dumps(expected, separators=(",", ":")).encode("ascii")
+    assert len(encoded) <= preview.FINDING_DETAILS_PREVIEW_BYTES
+    assert finding == original
+    assert 1_498 in probe_lengths
+    assert max(probe_lengths) <= 1_500
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "plain", '"\\\n\t\x00', "é", "😀", "a😀é\n", "\ud800"],
+    ids=["empty", "ascii", "escapes", "bmp", "supplementary", "mixed", "lone-surrogate"],
+)
+def test_bounded_json_text_matches_exhaustive_prefix_oracle(value: str) -> None:
+    prefixes = [
+        (value[:end], len(json.dumps(value[:end]).encode("ascii"))) for end in range(len(value) + 1)
+    ]
+    budgets = {-3, 0, 1, 2}
+    for _, size in prefixes:
+        budgets.update((size - 1, size, size + 1))
+
+    for budget in sorted(budgets):
+        expected = next((item for item in reversed(prefixes) if item[1] <= budget), ("", 2))
+        assert preview.bounded_json_text(value, budget) == expected, (repr(value), budget)
+        if budget <= 0:
+            remaining = [budget]
+            assert preview.bounded_json_value(value, remaining) is None
+            assert remaining == [budget]

@@ -125,19 +125,6 @@
       "required": ["id", "label", "path", "startLine", "code", "explanation"],
       "additionalProperties": true
     },
-    "legacyCodeEvidence": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-        },
-        "code": {
-          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-        }
-      },
-      "required": ["id", "code"],
-      "additionalProperties": true
-    },
     "findingAssessment": {
       "anyOf": [
         {
@@ -186,9 +173,7 @@
             "evidenceRefs": {
               "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
             },
-            "evidence_refs": {
-              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-            }
+            "evidence_refs": false
           },
           "additionalProperties": true
         }
@@ -226,9 +211,7 @@
             "evidenceRefs": {
               "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
             },
-            "evidence_refs": {
-              "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-            }
+            "evidence_refs": false
           },
           "additionalProperties": true
         }
@@ -256,9 +239,7 @@
         "evidenceRefs": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
         },
-        "evidence_refs": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-        },
+        "evidence_refs": false,
         "limitations": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
         },
@@ -307,21 +288,15 @@
         "controls": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
         },
-        "dataFlow": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textOrSummary"
-        },
-        "data_flow": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textOrSummary"
-        },
+        "dataFlow": false,
+        "data_flow": false,
         "dataflow": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textOrSummary"
         },
         "evidenceRefs": {
           "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
         },
-        "evidence_refs": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-        },
+        "evidence_refs": false,
         "impact": {
           "anyOf": [
             {
@@ -409,12 +384,7 @@
             "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/codeEvidence"
           }
         },
-        "code_evidence": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/legacyCodeEvidence"
-          }
-        },
+        "code_evidence": false,
         "rootCause": {
           "anyOf": [
             {
@@ -426,49 +396,19 @@
                 "summary": {
                   "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
                 },
-                "code": {
-                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-                },
-                "language": {
-                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-                },
+                "code": false,
+                "language": false,
                 "evidenceRefs": {
                   "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-                }
+                },
+                "evidence_refs": false
               },
               "required": ["summary"],
               "additionalProperties": true
             }
           ]
         },
-        "root_cause": {
-          "anyOf": [
-            {
-              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-            },
-            {
-              "type": "object",
-              "properties": {
-                "summary": {
-                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-                },
-                "code": {
-                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-                },
-                "language": {
-                  "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
-                },
-                "evidenceRefs": {
-                  "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-                },
-                "evidence_refs": {
-                  "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/textList"
-                }
-              },
-              "additionalProperties": true
-            }
-          ]
-        },
+        "root_cause": false,
         "remediation": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
         },
@@ -674,7 +614,7 @@
       "required": ["label", "disposition"],
       "additionalProperties": true
     },
-    "coverage": {
+    "reviewState": {
       "type": "object",
       "properties": {
         "documentType": false,
@@ -684,10 +624,6 @@
         "includePaths": false,
         "excludePaths": false,
         "receiptRefs": false,
-        "completeness": {
-          "enum": ["complete", "partial", "unknown"],
-          "description": "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains."
-        },
         "inventoryStrategy": false,
         "surfaces": {
           "type": "array",
@@ -778,12 +714,7 @@
           }
         }
       },
-      "required": [
-        "completeness",
-        "surfaces",
-        "explicitExclusions",
-        "deferred"
-      ],
+      "required": ["surfaces", "explicitExclusions", "deferred"],
       "additionalProperties": true
     },
     "scanDraftInput": {
@@ -791,7 +722,7 @@
       "properties": {
         "complete": {
           "type": "boolean",
-          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings."
+          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings."
         },
         "scanId": {
           "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
@@ -811,11 +742,11 @@
             "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/finding"
           }
         },
-        "coverage": {
-          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/coverage"
+        "reviewState": {
+          "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/reviewState"
         }
       },
-      "required": ["scanId", "findings", "coverage"],
+      "required": ["scanId", "findings", "reviewState"],
       "additionalProperties": false
     },
     "completedScanInput": {

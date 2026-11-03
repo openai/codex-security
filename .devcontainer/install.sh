@@ -29,4 +29,4 @@ fi
 
 pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt

@@ -13,9 +13,11 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
 );
 
 await testBeginProtocolAndParsing();
+await testScopeResponseParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
 testRunErrorParsing();
+testLegacyResponseNormalization();
 testConfiguredMaximumDurationParsing();
 await testWriteSerializationAndRecovery();
 await testBeginUsesTheWriteQueue();
@@ -36,12 +38,16 @@ async function testBeginProtocolAndParsing() {
   const calls: { args: string[]; input?: string }[] = [];
   const runner = async (args: string[], input?: string) => {
     calls.push({ args, input });
-    return stateResult(scanId, { startDisposition: "created" });
+    return stateResult(scanId, {
+      startDisposition: "created",
+      deepScan: { serviceTier: "default" },
+    });
   };
   const store = new WorkbenchDeepScanStore(runner);
   const result = await store.begin({
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
+    serviceTier: "default",
     targetPath: "/fixture/repository",
     scope: ".",
     userContext: "focus on archive parsing",
@@ -49,6 +55,7 @@ async function testBeginProtocolAndParsing() {
     scanRoot: "/fixture/scans",
   });
   assert.equal(result.scanId, scanId);
+  assert.equal(result.serviceTier, "default");
   assert.deepEqual(result.config, {
     workers: 6,
     subagents: 3,
@@ -67,6 +74,7 @@ async function testBeginProtocolAndParsing() {
   );
   assert.equal(flagValue(calls[0].args, "--model"), "gpt-5.6-sol");
   assert.equal(flagValue(calls[0].args, "--reasoning-effort"), "high");
+  assert.equal(flagValue(calls[0].args, "--service-tier"), "default");
   assert.equal(flagValue(calls[0].args, "--scope"), ".");
   assert.equal(calls[0].args.includes("--user-context-stdin"), true);
   assert.equal(calls[0].input, "focus on archive parsing");
@@ -104,6 +112,39 @@ async function testBeginProtocolAndParsing() {
   );
   assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
   assert.deepEqual(scoped.filePaths, ["README.md"]);
+}
+
+async function testScopeResponseParsing() {
+  const scanId = randomUUID();
+  for (const field of ["includePaths", "filePaths"] as const) {
+    for (const paths of [
+      ["api", "background jobs/café", "", " ", "./literal/../path"],
+      [],
+      undefined,
+    ]) {
+      const store = new WorkbenchDeepScanStore(async () =>
+        stateResult(scanId, {
+          startDisposition: "created",
+          deepScan: { [field]: paths },
+        }),
+      );
+      const started = await store.begin({
+        threadId: "thread-fixture",
+        scanRoot: "/fixture/scans",
+      });
+      assert.deepEqual(started[field], paths);
+      assert.equal(Object.hasOwn(started, field), true);
+      const resumed = await store.get(scanId, "thread-fixture");
+      assert.deepEqual(resumed[field], paths);
+    }
+    for (const paths of [null, "api", {}, ["api", 1]]) {
+      assert.throws(
+        () =>
+          parseDeepScan(stateResult(scanId, { deepScan: { [field]: paths } })),
+        { message: `deepScan.${field} must be an array of paths.` },
+      );
+    }
+  }
 }
 
 async function testWriteSerializationAndRecovery() {
@@ -322,27 +363,34 @@ async function testWorkerResponseParsing() {
     attempt: 1,
     resultManifestPath: "/fixture/output/result.json",
   };
-  const worker = await new WorkbenchDeepScanStore(async () =>
-    stateResult(scanId, {
-      deepScan: {
-        workers: [
-          {
-            id: workerId,
-            kind: "discovery",
-            status: "succeeded",
-            mergeState: "buffered",
-            promptPath: mutation.promptPath,
-            artifactDir: mutation.artifactDir,
-            resultManifestPath: mutation.resultManifestPath,
-            attempt: 1,
-            sdkThreadId: "thread-worker",
-            completionSequence: 3,
-            error: "worker was rate limited",
-          },
-        ],
-      },
-    }),
-  ).updateWorker(mutation);
+  const response = stateResult(scanId, {
+    deepScan: {
+      workers: [
+        null,
+        { id: "unrelated-malformed-worker" },
+        {
+          ...mutation,
+          mergeState: "buffered",
+          sdkThreadId: "thread-worker",
+          completionSequence: 3,
+          error: "worker was rate limited",
+        },
+      ],
+    },
+  });
+  const store = new WorkbenchDeepScanStore(async () => response);
+  const worker = await store.updateWorker(mutation);
+  const state: Record<string, unknown> = response.deepScan;
+  delete state.consecutiveErrors;
+  assert.equal(
+    Object.hasOwn(await store.updateWorker(mutation), "consecutiveErrors"),
+    false,
+  );
+  state.consecutiveErrors = null;
+  await assert.rejects(store.updateWorker(mutation), {
+    message:
+      "Codex Security workbench returned invalid deepScan.consecutiveErrors.",
+  });
 
   assert.equal(worker.completionSequence, 3);
   assert.equal(worker.mergeState, "buffered");
@@ -942,6 +990,59 @@ function testRunErrorParsing() {
   );
   assert.equal(state.createdAt, createdAt);
   assert.equal(state.error, "discovery retries exhausted");
+}
+
+function testLegacyResponseNormalization() {
+  for (const ignored of [undefined, null, "", false, [], {}]) {
+    const result = stateResult(" ");
+    const state: Record<string, unknown> = result.deepScan;
+    Object.assign(state, {
+      userContext: ignored,
+      coordinatorGeneration: ignored,
+      terminalReason: ignored,
+      consecutiveErrors: null,
+      workers: null,
+      dedupInputs: null,
+      extra: "discard",
+    });
+    Object.assign(result.deepScan.config, {
+      workers: Number.MAX_SAFE_INTEGER + 1,
+      stopAfterConsecutiveErrors: null,
+    });
+    const parsed = parseDeepScan(result);
+    assert.equal(parsed.scanId, " ");
+    assert.equal(parsed.config.workers, Number.MAX_SAFE_INTEGER + 1);
+    assert.equal(parsed.config.stopAfterConsecutiveErrors, 6);
+    assert.equal(parsed.consecutiveErrors, 0);
+    assert.deepEqual(parsed.persistedWorkers, []);
+    assert.deepEqual(parsed.persistedDedupInputs, []);
+    for (const field of [
+      "userContext",
+      "coordinatorGeneration",
+      "terminalReason",
+    ]) {
+      assert.equal(Object.hasOwn(parsed, field), true);
+      assert.equal(parsed[field], undefined);
+    }
+    assert.equal(Object.hasOwn(parsed, "extra"), false);
+  }
+  for (const [deepScan, diagnostic] of [
+    [null, "did not return deepScan."],
+    [{ status: "unknown" }, "did not return deepScan.config."],
+    [
+      { status: "unknown", config: {} },
+      "Unsupported Deep Scan status: unknown",
+    ],
+    [
+      { status: "running", config: {} },
+      "returned invalid deepScan.config.stopAfterNoNew.",
+    ],
+  ] as const) {
+    assert.throws(
+      () => parseDeepScan({ deepScan }),
+      (error: Error) => error.message.endsWith(diagnostic),
+    );
+  }
 }
 
 function stateResult(

@@ -1858,10 +1858,66 @@ var require_request = __commonJS({
           return false;
         }
       }
-      onUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number|null} statusCode
+       * @param {Buffer[]|null} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert(!this.aborted);
         assert(!this.completed);
-        return this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (statusCode !== null) {
+          this.#publishUpgradeHeaders(statusCode, headers, statusText);
+        }
+        const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (statusCode !== null) {
+            this.#publishUpgradeTrailers();
+          }
+        }
+        return result;
+      }
+      /**
+       * @param {number} statusCode
+       * @param {import('node:http2').IncomingHttpHeaders} headers
+       * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+       * @param {string} [statusText]
+       */
+      onUpgradeResponse(statusCode, headers, parseHeaders, statusText = "") {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.headers.hasSubscribers) {
+          this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText);
+        }
+        this.#publishUpgradeTrailers();
+      }
+      /**
+       * @param {Error} error
+       */
+      onUpgradeError(error2) {
+        assert(!this.aborted);
+        assert(this.completed);
+        if (channels.error.hasSubscribers) {
+          channels.error.publish({ request: this, error: error2 });
+        }
+      }
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]} headers
+       * @param {string} statusText
+       */
+      #publishUpgradeHeaders(statusCode, headers, statusText) {
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
+      }
+      #publishUpgradeTrailers() {
+        if (channels.trailers.hasSubscribers) {
+          channels.trailers.publish({ request: this, trailers: [] });
+        }
       }
       onComplete(trailers) {
         this.onFinally();
@@ -2046,6 +2102,7 @@ var require_dispatcher = __commonJS({
 var require_dispatcher_base = __commonJS({
   "node_modules/undici/lib/dispatcher/dispatcher-base.js"(exports2, module2) {
     "use strict";
+    var buffer2 = require("node:buffer");
     var Dispatcher = require_dispatcher();
     var {
       ClientDestroyedError,
@@ -2057,6 +2114,7 @@ var require_dispatcher_base = __commonJS({
     var kOnClosed = /* @__PURE__ */ Symbol("onClosed");
     var kInterceptedDispatch = /* @__PURE__ */ Symbol("Intercepted Dispatch");
     var kWebSocketOptions = /* @__PURE__ */ Symbol("webSocketOptions");
+    var kEventSourceOptions = /* @__PURE__ */ Symbol("eventSourceOptions");
     var DispatcherBase = class extends Dispatcher {
       constructor(opts) {
         super();
@@ -2065,11 +2123,17 @@ var require_dispatcher_base = __commonJS({
         this[kClosed] = false;
         this[kOnClosed] = [];
         this[kWebSocketOptions] = opts?.webSocket ?? {};
+        this[kEventSourceOptions] = opts?.eventSource ?? {};
       }
       get webSocketOptions() {
         return {
           maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
           maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+        };
+      }
+      get eventSourceOptions() {
+        return {
+          maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer2.kStringMaxLength
         };
       }
       get destroyed() {
@@ -4010,7 +4074,7 @@ var require_webidl = __commonJS({
 var require_util2 = __commonJS({
   "node_modules/undici/lib/web/fetch/util.js"(exports2, module2) {
     "use strict";
-    var { Transform: Transform3 } = require("node:stream");
+    var { Transform: Transform4 } = require("node:stream");
     var zlib2 = require("node:zlib");
     var { redirectStatusSet, referrerPolicySet: referrerPolicyTokens, badPortsSet } = require_constants3();
     var { getGlobalOrigin } = require_global();
@@ -4698,7 +4762,7 @@ var require_util2 = __commonJS({
       contentRange += isomorphicEncode(`${fullLength}`);
       return contentRange;
     }
-    var InflateStream = class extends Transform3 {
+    var InflateStream = class extends Transform4 {
       #zlibOptions;
       /** @param {zlib.ZlibOptions} [zlibOptions] */
       constructor(zlibOptions) {
@@ -6004,7 +6068,7 @@ var require_client_h1 = __commonJS({
         }
       }
       onUpgrade(head) {
-        const { upgrade, client: client2, socket, headers, statusCode } = this;
+        const { upgrade, client: client2, socket, headers, statusCode, statusText } = this;
         assert(upgrade);
         assert(client2[kSocket] === socket);
         assert(!socket.destroyed);
@@ -6029,9 +6093,10 @@ var require_client_h1 = __commonJS({
         client2[kQueue][client2[kRunningIdx]++] = null;
         client2.emit("disconnect", client2[kUrl], [client2], new InformationalError("upgrade"));
         try {
-          request2.onUpgrade(statusCode, headers, socket);
-        } catch (err) {
-          util3.destroy(socket, err);
+          request2.onUpgrade(statusCode, headers, socket, statusText);
+        } catch (error2) {
+          util3.errorRequest(client2, request2, error2);
+          util3.destroy(socket, error2);
         }
         client2[kResume]();
       }
@@ -6218,7 +6283,6 @@ var require_client_h1 = __commonJS({
       socket[kSocketUsed] = false;
       socket[kParser] = new Parser(client2, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
           const parserErr = parser.finish();
@@ -6434,11 +6498,17 @@ var require_client_h1 = __commonJS({
       }
       const socket = client2[kSocket];
       clearIdleSocketValidation(socket);
-      const abort = (err) => {
-        if (request2.aborted || request2.completed) {
+      const abort = (error2) => {
+        if (request2.aborted) {
           return;
         }
-        util3.errorRequest(client2, request2, err || new RequestAbortedError());
+        if (request2.completed) {
+          if (request2.upgrade || request2.method === "CONNECT") {
+            util3.destroy(socket, new InformationalError("aborted"));
+          }
+          return;
+        }
+        util3.errorRequest(client2, request2, error2 || new RequestAbortedError());
         util3.destroy(body2);
         util3.destroy(socket, new InformationalError("aborted"));
       };
@@ -6794,7 +6864,8 @@ var require_client_h2 = __commonJS({
   "node_modules/undici/lib/dispatcher/client-h2.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { pipeline } = require("node:stream");
+    var { errorMonitor } = require("node:events");
+    var { pipeline: pipeline3 } = require("node:stream");
     var util3 = require_util();
     var {
       RequestContentLengthMismatchError,
@@ -6854,6 +6925,10 @@ var require_client_h2 = __commonJS({
       }
       return result;
     }
+    function parseH2ResponseHeaders(headers) {
+      const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers;
+      return parseH2Headers(realHeaders);
+    }
     async function connectH2(client2, socket) {
       client2[kSocket] = socket;
       if (!h2ExperimentalWarned) {
@@ -6891,7 +6966,6 @@ var require_client_h2 = __commonJS({
       client2[kHTTP2Session] = session;
       socket[kHTTP2Session] = session;
       util3.addListener(socket, "error", function(err) {
-        assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         this[kError] = err;
         this[kClient][kOnError](err);
       });
@@ -6950,7 +7024,6 @@ var require_client_h2 = __commonJS({
       }
     }
     function onHttp2SessionError(err) {
-      assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
       this[kClient][kOnError](err);
     }
@@ -7017,16 +7090,22 @@ var require_client_h2 = __commonJS({
       const { hostname, port } = client2[kUrl];
       headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ""}`;
       headers[HTTP2_HEADER_METHOD] = method;
-      const abort = (err) => {
-        if (request2.aborted || request2.completed) {
+      const abort = (error2) => {
+        if (request2.aborted) {
           return;
         }
-        err = err || new RequestAbortedError();
-        util3.errorRequest(client2, request2, err);
-        if (stream4 != null) {
-          util3.destroy(stream4, err);
+        if (request2.completed) {
+          if (method === "CONNECT" && stream4 != null) {
+            util3.destroy(stream4, error2 || new RequestAbortedError());
+          }
+          return;
         }
-        util3.destroy(body2, err);
+        error2 = error2 || new RequestAbortedError();
+        util3.errorRequest(client2, request2, error2);
+        if (stream4 != null) {
+          util3.destroy(stream4, error2);
+        }
+        util3.destroy(body2, error2);
         client2[kQueue][client2[kRunningIdx]++] = null;
         client2[kResume]();
       };
@@ -7041,18 +7120,42 @@ var require_client_h2 = __commonJS({
       if (method === "CONNECT") {
         session.ref();
         stream4 = session.request(headers, { endStream: false, signal });
-        if (stream4.id && !stream4.pending) {
-          request2.onUpgrade(null, null, stream4);
-          ++session[kOpenStreams];
-          client2[kQueue][client2[kRunningIdx]++] = null;
-        } else {
-          stream4.once("ready", () => {
+        let upgradeResponseFinished = false;
+        const onResponse = (headers2) => {
+          upgradeResponseFinished = true;
+          stream4.off(errorMonitor, onUpgradeError);
+          request2.onUpgradeResponse(Number(headers2[HTTP2_HEADER_STATUS]), headers2, parseH2ResponseHeaders);
+        };
+        const onUpgradeError = (error2) => {
+          upgradeResponseFinished = true;
+          stream4.off("response", onResponse);
+          request2.onUpgradeError(error2);
+        };
+        const onReady = () => {
+          try {
             request2.onUpgrade(null, null, stream4);
-            ++session[kOpenStreams];
-            client2[kQueue][client2[kRunningIdx]++] = null;
-          });
-        }
+          } catch (error2) {
+            stream4.off("response", onResponse);
+            abort(error2);
+            return;
+          }
+          if (request2.aborted) {
+            return;
+          }
+          stream4.off("error", abort);
+          stream4.once(errorMonitor, onUpgradeError);
+          client2[kQueue][client2[kRunningIdx]++] = null;
+        };
+        stream4.once("response", onResponse);
+        stream4.once("error", abort);
+        ++session[kOpenStreams];
+        onReady();
         stream4.once("close", () => {
+          if (!upgradeResponseFinished && request2.completed) {
+            stream4.off("response", onResponse);
+            stream4.off(errorMonitor, onUpgradeError);
+            request2.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream4.rstCode}`));
+          }
           session[kOpenStreams] -= 1;
           if (session[kOpenStreams] === 0) session.unref();
         });
@@ -7241,7 +7344,7 @@ var require_client_h2 = __commonJS({
     }
     function writeStream(abort, socket, expectsPayload, h2stream, body2, client2, request2, contentLength2) {
       assert(contentLength2 !== 0 || client2[kRunning] === 0, "stream body cannot be pipelined");
-      const pipe = pipeline(
+      const pipe = pipeline3(
         body2,
         h2stream,
         (err) => {
@@ -7614,9 +7717,10 @@ var require_client = __commonJS({
         // h2
         maxConcurrentStreams,
         allowH2,
-        webSocket
+        webSocket,
+        eventSource
       } = {}) {
-        super({ webSocket });
+        super({ webSocket, eventSource });
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
         }
@@ -8513,7 +8617,7 @@ var require_agent = __commonJS({
       return opts && opts.connections === 1 ? new Client(origin, opts) : new Pool(origin, opts);
     }
     var Agent3 = class extends DispatcherBase {
-      constructor({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
+      constructor({ factory = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
         if (typeof factory !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -8527,8 +8631,11 @@ var require_agent = __commonJS({
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
+        if (tls && typeof tls !== "function") {
+          tls = { ...tls };
+        }
         this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent) ? options.interceptors.Agent : [createRedirectInterceptor({ maxRedirections })];
-        this[kOptions] = { ...util3.deepClone(options), connect };
+        this[kOptions] = { ...util3.deepClone(options), connect, tls };
         this[kOptions].interceptors = options.interceptors ? { ...options.interceptors } : void 0;
         this[kMaxRedirections] = maxRedirections;
         this[kFactory] = factory;
@@ -9117,7 +9224,7 @@ var require_retry_handler = __commonJS({
         const headers = parseHeaders(rawHeaders);
         this.retryCount += 1;
         if (statusCode >= 300) {
-          if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+          if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
             this.headersSent = true;
             this.checkpointResponseEnd(headers, resume);
             return this.handler.onHeaders(
@@ -9927,7 +10034,7 @@ var require_api_stream = __commonJS({
   "node_modules/undici/lib/api/api-stream.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { finished, PassThrough: PassThrough3 } = require("node:stream");
+    var { finished, PassThrough: PassThrough2 } = require("node:stream");
     var { InvalidArgumentError, InvalidReturnValueError } = require_errors();
     var util3 = require_util();
     var { getResolveErrorBodyCallback } = require_util3();
@@ -10003,7 +10110,7 @@ var require_api_stream = __commonJS({
         if (this.throwOnError && statusCode >= 400) {
           const parsedHeaders = responseHeaders === "raw" ? util3.parseHeaders(rawHeaders) : headers;
           const contentType2 = parsedHeaders["content-type"];
-          res = new PassThrough3();
+          res = new PassThrough2();
           this.callback = null;
           this.runInAsyncScope(
             getResolveErrorBodyCallback,
@@ -10102,7 +10209,7 @@ var require_api_pipeline = __commonJS({
     var {
       Readable: Readable7,
       Duplex,
-      PassThrough: PassThrough3
+      PassThrough: PassThrough2
     } = require("node:stream");
     var {
       InvalidArgumentError,
@@ -10282,16 +10389,16 @@ var require_api_pipeline = __commonJS({
         util3.destroy(ret, err);
       }
     };
-    function pipeline(opts, handler2) {
+    function pipeline3(opts, handler2) {
       try {
         const pipelineHandler = new PipelineHandler(opts, handler2);
         this.dispatch({ ...opts, body: pipelineHandler.req }, pipelineHandler);
         return pipelineHandler.ret;
       } catch (err) {
-        return new PassThrough3().destroy(err);
+        return new PassThrough2().destroy(err);
       }
     }
-    module2.exports = pipeline;
+    module2.exports = pipeline3;
   }
 });
 
@@ -11141,13 +11248,13 @@ var require_pluralizer = __commonJS({
 var require_pending_interceptors_formatter = __commonJS({
   "node_modules/undici/lib/mock/pending-interceptors-formatter.js"(exports2, module2) {
     "use strict";
-    var { Transform: Transform3 } = require("node:stream");
+    var { Transform: Transform4 } = require("node:stream");
     var { Console } = require("node:console");
     var PERSISTENT = process.versions.icu ? "\u2705" : "Y ";
     var NOT_PERSISTENT = process.versions.icu ? "\u274C" : "N ";
     module2.exports = class PendingInterceptorsFormatter {
       constructor({ disableColors } = {}) {
-        this.transform = new Transform3({
+        this.transform = new Transform4({
           transform(chunk, _enc, cb) {
             cb(null, chunk);
           }
@@ -13456,7 +13563,7 @@ var require_fetch = __commonJS({
       subresourceSet
     } = require_constants3();
     var EE = require("node:events");
-    var { Readable: Readable7, pipeline, finished } = require("node:stream");
+    var { Readable: Readable7, pipeline: pipeline3, finished } = require("node:stream");
     var { addAbortListener, isErrored, isReadable, bufferToLowerCasedHeaderName } = require_util();
     var { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require_data_url();
     var { getGlobalDispatcher } = require_global2();
@@ -14256,8 +14363,9 @@ var require_fetch = __commonJS({
         }
       );
       response.body = { stream: stream4, source: null, length: null };
-      fetchParams.controller.onAborted = onAborted;
-      fetchParams.controller.on("terminated", onAborted);
+      if (!fetchParams.controller.resume) {
+        fetchParams.controller.on("terminated", onAborted);
+      }
       fetchParams.controller.resume = async () => {
         while (true) {
           let bytes;
@@ -14357,7 +14465,6 @@ var require_fetch = __commonJS({
                 headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString("latin1"), true);
               }
               location = headersList.get("location", true);
-              this.body = new Readable7({ read: resume });
               const decoders = [];
               const willFollow = location && request2.redirect === "follow" && redirectStatusSet.has(status);
               if (request2.method !== "HEAD" && request2.method !== "CONNECT" && !nullBodyStatus.includes(status) && !willFollow) {
@@ -14365,7 +14472,7 @@ var require_fetch = __commonJS({
                 const codings = contentEncoding ? contentEncoding.toLowerCase().split(",") : [];
                 const maxContentEncodings = 5;
                 if (codings.length > maxContentEncodings) {
-                  reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+                  this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
                   return true;
                 }
                 for (let i = codings.length - 1; i >= 0; --i) {
@@ -14395,12 +14502,13 @@ var require_fetch = __commonJS({
                   }
                 }
               }
+              this.body = new Readable7({ read: resume });
               const onError = this.onError.bind(this);
               resolve7({
                 status,
                 statusText,
                 headersList,
-                body: decoders.length ? pipeline(this.body, ...decoders, (err) => {
+                body: decoders.length ? pipeline3(this.body, ...decoders, (err) => {
                   if (err) {
                     this.onError(err);
                   }
@@ -14419,9 +14527,6 @@ var require_fetch = __commonJS({
             onComplete() {
               if (this.abort) {
                 fetchParams.controller.off("terminated", this.abort);
-              }
-              if (fetchParams.controller.onAborted) {
-                fetchParams.controller.off("terminated", fetchParams.controller.onAborted);
               }
               fetchParams.controller.ended = true;
               this.body.push(null);
@@ -17496,6 +17601,16 @@ var require_receiver = __commonJS({
             if (isControlFrame(this.#info.opcode)) {
               this.#loop = this.parseControlFrame(body2);
               this.#state = parserStates.INFO;
+              const socket = this.ws[kResponse].socket;
+              if (this.#loop && socket.writableNeedDrain) {
+                this.#loop = false;
+                socket.once("drain", () => {
+                  if (this.destroyed) return;
+                  this.#loop = true;
+                  this.run(callback);
+                });
+                return;
+              }
             } else {
               if (!this.#info.compressed) {
                 if (!this.writeFragments(body2)) {
@@ -18189,31 +18304,36 @@ var require_util8 = __commonJS({
 var require_eventsource_stream = __commonJS({
   "node_modules/undici/lib/web/eventsource/eventsource-stream.js"(exports2, module2) {
     "use strict";
-    var { Transform: Transform3 } = require("node:stream");
+    var buffer2 = require("node:buffer");
+    var { Transform: Transform4 } = require("node:stream");
     var { isASCIINumber, isValidLastEventId } = require_util8();
     var BOM = [239, 187, 191];
     var LF = 10;
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var defaultMaxEventSize = buffer2.kStringMaxLength;
     var DATA = Buffer.from("data");
     var EVENT = Buffer.from("event");
     var ID = Buffer.from("id");
     var RETRY = Buffer.from("retry");
-    function isASCIINumberBytes(buffer2, start) {
-      if (start >= buffer2.length) {
+    var minParserItems = 1024;
+    var maxParserItems = 131072;
+    var bytesPerParserItem = 128;
+    function isASCIINumberBytes(buffer3, start) {
+      if (start >= buffer3.length) {
         return false;
       }
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] < 48 || buffer2[i] > 57) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] < 48 || buffer3[i] > 57) {
           return false;
         }
       }
       return true;
     }
-    function isValidLastEventIdBytes(buffer2, start) {
-      for (let i = start; i < buffer2.length; i++) {
-        if (buffer2[i] === 0) {
+    function isValidLastEventIdBytes(buffer3, start) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] === 0) {
           return false;
         }
       }
@@ -18230,7 +18350,12 @@ var require_eventsource_stream = __commonJS({
       }
       return true;
     }
-    var EventSourceStream = class extends Transform3 {
+    function createMaxEventSizeExceededError() {
+      const error2 = new Error("EventSource message size exceeded");
+      error2.aborted = false;
+      return error2;
+    }
+    var EventSourceStream = class extends Transform4 {
       /**
        * @type {eventSourceSettings}
        */
@@ -18256,6 +18381,13 @@ var require_eventsource_stream = __commonJS({
       pos = 0;
       lineChunkIndex = 0;
       linePos = 0;
+      lineLength = 0;
+      eventSize = 0;
+      eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 };
+      dataLineCount = 0;
+      maxEventSize;
+      maxDataLines;
+      maxBufferedChunks;
       event = {
         data: void 0,
         event: void 0,
@@ -18264,6 +18396,7 @@ var require_eventsource_stream = __commonJS({
       };
       /**
        * @param {object} options
+       * @param {number} [options.maxEventSize]
        * @param {eventSourceSettings} options.eventSourceSettings
        * @param {Function} [options.push]
        */
@@ -18271,6 +18404,10 @@ var require_eventsource_stream = __commonJS({
         options.readableObjectMode = true;
         super(options);
         this.state = options.eventSourceSettings || {};
+        this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+        const parserItemLimit = this.maxEventSize > 0 ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem))) : 0;
+        this.maxDataLines = parserItemLimit;
+        this.maxBufferedChunks = parserItemLimit;
         if (options.push) {
           this.push = options.push;
         }
@@ -18284,6 +18421,10 @@ var require_eventsource_stream = __commonJS({
       _transform(chunk, _encoding, callback) {
         if (chunk.length === 0) {
           callback();
+          return;
+        }
+        if (this.maxEventSize > 0 && this.chunks.length >= this.maxBufferedChunks && chunk[0] !== LF && chunk[0] !== CR) {
+          callback(createMaxEventSizeExceededError());
           return;
         }
         this.chunks.push(chunk);
@@ -18322,18 +18463,32 @@ var require_eventsource_stream = __commonJS({
             if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.readLine(), this.event);
+            try {
+              this.parseLine(this.readLine(), this.event);
+            } catch (error2) {
+              callback(error2);
+              return;
+            }
             this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
+          }
+          if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+            callback(createMaxEventSizeExceededError());
+            return;
           }
           this.advanceCursor();
         }
         callback();
       }
+      _destroy(error2, callback) {
+        this.chunks.length = 0;
+        this.clearEvent();
+        super._destroy(error2, callback);
+      }
       /**
        * @param {Buffer} line
-       * @param {EventStreamEvent} event
+       * @param {EventSourceStreamEvent} event
        */
       parseLine(line, event) {
         if (line.length === 0) {
@@ -18353,6 +18508,12 @@ var require_eventsource_stream = __commonJS({
           }
         }
         if (isFieldName(line, fieldLength, DATA)) {
+          if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+            throw createMaxEventSizeExceededError();
+          }
+          const valueBytes = line.length - valueStart;
+          const dataSize = this.eventFieldSizes.data + (event.data === void 0 ? 0 : 1) + valueBytes;
+          this.setEventFieldSize("data", dataSize);
           const value = line.toString("utf8", valueStart);
           if (event.data === void 0) {
             event.data = value;
@@ -18360,26 +18521,37 @@ var require_eventsource_stream = __commonJS({
             event.data += `
 ${value}`;
           }
+          this.dataLineCount++;
           return;
         }
         if (isFieldName(line, fieldLength, RETRY)) {
           if (isASCIINumberBytes(line, valueStart)) {
+            this.setEventFieldSize("retry", line.length - valueStart);
             event.retry = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, ID)) {
           if (isValidLastEventIdBytes(line, valueStart)) {
+            this.setEventFieldSize("id", line.length - valueStart);
             event.id = line.toString("utf8", valueStart);
           }
           return;
         }
         if (isFieldName(line, fieldLength, EVENT)) {
-          const value = line.toString("utf8", valueStart);
-          if (value.length > 0) {
-            event.event = value;
+          if (valueStart < line.length) {
+            this.setEventFieldSize("event", line.length - valueStart);
+            event.event = line.toString("utf8", valueStart);
           }
         }
+      }
+      setEventFieldSize(field, size) {
+        const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+        if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+          throw createMaxEventSizeExceededError();
+        }
+        this.eventSize = eventSize;
+        this.eventFieldSizes[field] = size;
       }
       /**
        * @param {EventSourceStreamEvent} event
@@ -18407,6 +18579,12 @@ ${value}`;
         this.event.event = void 0;
         this.event.id = void 0;
         this.event.retry = void 0;
+        this.eventSize = 0;
+        this.dataLineCount = 0;
+        this.eventFieldSizes.data = 0;
+        this.eventFieldSizes.event = 0;
+        this.eventFieldSizes.id = 0;
+        this.eventFieldSizes.retry = 0;
       }
       hasPendingEvent() {
         return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
@@ -18431,13 +18609,15 @@ ${value}`;
       syncLineStartToCursor() {
         this.lineChunkIndex = this.chunkIndex;
         this.linePos = this.pos;
+        this.lineLength = 0;
         this.dropConsumedChunks();
       }
       dropConsumedChunks() {
-        while (this.lineChunkIndex > 0) {
-          this.chunks.shift();
-          this.lineChunkIndex--;
-          this.chunkIndex--;
+        if (this.lineChunkIndex > 0) {
+          const consumed = this.lineChunkIndex;
+          this.chunks.splice(0, consumed);
+          this.lineChunkIndex = 0;
+          this.chunkIndex -= consumed;
         }
         if (this.chunkIndex === this.chunks.length) {
           this.chunks.length = 0;
@@ -18529,7 +18709,7 @@ ${value}`;
 var require_eventsource = __commonJS({
   "node_modules/undici/lib/web/eventsource/eventsource.js"(exports2, module2) {
     "use strict";
-    var { pipeline } = require("node:stream");
+    var { pipeline: pipeline3 } = require("node:stream");
     var { fetching } = require_fetch();
     var { makeRequest } = require_request2();
     var { webidl } = require_webidl();
@@ -18540,6 +18720,7 @@ var require_eventsource = __commonJS({
     var { delay: delay4 } = require_util8();
     var { kEnumerableProperty } = require_util();
     var { environmentSettingsObject } = require_util2();
+    var { getGlobalDispatcher } = require_global2();
     var experimentalWarned = false;
     var defaultReconnectionTime = 3e3;
     var CONNECTING = 0;
@@ -18680,6 +18861,7 @@ var require_eventsource = __commonJS({
           this.#state.origin = response.urlList[response.urlList.length - 1].origin;
           const eventSourceStream = new EventSourceStream({
             eventSourceSettings: this.#state,
+            maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
             push: (event) => {
               this.dispatchEvent(createFastMessageEvent(
                 event.type,
@@ -18687,7 +18869,7 @@ var require_eventsource = __commonJS({
               ));
             }
           });
-          pipeline(
+          pipeline3(
             response.body.stream,
             eventSourceStream,
             (error2) => {
@@ -18812,7 +18994,8 @@ var require_eventsource = __commonJS({
       {
         key: "dispatcher",
         // undici only
-        converter: webidl.converters.any
+        converter: webidl.converters.any,
+        defaultValue: () => getGlobalDispatcher()
       }
     ]);
     module2.exports = {
@@ -23195,7 +23378,7 @@ var require_package = __commonJS({
   "node_modules/@actions/artifact/package.json"(exports2, module2) {
     module2.exports = {
       name: "@actions/artifact",
-      version: "6.2.1",
+      version: "6.3.1",
       preview: true,
       description: "Actions artifact lib",
       keywords: [
@@ -23242,26 +23425,27 @@ var require_package = __commonJS({
         url: "https://github.com/actions/toolkit/issues"
       },
       dependencies: {
-        "@actions/core": "^3.0.0",
-        "@actions/github": "^9.0.0",
-        "@actions/http-client": "^4.0.0",
-        "@azure/storage-blob": "^12.30.0",
+        "@actions/core": "^3.0.1",
+        "@actions/github": "^9.1.1",
+        "@actions/http-client": "^4.0.1",
+        "@azure/storage-blob": "^12.31.0",
         "@octokit/core": "^7.0.6",
         "@octokit/plugin-request-log": "^6.0.0",
-        "@octokit/plugin-retry": "^8.0.0",
-        "@octokit/request": "^10.0.7",
+        "@octokit/plugin-retry": "^8.1.0",
+        "@octokit/request": "^10.0.8",
         "@octokit/request-error": "^7.1.0",
-        "@protobuf-ts/plugin": "^2.2.3-alpha.1",
-        "@protobuf-ts/runtime": "^2.9.4",
+        "@protobuf-ts/runtime": "^2.11.1",
+        "@protobuf-ts/runtime-rpc": "^2.11.1",
         archiver: "^7.0.1",
         "jwt-decode": "^4.0.0",
         "unzip-stream": "^0.3.1"
       },
       devDependencies: {
+        "@protobuf-ts/plugin": "^2.11.1",
         "@types/archiver": "^7.0.0",
         "@types/unzip-stream": "^0.3.4",
-        typedoc: "^0.28.16",
-        "typedoc-plugin-markdown": "^4.9.0",
+        typedoc: "^0.28.19",
+        "typedoc-plugin-markdown": "^4.11.0",
         typescript: "^5.9.3"
       },
       overrides: {
@@ -25519,13 +25703,13 @@ var require_minimatch = __commonJS({
 var require_readdir_glob = __commonJS({
   "node_modules/readdir-glob/index.js"(exports2, module2) {
     module2.exports = readdirGlob;
-    var fs8 = require("fs");
+    var fs9 = require("fs");
     var { EventEmitter: EventEmitter3 } = require("events");
     var { Minimatch } = require_minimatch();
     var { resolve: resolve7 } = require("path");
     function readdir2(dir, strict) {
       return new Promise((resolve8, reject) => {
-        fs8.readdir(dir, { withFileTypes: true }, (err, files) => {
+        fs9.readdir(dir, { withFileTypes: true }, (err, files) => {
           if (err) {
             switch (err.code) {
               case "ENOTDIR":
@@ -25558,7 +25742,7 @@ var require_readdir_glob = __commonJS({
     }
     function stat2(file, followSymlinks) {
       return new Promise((resolve8, reject) => {
-        const statFunc = followSymlinks ? fs8.stat : fs8.lstat;
+        const statFunc = followSymlinks ? fs9.stat : fs9.lstat;
         statFunc(file, (err, stats) => {
           if (err) {
             switch (err.code) {
@@ -27623,54 +27807,54 @@ var require_polyfills = __commonJS({
     }
     var chdir;
     module2.exports = patch;
-    function patch(fs8) {
+    function patch(fs9) {
       if (constants4.hasOwnProperty("O_SYMLINK") && process.version.match(/^v0\.6\.[0-2]|^v0\.5\./)) {
-        patchLchmod(fs8);
+        patchLchmod(fs9);
       }
-      if (!fs8.lutimes) {
-        patchLutimes(fs8);
+      if (!fs9.lutimes) {
+        patchLutimes(fs9);
       }
-      fs8.chown = chownFix(fs8.chown);
-      fs8.fchown = chownFix(fs8.fchown);
-      fs8.lchown = chownFix(fs8.lchown);
-      fs8.chmod = chmodFix(fs8.chmod);
-      fs8.fchmod = chmodFix(fs8.fchmod);
-      fs8.lchmod = chmodFix(fs8.lchmod);
-      fs8.chownSync = chownFixSync(fs8.chownSync);
-      fs8.fchownSync = chownFixSync(fs8.fchownSync);
-      fs8.lchownSync = chownFixSync(fs8.lchownSync);
-      fs8.chmodSync = chmodFixSync(fs8.chmodSync);
-      fs8.fchmodSync = chmodFixSync(fs8.fchmodSync);
-      fs8.lchmodSync = chmodFixSync(fs8.lchmodSync);
-      fs8.stat = statFix(fs8.stat);
-      fs8.fstat = statFix(fs8.fstat);
-      fs8.lstat = statFix(fs8.lstat);
-      fs8.statSync = statFixSync(fs8.statSync);
-      fs8.fstatSync = statFixSync(fs8.fstatSync);
-      fs8.lstatSync = statFixSync(fs8.lstatSync);
-      if (fs8.chmod && !fs8.lchmod) {
-        fs8.lchmod = function(path6, mode, cb) {
+      fs9.chown = chownFix(fs9.chown);
+      fs9.fchown = chownFix(fs9.fchown);
+      fs9.lchown = chownFix(fs9.lchown);
+      fs9.chmod = chmodFix(fs9.chmod);
+      fs9.fchmod = chmodFix(fs9.fchmod);
+      fs9.lchmod = chmodFix(fs9.lchmod);
+      fs9.chownSync = chownFixSync(fs9.chownSync);
+      fs9.fchownSync = chownFixSync(fs9.fchownSync);
+      fs9.lchownSync = chownFixSync(fs9.lchownSync);
+      fs9.chmodSync = chmodFixSync(fs9.chmodSync);
+      fs9.fchmodSync = chmodFixSync(fs9.fchmodSync);
+      fs9.lchmodSync = chmodFixSync(fs9.lchmodSync);
+      fs9.stat = statFix(fs9.stat);
+      fs9.fstat = statFix(fs9.fstat);
+      fs9.lstat = statFix(fs9.lstat);
+      fs9.statSync = statFixSync(fs9.statSync);
+      fs9.fstatSync = statFixSync(fs9.fstatSync);
+      fs9.lstatSync = statFixSync(fs9.lstatSync);
+      if (fs9.chmod && !fs9.lchmod) {
+        fs9.lchmod = function(path6, mode, cb) {
           if (cb) process.nextTick(cb);
         };
-        fs8.lchmodSync = function() {
+        fs9.lchmodSync = function() {
         };
       }
-      if (fs8.chown && !fs8.lchown) {
-        fs8.lchown = function(path6, uid, gid, cb) {
+      if (fs9.chown && !fs9.lchown) {
+        fs9.lchown = function(path6, uid, gid, cb) {
           if (cb) process.nextTick(cb);
         };
-        fs8.lchownSync = function() {
+        fs9.lchownSync = function() {
         };
       }
       if (platform2 === "win32") {
-        fs8.rename = typeof fs8.rename !== "function" ? fs8.rename : (function(fs$rename) {
+        fs9.rename = typeof fs9.rename !== "function" ? fs9.rename : (function(fs$rename) {
           function rename2(from, to, cb) {
             var start = Date.now();
             var backoff = 0;
             fs$rename(from, to, function CB(er) {
               if (er && (er.code === "EACCES" || er.code === "EPERM" || er.code === "EBUSY") && Date.now() - start < 6e4) {
                 setTimeout(function() {
-                  fs8.stat(to, function(stater, st) {
+                  fs9.stat(to, function(stater, st) {
                     if (stater && stater.code === "ENOENT")
                       fs$rename(from, to, CB);
                     else
@@ -27686,9 +27870,9 @@ var require_polyfills = __commonJS({
           }
           if (Object.setPrototypeOf) Object.setPrototypeOf(rename2, fs$rename);
           return rename2;
-        })(fs8.rename);
+        })(fs9.rename);
       }
-      fs8.read = typeof fs8.read !== "function" ? fs8.read : (function(fs$read) {
+      fs9.read = typeof fs9.read !== "function" ? fs9.read : (function(fs$read) {
         function read(fd, buffer2, offset, length, position, callback_) {
           var callback;
           if (callback_ && typeof callback_ === "function") {
@@ -27696,22 +27880,22 @@ var require_polyfills = __commonJS({
             callback = function(er, _2, __) {
               if (er && er.code === "EAGAIN" && eagCounter < 10) {
                 eagCounter++;
-                return fs$read.call(fs8, fd, buffer2, offset, length, position, callback);
+                return fs$read.call(fs9, fd, buffer2, offset, length, position, callback);
               }
               callback_.apply(this, arguments);
             };
           }
-          return fs$read.call(fs8, fd, buffer2, offset, length, position, callback);
+          return fs$read.call(fs9, fd, buffer2, offset, length, position, callback);
         }
         if (Object.setPrototypeOf) Object.setPrototypeOf(read, fs$read);
         return read;
-      })(fs8.read);
-      fs8.readSync = typeof fs8.readSync !== "function" ? fs8.readSync : /* @__PURE__ */ (function(fs$readSync) {
+      })(fs9.read);
+      fs9.readSync = typeof fs9.readSync !== "function" ? fs9.readSync : /* @__PURE__ */ (function(fs$readSync) {
         return function(fd, buffer2, offset, length, position) {
           var eagCounter = 0;
           while (true) {
             try {
-              return fs$readSync.call(fs8, fd, buffer2, offset, length, position);
+              return fs$readSync.call(fs9, fd, buffer2, offset, length, position);
             } catch (er) {
               if (er.code === "EAGAIN" && eagCounter < 10) {
                 eagCounter++;
@@ -27721,10 +27905,10 @@ var require_polyfills = __commonJS({
             }
           }
         };
-      })(fs8.readSync);
-      function patchLchmod(fs9) {
-        fs9.lchmod = function(path6, mode, callback) {
-          fs9.open(
+      })(fs9.readSync);
+      function patchLchmod(fs10) {
+        fs10.lchmod = function(path6, mode, callback) {
+          fs10.open(
             path6,
             constants4.O_WRONLY | constants4.O_SYMLINK,
             mode,
@@ -27733,80 +27917,80 @@ var require_polyfills = __commonJS({
                 if (callback) callback(err);
                 return;
               }
-              fs9.fchmod(fd, mode, function(err2) {
-                fs9.close(fd, function(err22) {
+              fs10.fchmod(fd, mode, function(err2) {
+                fs10.close(fd, function(err22) {
                   if (callback) callback(err2 || err22);
                 });
               });
             }
           );
         };
-        fs9.lchmodSync = function(path6, mode) {
-          var fd = fs9.openSync(path6, constants4.O_WRONLY | constants4.O_SYMLINK, mode);
+        fs10.lchmodSync = function(path6, mode) {
+          var fd = fs10.openSync(path6, constants4.O_WRONLY | constants4.O_SYMLINK, mode);
           var threw = true;
           var ret;
           try {
-            ret = fs9.fchmodSync(fd, mode);
+            ret = fs10.fchmodSync(fd, mode);
             threw = false;
           } finally {
             if (threw) {
               try {
-                fs9.closeSync(fd);
+                fs10.closeSync(fd);
               } catch (er) {
               }
             } else {
-              fs9.closeSync(fd);
+              fs10.closeSync(fd);
             }
           }
           return ret;
         };
       }
-      function patchLutimes(fs9) {
-        if (constants4.hasOwnProperty("O_SYMLINK") && fs9.futimes) {
-          fs9.lutimes = function(path6, at, mt, cb) {
-            fs9.open(path6, constants4.O_SYMLINK, function(er, fd) {
+      function patchLutimes(fs10) {
+        if (constants4.hasOwnProperty("O_SYMLINK") && fs10.futimes) {
+          fs10.lutimes = function(path6, at, mt, cb) {
+            fs10.open(path6, constants4.O_SYMLINK, function(er, fd) {
               if (er) {
                 if (cb) cb(er);
                 return;
               }
-              fs9.futimes(fd, at, mt, function(er2) {
-                fs9.close(fd, function(er22) {
+              fs10.futimes(fd, at, mt, function(er2) {
+                fs10.close(fd, function(er22) {
                   if (cb) cb(er2 || er22);
                 });
               });
             });
           };
-          fs9.lutimesSync = function(path6, at, mt) {
-            var fd = fs9.openSync(path6, constants4.O_SYMLINK);
+          fs10.lutimesSync = function(path6, at, mt) {
+            var fd = fs10.openSync(path6, constants4.O_SYMLINK);
             var ret;
             var threw = true;
             try {
-              ret = fs9.futimesSync(fd, at, mt);
+              ret = fs10.futimesSync(fd, at, mt);
               threw = false;
             } finally {
               if (threw) {
                 try {
-                  fs9.closeSync(fd);
+                  fs10.closeSync(fd);
                 } catch (er) {
                 }
               } else {
-                fs9.closeSync(fd);
+                fs10.closeSync(fd);
               }
             }
             return ret;
           };
-        } else if (fs9.futimes) {
-          fs9.lutimes = function(_a, _b, _c, cb) {
+        } else if (fs10.futimes) {
+          fs10.lutimes = function(_a, _b, _c, cb) {
             if (cb) process.nextTick(cb);
           };
-          fs9.lutimesSync = function() {
+          fs10.lutimesSync = function() {
           };
         }
       }
       function chmodFix(orig) {
         if (!orig) return orig;
         return function(target, mode, cb) {
-          return orig.call(fs8, target, mode, function(er) {
+          return orig.call(fs9, target, mode, function(er) {
             if (chownErOk(er)) er = null;
             if (cb) cb.apply(this, arguments);
           });
@@ -27816,7 +28000,7 @@ var require_polyfills = __commonJS({
         if (!orig) return orig;
         return function(target, mode) {
           try {
-            return orig.call(fs8, target, mode);
+            return orig.call(fs9, target, mode);
           } catch (er) {
             if (!chownErOk(er)) throw er;
           }
@@ -27825,7 +28009,7 @@ var require_polyfills = __commonJS({
       function chownFix(orig) {
         if (!orig) return orig;
         return function(target, uid, gid, cb) {
-          return orig.call(fs8, target, uid, gid, function(er) {
+          return orig.call(fs9, target, uid, gid, function(er) {
             if (chownErOk(er)) er = null;
             if (cb) cb.apply(this, arguments);
           });
@@ -27835,7 +28019,7 @@ var require_polyfills = __commonJS({
         if (!orig) return orig;
         return function(target, uid, gid) {
           try {
-            return orig.call(fs8, target, uid, gid);
+            return orig.call(fs9, target, uid, gid);
           } catch (er) {
             if (!chownErOk(er)) throw er;
           }
@@ -27855,13 +28039,13 @@ var require_polyfills = __commonJS({
             }
             if (cb) cb.apply(this, arguments);
           }
-          return options ? orig.call(fs8, target, options, callback) : orig.call(fs8, target, callback);
+          return options ? orig.call(fs9, target, options, callback) : orig.call(fs9, target, callback);
         };
       }
       function statFixSync(orig) {
         if (!orig) return orig;
         return function(target, options) {
-          var stats = options ? orig.call(fs8, target, options) : orig.call(fs8, target);
+          var stats = options ? orig.call(fs9, target, options) : orig.call(fs9, target);
           if (stats) {
             if (stats.uid < 0) stats.uid += 4294967296;
             if (stats.gid < 0) stats.gid += 4294967296;
@@ -27890,7 +28074,7 @@ var require_legacy_streams = __commonJS({
   "node_modules/graceful-fs/legacy-streams.js"(exports2, module2) {
     var Stream2 = require("stream").Stream;
     module2.exports = legacy;
-    function legacy(fs8) {
+    function legacy(fs9) {
       return {
         ReadStream,
         WriteStream
@@ -27933,7 +28117,7 @@ var require_legacy_streams = __commonJS({
           });
           return;
         }
-        fs8.open(this.path, this.flags, this.mode, function(err, fd) {
+        fs9.open(this.path, this.flags, this.mode, function(err, fd) {
           if (err) {
             self2.emit("error", err);
             self2.readable = false;
@@ -27972,7 +28156,7 @@ var require_legacy_streams = __commonJS({
         this.busy = false;
         this._queue = [];
         if (this.fd === null) {
-          this._open = fs8.open;
+          this._open = fs9.open;
           this._queue.push([this._open, this.path, this.flags, this.mode, void 0]);
           this.flush();
         }
@@ -28007,7 +28191,7 @@ var require_clone = __commonJS({
 // node_modules/graceful-fs/graceful-fs.js
 var require_graceful_fs = __commonJS({
   "node_modules/graceful-fs/graceful-fs.js"(exports2, module2) {
-    var fs8 = require("fs");
+    var fs9 = require("fs");
     var polyfills = require_polyfills();
     var legacy = require_legacy_streams();
     var clone = require_clone();
@@ -28039,12 +28223,12 @@ var require_graceful_fs = __commonJS({
         m = "GFS4: " + m.split(/\n/).join("\nGFS4: ");
         console.error(m);
       };
-    if (!fs8[gracefulQueue]) {
+    if (!fs9[gracefulQueue]) {
       queue = global[gracefulQueue] || [];
-      publishQueue(fs8, queue);
-      fs8.close = (function(fs$close) {
+      publishQueue(fs9, queue);
+      fs9.close = (function(fs$close) {
         function close(fd, cb) {
-          return fs$close.call(fs8, fd, function(err) {
+          return fs$close.call(fs9, fd, function(err) {
             if (!err) {
               resetQueue();
             }
@@ -28056,40 +28240,40 @@ var require_graceful_fs = __commonJS({
           value: fs$close
         });
         return close;
-      })(fs8.close);
-      fs8.closeSync = (function(fs$closeSync) {
+      })(fs9.close);
+      fs9.closeSync = (function(fs$closeSync) {
         function closeSync(fd) {
-          fs$closeSync.apply(fs8, arguments);
+          fs$closeSync.apply(fs9, arguments);
           resetQueue();
         }
         Object.defineProperty(closeSync, previousSymbol, {
           value: fs$closeSync
         });
         return closeSync;
-      })(fs8.closeSync);
+      })(fs9.closeSync);
       if (/\bgfs4\b/i.test(process.env.NODE_DEBUG || "")) {
         process.on("exit", function() {
-          debug2(fs8[gracefulQueue]);
-          require("assert").equal(fs8[gracefulQueue].length, 0);
+          debug2(fs9[gracefulQueue]);
+          require("assert").equal(fs9[gracefulQueue].length, 0);
         });
       }
     }
     var queue;
     if (!global[gracefulQueue]) {
-      publishQueue(global, fs8[gracefulQueue]);
+      publishQueue(global, fs9[gracefulQueue]);
     }
-    module2.exports = patch(clone(fs8));
-    if (process.env.TEST_GRACEFUL_FS_GLOBAL_PATCH && !fs8.__patched) {
-      module2.exports = patch(fs8);
-      fs8.__patched = true;
+    module2.exports = patch(clone(fs9));
+    if (process.env.TEST_GRACEFUL_FS_GLOBAL_PATCH && !fs9.__patched) {
+      module2.exports = patch(fs9);
+      fs9.__patched = true;
     }
-    function patch(fs9) {
-      polyfills(fs9);
-      fs9.gracefulify = patch;
-      fs9.createReadStream = createReadStream2;
-      fs9.createWriteStream = createWriteStream2;
-      var fs$readFile = fs9.readFile;
-      fs9.readFile = readFile4;
+    function patch(fs10) {
+      polyfills(fs10);
+      fs10.gracefulify = patch;
+      fs10.createReadStream = createReadStream2;
+      fs10.createWriteStream = createWriteStream2;
+      var fs$readFile = fs10.readFile;
+      fs10.readFile = readFile4;
       function readFile4(path6, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
@@ -28105,8 +28289,8 @@ var require_graceful_fs = __commonJS({
           });
         }
       }
-      var fs$writeFile = fs9.writeFile;
-      fs9.writeFile = writeFile4;
+      var fs$writeFile = fs10.writeFile;
+      fs10.writeFile = writeFile4;
       function writeFile4(path6, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
@@ -28122,9 +28306,9 @@ var require_graceful_fs = __commonJS({
           });
         }
       }
-      var fs$appendFile = fs9.appendFile;
+      var fs$appendFile = fs10.appendFile;
       if (fs$appendFile)
-        fs9.appendFile = appendFile2;
+        fs10.appendFile = appendFile2;
       function appendFile2(path6, data, options, cb) {
         if (typeof options === "function")
           cb = options, options = null;
@@ -28140,9 +28324,9 @@ var require_graceful_fs = __commonJS({
           });
         }
       }
-      var fs$copyFile = fs9.copyFile;
+      var fs$copyFile = fs10.copyFile;
       if (fs$copyFile)
-        fs9.copyFile = copyFile3;
+        fs10.copyFile = copyFile3;
       function copyFile3(src, dest, flags, cb) {
         if (typeof flags === "function") {
           cb = flags;
@@ -28160,8 +28344,8 @@ var require_graceful_fs = __commonJS({
           });
         }
       }
-      var fs$readdir = fs9.readdir;
-      fs9.readdir = readdir2;
+      var fs$readdir = fs10.readdir;
+      fs10.readdir = readdir2;
       var noReaddirOptionVersions = /^v[0-5]\./;
       function readdir2(path6, options, cb) {
         if (typeof options === "function")
@@ -28202,21 +28386,21 @@ var require_graceful_fs = __commonJS({
         }
       }
       if (process.version.substr(0, 4) === "v0.8") {
-        var legStreams = legacy(fs9);
+        var legStreams = legacy(fs10);
         ReadStream = legStreams.ReadStream;
         WriteStream = legStreams.WriteStream;
       }
-      var fs$ReadStream = fs9.ReadStream;
+      var fs$ReadStream = fs10.ReadStream;
       if (fs$ReadStream) {
         ReadStream.prototype = Object.create(fs$ReadStream.prototype);
         ReadStream.prototype.open = ReadStream$open;
       }
-      var fs$WriteStream = fs9.WriteStream;
+      var fs$WriteStream = fs10.WriteStream;
       if (fs$WriteStream) {
         WriteStream.prototype = Object.create(fs$WriteStream.prototype);
         WriteStream.prototype.open = WriteStream$open;
       }
-      Object.defineProperty(fs9, "ReadStream", {
+      Object.defineProperty(fs10, "ReadStream", {
         get: function() {
           return ReadStream;
         },
@@ -28226,7 +28410,7 @@ var require_graceful_fs = __commonJS({
         enumerable: true,
         configurable: true
       });
-      Object.defineProperty(fs9, "WriteStream", {
+      Object.defineProperty(fs10, "WriteStream", {
         get: function() {
           return WriteStream;
         },
@@ -28237,7 +28421,7 @@ var require_graceful_fs = __commonJS({
         configurable: true
       });
       var FileReadStream = ReadStream;
-      Object.defineProperty(fs9, "FileReadStream", {
+      Object.defineProperty(fs10, "FileReadStream", {
         get: function() {
           return FileReadStream;
         },
@@ -28248,7 +28432,7 @@ var require_graceful_fs = __commonJS({
         configurable: true
       });
       var FileWriteStream = WriteStream;
-      Object.defineProperty(fs9, "FileWriteStream", {
+      Object.defineProperty(fs10, "FileWriteStream", {
         get: function() {
           return FileWriteStream;
         },
@@ -28297,13 +28481,13 @@ var require_graceful_fs = __commonJS({
         });
       }
       function createReadStream2(path6, options) {
-        return new fs9.ReadStream(path6, options);
+        return new fs10.ReadStream(path6, options);
       }
       function createWriteStream2(path6, options) {
-        return new fs9.WriteStream(path6, options);
+        return new fs10.WriteStream(path6, options);
       }
-      var fs$open = fs9.open;
-      fs9.open = open3;
+      var fs$open = fs10.open;
+      fs10.open = open3;
       function open3(path6, flags, mode, cb) {
         if (typeof mode === "function")
           cb = mode, mode = null;
@@ -28319,20 +28503,20 @@ var require_graceful_fs = __commonJS({
           });
         }
       }
-      return fs9;
+      return fs10;
     }
     function enqueue(elem) {
       debug2("ENQUEUE", elem[0].name, elem[1]);
-      fs8[gracefulQueue].push(elem);
+      fs9[gracefulQueue].push(elem);
       retry2();
     }
     var retryTimer;
     function resetQueue() {
       var now = Date.now();
-      for (var i = 0; i < fs8[gracefulQueue].length; ++i) {
-        if (fs8[gracefulQueue][i].length > 2) {
-          fs8[gracefulQueue][i][3] = now;
-          fs8[gracefulQueue][i][4] = now;
+      for (var i = 0; i < fs9[gracefulQueue].length; ++i) {
+        if (fs9[gracefulQueue][i].length > 2) {
+          fs9[gracefulQueue][i][3] = now;
+          fs9[gracefulQueue][i][4] = now;
         }
       }
       retry2();
@@ -28340,9 +28524,9 @@ var require_graceful_fs = __commonJS({
     function retry2() {
       clearTimeout(retryTimer);
       retryTimer = void 0;
-      if (fs8[gracefulQueue].length === 0)
+      if (fs9[gracefulQueue].length === 0)
         return;
-      var elem = fs8[gracefulQueue].shift();
+      var elem = fs9[gracefulQueue].shift();
       var fn = elem[0];
       var args = elem[1];
       var err = elem[2];
@@ -28364,7 +28548,7 @@ var require_graceful_fs = __commonJS({
           debug2("RETRY", fn.name, args);
           fn.apply(null, args.concat([startTime]));
         } else {
-          fs8[gracefulQueue].push(elem);
+          fs9[gracefulQueue].push(elem);
         }
       }
       if (retryTimer === void 0) {
@@ -30221,11 +30405,11 @@ var require_stream_readable = __commonJS({
 var require_stream_transform = __commonJS({
   "node_modules/lazystream/node_modules/readable-stream/lib/_stream_transform.js"(exports2, module2) {
     "use strict";
-    module2.exports = Transform3;
+    module2.exports = Transform4;
     var Duplex = require_stream_duplex();
     var util3 = Object.create(require_util9());
     util3.inherits = require_inherits();
-    util3.inherits(Transform3, Duplex);
+    util3.inherits(Transform4, Duplex);
     function afterTransform(er, data) {
       var ts = this._transformState;
       ts.transforming = false;
@@ -30244,8 +30428,8 @@ var require_stream_transform = __commonJS({
         this._read(rs.highWaterMark);
       }
     }
-    function Transform3(options) {
-      if (!(this instanceof Transform3)) return new Transform3(options);
+    function Transform4(options) {
+      if (!(this instanceof Transform4)) return new Transform4(options);
       Duplex.call(this, options);
       this._transformState = {
         afterTransform: afterTransform.bind(this),
@@ -30273,14 +30457,14 @@ var require_stream_transform = __commonJS({
         done(this, null, null);
       }
     }
-    Transform3.prototype.push = function(chunk, encoding) {
+    Transform4.prototype.push = function(chunk, encoding) {
       this._transformState.needTransform = false;
       return Duplex.prototype.push.call(this, chunk, encoding);
     };
-    Transform3.prototype._transform = function(chunk, encoding, cb) {
+    Transform4.prototype._transform = function(chunk, encoding, cb) {
       throw new Error("_transform() is not implemented");
     };
-    Transform3.prototype._write = function(chunk, encoding, cb) {
+    Transform4.prototype._write = function(chunk, encoding, cb) {
       var ts = this._transformState;
       ts.writecb = cb;
       ts.writechunk = chunk;
@@ -30290,7 +30474,7 @@ var require_stream_transform = __commonJS({
         if (ts.needTransform || rs.needReadable || rs.length < rs.highWaterMark) this._read(rs.highWaterMark);
       }
     };
-    Transform3.prototype._read = function(n) {
+    Transform4.prototype._read = function(n) {
       var ts = this._transformState;
       if (ts.writechunk !== null && ts.writecb && !ts.transforming) {
         ts.transforming = true;
@@ -30299,7 +30483,7 @@ var require_stream_transform = __commonJS({
         ts.needTransform = true;
       }
     };
-    Transform3.prototype._destroy = function(err, cb) {
+    Transform4.prototype._destroy = function(err, cb) {
       var _this2 = this;
       Duplex.prototype._destroy.call(this, err, function(err2) {
         cb(err2);
@@ -30321,16 +30505,16 @@ var require_stream_transform = __commonJS({
 var require_stream_passthrough = __commonJS({
   "node_modules/lazystream/node_modules/readable-stream/lib/_stream_passthrough.js"(exports2, module2) {
     "use strict";
-    module2.exports = PassThrough3;
-    var Transform3 = require_stream_transform();
+    module2.exports = PassThrough2;
+    var Transform4 = require_stream_transform();
     var util3 = Object.create(require_util9());
     util3.inherits = require_inherits();
-    util3.inherits(PassThrough3, Transform3);
-    function PassThrough3(options) {
-      if (!(this instanceof PassThrough3)) return new PassThrough3(options);
-      Transform3.call(this, options);
+    util3.inherits(PassThrough2, Transform4);
+    function PassThrough2(options) {
+      if (!(this instanceof PassThrough2)) return new PassThrough2(options);
+      Transform4.call(this, options);
     }
-    PassThrough3.prototype._transform = function(chunk, encoding, cb) {
+    PassThrough2.prototype._transform = function(chunk, encoding, cb) {
       cb(null, chunk);
     };
   }
@@ -30372,13 +30556,13 @@ var require_passthrough = __commonJS({
 var require_lazystream = __commonJS({
   "node_modules/lazystream/lib/lazystream.js"(exports2, module2) {
     var util3 = require("util");
-    var PassThrough3 = require_passthrough();
+    var PassThrough2 = require_passthrough();
     module2.exports = {
       Readable: Readable7,
       Writable
     };
-    util3.inherits(Readable7, PassThrough3);
-    util3.inherits(Writable, PassThrough3);
+    util3.inherits(Readable7, PassThrough2);
+    util3.inherits(Writable, PassThrough2);
     function beforeFirstCall(instance, method, callback) {
       instance[method] = function() {
         delete instance[method];
@@ -30389,7 +30573,7 @@ var require_lazystream = __commonJS({
     function Readable7(fn, options) {
       if (!(this instanceof Readable7))
         return new Readable7(fn, options);
-      PassThrough3.call(this, options);
+      PassThrough2.call(this, options);
       beforeFirstCall(this, "_read", function() {
         var source = fn.call(this, options);
         var emit = this.emit.bind(this, "error");
@@ -30401,7 +30585,7 @@ var require_lazystream = __commonJS({
     function Writable(fn, options) {
       if (!(this instanceof Writable))
         return new Writable(fn, options);
-      PassThrough3.call(this, options);
+      PassThrough2.call(this, options);
       beforeFirstCall(this, "_write", function() {
         var destination = fn.call(this, options);
         var emit = this.emit.bind(this, "error");
@@ -31601,9 +31785,9 @@ var require_errors2 = __commonJS({
       "ERR_MISSING_ARGS",
       (...args) => {
         assert(args.length > 0, "At least one arg needs to be specified");
-        let msg;
+        let msg = "";
         const len = args.length;
-        args = (Array.isArray(args) ? args : [args]).map((a) => `"${a}"`).join(" or ");
+        args = (Array.isArray(args) ? args : [args]).map((a) => `"${a}"`);
         switch (len) {
           case 1:
             msg += `The ${args[0]} argument`;
@@ -36240,15 +36424,15 @@ var require_transform = __commonJS({
   "node_modules/readable-stream/lib/internal/streams/transform.js"(exports2, module2) {
     "use strict";
     var { ObjectSetPrototypeOf, Symbol: Symbol2 } = require_primordials();
-    module2.exports = Transform3;
+    module2.exports = Transform4;
     var { ERR_METHOD_NOT_IMPLEMENTED } = require_errors2().codes;
     var Duplex = require_duplex();
     var { getHighWaterMark } = require_state();
-    ObjectSetPrototypeOf(Transform3.prototype, Duplex.prototype);
-    ObjectSetPrototypeOf(Transform3, Duplex);
+    ObjectSetPrototypeOf(Transform4.prototype, Duplex.prototype);
+    ObjectSetPrototypeOf(Transform4, Duplex);
     var kCallback = Symbol2("kCallback");
-    function Transform3(options) {
-      if (!(this instanceof Transform3)) return new Transform3(options);
+    function Transform4(options) {
+      if (!(this instanceof Transform4)) return new Transform4(options);
       const readableHighWaterMark = options ? getHighWaterMark(this, options, "readableHighWaterMark", true) : null;
       if (readableHighWaterMark === 0) {
         options = {
@@ -36302,11 +36486,11 @@ var require_transform = __commonJS({
         final.call(this);
       }
     }
-    Transform3.prototype._final = final;
-    Transform3.prototype._transform = function(chunk, encoding, callback) {
+    Transform4.prototype._final = final;
+    Transform4.prototype._transform = function(chunk, encoding, callback) {
       throw new ERR_METHOD_NOT_IMPLEMENTED("_transform()");
     };
-    Transform3.prototype._write = function(chunk, encoding, callback) {
+    Transform4.prototype._write = function(chunk, encoding, callback) {
       const rState = this._readableState;
       const wState = this._writableState;
       const length = rState.length;
@@ -36327,7 +36511,7 @@ var require_transform = __commonJS({
         }
       });
     };
-    Transform3.prototype._read = function() {
+    Transform4.prototype._read = function() {
       if (this[kCallback]) {
         const callback = this[kCallback];
         this[kCallback] = null;
@@ -36342,15 +36526,15 @@ var require_passthrough2 = __commonJS({
   "node_modules/readable-stream/lib/internal/streams/passthrough.js"(exports2, module2) {
     "use strict";
     var { ObjectSetPrototypeOf } = require_primordials();
-    module2.exports = PassThrough3;
-    var Transform3 = require_transform();
-    ObjectSetPrototypeOf(PassThrough3.prototype, Transform3.prototype);
-    ObjectSetPrototypeOf(PassThrough3, Transform3);
-    function PassThrough3(options) {
-      if (!(this instanceof PassThrough3)) return new PassThrough3(options);
-      Transform3.call(this, options);
+    module2.exports = PassThrough2;
+    var Transform4 = require_transform();
+    ObjectSetPrototypeOf(PassThrough2.prototype, Transform4.prototype);
+    ObjectSetPrototypeOf(PassThrough2, Transform4);
+    function PassThrough2(options) {
+      if (!(this instanceof PassThrough2)) return new PassThrough2(options);
+      Transform4.call(this, options);
     }
-    PassThrough3.prototype._transform = function(chunk, encoding, cb) {
+    PassThrough2.prototype._transform = function(chunk, encoding, cb) {
       cb(null, chunk);
     };
   }
@@ -36388,7 +36572,7 @@ var require_pipeline = __commonJS({
       isReadableFinished
     } = require_utils2();
     var AbortController2 = globalThis.AbortController || require_abort_controller().AbortController;
-    var PassThrough3;
+    var PassThrough2;
     var Readable7;
     var addAbortListener;
     function destroyer(stream4, reading, writing) {
@@ -36513,7 +36697,7 @@ var require_pipeline = __commonJS({
         }
       }
     }
-    function pipeline(...streams) {
+    function pipeline3(...streams) {
       return pipelineImpl(streams, once(popCallback(streams)));
     }
     function pipelineImpl(streams, callback, opts) {
@@ -36621,10 +36805,10 @@ var require_pipeline = __commonJS({
             }
           } else {
             var _ret2;
-            if (!PassThrough3) {
-              PassThrough3 = require_passthrough2();
+            if (!PassThrough2) {
+              PassThrough2 = require_passthrough2();
             }
-            const pt = new PassThrough3({
+            const pt = new PassThrough2({
               objectMode: true
             });
             const then = (_ret2 = ret) === null || _ret2 === void 0 ? void 0 : _ret2.then;
@@ -36779,7 +36963,7 @@ var require_pipeline = __commonJS({
     }
     module2.exports = {
       pipelineImpl,
-      pipeline
+      pipeline: pipeline3
     };
   }
 });
@@ -36788,7 +36972,7 @@ var require_pipeline = __commonJS({
 var require_compose = __commonJS({
   "node_modules/readable-stream/lib/internal/streams/compose.js"(exports2, module2) {
     "use strict";
-    var { pipeline } = require_pipeline();
+    var { pipeline: pipeline3 } = require_pipeline();
     var Duplex = require_duplex();
     var { destroyer } = require_destroy2();
     var {
@@ -36848,7 +37032,7 @@ var require_compose = __commonJS({
         }
       }
       const head = streams[0];
-      const tail = pipeline(streams, onfinished);
+      const tail = pipeline3(streams, onfinished);
       const writable = !!(isWritable(head) || isWritableStream(head) || isTransformStream(head));
       const readable = !!(isReadable(tail) || isReadableStream3(tail) || isTransformStream(tail));
       d = new Duplex({
@@ -37391,7 +37575,7 @@ var require_promises = __commonJS({
     var { pipelineImpl: pl } = require_pipeline();
     var { finished } = require_end_of_stream();
     require_stream2();
-    function pipeline(...streams) {
+    function pipeline3(...streams) {
       return new Promise2((resolve7, reject) => {
         let signal;
         let end;
@@ -37419,7 +37603,7 @@ var require_promises = __commonJS({
     }
     module2.exports = {
       finished,
-      pipeline
+      pipeline: pipeline3
     };
   }
 });
@@ -37439,7 +37623,7 @@ var require_stream2 = __commonJS({
     } = require_errors2();
     var compose = require_compose();
     var { setDefaultHighWaterMark, getDefaultHighWaterMark } = require_state();
-    var { pipeline } = require_pipeline();
+    var { pipeline: pipeline3 } = require_pipeline();
     var { destroyer } = require_destroy2();
     var eos = require_end_of_stream();
     var promises4 = require_promises();
@@ -37503,7 +37687,7 @@ var require_stream2 = __commonJS({
     Stream2.Duplex = require_duplex();
     Stream2.Transform = require_transform();
     Stream2.PassThrough = require_passthrough2();
-    Stream2.pipeline = pipeline;
+    Stream2.pipeline = pipeline3;
     var { addAbortSignal } = require_add_abort_signal();
     Stream2.addAbortSignal = addAbortSignal;
     Stream2.finished = eos;
@@ -37519,7 +37703,7 @@ var require_stream2 = __commonJS({
         return promises4;
       }
     });
-    ObjectDefineProperty(pipeline, customPromisify, {
+    ObjectDefineProperty(pipeline3, customPromisify, {
       __proto__: null,
       enumerable: true,
       get() {
@@ -43447,8 +43631,8 @@ var require_commonjs6 = __commonJS({
        *
        * @internal
        */
-      constructor(cwd = process.cwd(), pathImpl, sep7, { nocase, childrenCacheSize = 16 * 1024, fs: fs8 = defaultFS } = {}) {
-        this.#fs = fsFromOption(fs8);
+      constructor(cwd = process.cwd(), pathImpl, sep7, { nocase, childrenCacheSize = 16 * 1024, fs: fs9 = defaultFS } = {}) {
+        this.#fs = fsFromOption(fs9);
         if (cwd instanceof URL || cwd.startsWith("file://")) {
           cwd = (0, node_url_1.fileURLToPath)(cwd);
         }
@@ -44007,8 +44191,8 @@ var require_commonjs6 = __commonJS({
       /**
        * @internal
        */
-      newRoot(fs8) {
-        return new PathWin32(this.rootPath, IFDIR, void 0, this.roots, this.nocase, this.childrenCache(), { fs: fs8 });
+      newRoot(fs9) {
+        return new PathWin32(this.rootPath, IFDIR, void 0, this.roots, this.nocase, this.childrenCache(), { fs: fs9 });
       }
       /**
        * Return true if the provided path string is an absolute path
@@ -44037,8 +44221,8 @@ var require_commonjs6 = __commonJS({
       /**
        * @internal
        */
-      newRoot(fs8) {
-        return new PathPosix(this.rootPath, IFDIR, void 0, this.roots, this.nocase, this.childrenCache(), { fs: fs8 });
+      newRoot(fs9) {
+        return new PathPosix(this.rootPath, IFDIR, void 0, this.roots, this.nocase, this.childrenCache(), { fs: fs9 });
       }
       /**
        * Return true if the provided path string is an absolute path
@@ -45223,7 +45407,7 @@ var require_commonjs7 = __commonJS({
 // node_modules/archiver-utils/file.js
 var require_file2 = __commonJS({
   "node_modules/archiver-utils/file.js"(exports2, module2) {
-    var fs8 = require_graceful_fs();
+    var fs9 = require_graceful_fs();
     var path6 = require("path");
     var flatten = require_flatten();
     var difference = require_difference();
@@ -45250,7 +45434,7 @@ var require_file2 = __commonJS({
     };
     file.exists = function() {
       var filepath = path6.join.apply(path6, arguments);
-      return fs8.existsSync(filepath);
+      return fs9.existsSync(filepath);
     };
     file.expand = function(...args) {
       var options = isPlainObject3(args[0]) ? args.shift() : {};
@@ -45268,7 +45452,7 @@ var require_file2 = __commonJS({
             if (typeof options.filter === "function") {
               return options.filter(filepath);
             } else {
-              return fs8.statSync(filepath)[options.filter]();
+              return fs9.statSync(filepath)[options.filter]();
             }
           } catch (e) {
             return false;
@@ -45376,14 +45560,14 @@ var require_file2 = __commonJS({
 // node_modules/archiver-utils/index.js
 var require_archiver_utils = __commonJS({
   "node_modules/archiver-utils/index.js"(exports2, module2) {
-    var fs8 = require_graceful_fs();
+    var fs9 = require_graceful_fs();
     var path6 = require("path");
     var isStream = require_is_stream();
     var lazystream = require_lazystream();
     var normalizePath = require_normalize_path();
     var defaults2 = require_defaults();
     var Stream2 = require("stream").Stream;
-    var PassThrough3 = require_ours().PassThrough;
+    var PassThrough2 = require_ours().PassThrough;
     var utils = module2.exports = {};
     utils.file = require_file2();
     utils.collectStream = function(source, callback) {
@@ -45425,7 +45609,7 @@ var require_archiver_utils = __commonJS({
     };
     utils.lazyReadStream = function(filepath) {
       return new lazystream.Readable(function() {
-        return fs8.createReadStream(filepath);
+        return fs9.createReadStream(filepath);
       });
     };
     utils.normalizeInputSource = function(source) {
@@ -45434,7 +45618,7 @@ var require_archiver_utils = __commonJS({
       } else if (typeof source === "string") {
         return Buffer.from(source);
       } else if (utils.isStream(source)) {
-        return source.pipe(new PassThrough3());
+        return source.pipe(new PassThrough2());
       }
       return source;
     };
@@ -45453,7 +45637,7 @@ var require_archiver_utils = __commonJS({
         callback = base;
         base = dirpath;
       }
-      fs8.readdir(dirpath, function(err, list) {
+      fs9.readdir(dirpath, function(err, list) {
         var i = 0;
         var file;
         var filepath;
@@ -45466,7 +45650,7 @@ var require_archiver_utils = __commonJS({
             return callback(null, results);
           }
           filepath = path6.join(dirpath, file);
-          fs8.stat(filepath, function(err2, stats) {
+          fs9.stat(filepath, function(err2, stats) {
             results.push({
               path: filepath,
               relative: path6.relative(base, filepath).replace(/\\/g, "/"),
@@ -45528,14 +45712,14 @@ var require_error = __commonJS({
 // node_modules/archiver/lib/core.js
 var require_core = __commonJS({
   "node_modules/archiver/lib/core.js"(exports2, module2) {
-    var fs8 = require("fs");
+    var fs9 = require("fs");
     var glob = require_readdir_glob();
     var async = require_async();
     var path6 = require("path");
     var util3 = require_archiver_utils();
     var inherits = require("util").inherits;
     var ArchiverError = require_error();
-    var Transform3 = require_ours().Transform;
+    var Transform4 = require_ours().Transform;
     var win32 = process.platform === "win32";
     var Archiver = function(format, options) {
       if (!(this instanceof Archiver)) {
@@ -45549,7 +45733,7 @@ var require_core = __commonJS({
         highWaterMark: 1024 * 1024,
         statConcurrency: 4
       });
-      Transform3.call(this, options);
+      Transform4.call(this, options);
       this._format = false;
       this._module = false;
       this._pending = 0;
@@ -45571,7 +45755,7 @@ var require_core = __commonJS({
       };
       this._streams = [];
     };
-    inherits(Archiver, Transform3);
+    inherits(Archiver, Transform4);
     Archiver.prototype._abort = function() {
       this._state.aborted = true;
       this._queue.kill();
@@ -45592,7 +45776,7 @@ var require_core = __commonJS({
       data.sourcePath = filepath;
       task.data = data;
       this._entriesCount++;
-      if (data.stats && data.stats instanceof fs8.Stats) {
+      if (data.stats && data.stats instanceof fs9.Stats) {
         task = this._updateQueueTaskWithStats(task, data.stats);
         if (task) {
           if (data.stats.size) {
@@ -45763,7 +45947,7 @@ var require_core = __commonJS({
         callback();
         return;
       }
-      fs8.lstat(task.filepath, function(err, stats) {
+      fs9.lstat(task.filepath, function(err, stats) {
         if (this._state.aborted) {
           setImmediate(callback);
           return;
@@ -45806,7 +45990,7 @@ var require_core = __commonJS({
         task.data.sourceType = "buffer";
         task.source = Buffer.concat([]);
       } else if (stats.isSymbolicLink() && this._moduleSupports("symlink")) {
-        var linkPath = fs8.readlinkSync(task.filepath);
+        var linkPath = fs9.readlinkSync(task.filepath);
         var dirName = path6.dirname(task.filepath);
         task.data.type = "symlink";
         task.data.linkname = path6.relative(dirName, path6.resolve(dirName, linkPath));
@@ -46517,7 +46701,7 @@ var require_zip_archive_entry = __commonJS({
 var require_util12 = __commonJS({
   "node_modules/compress-commons/lib/util/index.js"(exports2, module2) {
     var Stream2 = require("stream").Stream;
-    var PassThrough3 = require_ours().PassThrough;
+    var PassThrough2 = require_ours().PassThrough;
     var isStream = require_is_stream();
     var util3 = module2.exports = {};
     util3.normalizeInputSource = function(source) {
@@ -46526,7 +46710,7 @@ var require_util12 = __commonJS({
       } else if (typeof source === "string") {
         return Buffer.from(source);
       } else if (isStream(source) && !source._readableState) {
-        var normalized = new PassThrough3();
+        var normalized = new PassThrough2();
         source.pipe(normalized);
         return normalized;
       }
@@ -46540,14 +46724,14 @@ var require_archive_output_stream = __commonJS({
   "node_modules/compress-commons/lib/archivers/archive-output-stream.js"(exports2, module2) {
     var inherits = require("util").inherits;
     var isStream = require_is_stream();
-    var Transform3 = require_ours().Transform;
+    var Transform4 = require_ours().Transform;
     var ArchiveEntry = require_archive_entry();
     var util3 = require_util12();
     var ArchiveOutputStream = module2.exports = function(options) {
       if (!(this instanceof ArchiveOutputStream)) {
         return new ArchiveOutputStream(options);
       }
-      Transform3.call(this, options);
+      Transform4.call(this, options);
       this.offset = 0;
       this._archive = {
         finish: false,
@@ -46555,7 +46739,7 @@ var require_archive_output_stream = __commonJS({
         processing: false
       };
     };
-    inherits(ArchiveOutputStream, Transform3);
+    inherits(ArchiveOutputStream, Transform4);
     ArchiveOutputStream.prototype._appendBuffer = function(zae, source, callback) {
     };
     ArchiveOutputStream.prototype._appendStream = function(zae, source, callback) {
@@ -46618,7 +46802,7 @@ var require_archive_output_stream = __commonJS({
       if (chunk) {
         this.offset += chunk.length;
       }
-      return Transform3.prototype.write.call(this, chunk, cb);
+      return Transform4.prototype.write.call(this, chunk, cb);
     };
   }
 });
@@ -46725,9 +46909,9 @@ var require_crc32 = __commonJS({
 var require_crc32_stream = __commonJS({
   "node_modules/crc32-stream/lib/crc32-stream.js"(exports2, module2) {
     "use strict";
-    var { Transform: Transform3 } = require_ours();
+    var { Transform: Transform4 } = require_ours();
     var crc32 = require_crc32();
-    var CRC32Stream = class extends Transform3 {
+    var CRC32Stream = class extends Transform4 {
       constructor(options) {
         super(options);
         this.checksum = Buffer.allocUnsafe(4);
@@ -48393,11 +48577,11 @@ var require_streamx = __commonJS({
         }
       }
       static deferred(fn, opts) {
-        const out = new PassThrough3(opts);
+        const out = new PassThrough2(opts);
         fn().then((src) => {
           if (src === null) return out.end();
           if (out.destroying) return;
-          pipeline(src, out, noop3);
+          pipeline3(src, out, noop3);
         }).catch((err) => out.destroy(err));
         return out;
       }
@@ -48629,7 +48813,7 @@ var require_streamx = __commonJS({
         return this;
       }
     };
-    var Transform3 = class extends Duplex {
+    var Transform4 = class extends Duplex {
       constructor(opts) {
         super(opts);
         this._transformState = new TransformState(this);
@@ -48673,7 +48857,7 @@ var require_streamx = __commonJS({
         this._flush(transformAfterFlush.bind(this));
       }
     };
-    var PassThrough3 = class extends Transform3 {
+    var PassThrough2 = class extends Transform4 {
     };
     function transformAfterFlush(err, data) {
       const cb = this._transformState.afterFinal;
@@ -48684,13 +48868,13 @@ var require_streamx = __commonJS({
     }
     function pipelinePromise(...streams) {
       return new Promise((resolve7, reject) => {
-        return pipeline(...streams, (err) => {
+        return pipeline3(...streams, (err) => {
           if (err) return reject(err);
           resolve7();
         });
       });
     }
-    function pipeline(stream4, ...streams) {
+    function pipeline3(stream4, ...streams) {
       const all = Array.isArray(stream4) ? [...stream4, ...streams] : [stream4, ...streams];
       const done = all.length && typeof all[all.length - 1] === "function" ? all.pop() : null;
       if (all.length < 2) throw StreamError.BAD_ARGUMENT("Pipeline requires at least 2 streams");
@@ -48788,7 +48972,7 @@ var require_streamx = __commonJS({
       return s._writev !== Writable.prototype._writev && s._writev !== Duplex.prototype._writev;
     }
     module2.exports = {
-      pipeline,
+      pipeline: pipeline3,
       pipelinePromise,
       isStream,
       isStreamx,
@@ -48802,9 +48986,9 @@ var require_streamx = __commonJS({
       Writable,
       Readable: Readable7,
       Duplex,
-      Transform: Transform3,
+      Transform: Transform4,
       // Export PassThrough for compatibility with Node.js core's stream module
-      PassThrough: PassThrough3
+      PassThrough: PassThrough2
     };
   }
 });
@@ -50067,7 +50251,7 @@ var require_dist4 = __commonJS({
 var require_json = __commonJS({
   "node_modules/archiver/lib/plugins/json.js"(exports2, module2) {
     var inherits = require("util").inherits;
-    var Transform3 = require_ours().Transform;
+    var Transform4 = require_ours().Transform;
     var crc32 = require_dist4();
     var util3 = require_archiver_utils();
     var Json = function(options) {
@@ -50075,14 +50259,14 @@ var require_json = __commonJS({
         return new Json(options);
       }
       options = this.options = util3.defaults(options, {});
-      Transform3.call(this, options);
+      Transform4.call(this, options);
       this.supports = {
         directory: true,
         symlink: true
       };
       this.files = [];
     };
-    inherits(Json, Transform3);
+    inherits(Json, Transform4);
     Json.prototype._transform = function(chunk, encoding, callback) {
       callback(null, chunk);
     };
@@ -51883,13 +52067,13 @@ var require_binary = __commonJS({
 // node_modules/unzip-stream/lib/matcher-stream.js
 var require_matcher_stream = __commonJS({
   "node_modules/unzip-stream/lib/matcher-stream.js"(exports2, module2) {
-    var Transform3 = require("stream").Transform;
+    var Transform4 = require("stream").Transform;
     var util3 = require("util");
     function MatcherStream(patternDesc, matchFn) {
       if (!(this instanceof MatcherStream)) {
         return new MatcherStream();
       }
-      Transform3.call(this);
+      Transform4.call(this);
       var p = typeof patternDesc === "object" ? patternDesc.pattern : patternDesc;
       this.pattern = Buffer.isBuffer(p) ? p : Buffer.from(p);
       this.requiredLength = this.pattern.length;
@@ -51898,7 +52082,7 @@ var require_matcher_stream = __commonJS({
       this.bytesSoFar = 0;
       this.matchFn = matchFn;
     }
-    util3.inherits(MatcherStream, Transform3);
+    util3.inherits(MatcherStream, Transform4);
     MatcherStream.prototype.checkDataChunk = function(ignoreMatchZero) {
       var enoughData = this.data.length >= this.requiredLength;
       if (!enoughData) {
@@ -52578,7 +52762,7 @@ var require_unzip_stream = __commonJS({
 // node_modules/unzip-stream/lib/parser-stream.js
 var require_parser_stream = __commonJS({
   "node_modules/unzip-stream/lib/parser-stream.js"(exports2, module2) {
-    var Transform3 = require("stream").Transform;
+    var Transform4 = require("stream").Transform;
     var util3 = require("util");
     var UnzipStream = require_unzip_stream();
     function ParserStream(opts) {
@@ -52586,7 +52770,7 @@ var require_parser_stream = __commonJS({
         return new ParserStream(opts);
       }
       var transformOpts = opts || {};
-      Transform3.call(this, { readableObjectMode: true });
+      Transform4.call(this, { readableObjectMode: true });
       this.opts = opts || {};
       this.unzipStream = new UnzipStream(this.opts);
       var self2 = this;
@@ -52597,7 +52781,7 @@ var require_parser_stream = __commonJS({
         self2.emit("error", error2);
       });
     }
-    util3.inherits(ParserStream, Transform3);
+    util3.inherits(ParserStream, Transform4);
     ParserStream.prototype._transform = function(chunk, encoding, cb) {
       this.unzipStream.write(chunk, encoding, cb);
     };
@@ -52612,13 +52796,13 @@ var require_parser_stream = __commonJS({
     };
     ParserStream.prototype.on = function(eventName, fn) {
       if (eventName === "entry") {
-        return Transform3.prototype.on.call(this, "data", fn);
+        return Transform4.prototype.on.call(this, "data", fn);
       }
-      return Transform3.prototype.on.call(this, eventName, fn);
+      return Transform4.prototype.on.call(this, eventName, fn);
     };
     ParserStream.prototype.drainAll = function() {
       this.unzipStream.drainAll();
-      return this.pipe(new Transform3({ objectMode: true, transform: function(d, e, cb) {
+      return this.pipe(new Transform4({ objectMode: true, transform: function(d, e, cb) {
         cb();
       } }));
     };
@@ -52630,7 +52814,7 @@ var require_parser_stream = __commonJS({
 var require_mkdirp = __commonJS({
   "node_modules/mkdirp/index.js"(exports2, module2) {
     var path6 = require("path");
-    var fs8 = require("fs");
+    var fs9 = require("fs");
     var _0777 = parseInt("0777", 8);
     module2.exports = mkdirP.mkdirp = mkdirP.mkdirP = mkdirP;
     function mkdirP(p, opts, f, made) {
@@ -52641,7 +52825,7 @@ var require_mkdirp = __commonJS({
         opts = { mode: opts };
       }
       var mode = opts.mode;
-      var xfs = opts.fs || fs8;
+      var xfs = opts.fs || fs9;
       if (mode === void 0) {
         mode = _0777;
       }
@@ -52680,7 +52864,7 @@ var require_mkdirp = __commonJS({
         opts = { mode: opts };
       }
       var mode = opts.mode;
-      var xfs = opts.fs || fs8;
+      var xfs = opts.fs || fs9;
       if (mode === void 0) {
         mode = _0777;
       }
@@ -52717,16 +52901,16 @@ var require_mkdirp = __commonJS({
 // node_modules/unzip-stream/lib/extract.js
 var require_extract2 = __commonJS({
   "node_modules/unzip-stream/lib/extract.js"(exports2, module2) {
-    var fs8 = require("fs");
+    var fs9 = require("fs");
     var path6 = require("path");
     var util3 = require("util");
     var mkdirp = require_mkdirp();
-    var Transform3 = require("stream").Transform;
+    var Transform4 = require("stream").Transform;
     var UnzipStream = require_unzip_stream();
     function Extract(opts) {
       if (!(this instanceof Extract))
         return new Extract(opts);
-      Transform3.call(this);
+      Transform4.call(this);
       this.opts = opts || {};
       this.unzipStream = new UnzipStream(this.opts);
       this.unfinishedEntries = 0;
@@ -52738,7 +52922,7 @@ var require_extract2 = __commonJS({
         self2.emit("error", error2);
       });
     }
-    util3.inherits(Extract, Transform3);
+    util3.inherits(Extract, Transform4);
     Extract.prototype._transform = function(chunk, encoding, cb) {
       this.unzipStream.write(chunk, encoding, cb);
     };
@@ -52764,7 +52948,7 @@ var require_extract2 = __commonJS({
       var directory = entry.isDirectory ? destPath : path6.dirname(destPath);
       this.unfinishedEntries++;
       var writeFileFn = function() {
-        var pipedStream = fs8.createWriteStream(destPath);
+        var pipedStream = fs9.createWriteStream(destPath);
         pipedStream.on("close", function() {
           self2.unfinishedEntries--;
           self2._notifyAwaiter();
@@ -55549,7 +55733,7 @@ function saveState(name, value) {
 }
 
 // src/main.ts
-var import_promises9 = require("node:fs/promises");
+var import_promises10 = require("node:fs/promises");
 
 // src/inputs.ts
 function parseInputs(read, workspace) {
@@ -55564,8 +55748,10 @@ function parseInputs(read, workspace) {
     const value = str(name);
     if (!value) return void 0;
     const n = Number(value);
-    if (!Number.isFinite(n) || integer && !Number.isSafeInteger(n) || n < min || n > max)
-      throw new Error(`${name} must be ${integer ? "an integer" : "a number"} between ${min} and ${max}.`);
+    if (!Number.isFinite(n) || integer && !Number.isSafeInteger(n) || n < min || n > max) {
+      const bounds = min === Number.MIN_VALUE ? `a positive number${max < Infinity ? ` no greater than ${max}` : ""}` : `${integer ? "an integer" : "a number"} between ${min} and ${max}`;
+      throw new Error(`${name} must be ${bounds}.`);
+    }
     return n;
   };
   const list = (name) => str(name).split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
@@ -55585,6 +55771,11 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
+  const failOnSeverity = choice("fail-on-severity", ["none", "low", "medium", "high", "critical"], "none");
+  if (dryRun && failOnSeverity !== "none")
+    throw new Error("dry-run requires fail-on-severity: none. Configuration validation cannot satisfy a required security review.");
+  const provider = choice("provider", ["openai", "openrouter", "fireworks", "amazon-bedrock"], "openai");
+  const model = str("model", provider === "openai" ? "gpt-5.6-sol" : "");
   const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
@@ -55593,11 +55784,12 @@ function parseInputs(read, workspace) {
     diffBase,
     mode,
     cyberAccessProgram,
-    model: str("model", "gpt-5.6-sol"),
-    effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
+    provider,
+    model,
+    effort: str("effort", "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
     maxTimeHours,
-    failOnSeverity: choice("fail-on-severity", ["none", "low", "medium", "high", "critical"], "none"),
+    failOnSeverity,
     verbose: bool("verbose", true),
     dryRun,
     summary: bool("summary", true),
@@ -55608,25 +55800,32 @@ function parseInputs(read, workspace) {
   };
 }
 function scanArguments(inputs, target, resultsDirectory) {
+  const auth2 = inputs.dryRun || inputs.provider === "amazon-bedrock" ? "auto" : "api-key";
   const args = [
     "scan",
     target.repository,
     "--auth",
-    inputs.dryRun ? "auto" : "api-key",
+    auth2,
     "--provider",
-    "openai",
+    inputs.provider,
     "--mode",
     inputs.mode,
-    `--model=${inputs.model}`,
-    "--effort",
-    inputs.effort,
+    ...inputs.model ? [`--model=${inputs.model}`] : [],
+    `--effort=${inputs.effort}`,
     "--headless",
     "--output-dir",
     resultsDirectory,
     "--format",
     "json"
   ];
-  args.push("--codex", "analytics.enabled=false");
+  args.push(
+    "--codex",
+    "analytics.enabled=false",
+    "--codex",
+    'responses_api_metadata.codex_security_integration="github_action"',
+    "--codex",
+    `responses_api_metadata.codex_security_provider=${JSON.stringify(inputs.provider)}`
+  );
   for (const path6 of inputs.paths) args.push(`--path=./${path6}`);
   const options = [
     ["--cyber-access-program", inputs.cyberAccessProgram],
@@ -55743,13 +55942,36 @@ async function runProcess(executable, args, options) {
   });
 }
 
+// ../sdk/typescript/src/git-remote.ts
+function parseGitRemote(remote) {
+  if (remote.includes("://")) {
+    const url2 = new URL(remote);
+    return {
+      url: url2,
+      path: url2.pathname.slice(1),
+      scpStyle: false
+    };
+  }
+  const scp = /^((?:[^@/:\s?#]+@)?(?:\[[^\]]+\]|[^@/:\s?#]+)):(.+)$/u.exec(
+    remote
+  );
+  if (scp === null) return void 0;
+  return {
+    url: new URL(`ssh://${scp[1]}`),
+    // An SCP path's ?, #, and dot segments are literal Git path characters.
+    path: scp[2],
+    scpStyle: true
+  };
+}
+
 // src/targets.ts
 var SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 function validateEvent(event) {
   if (!["pull_request", "schedule", "workflow_dispatch", "push"].includes(event.eventName))
     throw new Error(`Unsupported event: ${event.eventName}. Use pull_request, schedule, workflow_dispatch, or push. Privileged PR source-scanning triggers are not supported.`);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(event.repository)) throw new Error("GITHUB_REPOSITORY is invalid.");
-  if (event.serverUrl !== "https://github.com") throw new Error("This release supports GitHub.com only; GitHub Enterprise Server has not been validated.");
+  if (!/^https:\/\/(?:github\.com|[a-z0-9-]+\.ghe\.com)$/.test(event.serverUrl))
+    throw new Error("This release supports GitHub.com and GitHub Enterprise Cloud on *.ghe.com; GitHub Enterprise Server has not been validated.");
   if (event.eventName === "pull_request") {
     const pr = event.payload.pull_request;
     if (!pr || pr.head?.repo?.full_name !== event.repository || pr.base?.repo?.full_name !== event.repository)
@@ -55810,11 +56032,17 @@ async function containedPath(repository, input) {
   if (!info2.isFile() && !info2.isDirectory()) throw new Error("A requested path is not a regular file or directory.");
   return path6;
 }
-function originMatches(url2, repository) {
+function originMatches(url2, repository, serverUrl) {
   try {
-    if (url2.startsWith("git@github.com:")) return url2.slice(15).replace(/\.git$/, "") === repository;
-    const parsed = new URL(url2);
-    return ["https:", "ssh:"].includes(parsed.protocol) && parsed.hostname === "github.com" && !parsed.password && (parsed.protocol === "ssh:" ? parsed.username === "git" : !parsed.username) && parsed.pathname.replace(/^\//, "").replace(/\.git$/, "") === repository;
+    const host = new URL(serverUrl).hostname;
+    const sshUser = host === "github.com" ? "git" : host.slice(0, -".ghe.com".length);
+    const remote = parseGitRemote(url2);
+    if (!remote) return false;
+    const parsed = remote.url;
+    const ssh = parsed.protocol === "ssh:";
+    const originHost = parsed.hostname.toLowerCase();
+    const matchesHost = originHost === host || host === "github.com" && ssh && originHost === "ssh.github.com" && parsed.port === "443";
+    return matchesHost && !parsed.password && (ssh ? parsed.username === sshUser : parsed.protocol === "https:" && !parsed.username) && remote.path.replace(/\/$/, "").replace(/\.git$/, "").toLowerCase() === repository.toLowerCase();
   } catch {
     return false;
   }
@@ -55828,7 +56056,7 @@ async function resolveTarget(inputs, event) {
   if (configKeys.some((key) => /^credential\.|^http\..*extraheader$|^include\.path$|^includeif\..*\.path$|^core\.sshcommand$|^url\..*\.insteadof$/.test(key)))
     throw new Error("The checkout retains Git authentication or external configuration. Use actions/checkout with persist-credentials: false and a dedicated clean job. Credential values have not been printed.");
   const origin = (await git(repository, ["config", "--no-includes", "--get", "remote.origin.url"])).trim();
-  if (!originMatches(origin, event.repository)) throw new Error("The checkout origin does not match GITHUB_REPOSITORY. Cross-repository checkouts are not supported.");
+  if (!originMatches(origin, event.repository, event.serverUrl)) throw new Error("The checkout origin does not match GITHUB_SERVER_URL and GITHUB_REPOSITORY. Cross-repository checkouts are not supported.");
   const scannedSha = await commit(repository, "HEAD");
   const pr = event.eventName === "pull_request" ? event.payload.pull_request : void 0;
   if (pr && scannedSha !== pr.head.sha) throw new Error("PR scans must check out github.event.pull_request.head.sha, not the merge commit.");
@@ -55845,7 +56073,7 @@ async function resolveTarget(inputs, event) {
     else if (pr) diffBase = (await git(repository, ["merge-base", pr.base.sha, diffHead])).trim();
     else throw new Error("diff-base is required for diff scans outside pull_request events.");
     if (!SHA.test(diffBase)) throw new Error("Could not resolve the diff base. Fetch full history.");
-    emptyDiff = (await gitResult(repository, ["diff", "--no-ext-diff", "--no-textconv", "--quiet", diffBase, diffHead, "--"], [0, 1])).exitCode === 0;
+    emptyDiff = (await gitResult(repository, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--quiet", diffBase, diffHead, "--"], [0, 1])).exitCode === 0;
   }
   const analysisRef = pr ? `refs/pull/${pr.number ?? event.payload.number}/head` : event.ref;
   const publishable = /^refs\/(heads|tags|pull)\//.test(analysisRef);
@@ -55853,6 +56081,7 @@ async function resolveTarget(inputs, event) {
 }
 
 // src/runtime.ts
+var import_node_fs = __toESM(require("node:fs"), 1);
 var import_promises3 = require("node:fs/promises");
 var import_node_path4 = require("node:path");
 
@@ -55882,14 +56111,46 @@ var package_default = {
   name: "codex-security-action-runtime",
   private: true,
   dependencies: {
-    "@openai/codex-security": "0.2.0"
+    "@openai/codex-security": "0.6.0"
   }
 };
 
 // src/runtime.ts
 var SUPPORTED_CLI_VERSION = package_default.dependencies["@openai/codex-security"];
 var REGISTRY = "https://registry.npmjs.org/";
-function runtimeEnvironment(paths, apiKey) {
+var AWS_ENVIRONMENT_VARIABLES = [
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_PROFILE",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"
+];
+var API_KEY_ENVIRONMENT_VARIABLES = {
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  fireworks: "FIREWORKS_API_KEY"
+};
+function scanCredentials(provider, source) {
+  if (provider !== "amazon-bedrock") return {
+    provider,
+    apiKey: source[API_KEY_ENVIRONMENT_VARIABLES[provider]] || (provider === "openai" ? source.CODEX_API_KEY : void 0) || ""
+  };
+  const environment = {};
+  for (const name of AWS_ENVIRONMENT_VARIABLES) if (source[name] !== void 0) environment[name] = source[name];
+  return { provider, environment };
+}
+function runtimeEnvironment(paths, credentials) {
   const env = {
     PATH: `${(0, import_node_path4.join)(paths.root, "bin")}:${paths.runnerPath ?? "/usr/bin:/bin"}`,
     HOME: paths.home,
@@ -55930,9 +56191,13 @@ function runtimeEnvironment(paths, apiKey) {
     env.CODEX_MCP_NODE_PATH = (0, import_node_path4.join)(paths.root, "bin", "node");
   }
   if (paths.runnerLibraryPath !== void 0) env.LD_LIBRARY_PATH = paths.runnerLibraryPath;
-  if (apiKey !== void 0) {
-    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error("OPENAI_API_KEY must be a nonempty single-line value.");
-    env.OPENAI_API_KEY = apiKey;
+  if (credentials?.provider === "amazon-bedrock") {
+    Object.assign(env, credentials.environment);
+  } else if (credentials) {
+    const { apiKey } = credentials;
+    const name = API_KEY_ENVIRONMENT_VARIABLES[credentials.provider];
+    if (!apiKey || /[\r\n\u0000]/.test(apiKey)) throw new Error(`${name} must be a nonempty single-line value.`);
+    env[name] = apiKey;
   }
   return env;
 }
@@ -55956,6 +56221,87 @@ async function checkPython(pythonPath, cwd, env) {
   const result = await runProcess(pythonPath, ["-I", "-c", "import sys, sqlite3, tomllib; assert sys.version_info >= (3, 11)"], { cwd, env, timeoutMs: 1e4 });
   if (result.exitCode !== 0 || result.timedOut || result.interrupted || result.signal)
     throw new Error("Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.");
+}
+var SANDBOX_UNAVAILABLE_EXIT = 75;
+var SandboxUnavailableError = class extends Error {
+};
+async function ensureSandbox(options, probe, execute = runProcess) {
+  let initialError;
+  try {
+    await probe();
+    return;
+  } catch (error2) {
+    if (!(error2 instanceof SandboxUnavailableError) || options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24" || import_node_fs.default.existsSync("/.dockerenv")) throw error2;
+    initialError = error2;
+  }
+  const sudo = "/usr/bin/sudo";
+  for (const args of [
+    ["-n", "/usr/bin/apt-get", "update"],
+    // Defer only the hosted image's problematic PHP restart during this install.
+    ["-n", "/bin/sh", "-eu", "-c", String.raw`
+      if [ -d /etc/needrestart/conf.d ]; then
+        override=$(/usr/bin/mktemp /etc/needrestart/conf.d/codex-security-XXXXXX.conf)
+        trap '/usr/bin/rm -f "$override"' EXIT
+        trap 'exit 1' HUP INT TERM
+        printf '%s\n' '$nrconf{override_rc}{qr(^php8\.3-fpm\.service$)} = 0;' > "$override"
+      fi
+      /usr/bin/apt-get install --yes bubblewrap apparmor-profiles
+    `],
+    ["-n", "/usr/sbin/apparmor_parser", "-r", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"]
+  ]) {
+    const result = await execute(sudo, args, options);
+    for (const line of safeLogLines(result.stdout)) {
+      try {
+        options.log?.(line);
+      } catch {
+      }
+    }
+    if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut) {
+      const details = safeLogLines([result.stderr, result.stdout].join("\n")).join("\n");
+      throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(" ")} (exit ${result.exitCode}).
+${details}
+Original sandbox preflight: ${initialError.message}`, { cause: initialError });
+    }
+  }
+  await probe();
+}
+async function checkSandbox(nodePath, cliPath, options, env) {
+  const result = await runProcess(nodePath, ["--input-type=module", "--eval", `
+    import { pathToFileURL } from 'node:url';
+    import { dirname, join } from 'node:path';
+    const [cli, provider, model] = process.argv.slice(1);
+    const fromCli = file => import(pathToFileURL(join(dirname(cli), '../dist', file)).href);
+    const { parseCodexOverrides } = await fromCli('cli.js');
+    const { scanRuntimeCodexConfig } = await fromCli('api.js');
+    const { writeCodexConfig } = await fromCli('config.js');
+    const runtime = await fromCli('runtime.js');
+    const config = parseCodexOverrides(['analytics.enabled=false'], model || undefined, undefined, provider);
+    await writeCodexConfig(join(process.env.CODEX_HOME, 'config.toml'), scanRuntimeCodexConfig(config, process.env.CODEX_HOME));
+    const command = runtime.resolveCodexCommand(process.env);
+    try { await runtime.probeCodexSandbox(command, process.env); }
+    catch (error) {
+      const { SandboxUnavailableError } = await fromCli('errors.js');
+      if (!(error instanceof SandboxUnavailableError)) throw error;
+      console.error(error);
+      // The feature list loads the native configuration without starting Bubblewrap.
+      const config = await runtime.runCodexCommand(command, ['features', 'list'], process.env,
+        undefined, AbortSignal.timeout(10_000));
+      if (!config.success) {
+        console.error('Codex configuration check failed (exit ' + config.exitCode + ').');
+        if (config.stdout) console.error(config.stdout);
+        if (config.stderr) console.error(config.stderr);
+      }
+      process.exitCode = config.success ? ${SANDBOX_UNAVAILABLE_EXIT} : 1;
+    }
+  `, cliPath, options.provider, options.model], { cwd: options.repository, env });
+  const detail = result.stderr || result.stdout;
+  if (result.interrupted || result.signal || result.timedOut)
+    throw new Error(`Codex Security sandbox preflight ${result.timedOut ? "timed out" : "was interrupted"}. ${detail}`);
+  if (result.exitCode !== 0) {
+    const message = `Codex Security sandbox preflight failed. ${detail}`;
+    if (result.exitCode === SANDBOX_UNAVAILABLE_EXIT) throw new SandboxUnavailableError(message);
+    throw new Error(message);
+  }
 }
 async function writeRuntimeLauncher(path6, executable, name, value) {
   const quote = (value2) => "'" + value2.replaceAll("'", "'\\''") + "'";
@@ -56004,13 +56350,24 @@ async function setupRuntime(options) {
     await (0, import_promises3.writeFile)(globalConfig, "", { mode: 384, flag: "wx" });
     const install = await runProcess(npmPath, ["ci", "--ignore-scripts", "--include=optional", `--registry=${REGISTRY}`, `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${(0, import_node_path4.join)(root, "npm-cache")}`, "--no-audit", "--no-fund", "--loglevel=error"], { cwd: destination, env, timeoutMs: 10 * 60 * 1e3, log: options.log });
     if (install.exitCode !== 0 || install.timedOut || install.interrupted) {
-      for (const line of safeLogLines(install.stdout)) options.log?.(line);
-      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}). Check the prefixed npm diagnostics, registry access, and runner prerequisites.`);
+      const details = safeLogLines([install.stderr, install.stdout].join("\n")).join("\n");
+      throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}).
+${details}`);
     }
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
+    if (options.model) {
+      await ensureSandbox(
+        { cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log },
+        () => checkSandbox(nodePath, cliPath, options, { ...env, CODEX_HOME: (0, import_node_path4.join)(root, "probe-home") })
+      );
+      try {
+        options.log?.("Codex sandbox probe succeeded without model calls.");
+      } catch {
+      }
+    }
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);
-    return { ...paths, nodePath, cliPath, resultsDirectory, env: (apiKey) => runtimeEnvironment(paths, apiKey) };
+    return { ...paths, nodePath, cliPath, resultsDirectory, env: (credentials) => runtimeEnvironment(paths, credentials) };
   } catch (error2) {
     await cleanupRuntime(root, tempRoot);
     throw error2;
@@ -56018,7 +56375,7 @@ async function setupRuntime(options) {
 }
 
 // src/results.ts
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 var import_promises4 = require("node:fs/promises");
 var import_node_path5 = require("node:path");
 
@@ -56066,7 +56423,7 @@ async function processReportFile(root, name, adapt) {
   const path6 = (0, import_node_path5.join)(absoluteRoot, name);
   const before = await (0, import_promises4.lstat)(path6);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error("Report must be a regular file without links.");
-  const file = await (0, import_promises4.open)(path6, (adapt ? import_node_fs.constants.O_RDWR : import_node_fs.constants.O_RDONLY) | import_node_fs.constants.O_NOFOLLOW | import_node_fs.constants.O_NONBLOCK);
+  const file = await (0, import_promises4.open)(path6, (adapt ? import_node_fs2.constants.O_RDWR : import_node_fs2.constants.O_RDONLY) | import_node_fs2.constants.O_NOFOLLOW | import_node_fs2.constants.O_NONBLOCK);
   try {
     const opened = await file.stat();
     if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino) throw new Error("Report changed while opening.");
@@ -56118,7 +56475,7 @@ async function analyzeResults(options) {
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push("CLI did not return a usable JSON scan result. See the CLI diagnostics.");
@@ -56154,27 +56511,23 @@ async function analyzeResults(options) {
   }
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
+  const usage = value.turn?.usage;
+  result.usage = usage == null ? void 0 : { ...usage, cached_input_tokens: usage.cached_input_tokens ?? 0 };
   result.estimatedCost = value.cost?.estimatedUsd;
+  result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {
     resultsDirectory: options.resultsDirectory,
     manifestPath: (0, import_node_path5.join)(options.resultsDirectory, "scan-manifest.json"),
     jsonPath: (0, import_node_path5.join)(options.resultsDirectory, "findings.json"),
-    coveragePath: (0, import_node_path5.join)(options.resultsDirectory, "coverage.json"),
+    coveragePath: value.coverage ? (0, import_node_path5.join)(options.resultsDirectory, "coverage.json") : "",
     sarifPath: ""
   };
   const warnings = value.warnings ?? [];
-  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0) {
+  if (options.executionFailed || value.manifest.scan.status !== "completed" || warnings.length > 0 || options.exitCode !== 0 && options.exitCode !== 1) {
     result.errors.push("CLI did not complete successfully. See the CLI diagnostics.");
-  } else if (value.coverage.completeness === "partial" && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = "incomplete";
-  } else if (value.coverage.completeness === "complete" && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = "completed";
     result.policyStatus = options.exitCode === 1 ? "failed" : "passed";
-  } else result.errors.push(value.coverage.completeness === "unknown" ? "CLI could not determine scan coverage. See the CLI diagnostics." : "CLI did not complete successfully. See the CLI diagnostics.");
-  if (value.coverage.completeness !== "complete") {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === "string") result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === "needs_follow_up" && typeof item.label === "string")
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = (0, import_node_path5.join)(options.resultsDirectory, "exports/results.sarif");
@@ -56269,7 +56622,7 @@ function getMaxArtifactListCount() {
 }
 
 // node_modules/@actions/artifact/lib/internal/upload/upload-artifact.js
-var fs6 = __toESM(require("fs"), 1);
+var fs7 = __toESM(require("fs"), 1);
 var path4 = __toESM(require("path"), 1);
 
 // node_modules/@actions/artifact/lib/generated/google/protobuf/timestamp.js
@@ -58178,8 +58531,9 @@ var __awaiter6 = function(thisArg, _arguments, P, generator) {
 var ArtifactHttpClient = class {
   constructor(userAgent2, maxAttempts, baseRetryIntervalMilliseconds, retryMultiplier) {
     this.maxAttempts = 5;
-    this.baseRetryIntervalMilliseconds = 3e3;
+    this.baseRetryIntervalMilliseconds = 8e3;
     this.retryMultiplier = 1.5;
+    this.retryTimeoutMilliseconds = 12e4;
     const token = getRuntimeToken();
     this.baseUrl = getResultsServiceUrl();
     if (maxAttempts) {
@@ -58219,11 +58573,16 @@ var ArtifactHttpClient = class {
       let attempt = 0;
       let errorMessage = "";
       let rawBody = "";
+      let totalRetryWaitMilliseconds = 0;
       while (attempt < this.maxAttempts) {
         let isRetryable = false;
+        let retryAfterSeconds;
         try {
           const response = yield operation();
           const statusCode = response.message.statusCode;
+          if (statusCode === HttpCodes.TooManyRequests) {
+            retryAfterSeconds = this.getRetryAfterSeconds(response);
+          }
           rawBody = yield response.readBody();
           debug(`[Response] - ${response.message.statusCode}`);
           debug(`Headers: ${JSON.stringify(response.message.headers, null, 2)}`);
@@ -58260,9 +58619,13 @@ var ArtifactHttpClient = class {
         if (attempt + 1 === this.maxAttempts) {
           throw new Error(`Failed to make request after ${this.maxAttempts} attempts: ${errorMessage}`);
         }
-        const retryTimeMilliseconds = this.getExponentialRetryTimeMilliseconds(attempt);
+        const retryTimeMilliseconds = retryAfterSeconds !== void 0 ? retryAfterSeconds * 1e3 : this.getExponentialRetryTimeMilliseconds(attempt);
+        if (totalRetryWaitMilliseconds + retryTimeMilliseconds > this.retryTimeoutMilliseconds) {
+          throw new Error(`Retry wait of ${retryTimeMilliseconds} ms would exceed the maximum total retry wait of ${this.retryTimeoutMilliseconds} ms: ${errorMessage}`);
+        }
         info(`Attempt ${attempt + 1} of ${this.maxAttempts} failed with error: ${errorMessage}. Retrying request in ${retryTimeMilliseconds} ms...`);
         yield this.sleep(retryTimeMilliseconds);
+        totalRetryWaitMilliseconds += retryTimeMilliseconds;
         attempt++;
       }
       throw new Error(`Request failed`);
@@ -58284,6 +58647,17 @@ var ArtifactHttpClient = class {
       HttpCodes.TooManyRequests
     ];
     return retryableStatusCodes.includes(statusCode);
+  }
+  // Only positive integer seconds are supported, not HTTP-date values.
+  getRetryAfterSeconds(response) {
+    var _a;
+    const header = response.message.headers["retry-after"];
+    const value = (_a = Array.isArray(header) ? header[0] : header) === null || _a === void 0 ? void 0 : _a.trim();
+    if (value === void 0 || !/^\d+$/.test(value)) {
+      return void 0;
+    }
+    const parsed = parseInt(value, 10);
+    return !isNaN(parsed) && parsed > 0 ? parsed : void 0;
   }
   sleep(milliseconds) {
     return __awaiter6(this, void 0, void 0, function* () {
@@ -58308,13 +58682,13 @@ function internalArtifactTwirpClient(options) {
 }
 
 // node_modules/@actions/artifact/lib/internal/upload/upload-zip-specification.js
-var fs3 = __toESM(require("fs"), 1);
+var fs4 = __toESM(require("fs"), 1);
 var import_path = require("path");
 function validateRootDirectory(rootDirectory) {
-  if (!fs3.existsSync(rootDirectory)) {
+  if (!fs4.existsSync(rootDirectory)) {
     throw new Error(`The provided rootDirectory ${rootDirectory} does not exist`);
   }
-  if (!fs3.statSync(rootDirectory).isDirectory()) {
+  if (!fs4.statSync(rootDirectory).isDirectory()) {
     throw new Error(`The provided rootDirectory ${rootDirectory} is not a valid directory`);
   }
   info(`Root directory input is valid!`);
@@ -58324,7 +58698,7 @@ function getUploadZipSpecification(filesToZip, rootDirectory) {
   rootDirectory = (0, import_path.normalize)(rootDirectory);
   rootDirectory = (0, import_path.resolve)(rootDirectory);
   for (let file of filesToZip) {
-    const stats = fs3.lstatSync(file, { throwIfNoEntry: false });
+    const stats = fs4.lstatSync(file, { throwIfNoEntry: false });
     if (!stats) {
       throw new Error(`File ${file} does not exist`);
     }
@@ -58803,12 +59177,12 @@ var HttpPipeline = class _HttpPipeline {
   }
   sendRequest(httpClient2, request2) {
     const policies = this.getOrderedPolicies();
-    const pipeline = policies.reduceRight((next, policy) => {
+    const pipeline3 = policies.reduceRight((next, policy) => {
       return (req) => {
         return policy.sendRequest(req, next);
       };
     }, (req) => httpClient2.sendRequest(req));
-    return pipeline(request2);
+    return pipeline3(request2);
   }
   getOrderedPolicies() {
     if (!this._orderedPolicies) {
@@ -60768,31 +61142,31 @@ function wrapAbortSignalLikePolicy() {
 
 // node_modules/@azure/core-rest-pipeline/dist/esm/createPipelineFromOptions.js
 function createPipelineFromOptions2(options) {
-  const pipeline = createEmptyPipeline2();
+  const pipeline3 = createEmptyPipeline2();
   if (isNodeLike2) {
     if (options.agent) {
-      pipeline.addPolicy(agentPolicy2(options.agent));
+      pipeline3.addPolicy(agentPolicy2(options.agent));
     }
     if (options.tlsOptions) {
-      pipeline.addPolicy(tlsPolicy2(options.tlsOptions));
+      pipeline3.addPolicy(tlsPolicy2(options.tlsOptions));
     }
-    pipeline.addPolicy(proxyPolicy2(options.proxyOptions));
-    pipeline.addPolicy(decompressResponsePolicy2());
+    pipeline3.addPolicy(proxyPolicy2(options.proxyOptions));
+    pipeline3.addPolicy(decompressResponsePolicy2());
   }
-  pipeline.addPolicy(wrapAbortSignalLikePolicy());
-  pipeline.addPolicy(formDataPolicy2(), { beforePolicies: [multipartPolicyName2] });
-  pipeline.addPolicy(userAgentPolicy2(options.userAgentOptions));
-  pipeline.addPolicy(setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
-  pipeline.addPolicy(multipartPolicy2(), { afterPhase: "Deserialize" });
-  pipeline.addPolicy(defaultRetryPolicy2(options.retryOptions), { phase: "Retry" });
-  pipeline.addPolicy(tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
+  pipeline3.addPolicy(wrapAbortSignalLikePolicy());
+  pipeline3.addPolicy(formDataPolicy2(), { beforePolicies: [multipartPolicyName2] });
+  pipeline3.addPolicy(userAgentPolicy2(options.userAgentOptions));
+  pipeline3.addPolicy(setClientRequestIdPolicy(options.telemetryOptions?.clientRequestIdHeaderName));
+  pipeline3.addPolicy(multipartPolicy2(), { afterPhase: "Deserialize" });
+  pipeline3.addPolicy(defaultRetryPolicy2(options.retryOptions), { phase: "Retry" });
+  pipeline3.addPolicy(tracingPolicy({ ...options.userAgentOptions, ...options.loggingOptions }), {
     afterPhase: "Retry"
   });
   if (isNodeLike2) {
-    pipeline.addPolicy(redirectPolicy2(options.redirectOptions), { afterPhase: "Retry" });
+    pipeline3.addPolicy(redirectPolicy2(options.redirectOptions), { afterPhase: "Retry" });
   }
-  pipeline.addPolicy(logPolicy2(options.loggingOptions), { afterPhase: "Sign" });
-  return pipeline;
+  pipeline3.addPolicy(logPolicy2(options.loggingOptions), { afterPhase: "Sign" });
+  return pipeline3;
 }
 
 // node_modules/@azure/core-rest-pipeline/dist/esm/defaultHttpClient.js
@@ -61119,8 +61493,8 @@ function createDisableKeepAlivePolicy() {
     }
   };
 }
-function pipelineContainsDisableKeepAlivePolicy(pipeline) {
-  return pipeline.getOrderedPolicies().some((policy) => policy.name === disableKeepAlivePolicyName);
+function pipelineContainsDisableKeepAlivePolicy(pipeline3) {
+  return pipeline3.getOrderedPolicies().some((policy) => policy.name === disableKeepAlivePolicyName);
 }
 
 // node_modules/@azure/core-client/dist/esm/base64.js
@@ -62375,18 +62749,18 @@ function prepareXMLRootList(obj, elementName, xmlNamespaceKey, xmlNamespace) {
 
 // node_modules/@azure/core-client/dist/esm/pipeline.js
 function createClientPipeline(options = {}) {
-  const pipeline = createPipelineFromOptions2(options ?? {});
+  const pipeline3 = createPipelineFromOptions2(options ?? {});
   if (options.credentialOptions) {
-    pipeline.addPolicy(bearerTokenAuthenticationPolicy({
+    pipeline3.addPolicy(bearerTokenAuthenticationPolicy({
       credential: options.credentialOptions.credential,
       scopes: options.credentialOptions.credentialScopes
     }));
   }
-  pipeline.addPolicy(serializationPolicy(options.serializationOptions), { phase: "Serialize" });
-  pipeline.addPolicy(deserializationPolicy(options.deserializationOptions), {
+  pipeline3.addPolicy(serializationPolicy(options.serializationOptions), { phase: "Serialize" });
+  pipeline3.addPolicy(deserializationPolicy(options.deserializationOptions), {
     phase: "Deserialize"
   });
-  return pipeline;
+  return pipeline3;
 }
 
 // node_modules/@azure/core-client/dist/esm/httpClientCache.js
@@ -72835,11 +73209,11 @@ var PathStylePorts2 = [
 ];
 
 // node_modules/@azure/storage-blob/dist/esm/Pipeline.js
-function isPipelineLike(pipeline) {
-  if (!pipeline || typeof pipeline !== "object") {
+function isPipelineLike(pipeline3) {
+  if (!pipeline3 || typeof pipeline3 !== "object") {
     return false;
   }
-  const castPipeline = pipeline;
+  const castPipeline = pipeline3;
   return Array.isArray(castPipeline.factories) && typeof castPipeline.options === "object" && typeof castPipeline.toServiceClientOptions === "function";
 }
 var Pipeline = class {
@@ -72878,11 +73252,11 @@ function newPipeline(credential, pipelineOptions = {}) {
   if (!credential) {
     credential = new AnonymousCredential();
   }
-  const pipeline = new Pipeline([], pipelineOptions);
-  pipeline._credential = credential;
-  return pipeline;
+  const pipeline3 = new Pipeline([], pipelineOptions);
+  pipeline3._credential = credential;
+  return pipeline3;
 }
-function processDownlevelPipeline(pipeline) {
+function processDownlevelPipeline(pipeline3) {
   const knownFactoryFunctions = [
     isAnonymousCredential,
     isStorageSharedKeyCredential,
@@ -72892,8 +73266,8 @@ function processDownlevelPipeline(pipeline) {
     isStorageTelemetryPolicyFactory,
     isCoreHttpPolicyFactory
   ];
-  if (pipeline.factories.length) {
-    const novelFactories = pipeline.factories.filter((factory) => {
+  if (pipeline3.factories.length) {
+    const novelFactories = pipeline3.factories.filter((factory) => {
       return !knownFactoryFunctions.some((knownFactory) => knownFactory(factory));
     });
     if (novelFactories.length) {
@@ -72906,14 +73280,14 @@ function processDownlevelPipeline(pipeline) {
   }
   return void 0;
 }
-function getCoreClientOptions(pipeline) {
-  const { httpClient: v1Client, ...restOptions } = pipeline.options;
-  let httpClient2 = pipeline._coreHttpClient;
+function getCoreClientOptions(pipeline3) {
+  const { httpClient: v1Client, ...restOptions } = pipeline3.options;
+  let httpClient2 = pipeline3._coreHttpClient;
   if (!httpClient2) {
     httpClient2 = v1Client ? convertHttpClient(v1Client) : getCachedDefaultHttpClient2();
-    pipeline._coreHttpClient = httpClient2;
+    pipeline3._coreHttpClient = httpClient2;
   }
-  let corePipeline = pipeline._corePipeline;
+  let corePipeline = pipeline3._corePipeline;
   if (!corePipeline) {
     const packageDetails = `azsdk-js-azure-storage-blob/${SDK_VERSION3}`;
     const userAgentPrefix = restOptions.userAgentOptions && restOptions.userAgentOptions.userAgentPrefix ? `${restOptions.userAgentOptions.userAgentPrefix} ${packageDetails}` : `${packageDetails}`;
@@ -72954,11 +73328,11 @@ function getCoreClientOptions(pipeline) {
     corePipeline.addPolicy(storageRetryPolicy(restOptions.retryOptions), { phase: "Retry" });
     corePipeline.addPolicy(storageRequestFailureDetailsParserPolicy());
     corePipeline.addPolicy(storageBrowserPolicy());
-    const downlevelResults = processDownlevelPipeline(pipeline);
+    const downlevelResults = processDownlevelPipeline(pipeline3);
     if (downlevelResults) {
       corePipeline.addPolicy(downlevelResults.wrappedPolicies, downlevelResults.afterRetry ? { afterPhase: "Retry" } : void 0);
     }
-    const credential = getCredentialFromPipeline(pipeline);
+    const credential = getCredentialFromPipeline(pipeline3);
     if (isTokenCredential(credential)) {
       corePipeline.addPolicy(bearerTokenAuthenticationPolicy({
         credential,
@@ -72971,7 +73345,7 @@ function getCoreClientOptions(pipeline) {
         accountKey: credential.accountKey
       }), { phase: "Sign" });
     }
-    pipeline._corePipeline = corePipeline;
+    pipeline3._corePipeline = corePipeline;
   }
   return {
     ...restOptions,
@@ -72980,12 +73354,12 @@ function getCoreClientOptions(pipeline) {
     pipeline: corePipeline
   };
 }
-function getCredentialFromPipeline(pipeline) {
-  if (pipeline._credential) {
-    return pipeline._credential;
+function getCredentialFromPipeline(pipeline3) {
+  if (pipeline3._credential) {
+    return pipeline3._credential;
   }
   let credential = new AnonymousCredential();
-  for (const factory of pipeline.factories) {
+  for (const factory of pipeline3.factories) {
     if (isTokenCredential(factory.credential)) {
       credential = factory.credential;
     } else if (isStorageSharedKeyCredential(factory)) {
@@ -87127,13 +87501,13 @@ var StorageClient2 = class {
    * @param url - url to resource
    * @param pipeline - request policy pipeline.
    */
-  constructor(url2, pipeline) {
+  constructor(url2, pipeline3) {
     this.url = escapeURLPath(url2);
     this.accountName = getAccountNameFromUrl(url2);
-    this.pipeline = pipeline;
-    this.storageClientContext = new StorageContextClient(this.url, getCoreClientOptions(pipeline));
+    this.pipeline = pipeline3;
+    this.storageClientContext = new StorageContextClient(this.url, getCoreClientOptions(pipeline3));
     this.isHttps = iEqual(getURLScheme(this.url) || "", "https");
-    this.credential = getCredentialFromPipeline(pipeline);
+    this.credential = getCredentialFromPipeline(pipeline3);
     const storageClientContext = this.storageClientContext;
     storageClientContext.requestContentType = void 0;
   }
@@ -90906,7 +91280,7 @@ var Batch = class {
 };
 
 // node_modules/@azure/storage-blob/dist/esm/utils/utils.js
-var import_node_fs2 = __toESM(require("node:fs"), 1);
+var import_node_fs3 = __toESM(require("node:fs"), 1);
 var import_node_util3 = __toESM(require("node:util"), 1);
 async function streamToBuffer(stream4, buffer2, offset, end, encoding) {
   let pos = 0;
@@ -90949,7 +91323,7 @@ async function streamToBuffer(stream4, buffer2, offset, end, encoding) {
 }
 async function readStreamToLocalFile(rs, file) {
   return new Promise((resolve7, reject) => {
-    const ws = import_node_fs2.default.createWriteStream(file);
+    const ws = import_node_fs3.default.createWriteStream(file);
     rs.on("error", (err) => {
       reject(err);
     });
@@ -90960,8 +91334,8 @@ async function readStreamToLocalFile(rs, file) {
     rs.pipe(ws);
   });
 }
-var fsStat = import_node_util3.default.promisify(import_node_fs2.default.stat);
-var fsCreateReadStream = import_node_fs2.default.createReadStream;
+var fsStat = import_node_util3.default.promisify(import_node_fs3.default.stat);
+var fsCreateReadStream = import_node_fs3.default.createReadStream;
 
 // node_modules/@azure/storage-blob/dist/esm/Clients.js
 var BlobClient = class _BlobClient extends StorageClient2 {
@@ -90991,22 +91365,22 @@ var BlobClient = class _BlobClient extends StorageClient2 {
   }
   constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, options) {
     options = options || {};
-    let pipeline;
+    let pipeline3;
     let url2;
     if (isPipelineLike(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
-      pipeline = credentialOrPipelineOrContainerName;
+      pipeline3 = credentialOrPipelineOrContainerName;
       options = blobNameOrOptions;
     } else if (isNodeLike2 && credentialOrPipelineOrContainerName instanceof StorageSharedKeyCredential || credentialOrPipelineOrContainerName instanceof AnonymousCredential || isTokenCredential(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(credentialOrPipelineOrContainerName, options);
+      pipeline3 = newPipeline(credentialOrPipelineOrContainerName, options);
     } else if (!credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName !== "string") {
       url2 = urlOrConnectionString;
       if (blobNameOrOptions && typeof blobNameOrOptions !== "string") {
         options = blobNameOrOptions;
       }
-      pipeline = newPipeline(new AnonymousCredential(), options);
+      pipeline3 = newPipeline(new AnonymousCredential(), options);
     } else if (credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName === "string" && blobNameOrOptions && typeof blobNameOrOptions === "string") {
       const containerName = credentialOrPipelineOrContainerName;
       const blobName = blobNameOrOptions;
@@ -91018,20 +91392,20 @@ var BlobClient = class _BlobClient extends StorageClient2 {
           if (!options.proxyOptions) {
             options.proxyOptions = getDefaultProxySettings2(extractedCreds.proxyUri);
           }
-          pipeline = newPipeline(sharedKeyCredential, options);
+          pipeline3 = newPipeline(sharedKeyCredential, options);
         } else {
           throw new Error("Account connection string is only supported in Node.js environment");
         }
       } else if (extractedCreds.kind === "SASConnString") {
         url2 = appendToURLPath(appendToURLPath(extractedCreds.url, encodeURIComponent(containerName)), encodeURIComponent(blobName)) + "?" + extractedCreds.accountSas;
-        pipeline = newPipeline(new AnonymousCredential(), options);
+        pipeline3 = newPipeline(new AnonymousCredential(), options);
       } else {
         throw new Error("Connection string must be either an Account connection string or a SAS connection string");
       }
     } else {
       throw new Error("Expecting non-empty strings for containerName and blobName parameters");
     }
-    super(url2, pipeline);
+    super(url2, pipeline3);
     ({ blobName: this._name, containerName: this._containerName } = this.getBlobAndContainerNamesFromUrl());
     this.blobContext = this.storageClientContext.blob;
     this._snapshot = getURLParameter(this.url, URLConstants2.Parameters.SNAPSHOT);
@@ -92034,21 +92408,21 @@ var AppendBlobClient = class _AppendBlobClient extends BlobClient {
    */
   appendBlobContext;
   constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, options) {
-    let pipeline;
+    let pipeline3;
     let url2;
     options = options || {};
     if (isPipelineLike(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
-      pipeline = credentialOrPipelineOrContainerName;
+      pipeline3 = credentialOrPipelineOrContainerName;
       options = blobNameOrOptions;
     } else if (isNodeLike2 && credentialOrPipelineOrContainerName instanceof StorageSharedKeyCredential || credentialOrPipelineOrContainerName instanceof AnonymousCredential || isTokenCredential(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(credentialOrPipelineOrContainerName, options);
+      pipeline3 = newPipeline(credentialOrPipelineOrContainerName, options);
     } else if (!credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName !== "string") {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(new AnonymousCredential(), options);
+      pipeline3 = newPipeline(new AnonymousCredential(), options);
     } else if (credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName === "string" && blobNameOrOptions && typeof blobNameOrOptions === "string") {
       const containerName = credentialOrPipelineOrContainerName;
       const blobName = blobNameOrOptions;
@@ -92060,20 +92434,20 @@ var AppendBlobClient = class _AppendBlobClient extends BlobClient {
           if (!options.proxyOptions) {
             options.proxyOptions = getDefaultProxySettings2(extractedCreds.proxyUri);
           }
-          pipeline = newPipeline(sharedKeyCredential, options);
+          pipeline3 = newPipeline(sharedKeyCredential, options);
         } else {
           throw new Error("Account connection string is only supported in Node.js environment");
         }
       } else if (extractedCreds.kind === "SASConnString") {
         url2 = appendToURLPath(appendToURLPath(extractedCreds.url, encodeURIComponent(containerName)), encodeURIComponent(blobName)) + "?" + extractedCreds.accountSas;
-        pipeline = newPipeline(new AnonymousCredential(), options);
+        pipeline3 = newPipeline(new AnonymousCredential(), options);
       } else {
         throw new Error("Connection string must be either an Account connection string or a SAS connection string");
       }
     } else {
       throw new Error("Expecting non-empty strings for containerName and blobName parameters");
     }
-    super(url2, pipeline);
+    super(url2, pipeline3);
     this.appendBlobContext = this.storageClientContext.appendBlob;
     this.blobClientConfig = options;
   }
@@ -92314,23 +92688,23 @@ var BlockBlobClient = class _BlockBlobClient extends BlobClient {
    */
   blockBlobContext;
   constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, options) {
-    let pipeline;
+    let pipeline3;
     let url2;
     options = options || {};
     if (isPipelineLike(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
-      pipeline = credentialOrPipelineOrContainerName;
+      pipeline3 = credentialOrPipelineOrContainerName;
       options = blobNameOrOptions;
     } else if (isNodeLike2 && credentialOrPipelineOrContainerName instanceof StorageSharedKeyCredential || credentialOrPipelineOrContainerName instanceof AnonymousCredential || isTokenCredential(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(credentialOrPipelineOrContainerName, options);
+      pipeline3 = newPipeline(credentialOrPipelineOrContainerName, options);
     } else if (!credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName !== "string") {
       url2 = urlOrConnectionString;
       if (blobNameOrOptions && typeof blobNameOrOptions !== "string") {
         options = blobNameOrOptions;
       }
-      pipeline = newPipeline(new AnonymousCredential(), options);
+      pipeline3 = newPipeline(new AnonymousCredential(), options);
     } else if (credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName === "string" && blobNameOrOptions && typeof blobNameOrOptions === "string") {
       const containerName = credentialOrPipelineOrContainerName;
       const blobName = blobNameOrOptions;
@@ -92342,20 +92716,20 @@ var BlockBlobClient = class _BlockBlobClient extends BlobClient {
           if (!options.proxyOptions) {
             options.proxyOptions = getDefaultProxySettings2(extractedCreds.proxyUri);
           }
-          pipeline = newPipeline(sharedKeyCredential, options);
+          pipeline3 = newPipeline(sharedKeyCredential, options);
         } else {
           throw new Error("Account connection string is only supported in Node.js environment");
         }
       } else if (extractedCreds.kind === "SASConnString") {
         url2 = appendToURLPath(appendToURLPath(extractedCreds.url, encodeURIComponent(containerName)), encodeURIComponent(blobName)) + "?" + extractedCreds.accountSas;
-        pipeline = newPipeline(new AnonymousCredential(), options);
+        pipeline3 = newPipeline(new AnonymousCredential(), options);
       } else {
         throw new Error("Connection string must be either an Account connection string or a SAS connection string");
       }
     } else {
       throw new Error("Expecting non-empty strings for containerName and blobName parameters");
     }
-    super(url2, pipeline);
+    super(url2, pipeline3);
     this.blockBlobContext = this.storageClientContext.blockBlob;
     this._blobContext = this.storageClientContext.blob;
     this.blobClientConfig = options;
@@ -92930,21 +93304,21 @@ var PageBlobClient = class _PageBlobClient extends BlobClient {
    */
   pageBlobContext;
   constructor(urlOrConnectionString, credentialOrPipelineOrContainerName, blobNameOrOptions, options) {
-    let pipeline;
+    let pipeline3;
     let url2;
     options = options || {};
     if (isPipelineLike(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
-      pipeline = credentialOrPipelineOrContainerName;
+      pipeline3 = credentialOrPipelineOrContainerName;
       options = blobNameOrOptions;
     } else if (isNodeLike2 && credentialOrPipelineOrContainerName instanceof StorageSharedKeyCredential || credentialOrPipelineOrContainerName instanceof AnonymousCredential || isTokenCredential(credentialOrPipelineOrContainerName)) {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(credentialOrPipelineOrContainerName, options);
+      pipeline3 = newPipeline(credentialOrPipelineOrContainerName, options);
     } else if (!credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName !== "string") {
       url2 = urlOrConnectionString;
       options = blobNameOrOptions;
-      pipeline = newPipeline(new AnonymousCredential(), options);
+      pipeline3 = newPipeline(new AnonymousCredential(), options);
     } else if (credentialOrPipelineOrContainerName && typeof credentialOrPipelineOrContainerName === "string" && blobNameOrOptions && typeof blobNameOrOptions === "string") {
       const containerName = credentialOrPipelineOrContainerName;
       const blobName = blobNameOrOptions;
@@ -92956,20 +93330,20 @@ var PageBlobClient = class _PageBlobClient extends BlobClient {
           if (!options.proxyOptions) {
             options.proxyOptions = getDefaultProxySettings2(extractedCreds.proxyUri);
           }
-          pipeline = newPipeline(sharedKeyCredential, options);
+          pipeline3 = newPipeline(sharedKeyCredential, options);
         } else {
           throw new Error("Account connection string is only supported in Node.js environment");
         }
       } else if (extractedCreds.kind === "SASConnString") {
         url2 = appendToURLPath(appendToURLPath(extractedCreds.url, encodeURIComponent(containerName)), encodeURIComponent(blobName)) + "?" + extractedCreds.accountSas;
-        pipeline = newPipeline(new AnonymousCredential(), options);
+        pipeline3 = newPipeline(new AnonymousCredential(), options);
       } else {
         throw new Error("Connection string must be either an Account connection string or a SAS connection string");
       }
     } else {
       throw new Error("Expecting non-empty strings for containerName and blobName parameters");
     }
-    super(url2, pipeline);
+    super(url2, pipeline3);
     this.pageBlobContext = this.storageClientContext.pageBlob;
     this.blobClientConfig = options;
   }
@@ -93678,6 +94052,7 @@ var KnownEncryptionAlgorithmType2;
 // node_modules/@actions/artifact/lib/internal/upload/blob-upload.js
 var crypto2 = __toESM(require("crypto"), 1);
 var stream = __toESM(require("stream"), 1);
+var import_promises5 = require("node:stream/promises");
 var __awaiter7 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function(resolve7) {
@@ -93739,14 +94114,20 @@ function uploadToBlobStorage(authenticatedUploadURL, uploadStream, contentType2)
       abortSignal: abortController.signal
     };
     let sha256Hash = void 0;
-    const blobUploadStream = new stream.PassThrough();
     const hashStream = crypto2.createHash("sha256");
-    uploadStream.pipe(blobUploadStream);
-    uploadStream.pipe(hashStream).setEncoding("hex");
+    const blobUploadStream = new stream.Transform({
+      transform(chunk, encoding, callback) {
+        hashStream.update(chunk);
+        callback(null, chunk);
+      }
+    });
     info("Beginning upload of artifact content to blob storage");
     try {
       yield Promise.race([
-        blockBlobClient.uploadStream(blobUploadStream, bufferSize, maxConcurrency, options),
+        Promise.all([
+          (0, import_promises5.pipeline)(uploadStream, blobUploadStream, { signal: abortController.signal }),
+          blockBlobClient.uploadStream(blobUploadStream, bufferSize, maxConcurrency, options)
+        ]),
         chunkTimer(getUploadChunkTimeout())
       ]);
     } catch (error2) {
@@ -93758,8 +94139,7 @@ function uploadToBlobStorage(authenticatedUploadURL, uploadStream, contentType2)
       abortController.abort();
     }
     info("Finished uploading artifact content to blob storage!");
-    hashStream.end();
-    sha256Hash = hashStream.read();
+    sha256Hash = hashStream.digest("hex");
     info(`SHA256 digest of uploaded artifact is ${sha256Hash}`);
     if (uploadByteCount === 0) {
       warning(`No data was uploaded to blob storage. Reported upload byte count is 0.`);
@@ -93772,13 +94152,14 @@ function uploadToBlobStorage(authenticatedUploadURL, uploadStream, contentType2)
 }
 
 // node_modules/@actions/artifact/lib/internal/upload/zip.js
-var import_promises6 = require("fs/promises");
+var import_promises7 = require("fs/promises");
+var import_node_stream7 = require("node:stream");
 var import_archiver = __toESM(require_archiver(), 1);
 
 // node_modules/@actions/artifact/lib/internal/upload/stream.js
 var stream2 = __toESM(require("stream"), 1);
-var fs5 = __toESM(require("fs"), 1);
-var import_promises5 = require("fs/promises");
+var fs6 = __toESM(require("fs"), 1);
+var import_promises6 = require("fs/promises");
 var __awaiter8 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function(resolve7) {
@@ -93823,11 +94204,11 @@ function createRawFileUploadStream(filePath) {
     const bufferSize = getUploadChunkSize();
     const uploadStream = new WaterMarkedUploadStream(bufferSize);
     let sourcePath = filePath;
-    const stats = yield fs5.promises.lstat(filePath);
+    const stats = yield fs6.promises.lstat(filePath);
     if (stats.isSymbolicLink()) {
-      sourcePath = yield (0, import_promises5.realpath)(filePath);
+      sourcePath = yield (0, import_promises6.realpath)(filePath);
     }
-    const fileStream = fs5.createReadStream(sourcePath, {
+    const fileStream = fs6.createReadStream(sourcePath, {
       highWaterMark: bufferSize
     });
     fileStream.on("error", (error2) => {
@@ -93876,7 +94257,13 @@ function createZipUploadStream(uploadSpecification_1) {
       highWaterMark: getUploadChunkSize(),
       zlib: { level: compressionLevel }
     });
-    zip.on("error", zipErrorCallback);
+    const bufferSize = getUploadChunkSize();
+    const zipUploadStream = new WaterMarkedUploadStream(bufferSize);
+    debug(`Zip write high watermark value ${zipUploadStream.writableHighWaterMark}`);
+    debug(`Zip read high watermark value ${zipUploadStream.readableHighWaterMark}`);
+    (0, import_node_stream7.pipeline)(zip, zipUploadStream, (error2) => {
+      if (error2) zipErrorCallback(error2);
+    });
     zip.on("warning", zipWarningCallback);
     zip.on("finish", zipFinishCallback);
     zip.on("end", zipEndCallback);
@@ -93884,7 +94271,7 @@ function createZipUploadStream(uploadSpecification_1) {
       if (file.sourcePath !== null) {
         let sourcePath = file.sourcePath;
         if (file.stats.isSymbolicLink()) {
-          sourcePath = yield (0, import_promises6.realpath)(file.sourcePath);
+          sourcePath = yield (0, import_promises7.realpath)(file.sourcePath);
         }
         zip.file(sourcePath, {
           name: file.destinationPath
@@ -93893,19 +94280,13 @@ function createZipUploadStream(uploadSpecification_1) {
         zip.append("", { name: file.destinationPath });
       }
     }
-    const bufferSize = getUploadChunkSize();
-    const zipUploadStream = new WaterMarkedUploadStream(bufferSize);
-    debug(`Zip write high watermark value ${zipUploadStream.writableHighWaterMark}`);
-    debug(`Zip read high watermark value ${zipUploadStream.readableHighWaterMark}`);
-    zip.pipe(zipUploadStream);
-    zip.finalize();
+    zip.finalize().catch((error2) => zip.destroy(error2));
     return zipUploadStream;
   });
 }
 var zipErrorCallback = (error2) => {
   error("An error has occurred while creating the zip file for upload");
   info(error2);
-  throw new Error("An error has occurred during zip creation for the artifact");
 };
 var zipWarningCallback = (error2) => {
   if (error2.code === "ENOENT") {
@@ -94027,7 +94408,7 @@ function uploadArtifact(name, files, rootDirectory, options) {
       if (files.length > 1) {
         throw new Error("skipArchive option is only supported when uploading a single file");
       }
-      if (!fs6.existsSync(files[0])) {
+      if (!fs7.existsSync(files[0])) {
         throw new FilesNotFoundError(files);
       }
       artifactFileName = path4.basename(files[0]);
@@ -94095,7 +94476,7 @@ function uploadArtifact(name, files, rootDirectory, options) {
 }
 
 // node_modules/@actions/artifact/lib/internal/download/download-artifact.js
-var import_promises7 = __toESM(require("fs/promises"), 1);
+var import_promises8 = __toESM(require("fs/promises"), 1);
 var fsSync = __toESM(require("fs"), 1);
 var crypto3 = __toESM(require("crypto"), 1);
 var stream3 = __toESM(require("stream"), 1);
@@ -98303,7 +98684,7 @@ var scrubQueryParameters = (url2) => {
 function exists2(path6) {
   return __awaiter12(this, void 0, void 0, function* () {
     try {
-      yield import_promises7.default.access(path6);
+      yield import_promises8.default.access(path6);
       return true;
     } catch (error2) {
       if (error2.code === "ENOENT") {
@@ -98478,7 +98859,7 @@ function resolveOrCreateDirectory() {
   return __awaiter12(this, arguments, void 0, function* (downloadPath = getGitHubWorkspaceDir()) {
     if (!(yield exists2(downloadPath))) {
       debug(`Artifact destination folder does not exist, creating: ${downloadPath}`);
-      yield import_promises7.default.mkdir(downloadPath, { recursive: true });
+      yield import_promises8.default.mkdir(downloadPath, { recursive: true });
     } else {
       debug(`Artifact destination folder already exists: ${downloadPath}`);
     }
@@ -99078,7 +99459,7 @@ If the error persists, please check whether Actions and API requests are operati
 var client = new DefaultArtifactClient();
 
 // src/artifacts.ts
-var import_promises8 = require("node:fs/promises");
+var import_promises9 = require("node:fs/promises");
 var import_node_path6 = require("node:path");
 async function collectReports(result) {
   const reports = /* @__PURE__ */ new Map();
@@ -99096,53 +99477,60 @@ async function collectReports(result) {
 }
 async function uploadReports(reports, inputs, tempRoot) {
   if (!reports.size) throw new Error("Artifact upload requested, but no validated reports are available.");
-  const staging = await (0, import_promises8.mkdtemp)((0, import_node_path6.join)(tempRoot, "codex-security-upload-"));
-  await (0, import_promises8.chmod)(staging, 448);
+  const staging = await (0, import_promises9.mkdtemp)((0, import_node_path6.join)(tempRoot, "codex-security-upload-"));
   try {
+    await (0, import_promises9.chmod)(staging, 448);
     const files = [];
     for (const [name, bytes] of reports) {
       const dest = (0, import_node_path6.join)(staging, name === "exports/results.sarif" ? "results.sarif" : name);
-      await (0, import_promises8.writeFile)(dest, bytes, { mode: 384, flag: "wx" });
+      await (0, import_promises9.writeFile)(dest, bytes, { mode: 384, flag: "wx" });
       files.push(dest);
     }
-    await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, { retentionDays: inputs.retentionDays, compressionLevel: 0 });
+    const artifact = await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, { retentionDays: inputs.retentionDays, compressionLevel: 0 });
+    return artifact.id;
   } finally {
-    await (0, import_promises8.rm)(staging, { recursive: true, force: true });
+    await (0, import_promises9.rm)(staging, { recursive: true, force: true });
   }
 }
 
 // src/reporting.ts
 function plain(value, limit) {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
-  return text.slice(0, limit);
+  const prefix2 = text.slice(0, limit);
+  const codePoint = text.codePointAt(prefix2.length - 1);
+  return codePoint !== void 0 && codePoint > 65535 ? prefix2.slice(0, -1) : prefix2;
 }
 function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : "Scan coverage is partial. Available findings are provisional.";
-  if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
+  if (result.scanStatus !== "completed") return "Scan could not complete.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
   if (inputs.failOnSeverity === "none") return "Scan completed. Findings are reported without failing the job.";
   return "Scan completed. No findings meet the failure threshold.";
 }
-function resultSummary(result, inputs, target) {
+function resultSummary(result, inputs, target, artifactUrl) {
   const esc = (value, limit = 4e3) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
+  const usage = result.usage;
+  const tokens = usage ? `${usage.input_tokens.toLocaleString("en-US")} input (${usage.cached_input_tokens.toLocaleString("en-US")} cached) \xB7 ${usage.output_tokens.toLocaleString("en-US")} output` : "unavailable";
+  const range2 = result.estimatedCostRange;
+  const cost = range2 && range2.max !== range2.min ? range2.max === null ? `$${range2.min.toFixed(4)} (upper estimate unavailable)` : `$${range2.min.toFixed(4)}\u2013$${range2.max.toFixed(4)}` : result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} \xB7 **Findings policy:** ${result.policyStatus} \xB7 **Report:** ${result.reportStatus}`,
+    ...artifactUrl ? [`**Reports:** <a href="${html(artifactUrl)}">${esc(inputs.artifactName)}</a> \xB7 Retention: up to ${inputs.retentionDays} days.`] : [],
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
-    `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Configured provider:** <code>${esc(inputs.provider)}</code> \xB7 **Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
+    `**Tokens:** ${tokens} \xB7 **Estimated cost:** ${cost}`,
+    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Findings at or above the configured threshold fail the action. Scanner and required reporting errors also fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus === "incomplete") parts.push("Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.");
-  if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
+  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
@@ -99152,12 +99540,12 @@ function resultSummary(result, inputs, target) {
 <pre>${esc(finding.summary, 1200)}</pre>`);
   }
   if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON, coverage, and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
+  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
   return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {
-    const message = plain(`${result.scanStatus === "completed" ? "" : "Provisional finding: "}${finding.summary}`, 4e3);
+    const message = plain(finding.summary, 4e3);
     const props = {
       title: plain(`${finding.severity.toUpperCase()}: ${finding.title}`, 200),
       file: finding.path,
@@ -99170,9 +99558,11 @@ function emitAnnotations(result) {
 }
 
 // src/main.ts
+var SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 var OUTPUT_NAMES = [
   "sarif-path",
   "json-path",
+  "manifest-path",
   "coverage-path",
   "results-directory",
   "scan-status",
@@ -99193,7 +99583,7 @@ var OUTPUT_NAMES = [
 async function context5() {
   const path6 = process.env.GITHUB_EVENT_PATH;
   if (!path6) throw new Error("GITHUB_EVENT_PATH is required; run this action in GitHub Actions.");
-  const payload = JSON.parse(await (0, import_promises9.readFile)(path6, "utf8"));
+  const payload = JSON.parse(await (0, import_promises10.readFile)(path6, "utf8"));
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid GitHub event payload.");
   return {
     eventName: process.env.GITHUB_EVENT_NAME ?? "",
@@ -99209,6 +99599,7 @@ function outputs(result, target, exitCode) {
     "sarif-path": result.paths.sarifPath,
     "json-path": result.paths.jsonPath,
     "coverage-path": result.paths.coveragePath,
+    "manifest-path": result.paths.manifestPath,
     "results-directory": result.paths.resultsDirectory,
     "scan-status": result.scanStatus,
     "policy-status": result.policyStatus,
@@ -99246,8 +99637,8 @@ async function runAction(actionRoot, overrides = {}) {
   setOutput("report-status", "failed");
   setOutput("sarif-upload-ready", "false");
   try {
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "";
     inputs = parseInputs((name) => getInput(name), process.env.GITHUB_WORKSPACE ?? "");
+    const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context5();
     target = await resolveTarget(inputs, event);
     setOutput("scanned-sha", target.scannedSha);
@@ -99261,14 +99652,16 @@ async function runAction(actionRoot, overrides = {}) {
       finalSummary = "The requested diff is empty. No scan ran and no model cost was incurred.";
       info(finalSummary);
     } else {
-      if (!inputs.dryRun && (!apiKey || /[\r\n\u0000]/.test(apiKey))) throw new Error("Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.");
-      tempRoot = await (0, import_promises9.realpath)(process.env.RUNNER_TEMP ?? "");
+      if (!inputs.dryRun && credentials.provider !== "amazon-bedrock" && (!credentials.apiKey || /[\r\n\u0000]/.test(credentials.apiKey))) {
+        throw new Error(credentials.provider === "openai" ? "Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started." : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
+      }
       if (!process.env.RUNNER_TEMP) throw new Error("RUNNER_TEMP is required.");
+      tempRoot = await (0, import_promises10.realpath)(process.env.RUNNER_TEMP);
       info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat("CLI preparation", preparationStarted);
       try {
-        runtime = await deps.setupRuntime({ actionRoot, tempRoot, log: info });
+        runtime = await deps.setupRuntime({ actionRoot, tempRoot, repository: target.repository, provider: inputs.provider, model: inputs.model, log: inputs.verbose ? info : void 0 });
       } finally {
         clearInterval(timer);
       }
@@ -99281,7 +99674,7 @@ async function runAction(actionRoot, overrides = {}) {
       };
       log2(`Target commit: ${target.scannedSha}.${target.diffBase ? ` Diff: ${target.diffBase}..${target.diffHead}.` : ""}`);
       if (inputs.paths.length) log2(`Paths: ${inputs.paths.join(", ")}.`);
-      log2(`Model: ${inputs.model}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
+      log2(`Model: ${inputs.model || "(not specified)"}; estimated cost stop threshold: ${inputs.maxCost === void 0 ? "unset" : `$${inputs.maxCost}`}; findings failure threshold: ${inputs.failOnSeverity}.`);
       if (inputs.cyberAccessProgram) log2(`Requested Cyber access program: ${inputs.cyberAccessProgram}.`);
       const scanLabel = inputs.dryRun ? "CLI configuration validation" : "Security scan";
       const scanStarted = performance.now();
@@ -99291,7 +99684,7 @@ async function runAction(actionRoot, overrides = {}) {
       try {
         execution = await deps.runProcess(runtime.nodePath, [runtime.cliPath, ...args], {
           cwd: target.repository,
-          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(apiKey),
+          env: inputs.dryRun ? runtimeEnvironment(runtime) : runtime.env(credentials),
           // Stream stderr with terminal controls escaped; structured stdout is consumed below.
           log: inputs.verbose ? info : void 0
         });
@@ -99326,19 +99719,22 @@ async function runAction(actionRoot, overrides = {}) {
           scannedSha: target.scannedSha,
           exitCode: execution.exitCode,
           executionFailed: interrupted || !!checkoutError,
-          publishable: target.publishable && !interrupted && !checkoutError
+          publishable: target.publishable
         });
         if (result.paths.jsonPath && !result.paths.sarifPath)
           warning("SARIF report is unavailable; scan results and other reports are still available.");
         if (checkoutError) result.errors.unshift(checkoutError);
-        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit. Available findings are provisional.");
+        if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit.");
         let reportsValidated = false;
+        let artifactUrl;
         try {
           const reports = await collectReports(result);
           reportsValidated = true;
           if (inputs.uploadArtifacts) {
             info("Uploading validated report artifacts.");
-            await uploadReports(reports, inputs, tempRoot);
+            const artifactId = await uploadReports(reports, inputs, tempRoot);
+            if (artifactId !== void 0 && process.env.GITHUB_RUN_ID)
+              artifactUrl = `${event.serverUrl}/${event.repository}/actions/runs/${process.env.GITHUB_RUN_ID}/artifacts/${artifactId}`;
           }
         } catch (error2) {
           result.reportStatus = "failed";
@@ -99348,15 +99744,17 @@ async function runAction(actionRoot, overrides = {}) {
         }
         outputs(result, target, execution.exitCode);
         info(`Scan: ${result.scanStatus}; findings policy: ${result.policyStatus}; report: ${result.reportStatus}; SARIF upload ready: ${result.sarifUploadReady}.`);
-        info(`${result.scanStatus === "completed" ? "Findings" : "Provisional findings"}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
+        info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" || result.scanStatus === "completed" && result.policyStatus === "passed");
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+        };
+        finalSummary = resultSummary(displayResult, inputs, target, artifactUrl);
+        if (inputs.annotations) emitAnnotations(displayResult);
+        success = result.reportStatus !== "failed" && result.scanStatus === "completed" && result.policyStatus === "passed";
         finalTitle = resultTitle(result, inputs);
-        if (success && result.scanStatus === "incomplete")
-          warning("Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.");
       }
     }
   } catch (error2) {
@@ -99376,7 +99774,7 @@ async function runAction(actionRoot, overrides = {}) {
         setOutput("sarif-upload-ready", "false");
       }
     }
-    if (inputs?.summary !== false) {
+    if (inputs?.summary ?? getInput("summary") !== "false") {
       try {
         await summary.addRaw(`## Codex Security
 

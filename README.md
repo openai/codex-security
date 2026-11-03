@@ -1,7 +1,13 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and
-fixing security vulnerabilities in your code.
+Codex Security helps you find, investigate, and fix vulnerabilities in your code.
+Use its security workflows in Codex, or automate them with the
+`@openai/codex-security` CLI and TypeScript SDK.
+
+- **In Codex:** [choose a security workflow](docs/agent-workflows.md).
+- **In a terminal:** [install the CLI and scan your repository](#quick-start).
+- **In automation:** use the [TypeScript SDK](#typescript-sdk) or
+  [GitHub Action](#github-actions).
 
 ## Features
 
@@ -11,10 +17,23 @@ fixing security vulnerabilities in your code.
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.
-- Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
-  findings to Linear or a findings service.
+- Import Semgrep, Snyk, and Wiz findings locally or publish them to Codex Security Cloud. [All scanner import guides](docs/scanner-imports/README.md).
+- Export SARIF, JSON, or CSV, and publish findings to Linear or a findings service.
 - Automate scans across repositories or project components, including in CI and
   containers.
+
+## Use in Codex
+
+Open your repository in a Codex session with the Codex Security plugin enabled,
+then ask:
+
+> Run a Codex Security scan on this repository, focusing on authentication and
+> authorization. Return the saved report, source evidence, and coverage limits.
+
+A completed scan saves a report, findings, coverage, and a threat model when
+available. Use those results to investigate findings, request a patch, or verify
+an existing fix. See the [agent workflow guide](docs/agent-workflows.md) for plugin
+setup, task selection, and recovery when required tools are unavailable.
 
 ## Quick start
 
@@ -34,17 +53,6 @@ which must be on your `PATH`. If `cs` already resolves to another tool, use
 `codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
 `npx @openai/codex-security` without a global installation.
 
-From your repository, optionally [draft a `SECURITY.md`](#generate-securitymd)
-that explains what counts as a security issue in your project:
-
-```bash
-cs policy .
-```
-
-The draft is saved outside your repository. Review the diff and notes, edit the
-draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
-to keep your current policy or scan without one.
-
 Run your scan from the repository directory:
 
 ```bash
@@ -54,6 +62,13 @@ cs scan .
 If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
 to the scan command. Otherwise, omit the flag or use
 `--cyber-access-program standard`.
+
+To use Codex's Daybreak toggle, pass `--codex daybreak=true`. It defaults off
+and requires compatible access. See [Daybreak configuration](sdk/typescript/docs/cli.md#daybreak-opt-in)
+for SDK and plugin usage, including Deep Scan workers.
+
+Scans use your existing `SECURITY.md` guidance. You can optionally
+[draft or update a policy](#generate-securitymd) before scanning.
 
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:
@@ -84,6 +99,10 @@ cs scan . --diff origin/main
 cs scan . --mode deep
 ```
 
+Use `cs scan . --max-time 15` for an advisory 15-minute Standard investigation
+allowance. See [investigation time](sdk/typescript/docs/cli.md#set-investigation-time)
+for timing semantics and Deep Scan limits.
+
 Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
@@ -91,6 +110,10 @@ For an application spread across repositories, see
 [review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
 Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
 reviews in one resumable campaign.
+
+After a scan, [inspect its scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
+to understand recorded exclusions and decide whether to review the findings,
+run a focused scan, or recover an interrupted run.
 
 ## TypeScript SDK
 
@@ -117,6 +140,16 @@ try {
 
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
+
+## Read existing Cloud findings
+
+When Codex Security Cloud is available to your account, the Security plugin's
+`$cloud-findings` skill can read findings, reports, recorded assignment and
+verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
+optional connection; local scans work without it.
+
+See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+for authentication requirements and a read-only example.
 
 ## Generate SECURITY.md
 
@@ -155,7 +188,8 @@ cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 
 Omit `--scan` to use the current repository's latest completed scan. The
 [export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
-SARIF output for CI, and the offline TypeScript API.
+SARIF output for CI, and the offline TypeScript API. For ServiceNow Application
+Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs/cli.md#export-findings-for-servicenow).
 
 ## GitHub Actions
 
@@ -163,7 +197,8 @@ Run scheduled, manual, or pull request scans with the GitHub Action. For a weekl
 repository scan, add an OpenAI API key as the repository secret
 `CODEX_SECURITY_API_KEY`, then save this workflow in
 `.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
-with the full SHA of an Action commit.
+with the full SHA of an Action release that includes automatic Ubuntu sandbox setup.
+For older pins, including `action-v0.6.0`, keep the [manual sandbox setup](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
 
 This workflow requests Daybreak Blue. Use an API key from a project with Blue
 enabled; without Daybreak access, omit `cyber-access-program` or set it to
@@ -183,12 +218,6 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -201,9 +230,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-Findings are report-only by default. Partial scans with valid results produce a
-warning; scanner and required reporting errors fail the job. Severity thresholds
-apply to complete scans.
+The Action sets up and verifies the sandbox on GitHub-hosted Ubuntu 24.04 VMs.
+Self-hosted runners and job containers must provide a working Codex sandbox.
+
+Findings are report-only by default. Set a severity threshold to fail on reported
+findings at or above it. Scanner and required reporting errors fail the job;
+intentional file exclusions and investigation notes do not.
 See the [Action setup and input reference](github-action/README.md) for PR scans,
 severity thresholds, and report uploads.
 
@@ -225,18 +257,20 @@ scan artifacts remain available.
 
 ## Other providers
 
-Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+Scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper Inference. Bedrock uses
 AWS credentials and does not require a separate OpenAI login. See
 [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
 
-For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+For OpenRouter, Fireworks AI, and Cheaper Inference, set the provider's API key and choose a supported
 model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
 for examples.
 
 ## Documentation
 
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
+- [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Imported finding identity and evidence](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Examples](examples/README.md)
 

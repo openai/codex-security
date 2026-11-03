@@ -22,6 +22,7 @@ import { exportEnvironment, main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import {
   CodexSecurityError,
+  exportArtifact,
   type CoverageDocument,
   type ScanManifest,
 } from "../src/index.js";
@@ -33,7 +34,10 @@ import {
   mustNotInitializeCodex,
 } from "./cli-fixtures.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import {
+  scopedTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
 import {
   createCliTest,
@@ -188,6 +192,52 @@ describe("CLI", () => {
     expect(exportedScanDir).toBe(scanDir);
   });
 
+  test("exports the same AVIT rows through the CLI and SDK with a reusable template", async () => {
+    await using temp = await scopedTemporaryDirectory("codex-security-avit-");
+    const directory = temp.path;
+    const scan = await copyCompletedScan(directory);
+    const sample = await readFile(
+      new URL(
+        "../../../examples/servicenow-avit-template.csv",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const template = join(directory, "app template.csv");
+    await writeFile(template, sample);
+    const { runCli, stdout, stderr } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "export",
+          scan,
+          "--export-format",
+          "servicenow-avit",
+          "--avit-template",
+          template,
+          "--output",
+          "-",
+        ],
+        undefined,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("src/extract.py:41");
+    expect(stderr.text()).toContain("Rows with no recorded steps: 1");
+
+    const options = {
+      source: { directory: scan },
+      format: "servicenow-avit",
+      avitTemplate: template,
+    } as const;
+    const output = join(directory, "avit.csv");
+    await exportArtifact({ ...options, output });
+    expect(await readFile(output, "utf8")).toBe(stdout.text());
+    await expect(
+      exportArtifact({ ...options, output: template }),
+    ).rejects.toThrow("cannot overwrite the reusable template");
+    expect(await readFile(template, "utf8")).toBe(sample);
+  });
+
   test("reports default-source history failures once without running the exporter", async () => {
     for (const lookupFails of [false, true]) {
       const deps = dependencies({
@@ -261,8 +311,8 @@ describe("CLI", () => {
         await chmod(join(scanDir, "exports"), 0o500);
       }
 
-      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
-        const result = await runCommand(
+      const exportModel = (...selector: string[]) =>
+        runCommand(
           process.execPath,
           [
             join(import.meta.dir, "../src/cli.ts"),
@@ -277,6 +327,13 @@ describe("CLI", () => {
           ],
           { cwd: repository, env: environment, timeout: 30_000 },
         );
+      const selectors = [
+        [],
+        ["--scan", "latest"],
+        ["--scan", scanId.slice(0, 8)],
+      ];
+      for (const selector of selectors) {
+        const result = await exportModel(...selector);
         expect(result.stderr).toBe("");
         expect(result.status).toBe(0);
         expect(result.stdout).toStartWith(content);
@@ -314,22 +371,8 @@ describe("CLI", () => {
       const changed = JSON.parse(await readFile(manifestPath, "utf8"));
       changed.scan.threatModel.content = "# Changed after completion\n";
       await writeFile(manifestPath, JSON.stringify(changed));
-      for (const selector of [["--scan", scanId.slice(0, 8)], []]) {
-        const rejected = await runCommand(
-          process.execPath,
-          [
-            join(import.meta.dir, "../src/cli.ts"),
-            "export",
-            ...selector,
-            "--artifact",
-            "threat-model",
-            "--output",
-            "-",
-            "--python",
-            python,
-          ],
-          { cwd: repository, env: environment, timeout: 30_000 },
-        );
+      for (const selector of selectors) {
+        const rejected = await exportModel(...selector);
         expect(rejected.status).toBe(2);
         expect(rejected.stdout).toBe("");
         expect(rejected.stderr).toContain("manifest changed after completion");
@@ -401,8 +444,6 @@ describe("CLI", () => {
           "scan-prov",
           "--artifact",
           "threat-model",
-          "--format",
-          "md",
           "--validate-only",
         ],
       ]);
@@ -462,6 +503,25 @@ describe("CLI", () => {
         "only support --export-format md",
       ],
       [["saved", "--export-format", "md"], "Findings exports support"],
+      [
+        ["saved", "--export-format", "servicenow-avit"],
+        "requires --avit-template",
+      ],
+      [
+        ["saved", "--export-format", "csv", "--avit-template", "app.csv"],
+        "--avit-template is only supported",
+      ],
+      [
+        [
+          "saved",
+          "--export-format",
+          "servicenow-avit",
+          "--output",
+          "-",
+          "--json",
+        ],
+        "CSV stdout cannot",
+      ],
       [
         ["saved", "--artifact", "threat-model", "--output", "-", "--json"],
         "Markdown stdout cannot",
@@ -711,24 +771,25 @@ describe("CLI", () => {
   );
 
   test.each([
-    ["complete", false],
-    ["partial", true],
-    ["unknown", true],
+    [undefined, true],
     ["partial", false],
-    ["unknown", false],
-  ] as const)("exports %s, deferred: %j", async (completeness, hasDeferred) => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
+  ] as const)(
+    "exports saved results with legacy metadata %s and notes %j",
+    async (completeness, hasDeferred) => {
+      await using temp = await scopedTemporaryDirectory(
+        "codex-security-export-",
+      );
+      const directory = temp.path;
       const scan = await copyCompletedScan(directory);
       const manifestPath = join(scan, "scan-manifest.json");
       const manifest = JSON.parse(
         await readFile(manifestPath, "utf8"),
       ) as ScanManifest;
-      const coveragePath = join(scan, manifest.scan.coverageRef);
+      const coveragePath = join(scan, manifest.scan.coverageRef!);
       const coverage = JSON.parse(
         await readFile(coveragePath, "utf8"),
       ) as CoverageDocument;
-      coverage.completeness = completeness;
+      if (completeness !== undefined) coverage["completeness"] = completeness;
       coverage.deferred = hasDeferred
         ? [
             { id: "review", reason: "Source review did not finish." },
@@ -775,10 +836,10 @@ describe("CLI", () => {
           const sarif = JSON.parse(contents);
           expect(sarif.version).toBe("2.1.0");
           const run = sarif.runs[0];
-          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
-            completeness === "complete" ? undefined : completeness,
+          expect(run.properties).not.toHaveProperty(
+            "codexSecurityCoverageCompleteness",
           );
-          if (completeness === "complete") {
+          if (!hasDeferred) {
             expect(run.invocations).toBeUndefined();
           } else {
             expect(run.invocations).toHaveLength(1);
@@ -820,10 +881,8 @@ describe("CLI", () => {
       expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
         before,
       );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   test("expands home-relative export paths", async () => {
     const root = await temporaryDirectory("codex-security-export-home-");
@@ -876,243 +935,202 @@ describe("CLI", () => {
   });
 
   test("explains a missing export-output directory", async () => {
-    const root = await temporaryDirectory("codex-security-export-missing-");
-    try {
-      const output = join(root, "reports", "results.sarif");
-      const stderr = captureCli(main, "stderr");
-      expect(
-        await stderr.run(
-          ["export", "scan", "--output", output],
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toContain(
-        `Export output directory does not exist: ${join(root, "reports")}`,
-      );
-      expect(stderr.text()).toContain("Create the directory and retry");
-      expect(stderr.text()).not.toContain("ENOENT");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    await using temp = await scopedTemporaryDirectory(
+      "codex-security-export-missing-",
+    );
+    const root = temp.path;
+    const output = join(root, "reports", "results.sarif");
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(["export", "scan", "--output", output], dependencies()),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      `Export output directory does not exist: ${join(root, "reports")}`,
+    );
+    expect(stderr.text()).toContain("Create the directory and retry");
+    expect(stderr.text()).not.toContain("ENOENT");
   });
 
   test("rejects a repository-controlled output symlink without following it", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = await copyCompletedScan(directory);
-      const outside = join(directory, "outside.txt");
-      const output = join(directory, "results.sarif");
-      await writeFile(outside, "unchanged\n");
-      await symlink(outside, output);
-      const stderr = capture();
-      expect(
-        await main(
-          ["export", scan, "--output", output],
-          capture().stream,
-          stderr.stream,
-        ),
-      ).toBe(2);
-      expect(await readFile(outside, "utf8")).toBe("unchanged\n");
-      expect((await lstat(output)).isSymbolicLink()).toBe(true);
-      expect(stderr.text()).toMatch(
-        /codex-security: results\.sarif: (?:expected a regular non-symlink file|\[Errno 22\] scan-local files must not be reparse points)/u,
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const scan = await copyCompletedScan(directory);
+    const outside = join(directory, "outside.txt");
+    const output = join(directory, "results.sarif");
+    await writeFile(outside, "unchanged\n");
+    await symlink(outside, output);
+    const stderr = capture();
+    expect(
+      await main(
+        ["export", scan, "--output", output],
+        capture().stream,
+        stderr.stream,
+      ),
+    ).toBe(2);
+    expect(await readFile(outside, "utf8")).toBe("unchanged\n");
+    expect((await lstat(output)).isSymbolicLink()).toBe(true);
+    expect(stderr.text()).toMatch(
+      /codex-security: results\.sarif: (?:expected a regular non-symlink file|\[Errno 22\] scan-local files must not be reparse points)/u,
+    );
   });
 
   test("passes the canonical scan directory to the exporter", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const actual = join(directory, "actual");
-      const linked = join(directory, "linked");
-      const scan = join(actual, "scan");
-      await mkdir(scan, { recursive: true });
-      await symlink(actual, linked, "dir");
-      for (const output of ["-", join(directory, "results.sarif")] as const) {
-        const deps = dependencies();
-        let received = "";
-        deps.exportFindings = async (arguments_) => {
-          received = arguments_.scanDir;
-          return new TextEncoder().encode('{"version":"2.1.0"}\n');
-        };
-        expect(
-          await runCapturedCli(
-            main,
-            ["export", join(linked, "scan"), "--output", output],
-            deps,
-          ),
-        ).toBe(0);
-        expect(received).toBe(await realpath(scan));
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const actual = join(directory, "actual");
+    const linked = join(directory, "linked");
+    const scan = join(actual, "scan");
+    await mkdir(scan, { recursive: true });
+    await symlink(actual, linked, "dir");
+    for (const output of ["-", join(directory, "results.sarif")] as const) {
+      const deps = dependencies();
+      let received = "";
+      deps.exportFindings = async (arguments_) => {
+        received = arguments_.scanDir;
+        return new TextEncoder().encode('{"version":"2.1.0"}\n');
+      };
+      expect(
+        await runCapturedCli(
+          main,
+          ["export", join(linked, "scan"), "--output", output],
+          deps,
+        ),
+      ).toBe(0);
+      expect(received).toBe(await realpath(scan));
     }
   });
 
   test("creates the optional scan-local exports directory", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = await copyCompletedScan(directory);
-      const output = join(scan, "exports", "results.sarif");
-      expect(
-        await main(
-          ["export", scan, "--output", output],
-          capture().stream,
-          capture().stream,
-        ),
-      ).toBe(0);
-      expect(JSON.parse(await readFile(output, "utf8"))).toMatchObject({
-        version: "2.1.0",
-      });
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const scan = await copyCompletedScan(directory);
+    const output = join(scan, "exports", "results.sarif");
+    expect(
+      await main(
+        ["export", scan, "--output", output],
+        capture().stream,
+        capture().stream,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(await readFile(output, "utf8"))).toMatchObject({
+      version: "2.1.0",
+    });
   });
 
   test("exports through a symlinked output parent", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = await copyCompletedScan(directory);
-      const actualOutput = join(directory, "actual-output");
-      const linkedOutput = join(directory, "linked-output");
-      const output = join(linkedOutput, "results.json");
-      await mkdir(actualOutput);
-      await writeFile(join(actualOutput, "results.json"), "old\n");
-      await symlink(
-        actualOutput,
-        linkedOutput,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stdout = capture();
-      const stderr = capture();
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const scan = await copyCompletedScan(directory);
+    const actualOutput = join(directory, "actual-output");
+    const linkedOutput = join(directory, "linked-output");
+    const output = join(linkedOutput, "results.json");
+    await mkdir(actualOutput);
+    await writeFile(join(actualOutput, "results.json"), "old\n");
+    await symlink(
+      actualOutput,
+      linkedOutput,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const stdout = capture();
+    const stderr = capture();
 
-      expect(
-        await main(
-          ["export", scan, "--export-format", "json", "--output", output],
-          stdout.stream,
-          stderr.stream,
-        ),
-      ).toBe(0);
-      expect(
-        JSON.parse(await readFile(join(actualOutput, "results.json"), "utf8")),
-      ).toMatchObject({ documentType: "codex-security.findings" });
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toBe(`JSON: ${output}\n`);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    expect(
+      await main(
+        ["export", scan, "--export-format", "json", "--output", output],
+        stdout.stream,
+        stderr.stream,
+      ),
+    ).toBe(0);
+    expect(
+      JSON.parse(await readFile(join(actualOutput, "results.json"), "utf8")),
+    ).toMatchObject({ documentType: "codex-security.findings" });
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe(`JSON: ${output}\n`);
   });
 
   test("rejects a symlinked output parent inside the scan directory", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = join(directory, "scan");
-      const outside = join(directory, "outside");
-      const linked = join(scan, "reports");
-      await mkdir(scan);
-      await mkdir(outside);
-      await writeFile(join(outside, "results.json"), "unchanged\n");
-      await symlink(
-        outside,
-        linked,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stderr = captureCli(main, "stderr");
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const scan = join(directory, "scan");
+    const outside = join(directory, "outside");
+    const linked = join(scan, "reports");
+    await mkdir(scan);
+    await mkdir(outside);
+    await writeFile(join(outside, "results.json"), "unchanged\n");
+    await symlink(
+      outside,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const stderr = captureCli(main, "stderr");
 
-      expect(
-        await stderr.run(
-          [
-            "export",
-            scan,
-            "--export-format",
-            "json",
-            "--output",
-            join(linked, "results.json"),
-          ],
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(await readFile(join(outside, "results.json"), "utf8")).toBe(
-        "unchanged\n",
-      );
-      expect(stderr.text()).toContain(
-        "The export output path cannot overwrite a scan artifact",
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    expect(
+      await stderr.run(
+        [
+          "export",
+          scan,
+          "--export-format",
+          "json",
+          "--output",
+          join(linked, "results.json"),
+        ],
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(await readFile(join(outside, "results.json"), "utf8")).toBe(
+      "unchanged\n",
+    );
+    expect(stderr.text()).toContain(
+      "The export output path cannot overwrite a scan artifact",
+    );
   });
 
   test("rejects a repository-controlled output-directory symlink", async () => {
-    const directory = await temporaryDirectory("codex-security-export-");
-    try {
-      const scan = join(directory, "scan");
-      const repository = join(directory, "repo");
-      const outside = join(directory, "outside");
-      await mkdir(scan);
-      await mkdir(repository);
-      await mkdir(outside);
-      await symlink(
-        outside,
-        join(repository, "reports"),
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stderr = captureCli(main, "stderr");
-      const deps = dependencies();
-      deps.currentDirectory = () => repository;
-      deps.exportFindings = async () => {
-        throw new Error("must not export before rejecting the output path");
-      };
-
-      expect(
-        await stderr.run(
-          [
-            "export",
-            scan,
-            "--output",
-            join(repository, "reports", "results.sarif"),
-          ],
-          deps,
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toBe(
-        "codex-security: The export output path cannot traverse a repository symlink.\n",
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("reports strict export failures without a stack trace", async () => {
-    const { stdout, stderr, runCli } = createCliTest(main);
-
+    await using temp = await scopedTemporaryDirectory("codex-security-export-");
+    const directory = temp.path;
+    const scan = join(directory, "scan");
+    const repository = join(directory, "repo");
+    const outside = join(directory, "outside");
+    await mkdir(scan);
+    await mkdir(repository);
+    await mkdir(outside);
+    await symlink(
+      outside,
+      join(repository, "reports"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const stderr = captureCli(main, "stderr");
     const deps = dependencies();
+    deps.currentDirectory = () => repository;
     deps.exportFindings = async () => {
-      throw new CodexSecurityError(
-        "manifest.scan: SARIF projection requires a sealed scan",
-      );
+      throw new Error("must not export before rejecting the output path");
     };
-    expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
-    expect(stdout.text()).toBe("");
+
+    expect(
+      await stderr.run(
+        [
+          "export",
+          scan,
+          "--output",
+          join(repository, "reports", "results.sarif"),
+        ],
+        deps,
+      ),
+    ).toBe(2);
     expect(stderr.text()).toBe(
-      "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
+      "codex-security: The export output path cannot traverse a repository symlink.\n",
     );
   });
 
-  test("preserves caught export failures", async () => {
+  test("preserves strict export diagnostics without a stack trace", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
-
+    const diagnostic = `manifest.scan: SARIF projection requires a sealed scan ${SYNTHETIC_CREDENTIALS}`;
     const deps = dependencies();
     deps.exportFindings = async () => {
-      throw new CodexSecurityError(`export failed ${SYNTHETIC_CREDENTIALS}`);
+      throw new CodexSecurityError(diagnostic);
     };
-
     expect(await runCli(["export", "scan", "--output", "-"], deps)).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe(
-      `codex-security: export failed ${SYNTHETIC_CREDENTIALS}\n`,
-    );
+    expect(stderr.text()).toBe(`codex-security: ${diagnostic}\n`);
   });
 });

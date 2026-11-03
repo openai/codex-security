@@ -3,6 +3,7 @@ import childProcess, { type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const EVAL_ROOT = path.resolve(import.meta.dirname, "..");
 const PLUGIN_ROOT = path.resolve(
@@ -73,6 +74,7 @@ function stageSkillRuntime() {
 async function runPromptfoo(
   promptfooArgs: string[],
   environment: NodeJS.ProcessEnv = {},
+  builtMcp?: string,
 ) {
   const runtimeRoot = stageSkillRuntime();
   const artifacts = path.join(EVAL_ROOT, "artifacts");
@@ -130,18 +132,32 @@ async function runPromptfoo(
     });
   }
   try {
-    const built = await runChild(
+    const mcp = path.join(runtimeRoot, "plugins", "codex-security", "mcp");
+    if (builtMcp) {
+      copyDirectory(builtMcp, mcp);
+    } else {
+      const built = await runChild(
+        [
+          path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
+          "--output",
+          mcp,
+          "--native",
+          "host",
+        ],
+        path.join(PLUGIN_ROOT, "mcp-app"),
+      );
+      if (built !== 0) return built;
+    }
+    return await runChild(
       [
-        path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        path.join(runtimeRoot, "plugins", "codex-security", "mcp"),
-        "--native",
-        "host",
+        "--import",
+        pathToFileURL(path.join(import.meta.dirname, "initialize-provider.mts"))
+          .href,
+        PROMPTFOO_ENTRYPOINT,
+        ...promptfooArgs,
       ],
-      path.join(PLUGIN_ROOT, "mcp-app"),
+      EVAL_ROOT,
     );
-    if (built !== 0) return built;
-    return await runChild([PROMPTFOO_ENTRYPOINT, ...promptfooArgs], EVAL_ROOT);
   } finally {
     for (const [signal, handler] of handlers) process.off(signal, handler);
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
