@@ -855,6 +855,24 @@ describe("scan knowledge bases", () => {
     ]);
   });
 
+  test("skips macOS metadata files copied next to documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
+    await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    const appleDouble = Buffer.alloc(82);
+    appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
+    await writeFile(join(root, "._guide.md"), appleDouble);
+    await writeFile(join(root, "._policy.pdf"), appleDouble);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "Access policy.",
+      "Rotate admin keys monthly.",
+    ]);
+  });
+
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
