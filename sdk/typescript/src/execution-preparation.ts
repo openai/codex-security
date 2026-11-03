@@ -37,7 +37,7 @@ import {
   environmentValue,
   selectedScanEnvironment,
   withoutCodexHome,
-  withoutOpenAiApiKeys,
+  configuredAuthEnvironment,
   definedEnvironment,
   type ScanAuthentication,
 } from "./execution-auth.js";
@@ -155,7 +155,7 @@ export function prepareExecutionSource(input: {
     environment: preserveProviderEnvironment
       ? environment
       : selectedScanEnvironment(
-          commandAuth ? withoutOpenAiApiKeys(environment) : environment,
+          commandAuth ? configuredAuthEnvironment(environment) : environment,
           input.auth,
           modelProvider,
           externalProvider?.env_key,
@@ -340,7 +340,7 @@ export async function createExecutionCodex(
     preserveProviderEnvironment
       ? environment
       : {
-          ...withoutOpenAiApiKeys(environment),
+          ...configuredAuthEnvironment(environment),
           ...(externalProvider === null
             ? {}
             : { [externalProvider.env_key]: apiKey! }),

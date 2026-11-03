@@ -1,5 +1,6 @@
 import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
+export { configuredAuthEnvironment } from "./auth.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { forwardExternalImportSetting } from "./external-imports-feature.js";
@@ -199,19 +200,6 @@ export function selectedScanEnvironment(
   );
   forwardExternalImportSetting(environment, selected);
   return selected;
-}
-
-export function withoutOpenAiApiKeys(
-  environment: ProcessEnvironment,
-): ProcessEnvironment {
-  const child = Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) =>
-        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
-    ),
-  );
-  forwardExternalImportSetting(environment, child);
-  return child;
 }
 
 export function environmentApiKey(

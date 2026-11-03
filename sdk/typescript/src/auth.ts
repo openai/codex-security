@@ -357,8 +357,8 @@ function plainTerminalText(value: string): string {
     .replace(/\r/g, "");
 }
 
-/** @internal */
-export function withoutOpenAiApiKeys<Value>(
+/** Copy the child environment so configured authentication takes precedence over ambient OpenAI keys. @internal */
+export function configuredAuthEnvironment<Value>(
   environment: Record<string, Value>,
 ): Record<string, Value> {
   const child = Object.fromEntries(

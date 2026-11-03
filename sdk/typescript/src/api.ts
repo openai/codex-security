@@ -24,7 +24,7 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
-  withoutOpenAiApiKeys,
+  configuredAuthEnvironment,
   environmentApiKey,
   environmentValue,
   definedEnvironment,
@@ -4776,7 +4776,7 @@ export class CodexSecurity {
         ? runtimeEnvironment
         : selectedScanEnvironment(
             commandAuth
-              ? withoutOpenAiApiKeys(runtimeEnvironment)
+              ? configuredAuthEnvironment(runtimeEnvironment)
               : runtimeEnvironment,
             options.auth,
             modelProvider,

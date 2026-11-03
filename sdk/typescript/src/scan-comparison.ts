@@ -24,7 +24,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
-  withoutOpenAiApiKeys,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -1337,7 +1337,7 @@ export async function comparisonEnvironment(
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {
-    return withoutOpenAiApiKeys(environment);
+    return configuredAuthEnvironment(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;
@@ -1355,7 +1355,7 @@ export async function comparisonEnvironment(
   if (existsSync(credentialHome)) {
     const canonicalCredentialHome = await prepareCredentialHome(source);
     signal?.throwIfAborted();
-    const storedEnvironment = withoutOpenAiApiKeys(environment);
+    const storedEnvironment = configuredAuthEnvironment(environment);
     for (const key of Object.keys(storedEnvironment)) {
       if (key.toUpperCase() === "CODEX_HOME") {
         delete storedEnvironment[key];
@@ -1370,7 +1370,7 @@ export async function comparisonEnvironment(
     if (status.authenticated) return storedEnvironment;
   }
   if (existsSync(join(home, "auth.json"))) {
-    return withoutOpenAiApiKeys(environment);
+    return configuredAuthEnvironment(environment);
   }
   return environment;
 }
