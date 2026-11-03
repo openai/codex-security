@@ -333,7 +333,20 @@ test.each(
       },
       model_instructions_file: "file-instructions.md",
       model_catalog_json: "file-catalog.json",
-      features: { view_image: true },
+      features: {
+        view_image: true,
+        code_mode: {
+          enabled: true,
+          excluded_tool_namespaces: ["caller_tools"],
+        },
+      },
+      mcp_servers: {
+        codex_security: {
+          command: "node",
+          enabled: false,
+          omit_tools_from: ["direct"],
+        },
+      },
     });
     await writeFile(profilePath, stringify(fileProfile("first")));
     const explicit: JsonObject = {
@@ -357,7 +370,11 @@ test.each(
       agents: { reviewer: { config_file: "caller-reviewer.toml" } },
       model_instructions_file: null,
       model_catalog_json: "../caller-catalog.json",
-      features: { view_image: false, shell_tool: false },
+      features: {
+        view_image: false,
+        shell_tool: false,
+        code_mode: { direct_only_tool_namespaces: ["audit"] },
+      },
     };
     if (skills !== "inherited")
       explicit["skills"] =
@@ -437,7 +454,15 @@ test.each(
           },
         },
         model_catalog_json: resolve(scanDir, "../caller-catalog.json"),
-        features: { view_image: false, shell_tool: false },
+        features: {
+          view_image: false,
+          shell_tool: false,
+          code_mode: {
+            enabled: true,
+            excluded_tool_namespaces: ["caller_tools"],
+            direct_only_tool_namespaces: ["audit"],
+          },
+        },
       });
       expect(restored["skills"]).toEqual(
         skills === "inherited"

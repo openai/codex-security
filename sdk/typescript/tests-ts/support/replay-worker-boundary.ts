@@ -141,6 +141,23 @@ export async function checkReplayWorkerSettings(
         );
         for (const key of ["view_image", "shell_tool"])
           assert.equal((selected["features"] as JsonObject)[key], false);
+        const effective = deepMerge(
+          parse(marker.profileContents) as JsonObject,
+          selected,
+        );
+        assert.deepEqual(
+          (effective["features"] as JsonObject)["code_mode"],
+          (config["features"] as JsonObject)["code_mode"],
+        );
+        const servers = effective["mcp_servers"] as JsonObject;
+        assert.deepEqual(
+          servers["codex_security"],
+          (config["mcp_servers"] as JsonObject)["codex_security"],
+        );
+        assert.deepEqual(servers["codex-security"], {
+          command: "node",
+          enabled: false,
+        });
         assert.equal(selected["approval_policy"], "never");
         assert.deepEqual(
           (selected["permissions"] as JsonObject)["codex_security_scan"],

@@ -1,6 +1,5 @@
 import { rawEnvironmentValue as environmentValue } from "./codex-home.js";
 export { rawEnvironmentValue as environmentValue } from "./codex-home.js";
-export { configuredAuthEnvironment } from "./auth.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { forwardExternalImportSetting } from "./external-imports-feature.js";

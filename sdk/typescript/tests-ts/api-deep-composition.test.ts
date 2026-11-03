@@ -555,6 +555,13 @@ const file = typeof raw === "string" ? resolve(selected === undefined ? home : p
 process.stdout.write(JSON.stringify({cwd:process.cwd(),path:file,bytes:file === null ? null : readFileSync(file,"utf8")}));
 `;
     const inheritedSettings = {
+      features: {
+        code_mode: {
+          enabled: true,
+          direct_only_tool_namespaces: ["audit"],
+          excluded_tool_namespaces: ["caller_tools"],
+        },
+      },
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
       developer_instructions: "Synthetic composed-scan instructions.",

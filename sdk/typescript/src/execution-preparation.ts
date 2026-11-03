@@ -5,6 +5,7 @@ import {
   accountStatus,
   configuredCodexHome,
   readCodexHomeConfig,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import { join, resolve } from "node:path";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
@@ -37,7 +38,6 @@ import {
   environmentValue,
   selectedScanEnvironment,
   withoutCodexHome,
-  configuredAuthEnvironment,
   definedEnvironment,
   type ScanAuthentication,
 } from "./execution-auth.js";

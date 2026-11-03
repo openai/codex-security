@@ -24,7 +24,6 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
-  configuredAuthEnvironment,
   environmentApiKey,
   environmentValue,
   definedEnvironment,
@@ -154,6 +153,7 @@ import {
   loginApiKey as persistApiKey,
   logout as codexLogout,
   type AccountStatus,
+  configuredAuthEnvironment,
 } from "./auth.js";
 import { jsonForPrompt, shellEnvironmentReference } from "./codex-prompt.js";
 import {
