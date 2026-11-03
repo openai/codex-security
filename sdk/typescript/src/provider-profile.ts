@@ -311,7 +311,7 @@ export async function withCodexPreflightLock<T>(
   }
 }
 
-async function nativePermissionPreflight() {
+export async function nativePermissionPreflight() {
   return await import(
     pathToFileURL(
       join(
@@ -323,7 +323,7 @@ async function nativePermissionPreflight() {
   );
 }
 
-async function nativeProfileClient() {
+export async function nativeProfileClient() {
   return await import(
     pathToFileURL(
       join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
