@@ -7,6 +7,7 @@ const workflow = Bun.YAML.parse(
     "utf8",
   ),
 ) as {
+  on: { workflow_run: { workflows: string[]; types: string[] } };
   concurrency: { group: string };
   jobs: {
     identify: {
@@ -79,6 +80,76 @@ function identify(
   );
   return { output: output.join(""), calls };
 }
+
+test("main CI completions report independently of cutting a release", () => {
+  expect(workflow.on).toHaveProperty("workflow_call");
+  expect(workflow.on.workflow_run).toEqual({
+    workflows: ["node-release", "node-github-release"],
+    types: ["in_progress", "completed"],
+  });
+  const cut = Bun.YAML.parse(
+    readFileSync(
+      new URL(
+        "../../../.github/workflows/node-release-cut.yml",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    on: Record<string, unknown>;
+    jobs: {
+      progress: { if: string; uses: string };
+      cut: {
+        env: { RELEASE_SHA: string };
+        steps: { uses?: string; with?: { ref?: string } }[];
+      };
+    };
+  };
+  expect(cut.on).toEqual({
+    workflow_run: {
+      workflows: ["node-ci"],
+      types: ["completed"],
+      branches: ["main"],
+    },
+    workflow_dispatch: null,
+  });
+  const verifiedSha = "${{ github.event.workflow_run.head_sha || github.sha }}";
+  expect(cut.jobs.cut.env.RELEASE_SHA).toBe(verifiedSha);
+  expect(
+    cut.jobs.cut.steps.find(({ uses }) => uses?.startsWith("actions/checkout@"))
+      ?.with?.ref,
+  ).toBe(verifiedSha);
+  expect(cut.jobs.progress.uses).toBe(
+    "./.github/workflows/release-progress.yml",
+  );
+  expect(cut.jobs.cut).not.toHaveProperty("needs");
+  expect(cut.jobs.progress).not.toHaveProperty("needs");
+  expect(cut.jobs.cut).toHaveProperty("concurrency", {
+    group: "node-release-cut",
+    queue: "max",
+  });
+  const selected = new Function("github", `return (${cut.jobs.progress.if})`);
+  const context = {
+    repository: "openai/codex-security",
+    event_name: "workflow_run",
+    event: { workflow_run: ciRun },
+  };
+  for (const conclusion of ["success", "failure", "cancelled"]) {
+    expect(
+      selected({
+        ...context,
+        event: { workflow_run: { ...ciRun, conclusion } },
+      }),
+    ).toBe(true);
+  }
+  expect(selected({ ...context, event_name: "workflow_dispatch" })).toBe(false);
+  expect(
+    selected({
+      ...context,
+      event: { workflow_run: { ...ciRun, event: "pull_request" } },
+    }),
+  ).toBe(false);
+});
 
 test("ordinary CI commits do not reach release checkout or reporting", () => {
   for (const pull of [

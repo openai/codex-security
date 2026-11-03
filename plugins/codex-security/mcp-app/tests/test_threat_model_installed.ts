@@ -55,7 +55,7 @@ test("installed worker MCP saves threat models without Python", async (t) => {
       scanId,
       complete: false,
       findings: [],
-      coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+      reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     };
     const result = await server.callTool(2, {
       name: "record_codex_security_scan_draft",

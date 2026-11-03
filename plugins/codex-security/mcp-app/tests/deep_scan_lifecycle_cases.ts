@@ -1326,9 +1326,9 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   });
   const executor = new FakeExecutor();
   const run = executor.run.bind(executor);
-  const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
   const workerReviewed = {
-    ...reviewed,
+    label: "Reviewed query",
+    disposition: "no_issue_found",
     id: "shared-surface",
     receiptRefs: ["artifacts/worker-receipt.md"],
   };
@@ -1341,7 +1341,7 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
     if (request.kind !== "discovery") return outcome;
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
-    draft.coverage = {
+    draft.reviewState = {
       surfaces: [workerReviewed, followUp],
       explicitExclusions: [
         { pattern: "vendor/**", reason: "Third-party code." },
@@ -1371,7 +1371,8 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
   });
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
-  const coverage = completed[0].coverage as unknown as {
+  const coverage = completed[0].reviewState as unknown as {
+    reviews: { workerId: string }[];
     surfaces: { id: string; workerId: string; receiptRefs?: string[] }[];
     explicitExclusions: { workerId: string; pattern: string }[];
     deferred: {
@@ -1382,6 +1383,15 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
     openQuestions: { question: string; workerId: string }[];
   };
 
+  const workers = [...store.workers.values()].filter(
+    (worker) => worker.kind === "discovery",
+  );
+  assert.equal("completeness" in coverage, false);
+  assert.deepEqual(
+    coverage.reviews.map((review) => review.workerId).sort(),
+    workers.map((worker) => worker.id).sort(),
+  );
+  assert.equal(coverage.deferred.length, 2);
   assert.equal(coverage.surfaces.length, 4);
   assert.equal(new Set(coverage.surfaces.map((row) => row.id)).size, 4);
   assert.equal(new Set(coverage.deferred.map((row) => row.id)).size, 2);
@@ -1403,10 +1413,9 @@ export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewSt
       );
     }
   }
-  for (const worker of store.workers.values()) {
-    if (worker.kind !== "discovery") continue;
+  for (const worker of workers) {
     const draft = await readJson(worker.resultManifestPath!);
-    assert.deepEqual(draft.coverage.surfaces, [workerReviewed, followUp]);
-    assert.equal(draft.coverage.deferred.length, 1);
+    assert.deepEqual(draft.reviewState.surfaces, [workerReviewed, followUp]);
+    assert.equal(draft.reviewState.deferred.length, 1);
   }
 }

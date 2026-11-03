@@ -13,7 +13,11 @@ import {
 } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadContract, hasSealedReport } from "../src/contract.js";
+import {
+  loadContract,
+  loadContractWithScanDirectory,
+  hasSealedReport,
+} from "../src/contract.js";
 import { normalizeTarget } from "../src/targets.js";
 import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
 import { runMultiscan } from "../src/multiscan.js";
@@ -149,22 +153,11 @@ async function fixture(registerOnly = false) {
       scanId: registered["scanId"],
       findings: [],
     };
-    const coverage = JSON.parse(
-      await readFile(join(scanDir, "coverage.json"), "utf8"),
-    );
-    Object.assign(coverage, {
-      scanId: registered["scanId"],
-      mode: target.kind === "repository" ? "repository" : "scoped_path",
-      includePaths,
-      excludePaths: [],
-      deferred: [],
-      surfaces: [],
-      completeness: "complete",
-    });
+    manifest.scan.mode =
+      target.kind === "repository" ? "repository" : "scoped_path";
     for (const [name, value] of [
       ["scan-manifest", manifest],
       ["findings", findings],
-      ["coverage", coverage],
     ])
       await writeFile(join(scanDir, `${name}.json`), JSON.stringify(value));
     execFileSync(
@@ -530,7 +523,7 @@ test.each([
 ] as const)("canonical sealed readers agree for %s", async (kind) => {
   const root = await temporaryDirectory();
   const scanDir = join(root, "scan");
-  await cp(join(pluginRoot, "examples/completed-scan"), scanDir, {
+  await cp(join(pluginRoot, "examples/legacy-completed-scan"), scanDir, {
     recursive: true,
   });
   await chmod(scanDir, 0o700);
@@ -612,13 +605,19 @@ test.each([
     kind.includes("legacy") ||
     ["partial", "failed", "canceled", "interrupted"].includes(kind)
   ) {
-    await loadContract(scanDir, { pluginRoot });
+    await loadContractWithScanDirectory(scanDir, {
+      pluginRoot,
+      validateRecoveryCoverage: true,
+    });
     expect(canonical().length).toBeGreaterThan(0);
   } else {
     expect(canonical).toThrow();
-    await expect(loadContract(scanDir, { pluginRoot })).rejects.toThrow(
-      /resolved deferred|still active/,
-    );
+    await expect(
+      loadContractWithScanDirectory(scanDir, {
+        pluginRoot,
+        validateRecoveryCoverage: true,
+      }),
+    ).rejects.toThrow(/resolved deferred|still active/);
   }
   expect(await readFile(join(scanDir, "findings.json"))).toEqual(before);
 });

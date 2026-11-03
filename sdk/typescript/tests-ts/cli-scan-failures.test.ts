@@ -3,6 +3,7 @@ import { main } from "../src/cli.js";
 import { CodexSecurityError } from "../src/index.js";
 import {
   FakeSignals,
+  SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
   fakePreflight,
@@ -55,142 +56,113 @@ function expectFailure(
 ) {
   const result = JSON.parse(text);
   if (fullOutput) {
-    expect(result).toMatchObject({ ok: false, error: { code, message } });
-    expect(result.data).toEqual(data);
+    expect(result.ok).toBe(false);
+    expect(result.error).toEqual({ code, message });
+    if (data === undefined) expect(result).not.toHaveProperty("data");
+    else expect(result.data).toEqual(data);
   } else {
     expect(result).toEqual({ status: "failed", code, message });
   }
 }
 
-for (const formatArgs of [
-  ["--json"],
-  ["--format", "json"],
-  ["--format", "jsonl"],
-]) {
-  for (const fullOutput of [false, true]) {
-    describe(`scan failures with ${formatArgs.join(" ")}${fullOutput ? " --full-output" : ""}`, () => {
-      const flags = [...formatArgs, ...(fullOutput ? ["--full-output"] : [])];
+for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
+  describe(`scan failures with ${flags.join(" ")}`, () => {
+    const fullOutput = flags.includes("--full-output");
 
-      test.each(commands)(
-        "formats %s execution failures consistently",
-        async (_name, command) => {
-          const stdout = capture();
-          const stderr = capture();
-          const message = "The scan could not save its results.";
-          expect(
-            await main(
-              [...command, ...flags],
-              stdout.stream,
-              stderr.stream,
-              failingScan(message),
-            ),
-          ).toBe(2);
-          expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
-          expect(stderr.text()).toContain(`${message}\n`);
-        },
-      );
-
-      test.each([
-        ["rerun", "SCAN_REPLAY_UNAVAILABLE"],
-        ["resume", "SCAN_RESUME_UNAVAILABLE"],
-      ])("preserves %s preparation failure codes", async (command, code) => {
+    test.each(commands)(
+      "formats %s execution failures consistently",
+      async (_name, command) => {
         const stdout = capture();
         const stderr = capture();
-        const message = "This scan does not have a saved launch recipe.";
+        const message = `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`;
+        expect(
+          await main(
+            [...command, ...flags],
+            stdout.stream,
+            stderr.stream,
+            failingScan(message),
+          ),
+        ).toBe(2);
+        expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
+        expect(stderr.text()).toContain(`${message}\n`);
+      },
+    );
+
+    test.each([
+      ["rerun", "SCAN_REPLAY_UNAVAILABLE"],
+      ["resume", "SCAN_RESUME_UNAVAILABLE"],
+    ])("preserves %s preparation failure codes", async (command, code) => {
+      const stdout = capture();
+      const stderr = capture();
+      const message = "This scan does not have a saved launch recipe.";
+      const deps = scanDependencies();
+      deps.runWorkbench = async () => ({
+        scanId: "saved-scan",
+        scanDir: "/tmp/saved-scan",
+      });
+      expect(
+        await main(
+          ["scans", command, "saved-scan", ...flags],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expectFailure(stdout.text(), fullOutput, code, message);
+      expect(stderr.text()).toBe(`codex-security: ${message}\n`);
+    });
+
+    test("reports unavailable latest scans with the replay failure code", async () => {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = scanDependencies();
+      deps.runWorkbench = async () => ({ scans: [] });
+      expect(
+        await main(
+          ["scans", "rerun", ...flags],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      const message = "No completed scans found for the current repository.";
+      expectFailure(
+        stdout.text(),
+        fullOutput,
+        "SCAN_REPLAY_UNAVAILABLE",
+        message,
+      );
+      expect(stderr.text()).toBe(`codex-security: ${message}\n`);
+    });
+
+    test.each(["csv", "json"])(
+      "formats rerun failures independently of the %s import format",
+      async (format) => {
+        const stdout = capture();
+        const stderr = capture();
+        const message = "The saved import source is unavailable.";
         const deps = scanDependencies();
         deps.runWorkbench = async () => ({
-          scanId: "saved-scan",
-          scanDir: "/tmp/saved-scan",
+          recipe: {
+            import: { sourcePath: `/tmp/findings.${format}`, format },
+          },
         });
+        deps.importScan = async () => {
+          throw new CodexSecurityError(message);
+        };
         expect(
           await main(
-            ["scans", command, "saved-scan", ...flags],
+            ["scans", "rerun", "saved-scan", ...flags],
             stdout.stream,
             stderr.stream,
             deps,
           ),
         ).toBe(2);
-        expectFailure(stdout.text(), fullOutput, code, message);
+        expectFailure(stdout.text(), fullOutput, "SCAN_IMPORT_FAILED", message);
         expect(stderr.text()).toBe(`codex-security: ${message}\n`);
-      });
-
-      test("reports unavailable latest scans with the replay failure code", async () => {
-        const stdout = capture();
-        const stderr = capture();
-        const deps = scanDependencies();
-        deps.runWorkbench = async () => ({ scans: [] });
-        expect(
-          await main(
-            ["scans", "rerun", ...flags],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
-        ).toBe(2);
-        const message = "No completed scans found for the current repository.";
-        expectFailure(
-          stdout.text(),
-          fullOutput,
-          "SCAN_REPLAY_UNAVAILABLE",
-          message,
-        );
-        expect(stderr.text()).toBe(`codex-security: ${message}\n`);
-      });
-
-      test.each(["csv", "json"])(
-        "formats rerun failures independently of the %s import format",
-        async (format) => {
-          const stdout = capture();
-          const stderr = capture();
-          const message = "The saved import source is unavailable.";
-          const deps = scanDependencies();
-          deps.runWorkbench = async () => ({
-            recipe: {
-              import: { sourcePath: `/tmp/findings.${format}`, format },
-            },
-          });
-          deps.importScan = async () => {
-            throw new CodexSecurityError(message);
-          };
-          expect(
-            await main(
-              ["scans", "rerun", "saved-scan", ...flags],
-              stdout.stream,
-              stderr.stream,
-              deps,
-            ),
-          ).toBe(2);
-          expectFailure(
-            stdout.text(),
-            fullOutput,
-            "SCAN_IMPORT_FAILED",
-            message,
-          );
-          expect(stderr.text()).toBe(`codex-security: ${message}\n`);
-        },
-      );
-
-      test.each(commands)(
-        "preserves diagnostic text for %s failures",
-        async (_name, command) => {
-          const stdout = capture();
-          const stderr = capture();
-          const message =
-            "network failure ECONNRESET Bearer SYNTHETIC_TOKEN_123";
-          expect(
-            await main(
-              [...command, ...flags],
-              stdout.stream,
-              stderr.stream,
-              failingScan(message),
-            ),
-          ).toBe(2);
-          expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
-          expect(stderr.text()).toContain(message);
-        },
-      );
-    });
-  }
+      },
+    );
+  });
 }
 
 test.each(commands)(

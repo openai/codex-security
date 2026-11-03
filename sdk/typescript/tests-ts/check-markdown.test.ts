@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitText, runCommand } from "./support/shell.js";
 
@@ -31,18 +31,23 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
     );
     await writeFile(join(root, ".gitignore"), "node_modules/\n");
     await writeFile(join(sdk, "README.md"), "# Readme\n");
-    // The previous format command checks these folders, not all repository Markdown.
-    await mkdir(join(root, "github-action"));
-    await writeFile(join(root, "github-action", "README.md"), invalid);
-    const outsideGuides = [
-      join(root, "examples", "custom-validation", "guide.md"),
-      join(root, "plugins", "codex-security", "native", "guide.md"),
+    const guides = [
+      "README.md",
+      "CONTRIBUTING.md",
+      "CODE_OF_CONDUCT.md",
+      "docs/nested/guide.md",
+      "github-action/README.md",
+      "docker/README.md",
+      "examples/custom-validation/guide.md",
+      "plugins/codex-security/native/guide.md",
     ];
-    for (const path of outsideGuides) {
-      await mkdir(join(path, ".."), { recursive: true });
-      await writeFile(path, invalid);
-      await mkdir(join(path, "..", "nested"));
-      await writeFile(join(path, "..", "nested", "outside.md"), invalid);
+    for (const path of [
+      ...guides,
+      "examples/custom-validation/nested/outside.md",
+      "plugins/codex-security/native/nested/outside.md",
+    ]) {
+      await mkdir(dirname(join(root, path)), { recursive: true });
+      await writeFile(join(root, path), invalid);
     }
     await writeFile(join(sdk, "--plugin=fixture.md"), "# Markdown fixture\n");
     // The combined paths exceed the Windows process command-line limit.
@@ -68,13 +73,11 @@ test("checks tracked Markdown including leading-dash paths and skips deleted, un
     });
     expect(failing.status).toBe(1);
     expect(failing.stdout + failing.stderr).toContain("guide with # spaces.md");
-    for (const path of outsideGuides)
-      expect(failing.stdout + failing.stderr).toContain(
-        path.replaceAll("\\", "/").slice(root.length + 1),
-      );
+    for (const path of guides)
+      expect(failing.stdout + failing.stderr).toContain(path);
 
     await writeFile(guide, "# Title\n");
-    for (const path of outsideGuides) await writeFile(path, "# Guide\n");
+    for (const path of guides) await writeFile(join(root, path), "# Guide\n");
     const passing = await runCommand("node", [script], {
       cwd: sdk,
       timeout: 30_000,

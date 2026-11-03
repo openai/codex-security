@@ -41,6 +41,7 @@ import {
   hasSealedReport,
   loadContract,
   loadContractWithScanDirectory,
+  validatedFileDigests,
 } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
@@ -1500,6 +1501,7 @@ async function loadRegisteredCampaignScan(
   signal?: AbortSignal,
 ) {
   const loaded = await loadContractWithScanDirectory(path, {
+    validateRecoveryCoverage: true,
     pluginRoot,
     signal,
   }).catch((error: unknown) => {
@@ -1522,7 +1524,8 @@ async function loadRegisteredCampaignScan(
     authority.status !== "complete" ||
     typeof authority.recipe["scanRequestDigest"] !== "string" ||
     !expectedRequestDigests.includes(authority.recipe["scanRequestDigest"]) ||
-    authority.seal_manifest_digest !== loaded.manifestDigest
+    authority.seal_manifest_digest !==
+      `sha256:${validatedFileDigests.get(loaded.contract.manifest)!.get("scan-manifest.json")!}`
   )
     return undefined;
   for (const finding of loaded.contract.findings.findings) {
@@ -1584,7 +1587,7 @@ async function loadResumableScan(
   }
   if (accepted === undefined) return undefined;
   const { contract: saved, authority } = accepted;
-  const { manifest, findings, coverage } = saved;
+  const { manifest, findings, mode } = saved;
   const { target, scope, producer } = manifest.scan;
   const campaignRoot = dirname(dirname(dirname(path)));
   const recoveryCheckout = join(
@@ -1631,7 +1634,7 @@ async function loadResumableScan(
     receipt.snapshotDigest !== undefined ||
     target.displayName !== basename(matchedRoot) ||
     target.revision !== receipt.revision ||
-    coverage.mode !== expectedMode ||
+    mode !== expectedMode ||
     scope.excludePaths.length !== 0
   )
     return undefined;
@@ -1817,7 +1820,8 @@ async function loadResumableScan(
     );
     if (
       !sealedArtifacts.has("findings.json") ||
-      !sealedArtifacts.has("coverage.json")
+      (manifest.scan.coverageRef !== undefined &&
+        !sealedArtifacts.has(manifest.scan.coverageRef))
     ) {
       return undefined;
     }

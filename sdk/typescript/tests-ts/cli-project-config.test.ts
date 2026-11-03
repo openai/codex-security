@@ -8,9 +8,9 @@ import {
 } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { basename, join } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { normalizeTarget } from "../src/targets.js";
-import { loadContract } from "../src/contract.js";
+import { deriveFindingIdentity, loadContract } from "../src/contract.js";
 import { scanRequestDigest } from "../src/finding-workflow.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -32,6 +32,7 @@ import {
 } from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
+import { git } from "./git-fixture.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
@@ -75,26 +76,16 @@ async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
   rowModes: readonly string[],
 ) {
-  execFileSync("git", ["init", "-q", input.repository]);
-  execFileSync("git", [
-    "-C",
+  git(input.repository, "init", "-q");
+  git(
     input.repository,
-    "-c",
-    "user.name=Test",
-    "-c",
-    "user.email=test@example.test",
-    "-c",
-    "commit.gpgsign=false",
     "commit",
+    "--no-gpg-sign",
     "--allow-empty",
     "-qm",
     "fixture",
-  ]);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  );
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -518,30 +509,11 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     join(input.repository, "lib", "index.ts"),
     "export const value = 2;\n",
   );
-  for (const args of [
-    ["init", "-q", input.repository],
-    ["-C", input.repository, "config", "--local", "core.autocrlf", "false"],
-    ["-C", input.repository, "add", "."],
-    [
-      "-C",
-      input.repository,
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.test",
-      "-c",
-      "commit.gpgsign=false",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-  ])
-    execFileSync("git", args);
-  const revision = execFileSync(
-    "git",
-    ["-C", input.repository, "rev-parse", "HEAD"],
-    { encoding: "utf8" },
-  ).trim();
+  git(input.repository, "init", "-q");
+  git(input.repository, "config", "--local", "core.autocrlf", "false");
+  git(input.repository, "add", ".");
+  git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+  const revision = git(input.repository, "rev-parse", "HEAD");
   const csv = join(input.root, "repositories.csv");
   await writeFile(
     csv,
@@ -598,51 +570,36 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
       const findings = JSON.parse(
         await readFile(join(scanDir, "findings.json"), "utf8"),
       ) as typeof template.findings;
-      const coverage = JSON.parse(
-        await readFile(join(scanDir, "coverage.json"), "utf8"),
-      ) as typeof template.coverage;
       const includePaths = target.kind === "paths" ? [...target.paths] : ["."];
       manifest.scan.id = scanId;
       findings.scanId = scanId;
-      coverage.scanId = scanId;
       manifest.scan.target = {
         kind: "git_revision",
         targetId: String(registered["targetId"]),
         displayName: basename(root),
-        revision: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
-          encoding: "utf8",
-        }).trim(),
+        revision: git(root, "rev-parse", "HEAD"),
       };
       manifest.scan.scope.includePaths = includePaths;
-      coverage.includePaths = includePaths;
-      coverage.mode =
+      manifest.scan.mode =
         target.kind === "paths"
           ? "scoped_path"
           : options.mode === "deep"
             ? "deep_repository"
             : "repository";
-      coverage.inventoryStrategy =
-        target.kind === "paths" ? "scoped_path" : "repository";
       for (const finding of findings.findings) {
-        const fingerprint = `codex-security/v1:sha256:${createHash("sha256")
-          .update(
-            [
-              "codex-security/v1",
-              manifest.scan.target.targetId,
-              finding.ruleId,
-              finding.identity.anchor,
-              finding.identity.instance ?? "",
-            ].join("\0"),
-          )
-          .digest("hex")}`;
-        finding.fingerprints.primary = fingerprint;
-        finding.findingId = `csf_${createHash("sha256").update(fingerprint).digest("hex").slice(0, 24)}`;
-        finding.occurrenceId = `occ_${createHash("sha256").update([manifest.scan.id, fingerprint].join("\0")).digest("hex").slice(0, 24)}`;
+        Object.assign(
+          finding,
+          deriveFindingIdentity(
+            scanId,
+            manifest.scan.target.targetId,
+            finding.ruleId,
+            finding.identity,
+          ),
+        );
         for (const location of finding.locations)
           location.path = `${includePaths[0]}/index.ts`;
       }
       await writeFile(join(scanDir, "findings.json"), JSON.stringify(findings));
-      await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
       await writeFile(
         join(scanDir, "scan-manifest.json"),
         JSON.stringify({
@@ -1406,6 +1363,34 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     },
     failOnSeverity: "high",
   });
+  const nativeProject = JSON.parse(
+    await readFile(input.config, "utf8"),
+  ) as Record<string, JsonObject>;
+  delete nativeProject["codex"]!["profiles"];
+  delete nativeProject["codex"]!["model"];
+  await writeFile(input.config, JSON.stringify(nativeProject));
+  await writeFile(
+    join(ambient, "review.config.toml"),
+    'model = "synthetic-native-model"\nmodel_provider = "openrouter"\nmodel_reasoning_effort = "high"\n',
+  );
+  Object.assign(environment, {
+    OPENROUTER_API_KEY: "synthetic-cli-provider-key",
+  });
+  const nativeCli = createCliTest(main);
+  expect(
+    await nativeCli.runCli(
+      ["scan", "-c", input.config, "--dry-run", "--json"],
+      deps,
+    ),
+    nativeCli.stderr.text(),
+  ).toBe(0);
+  expect(JSON.parse(nativeCli.stdout.text())).toMatchObject({
+    model: "synthetic-native-model",
+    modelProvider: "openrouter",
+    reasoningEffort: "high",
+  });
+  expect(createCodex).not.toHaveBeenCalled();
+  expect(prepareRuntime).not.toHaveBeenCalled();
 });
 
 test.each([

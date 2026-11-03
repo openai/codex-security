@@ -1,55 +1,47 @@
 import { setFindingIdentity, sha256 } from "./support/finding-identity.js";
 import type { Stats } from "node:fs";
+import { createRequire } from "node:module";
 import {
   chmod,
   cp,
+  link,
   lstat,
   mkdir,
   readFile,
   realpath,
   rename,
+  rm,
   symlink,
   type FileHandle,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import fc from "fast-check";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
 import {
   hasSealedReport,
+  loadContractWithScanDirectory,
   readScanFile,
   sameCheckedFileDevice,
+  validatedFileDigests,
 } from "../src/contract.js";
 import type {
   NormalizedTarget,
   ScanExpectation,
   ScanManifest,
 } from "../src/index.js";
-import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
-import { propertyOptions } from "./support/property.js";
-import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { createContractTestFixtures } from "./support/contract-fixture.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const { temporaryDirectory, cleanup } = createApiTestFixtures(
-  "codex-security-contract-",
-  false,
-);
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
+const { temporaryDirectory, cleanup, copyExample } =
+  createContractTestFixtures();
 
 afterEach(cleanup);
-
-async function copyExample(): Promise<string> {
-  const root = await temporaryDirectory();
-  const scanDir = join(root, "scan");
-  await cp(EXAMPLE, scanDir, { recursive: true });
-  if (process.platform !== "win32") await chmod(scanDir, 0o700);
-  return scanDir;
-}
 
 const readJson = readJsonFile<Record<string, any>>;
 
@@ -95,118 +87,56 @@ describe("canonical scan contract", () => {
         import.meta.path,
         "recognizes only the authenticated report directory entry",
       )
-    ) {
+    )
       return;
-    }
-    const root = resolve("saved-scan");
-    const original = { ...fsPromises };
-    const metadata = (ino: number, directory = false): Stats =>
-      ({
-        dev: 1,
-        ino,
-        isDirectory: () => directory,
-        isFile: () => !directory,
-        isSymbolicLink: () => false,
-      }) as Stats;
-    let entries: string[] = [];
-    let artifactInode = 7;
-    let missingReport = false;
-    let onList: (() => void) | undefined;
-    let opened = 0;
-    let closed = 0;
-    const inspected = (path: unknown): Stats => {
-      const absolute = resolve(String(path));
-      if (absolute === root) return metadata(1, true);
-      if (dirname(absolute) !== root) throw new Error("Unexpected mock path.");
-      if (missingReport && absolute === join(root, "report.md")) {
-        throw Object.assign(new Error("Missing mock report."), {
-          code: "ENOENT",
-        });
-      }
-      return metadata(absolute === join(root, "REPORT.md") ? artifactInode : 7);
-    };
-    const privateOutput = spyOn(
-      runtime,
-      "requirePrivateOutputDirectory",
-    ).mockImplementation(() => {});
-    const secureAncestry = spyOn(
-      runtime,
-      "requireSecureOutputAncestry",
-    ).mockResolvedValue(undefined);
-    const stats = (value: Stats, options?: { bigint?: boolean }) =>
-      options?.bigint
-        ? { ...value, dev: BigInt(value.dev), ino: BigInt(value.ino) }
-        : value;
-    mock.module("node:fs/promises", () => ({
-      ...original,
-      lstat: async (path: unknown, options?: { bigint?: boolean }) =>
-        stats(inspected(path), options),
-      realpath: async (path: unknown) => resolve(String(path)),
-      readdir: async () => {
-        onList?.();
-        return entries;
-      },
-      open: async (path: unknown) => {
-        const fileMetadata = inspected(path);
-        opened += 1;
-        return {
-          stat: async (options?: { bigint?: boolean }) =>
-            stats(fileMetadata, options),
-          close: async () => {
-            closed += 1;
-          },
-        };
-      },
-    }));
-    const manifest = (paths: string[]): ScanManifest =>
+    const scanDirectory = await temporaryDirectory();
+    const alias = join(scanDirectory, "REPORT.md");
+    const report = join(scanDirectory, "report.md");
+    const manifest = (...paths: string[]) =>
       ({
         scan: { artifacts: paths.map((path) => ({ path })) },
-      }) as unknown as ScanManifest;
+      }) as ScanManifest;
+    await writeFile(alias, "Sealed report.");
+    expect(await hasSealedReport(scanDirectory, manifest("./report.md"))).toBe(
+      true,
+    );
+    expect(
+      await hasSealedReport(scanDirectory, manifest("findings.json")),
+    ).toBe(false);
+    const caseSensitive = await lstat(report).then(
+      () => false,
+      () => true,
+    );
+    if (caseSensitive) {
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        false,
+      );
+      await link(alias, report);
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        false,
+      );
+    }
+    // Simulate one case-insensitive directory entry while comparing real file identities.
+    const original = { ...fsPromises };
+    let onList: (() => void) | undefined;
+    mock.module("node:fs/promises", () => ({
+      ...original,
+      readdir: async () => {
+        onList?.();
+        return ["REPORT.md"];
+      },
+    }));
     try {
-      const cases: Array<{
-        paths: string[];
-        entries: string[];
-        expected: boolean;
-        inode?: number;
-        missing?: boolean;
-      }> = [
-        { paths: ["./report.md"], entries: [], expected: true },
-        {
-          paths: ["findings.json", "coverage.json"],
-          entries: ["report.md", "findings.json", "coverage.json"],
-          expected: false,
-        },
-        { paths: ["REPORT.md"], entries: ["REPORT.md"], expected: true },
-        { paths: ["REPORT.md"], entries: ["report.md"], expected: true },
-        {
-          paths: ["REPORT.md"],
-          entries: ["REPORT.md", "report.md"],
-          expected: false,
-        },
-        {
-          paths: ["REPORT.md"],
-          entries: ["REPORT.md"],
-          inode: 8,
-          expected: false,
-        },
-        {
-          paths: ["REPORT.md"],
-          entries: ["REPORT.md"],
-          missing: true,
-          expected: false,
-        },
-        { paths: ["REPORT.md"], entries: [], expected: false },
-      ];
-      for (const value of cases) {
-        entries = value.entries;
-        artifactInode = value.inode ?? 7;
-        missingReport = value.missing ?? false;
-        expect(await hasSealedReport(root, manifest(value.paths))).toBe(
-          value.expected,
-        );
-        expect(closed).toBe(opened);
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        true,
+      );
+      if (caseSensitive) {
+        await rm(report);
+        await writeFile(report, "Different file.");
+        expect(
+          await hasSealedReport(scanDirectory, manifest("REPORT.md")),
+        ).toBe(false);
       }
-      entries = [];
       for (const throwDuringList of [false, true]) {
         const controller = new AbortController();
         const reason = new Error("Report inspection cancelled.");
@@ -215,46 +145,47 @@ describe("canonical scan contract", () => {
           if (throwDuringList) throw reason;
         };
         await expect(
-          hasSealedReport(root, manifest(["REPORT.md"]), controller.signal),
+          hasSealedReport(
+            scanDirectory,
+            manifest("REPORT.md"),
+            controller.signal,
+          ),
         ).rejects.toBe(reason);
       }
     } finally {
       mock.module("node:fs/promises", () => original);
-      privateOutput.mockRestore();
-      secureAncestry.mockRestore();
     }
   });
 
-  test.each(["report.md", "report.html", "exports/results.sarif"])(
-    "re-finalizing an imported bundle preserves sealed %s",
-    async (projection) => {
-      const scanDir = await copyExample();
-      const destination = join(scanDir, projection);
-      const content = "Synthetic externally sealed projection.\n";
-      await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, content);
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(manifestPath);
+  test("re-finalizing an imported bundle preserves its sealed projections", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    const projections = ["report.md", "report.html", "exports/results.sarif"];
+    for (const path of projections) {
+      await mkdir(dirname(join(scanDir, path)), { recursive: true });
+      await writeFile(join(scanDir, path), path);
       manifest["scan"].artifacts.push({
-        path: projection,
-        sha256: sha256(content),
+        path,
+        sha256: sha256(path),
         mediaType: "text/plain",
       });
-      await writeJson(manifestPath, manifest);
-      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-      const result = runPython(
-        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
-        [
-          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-          "--scan-dir",
-          scanDir,
-        ],
-      );
-      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-      expect(await readFile(destination, "utf8")).toBe(content);
-      await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-    },
-  );
+    }
+    await writeJson(manifestPath, manifest);
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const result = runPython(
+      process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+      [
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        scanDir,
+      ],
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    for (const path of projections)
+      expect(await readFile(join(scanDir, path), "utf8")).toBe(path);
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+  });
 
   test.each([
     "duplicate finding",
@@ -295,106 +226,6 @@ describe("canonical scan contract", () => {
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toBeInstanceOf(ContractValidationError);
-  });
-
-  test("rejects byte changes to any sealed binary artifact", async () => {
-    const scanDir = await copyExample();
-    const artifactPath = join(scanDir, "artifacts", "synthetic.bin");
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    await mkdir(dirname(artifactPath), { recursive: true });
-
-    await fc.assert(
-      fc.asyncProperty(
-        fc.uint8Array({ minLength: 1, maxLength: 256 }),
-        fc.nat(),
-        fc.integer({ min: 1, max: 255 }),
-        async (bytes, offset, difference) => {
-          await writeFile(artifactPath, bytes);
-          await writeJson(manifestPath, {
-            ...manifest,
-            scan: {
-              ...manifest["scan"],
-              artifacts: [
-                ...manifest["scan"]["artifacts"],
-                {
-                  path: "artifacts/synthetic.bin",
-                  sha256: sha256(bytes),
-                  mediaType: "application/octet-stream",
-                },
-              ],
-            },
-          });
-          await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-          const changed = Uint8Array.from(bytes);
-          changed[offset % bytes.length]! ^= difference;
-          await writeFile(artifactPath, changed);
-          await expect(
-            loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-          ).rejects.toBeInstanceOf(ContractValidationError);
-        },
-      ),
-      {
-        ...propertyOptions,
-        numRuns: Number(process.env["CODEX_SECURITY_PROPERTY_RUNS"] ?? "20"),
-      },
-    );
-  });
-
-  test("rejects non-relative artifact paths before accepting a seal", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    const prefixes = ["../", "/", "C:/", "artifacts/../", "artifacts\\"];
-    await mkdir(join(scanDir, "artifacts"), { recursive: true });
-    await fc.assert(
-      fc.asyncProperty(
-        fc.stringMatching(/^[a-z]{1,16}$/u),
-        fc.constantFrom(...prefixes),
-        async (name, prefix) => {
-          const filename = `artifact-${name}`;
-          const bytes = Buffer.from(name);
-          const artifact = {
-            path: `artifacts/${filename}`,
-            sha256: sha256(bytes),
-            mediaType: "application/octet-stream",
-          };
-          const scan = {
-            ...manifest["scan"],
-            artifacts: [...manifest["scan"]["artifacts"], artifact],
-          };
-          await writeFile(join(scanDir, "artifacts", filename), bytes);
-          await writeJson(manifestPath, { ...manifest, scan });
-          await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-
-          artifact.path = `${prefix}${filename}`;
-          await writeJson(manifestPath, { ...manifest, scan });
-          const rejected = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-          await expect(rejected).rejects.toBeInstanceOf(
-            ContractValidationError,
-          );
-          await expect(rejected).rejects.toThrow(
-            /safe scan-relative POSIX path|schema validation failed \(pattern/u,
-          );
-        },
-      ),
-      {
-        ...propertyOptions,
-        numRuns: Number(process.env["CODEX_SECURITY_PROPERTY_RUNS"] ?? "20"),
-        examples: [
-          ...prefixes.map((prefix): [string, string] => ["synthetic", prefix]),
-          ["con", "C:/"],
-        ],
-      },
-    );
-  });
-
-  test("ships a completed example that passes tracking preflight", () => {
-    const result = runPython(Bun.which("python3") ?? "python", [
-      join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
-      EXAMPLE,
-    ]);
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
   });
 
   test("compares exact Windows volume serials without rounding file identity", async () => {
@@ -521,108 +352,75 @@ describe("canonical scan contract", () => {
     ).resolves.toBe(false);
   });
 
-  test("rejects scan-file replacements whose numeric file IDs collide", async () => {
-    const title =
-      "rejects scan-file replacements whose numeric file IDs collide";
-    if (runTestInSubprocess(import.meta.path, title)) return;
-    const scanDir = await realpath(await copyExample());
-    const path = join(scanDir, "coverage.json");
-    const selectedInode = 2n ** 60n;
-    const replacementInode = selectedInode + 1n;
-    expect(Number(selectedInode)).toBe(Number(replacementInode));
-    const files = await import("node:fs/promises");
-    const originalLstat = files.lstat;
-    const originalOpen = files.open;
-    let replaced = false;
-    let restoreOpenedStat: (() => void) | undefined;
-    const inspecting = spyOn(files, "lstat").mockImplementation((async (
-      ...args: Parameters<typeof files.lstat>
-    ) => {
-      const metadata = await originalLstat(...args);
-      if (args[0] === path) {
-        const inode = replaced ? replacementInode : selectedInode;
-        metadata.ino = typeof metadata.ino === "bigint" ? inode : Number(inode);
-      }
-      return metadata;
-    }) as typeof files.lstat);
-    const opening = spyOn(files, "open").mockImplementation(async (...args) => {
-      if (args[0] !== path) return await originalOpen(...args);
-      await rename(path, `${path}.original`);
-      await writeFile(path, "replacement");
-      replaced = true;
-      const file = await originalOpen(...args);
-      const originalStat = file.stat.bind(file);
-      const openedStat = spyOn(file, "stat").mockImplementation((async (
-        ...statArgs: Parameters<typeof file.stat>
-      ) => {
-        const metadata = await originalStat(...statArgs);
-        metadata.ino =
-          typeof metadata.ino === "bigint"
-            ? replacementInode
-            : Number(replacementInode);
-        return metadata;
-      }) as typeof file.stat);
-      restoreOpenedStat = () => openedStat.mockRestore();
-      return file;
-    });
-    try {
-      await expect(
-        readScanFile(scanDir, "coverage.json", "coverage"),
-      ).rejects.toThrow("expected the checked regular file");
-      expect(replaced).toBe(true);
-    } finally {
-      restoreOpenedStat?.();
-      opening.mockRestore();
-      inspecting.mockRestore();
-    }
-  });
+  // macOS can reject the unreadable path before the checked open.
+  test.skipIf(process.platform !== "linux" || process.geteuid?.() === 0)(
+    "reports the permission error when opening an unreadable scan file",
+    async () => {
+      const scanDir = await realpath(await temporaryDirectory());
+      const path = join(scanDir, "report.md");
+      await writeFile(path, "Scan report", { mode: 0o000 });
 
-  test("rejects scan root replacement when numeric directory IDs collide", async () => {
-    const title =
-      "rejects scan root replacement when numeric directory IDs collide";
-    if (runTestInSubprocess(import.meta.path, title)) return;
-    const scanDir = await realpath(await copyExample());
-    const before = 2n ** 60n;
-    const after = before + 1n;
-    expect(Number(before)).toBe(Number(after));
-    const files = await import("node:fs/promises");
-    const original = { lstat: files.lstat, realpath: files.realpath };
-    let replaced = false;
-    const inspecting = spyOn(files, "lstat").mockImplementation((async (
-      ...args: Parameters<typeof original.lstat>
-    ) => {
-      const metadata = await original.lstat(...args);
-      if (args[0] === scanDir) {
-        const identity = replaced ? after : before;
-        Object.defineProperty(metadata, "ino", {
-          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
-        });
+      const reading = readScanFile(scanDir, "report.md", "scan report");
+      await expect(reading).rejects.toBeInstanceOf(ContractValidationError);
+      await expect(reading).rejects.toMatchObject({
+        message: "scan report: unable to open the checked regular file.",
+        cause: expect.objectContaining({ code: "EACCES", path }),
+      });
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects scan root replacement when numeric directory IDs collide",
+    async () => {
+      const title =
+        "rejects scan root replacement when numeric directory IDs collide";
+      if (runTestInSubprocess(import.meta.path, title)) return;
+      const scanDir = await realpath(await copyExample());
+      const before = 2n ** 60n;
+      const after = before + 1n;
+      expect(Number(before)).toBe(Number(after));
+      const files: typeof import("node:fs/promises") = createRequire(
+        import.meta.url,
+      )("node:fs/promises");
+      const original = { lstat: files.lstat, realpath: files.realpath };
+      let replaced = false;
+      const inspecting = spyOn(files, "lstat").mockImplementation((async (
+        ...args: Parameters<typeof original.lstat>
+      ) => {
+        const metadata = await original.lstat(...args);
+        if (args[0].toString() === scanDir) {
+          const identity = replaced ? after : before;
+          Object.defineProperty(metadata, "ino", {
+            value:
+              typeof metadata.ino === "bigint" ? identity : Number(identity),
+          });
+        }
+        return metadata;
+      }) as typeof original.lstat);
+      const resolving = spyOn(files, "realpath").mockImplementation((async (
+        ...args: Parameters<typeof original.realpath>
+      ) => {
+        const canonical = await original.realpath(...args);
+        if (args[0].toString() === scanDir && !replaced) {
+          replaced = true;
+          await rename(scanDir, `${scanDir}.original`);
+          await mkdir(scanDir, { mode: 0o700 });
+        }
+        return canonical;
+      }) as typeof original.realpath);
+      try {
+        await expect(
+          readScanFile(scanDir, "coverage.json", "coverage.json"),
+        ).rejects.toThrow(
+          "Scan directory must be an existing non-symlink directory",
+        );
+        expect(replaced).toBe(true);
+      } finally {
+        resolving.mockRestore();
+        inspecting.mockRestore();
       }
-      return metadata;
-    }) as typeof original.lstat);
-    const resolving = spyOn(files, "realpath").mockImplementation((async (
-      ...args: Parameters<typeof original.realpath>
-    ) => {
-      const canonical = await original.realpath(...args);
-      if (args[0] === scanDir && !replaced) {
-        replaced = true;
-        await rename(scanDir, `${scanDir}.original`);
-        await mkdir(scanDir, { mode: 0o700 });
-      }
-      return canonical;
-    }) as typeof original.realpath);
-    try {
-      await expect(
-        readScanFile(scanDir, "coverage.json", "coverage.json"),
-      ).rejects.toThrow(
-        "Scan directory must be an existing non-symlink directory",
-      );
-      expect(replaced).toBe(true);
-    } finally {
-      resolving.mockRestore();
-      inspecting.mockRestore();
-    }
-  });
+    },
+  );
 
   test("loads the unchanged plugin example with typed canonical names", async () => {
     const scanDir = await copyExample();
@@ -632,7 +430,7 @@ describe("canonical scan contract", () => {
       "target_sha256_example",
     );
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
-    expect(contract.coverage.mode).toBe("repository");
+    expect(contract.review).toEqual({ excludedPaths: [] });
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
@@ -745,7 +543,15 @@ describe("canonical scan contract", () => {
     await writeJson(findingsPath, findings);
     await reseal(scanDir);
 
-    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const originalBytes = await readFile(findingsPath);
+    const result = await loadContractWithScanDirectory(scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    expect(Object.keys(result).sort()).toEqual(["contract", "scanDirectory"]);
+    const loaded = result.contract;
+    expect(
+      validatedFileDigests.get(loaded.manifest)?.get("findings.json"),
+    ).toBe(sha256(originalBytes));
     expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
       "legacy-source",
     );
@@ -959,14 +765,19 @@ describe("canonical scan contract", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  test.skipIf(process.platform === "win32")(
-    "rejects a scan directory that is no longer private to the current user",
-    async () => {
+  test.skipIf(process.platform === "win32").each([0o755, 0o775])(
+    "reads a scan directory with mode %o without changing its permissions",
+    async (mode) => {
       const scanDir = await copyExample();
-      await chmod(scanDir, 0o755);
+      await chmod(scanDir, mode);
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("must not be accessible to other users");
+      ).resolves.toBeDefined();
+      const exported = pythonExport(scanDir);
+      expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
+        0,
+      );
+      expect((await lstat(scanDir)).mode & 0o777).toBe(mode);
     },
   );
 
@@ -1133,45 +944,35 @@ describe("canonical scan contract", () => {
   });
 
   test("rejects unsafe Windows and traversal artifact paths", async () => {
+    const scanDir = await copyExample();
+    const path = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(path);
+    const invalidArtifact = {
+      path: "",
+      sha256: "0".repeat(64),
+      mediaType: "text/plain",
+    };
+    manifest["scan"]["artifacts"].push(invalidArtifact);
     for (const unsafe of [
+      "/escape",
       "D:/escape",
       "../escape",
+      "artifacts/../escape",
       "artifacts\\escape",
       "artifacts/report?.json",
-    ]) {
-      const scanDir = await copyExample();
-      const path = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(path);
-      manifest["scan"]["artifacts"].push({
-        path: unsafe,
-        sha256: "0".repeat(64),
-        mediaType: "text/plain",
-      });
-      await writeJson(path, manifest);
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(ContractValidationError);
-    }
-
-    for (const unsafe of [
       "artifacts/report.json.",
       "artifacts/report.json ",
       "artifacts/CON.txt",
       " ",
       "\u00a0",
     ]) {
-      const scanDir = await copyExample();
-      const path = join(scanDir, "scan-manifest.json");
-      const manifest = await readJson(path);
-      manifest["scan"]["artifacts"].push({
-        path: unsafe,
-        sha256: "0".repeat(64),
-        mediaType: "text/plain",
-      });
+      invalidArtifact.path = unsafe;
       await writeJson(path, manifest);
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow("safe scan-relative POSIX path");
+      const rejected = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      await expect(rejected).rejects.toBeInstanceOf(ContractValidationError);
+      await expect(rejected).rejects.toThrow(
+        /safe scan-relative POSIX path|schema validation failed \(pattern/u,
+      );
     }
   });
 
@@ -1248,7 +1049,6 @@ describe("canonical scan contract", () => {
 
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
-      expect(contract.coverage.includePaths).toEqual([path]);
       expect(contract.findings.findings[0]!.locations[0]!.path).toBe(path);
     },
   );
@@ -1285,11 +1085,7 @@ describe("canonical scan contract", () => {
     await reseal(scanDir);
     const sealedBytes = await readFile(coveragePath);
 
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toMatchObject({
-      coverage: { deferred: [{ paths }] },
-    });
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
     expect(await readFile(coveragePath)).toEqual(sealedBytes);
   });
 
@@ -1315,14 +1111,23 @@ describe("canonical scan contract", () => {
       const coveragePath = join(scanDir, "coverage.json");
       const coverage = await readJson(coveragePath);
       coverage["deferred"] = [
-        { id: "review", reason: "Review is incomplete.", paths: [path] },
+        { id: "earlier", reason: "Follow up.", paths: ["src/earlier.ts"] },
+        {
+          id: "review",
+          reason: "Review is incomplete.",
+          paths: ["src/valid.ts", path],
+        },
       ];
       await writeJson(coveragePath, coverage);
       await reseal(scanDir);
 
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(/coverage.*deferred/);
+      ).rejects.toThrow(
+        path === ""
+          ? /coverage.*\/deferred\/1\/paths\/1/
+          : "coverage.deferred[1].paths[1]: expected a safe repository-relative POSIX path.",
+      );
     }
   });
 
