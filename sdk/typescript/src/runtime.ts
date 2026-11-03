@@ -1670,24 +1670,30 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
   const signal = options.signal;
+  // Explicitly selected external plugins retain their own workbench protocol.
+  const nativeLocalDedupe =
+    args[0] === "local-dedupe" &&
+    (await sameFile(options.pluginRoot, await bundledPluginRoot()));
   const run = async (
     arguments_: readonly string[],
     input?: string,
     archiveHandshake = false,
   ): Promise<string> => {
-    const native = [
-      "database-info",
-      "store-findings",
-      "list-stored-findings",
-      "store-external-findings",
-      "list-external-findings",
-      "find-potential-duplicates",
-      "store-dedupe-groups",
-      "list-dedupe-groups",
-      "dashboard",
-      "severity-classification",
-      "read-severity-classification",
-    ].includes(arguments_[0] ?? "");
+    const native =
+      nativeLocalDedupe ||
+      [
+        "database-info",
+        "store-findings",
+        "list-stored-findings",
+        "store-external-findings",
+        "list-external-findings",
+        "find-potential-duplicates",
+        "store-dedupe-groups",
+        "list-dedupe-groups",
+        "dashboard",
+        "severity-classification",
+        "read-severity-classification",
+      ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
         ? await resolveTrustedExecutable("node", options.environment, [
@@ -1713,12 +1719,8 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // Workbench text fields can contain NUL or exceed OS command-line limits.
-    const framedArguments = !native;
-    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
-    if (framedArguments)
-      program =
-        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
+    // Validate one JSON document before framing its unchanged source as payload.
+    if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
     const result = await runCodexCommand(
       { command },
       native
@@ -1728,28 +1730,34 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(program === undefined ? [] : ["-c", program]),
+            "-c",
+            WORKBENCH_ARGUMENTS_PROGRAM +
+              (archiveHandshake
+                ? ARCHIVE_REGISTRATION_PROGRAM
+                : WORKBENCH_SCRIPT_PROGRAM),
             script,
-            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
-      native
-        ? JSON.stringify(
-            arguments_[0] === "database-info"
-              ? stateDirectory
-              : {
-                  stateDirectory,
-                  payload: input === undefined ? undefined : JSON.parse(input),
-                },
-          )
-        : input,
+      nativeLocalDedupe
+        ? `{"stateDirectory":${JSON.stringify(stateDirectory)},"payload":${input ?? "null"}}`
+        : native
+          ? JSON.stringify(
+              arguments_[0] === "database-info"
+                ? stateDirectory
+                : {
+                    stateDirectory,
+                    payload:
+                      input === undefined ? undefined : JSON.parse(input),
+                  },
+            )
+          : input,
       signal,
       archiveHandshake,
-      // Match native argv's UTF-8 encoding for the private argument frame.
-      framedArguments
-        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
-        : undefined,
+      // Frame Python arguments on stdin to preserve NUL and long diagnostics.
+      native
+        ? undefined
+        : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
     );
     if (!result.success) {
       throw new Error(
