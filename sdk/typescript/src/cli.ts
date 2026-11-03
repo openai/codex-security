@@ -3647,7 +3647,7 @@ export async function main(
     publication.command("findings", {
       description:
         "Preview and import a saved scanner report locally or to Cloud.",
-      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
