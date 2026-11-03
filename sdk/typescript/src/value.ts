@@ -25,6 +25,7 @@ export const findingEntry = <T extends { findingId: string }>(
 /** @internal Optional observers must not block or interrupt their operation. */
 export function notify(callback: () => unknown): void {
   try {
-    void Promise.resolve(callback()).catch(() => {});
+    const result = callback();
+    if (result !== undefined) void Promise.resolve(result).catch(() => {});
   } catch {}
 }

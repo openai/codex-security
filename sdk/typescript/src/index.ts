@@ -317,6 +317,8 @@ export type {
   ClassifySeverityRecordsResult,
   CanonicalSeverityAssessment,
   SeverityClassificationReviewRequest,
+  SeverityDiagnosticCode,
+  SeverityRecordDiagnosticCode,
 } from "./classify-severity-records.js";
 export { validateRecords } from "./validation-records.js";
 export type {
