@@ -269,7 +269,7 @@ export function registerCompactWorkerArtifactTools(
       name: "record_codex_security_scan_draft",
       title: "Record Codex Security Scan Draft",
       description:
-        "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in reviewState.deferred. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+        "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints or when source access or execution blocks the audit; record blockers and unvalidated candidates in reviewState.deferred. Use complete:true only after the source review finishes, including a review with no findings. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
         semanticFindingGuidance +
         reviewStateGuidance,
       inputSchema: scanDraftInputSchema,
