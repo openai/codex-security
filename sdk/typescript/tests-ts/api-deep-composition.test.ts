@@ -372,6 +372,20 @@ test.each([
       },
     };
     const replaySettings = {
+      features: {
+        code_mode: {
+          enabled: true,
+          direct_only_tool_namespaces: ["viewer"],
+          excluded_tool_namespaces: ["mcp__codex_security"],
+        },
+      },
+      mcp_servers: {
+        "codex.security": {
+          command: "synthetic-private-inspector",
+          enabled_tools: ["inspect"],
+          omit_tools_from: ["direct"],
+        },
+      },
       analytics: { enabled: false },
       developer_instructions: "synthetic-private-developer-instructions",
       shell_environment_policy: {
@@ -448,6 +462,7 @@ test.each([
       auth: { ...provider.auth, cwd: h.home },
     };
     expect(config).not.toHaveProperty("model_providers");
+    expect(config).not.toHaveProperty("mcp_servers");
     const providerProfile = (saved["recipe"] as JsonObject)["providerProfile"];
     const restored = await restoreProviderProfile(config, providerProfile, {
       CODEX_HOME: h.home,
@@ -1467,6 +1482,10 @@ test.each([false, true])(
     const output = followUp.threadOptions.workingDirectory!;
     expect(dirname(output)).toBe(join(h.outputDir, "artifacts/follow-up"));
     expect(effectiveCodexConfiguration(followUp.options)).toMatchObject({
+      mcp_servers: {
+        "codex-security": { command: "synthetic-workbench", enabled: true },
+        "synthetic.server": { command: "synthetic-command" },
+      },
       permissions: {
         codex_security_scan: {
           filesystem: {

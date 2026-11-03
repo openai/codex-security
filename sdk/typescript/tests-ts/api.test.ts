@@ -19209,6 +19209,7 @@ describe("incoming native runtime integration", () => {
                     env: { ...options.env, ...fake.environment },
                   });
                   return {
+                    resumeThread: codex.resumeThread.bind(codex),
                     startThread: (threadOptions: ThreadOptions) => {
                       const thread = codex.startThread(threadOptions);
                       return {

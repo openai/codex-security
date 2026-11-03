@@ -75,6 +75,7 @@ export function scanReplaySettings(config: JsonObject): JsonObject {
       "analytics",
       "developer_instructions",
       "shell_environment_policy",
+      "mcp_servers",
       "model_instructions_file",
       "experimental_compact_prompt_file",
       "model_catalog_json",
