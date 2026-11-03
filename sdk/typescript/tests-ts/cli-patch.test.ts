@@ -3468,6 +3468,8 @@ describe("scan and patch workflow", () => {
                 options?.encoding === "base64"
                   ? Buffer.from(value).toString("base64")
                   : value;
+              if (args.at(-1) === "core.sshCommand")
+                return runGitRepositoryCommand(command, args, target, options);
               if (args.includes("--show-toplevel")) return encoded(directory);
               if (
                 args[0] === "rev-parse" &&
@@ -3837,6 +3839,8 @@ describe("scan and patch workflow", () => {
                 options?.encoding === "base64"
                   ? Buffer.from(value).toString("base64")
                   : value;
+              if (args.at(-1) === "core.sshCommand")
+                return runGitRepositoryCommand(command, args, target, options);
               if (args.includes("--show-toplevel")) return encoded(repository);
               if (
                 args[0] === "rev-parse" &&
