@@ -170,18 +170,15 @@ export function listExternalFindings(
 ): { findings: StoredExternalFinding[] } {
   requireRepository(selection?.repository);
   if (selection.id !== undefined) requireText(selection.id, "id");
+  const selectByRepository =
+    "SELECT * FROM external_source_reports WHERE repository = ?";
   const rows =
     selection.id === undefined
       ? database
-          .prepare(
-            `SELECT * FROM external_source_reports
-             WHERE repository = ? ORDER BY created_at, id`,
-          )
+          .prepare(`${selectByRepository} ORDER BY created_at, id`)
           .all(selection.repository)
       : database
-          .prepare(
-            "SELECT * FROM external_source_reports WHERE repository = ? AND id = ?",
-          )
+          .prepare(`${selectByRepository} AND id = ?`)
           .all(selection.repository, selection.id);
   return { findings: rows.map(fromRow) };
 }

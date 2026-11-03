@@ -1,19 +1,20 @@
 import { execFileSync } from "node:child_process";
+import { resolveCodexProfile } from "../src/config.js";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   chmod,
   cp,
   mkdir,
   readFile,
-  rename,
   rm,
   stat,
   symlink,
   writeFile,
-  type FileHandle,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { ScanReadFile } from "../../../plugins/codex-security/native/scan-read-binding.mjs";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanSessionEvent } from "../src/cost.js";
@@ -24,12 +25,12 @@ import {
   runCustomValidation,
   type CustomValidationResult,
 } from "../src/custom-validation.js";
-import { readScanFile } from "../src/contract.js";
 import {
   customDiscoveryPrompt,
   customValidationConfig,
 } from "../src/custom-validation-prompt.js";
 import {
+  ContractValidationError,
   DiffTarget,
   type CoverageDocument,
   type FindingsDocument,
@@ -45,6 +46,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { scanReadBinding } from "./support/scan-read-binding.js";
 import { readReviewState } from "./support/review-state.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -212,207 +214,103 @@ async function* responseEvents(
 
 describe("custom validation", () => {
   test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
-    "rejects %s replacement before opening the provisional document",
+    "rejects %s replaced by a directory before opening the provisional document",
     async (name) => {
-      const title = `rejects ${name} replacement before opening the provisional document`;
+      const title = `rejects ${name} replaced by a directory before opening the provisional document`;
       if (runTestInSubprocess(import.meta.path, title)) return;
       const f = await fixture();
       const path = join(f.scanDir, name);
-      const files = await import("node:fs/promises");
-      const original = files.realpath;
+      const native = scanReadBinding();
+      const original = native.openScanReadRoot;
       let replaced = false;
-      const resolving = spyOn(files, "realpath").mockImplementation((async (
-        ...args: Parameters<typeof original>
-      ) => {
-        const canonical = await original(...args);
-        if (args[0] === path && !replaced) {
-          replaced = true;
-          await rename(path, `${path}.original`);
-          await writeFile(path, await readFile(`${path}.original`));
-        }
-        return canonical;
-      }) as typeof original);
+      const opening = spyOn(native, "openScanReadRoot").mockImplementation(
+        (...args) => {
+          const root = original(...args);
+          const open = root.openFile.bind(root);
+          spyOn(root, "openFile").mockImplementation((relativePath) => {
+            if (relativePath === name && !replaced) {
+              renameSync(path, `${path}.original`);
+              mkdirSync(path);
+              replaced = true;
+            }
+            return open(relativePath);
+          });
+          return root;
+        },
+      );
       const run = mock(async () => JSON.stringify(result("reportable")));
       try {
-        await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
-          "expected the checked regular file",
+        const pending = runCustomValidation({ ...f, run });
+        await expect(pending).rejects.toBeInstanceOf(ContractValidationError);
+        await expect(pending).rejects.toThrow(
+          name === "coverage.json" ? "legacy review state" : name,
         );
+        await expect(pending).rejects.toThrow(/regular.*file/i);
         expect(replaced).toBe(true);
         expect(run).not.toHaveBeenCalled();
       } finally {
-        resolving.mockRestore();
-      }
-    },
-  );
-
-  test.each(["unchanged", "replaced"])(
-    "compares exact provisional file identity when numeric IDs collide: %s",
-    async (state) => {
-      const title = `compares exact provisional file identity when numeric IDs collide: ${state}`;
-      if (runTestInSubprocess(import.meta.path, title)) return;
-      const f = await fixture();
-      const path = join(f.scanDir, "coverage.json");
-      const before = 2n ** 60n;
-      const after = before + 1n;
-      expect(Number(before)).toBe(Number(after));
-      const files = await import("node:fs/promises");
-      const original = {
-        lstat: files.lstat,
-        open: files.open,
-        realpath: files.realpath,
-      };
-      let replaced = false;
-      const inspecting = spyOn(files, "lstat").mockImplementation((async (
-        ...args: Parameters<typeof original.lstat>
-      ) => {
-        const metadata = await original.lstat(...args);
-        if (args[0] === path) {
-          const identity = replaced ? after : before;
-          Object.defineProperty(metadata, "ino", {
-            value:
-              typeof metadata.ino === "bigint" ? identity : Number(identity),
-          });
-        }
-        return metadata;
-      }) as typeof original.lstat);
-      const opening = spyOn(files, "open").mockImplementation(
-        async (...args) => {
-          const file = await original.open(...args);
-          if (args[0] === path) {
-            const identity = replaced ? after : before;
-            const stat = file.stat.bind(file);
-            spyOn(file, "stat").mockImplementation((async (
-              ...options: Parameters<typeof stat>
-            ) => {
-              const metadata = await stat(...options);
-              Object.defineProperty(metadata, "ino", {
-                value:
-                  typeof metadata.ino === "bigint"
-                    ? identity
-                    : Number(identity),
-              });
-              return metadata;
-            }) as typeof stat);
-          }
-          return file;
-        },
-      );
-      const resolving = spyOn(files, "realpath").mockImplementation((async (
-        ...args: Parameters<typeof original.realpath>
-      ) => {
-        const canonical = await original.realpath(...args);
-        if (args[0] === path && state === "replaced" && !replaced) {
-          await rename(path, `${path}.original`);
-          await writeFile(path, await readFile(`${path}.original`));
-          replaced = true;
-        }
-        return canonical;
-      }) as typeof original.realpath);
-      const run = mock(async () => JSON.stringify(result("reportable")));
-      try {
-        if (state === "replaced") {
-          await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
-            "expected the checked regular file",
-          );
-          expect(replaced).toBe(true);
-          expect(run).not.toHaveBeenCalled();
-        } else {
-          await runCustomValidation({ ...f, run });
-          expect(run).toHaveBeenCalledTimes(1);
-        }
-      } finally {
-        resolving.mockRestore();
         opening.mockRestore();
-        inspecting.mockRestore();
       }
     },
   );
 
   test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
-    "reads the checked %s descriptor after pathname replacement",
+    "reads and closes held %s after a pathname replacement attempt",
     async (name) => {
-      const title = `reads the checked ${name} descriptor after pathname replacement`;
+      const title = `reads and closes held ${name} after a pathname replacement attempt`;
       if (runTestInSubprocess(import.meta.path, title)) return;
       const f = await fixture();
       const path = join(f.scanDir, name);
-      const files = await import("node:fs/promises");
-      const original = files.open;
-      let checked: FileHandle | undefined;
-      const opening = spyOn(files, "open").mockImplementation(
-        async (...args) => {
-          const file = await original(...args);
-          if (args[0] === path) {
-            const read = file.readFile.bind(file);
-            spyOn(file, "readFile").mockImplementation((async (
-              ...args: Parameters<typeof read>
-            ) => {
+      const native = scanReadBinding();
+      const original = native.openScanReadRoot;
+      let checked: ScanReadFile | undefined;
+      let attempted = false;
+      const originalBytes = await readFile(path);
+      const chunks: Buffer[] = [];
+      const opening = spyOn(native, "openScanReadRoot").mockImplementation(
+        (...args) => {
+          const root = original(...args);
+          const open = root.openFile.bind(root);
+          spyOn(root, "openFile").mockImplementation((relativePath) => {
+            const file = open(relativePath);
+            if (relativePath === name && file !== null) {
               checked = file;
-              await rename(path, `${path}.original`);
-              await writeFile(path, "not JSON");
-              return read(...args);
-            }) as typeof read);
-          }
-          return file;
+              const read = file.read.bind(file);
+              spyOn(file, "read").mockImplementation((size) => {
+                if (!attempted) {
+                  attempted = true;
+                  if (process.platform === "win32") {
+                    expect(() =>
+                      renameSync(path, `${path}.original`),
+                    ).toThrow();
+                  } else {
+                    renameSync(path, `${path}.original`);
+                    writeFileSync(path, "not JSON");
+                  }
+                }
+                const chunk = read(size);
+                chunks.push(chunk);
+                return chunk;
+              });
+            }
+            return file;
+          });
+          return root;
         },
       );
       const run = mock(async () => JSON.stringify(result("reportable")));
       try {
         await runCustomValidation({ ...f, run });
         expect(run).toHaveBeenCalledTimes(1);
+        expect(attempted).toBe(true);
+        expect(Buffer.concat(chunks)).toEqual(originalBytes);
         expect(checked).toBeDefined();
-        expect(checked!.fd).toBe(-1);
+        expect(() => checked!.read(1)).toThrow("Scan file is closed");
       } finally {
         opening.mockRestore();
       }
     },
   );
-
-  test("rejects scan root replacement when numeric directory IDs collide", async () => {
-    const title =
-      "rejects scan root replacement when numeric directory IDs collide";
-    if (runTestInSubprocess(import.meta.path, title)) return;
-    const f = await fixture();
-    const before = 2n ** 60n;
-    const after = before + 1n;
-    expect(Number(before)).toBe(Number(after));
-    const files = await import("node:fs/promises");
-    const original = { lstat: files.lstat, realpath: files.realpath };
-    let replaced = false;
-    const inspecting = spyOn(files, "lstat").mockImplementation((async (
-      ...args: Parameters<typeof original.lstat>
-    ) => {
-      const metadata = await original.lstat(...args);
-      if (args[0] === f.scanDir) {
-        const identity = replaced ? after : before;
-        Object.defineProperty(metadata, "ino", {
-          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
-        });
-      }
-      return metadata;
-    }) as typeof original.lstat);
-    const resolving = spyOn(files, "realpath").mockImplementation((async (
-      ...args: Parameters<typeof original.realpath>
-    ) => {
-      const canonical = await original.realpath(...args);
-      if (args[0] === f.scanDir && !replaced) {
-        replaced = true;
-        await rename(f.scanDir, `${f.scanDir}.original`);
-        await mkdir(f.scanDir, { mode: 0o700 });
-      }
-      return canonical;
-    }) as typeof original.realpath);
-    try {
-      await expect(
-        readScanFile(f.scanDir, "coverage.json", "coverage.json"),
-      ).rejects.toThrow(
-        "Scan directory must be an existing non-symlink directory",
-      );
-      expect(replaced).toBe(true);
-    } finally {
-      resolving.mockRestore();
-      inspecting.mockRestore();
-    }
-  });
 
   test.each(["malformed", "directory"])(
     "rejects a %s provisional document before invoking validation",
@@ -425,9 +323,14 @@ describe("custom validation", () => {
         await mkdir(path);
       }
       const run = mock(async () => JSON.stringify(result("reportable")));
-      await expect(runCustomValidation({ ...f, run })).rejects.toThrow(
-        kind === "malformed" ? /JSON/ : /regular non-symlink file/,
-      );
+      const pending = runCustomValidation({ ...f, run });
+      if (kind === "malformed") {
+        await expect(pending).rejects.toThrow(/JSON/);
+      } else {
+        await expect(pending).rejects.toBeInstanceOf(ContractValidationError);
+        await expect(pending).rejects.toThrow("findings.json");
+        await expect(pending).rejects.toThrow(/regular.*file/i);
+      }
       expect(run).not.toHaveBeenCalled();
     },
   );
@@ -445,7 +348,10 @@ describe("custom validation", () => {
         ...args: Parameters<typeof original>
       ) => {
         const metadata = await original(...args);
-        if (args[0] === f.scanDir)
+        if (
+          args[0] === f.scanDir ||
+          (Buffer.isBuffer(args[0]) && args[0].equals(Buffer.from(f.scanDir)))
+        )
           Object.defineProperty(metadata, "uid", {
             value: process.geteuid!() + 1,
           });
@@ -1406,50 +1312,61 @@ describe("custom validation", () => {
     ).rejects.toThrow("incompatible");
   });
 
-  test("the bundled Codex honors the invocation-only completion restriction", async () => {
-    const home = await temporaryDirectory();
-    const marketplace = await createMarketplace(home, PLUGIN_ROOT);
-    const command = resolveCodexCommand({}).command;
-    const run = (args: string[]) =>
-      execFileSync(command, args, {
-        env: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          TEMP: process.env["TEMP"],
-          TMP: process.env["TMP"],
-          CODEX_HOME: home,
-        },
-        encoding: "utf8",
-        windowsHide: true,
-      });
-    run(["plugin", "marketplace", "add", marketplace]);
-    run(["plugin", "add", "--json", "codex-security@codex-security-sdk"]);
-    const config = await customValidationConfig(
-      {
+  for (const profiled of [false, true]) {
+    test(`the bundled Codex honors the invocation-only completion restriction with inline profile: ${profiled}`, async () => {
+      const home = await temporaryDirectory();
+      const marketplace = await createMarketplace(home, PLUGIN_ROOT);
+      const command = resolveCodexCommand({}).command;
+      const run = (args: string[]) =>
+        execFileSync(command, args, {
+          env: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            TEMP: process.env["TEMP"],
+            TMP: process.env["TMP"],
+            CODEX_HOME: home,
+          },
+          encoding: "utf8",
+          windowsHide: true,
+        });
+      run(["plugin", "marketplace", "add", marketplace]);
+      run(["plugin", "add", "--json", "codex-security@codex-security-sdk"]);
+      const settings = {
         mcp_servers: {
           "codex-security": { disabled_tools: ["user_disabled_tool"] },
         },
-      },
-      PLUGIN_ROOT,
-    );
-    const server = (config["mcp_servers"] as Record<string, unknown>)[
-      "codex-security"
-    ] as Record<string, unknown>;
-    const overrides = Object.entries(server).flatMap(([key, value]) => [
-      "-c",
-      `mcp_servers.codex-security.${key}=${JSON.stringify(value)}`,
-    ]);
-    const effective = JSON.parse(
-      run([...overrides, "mcp", "get", "codex-security", "--json"]),
-    );
-    expect(effective.disabled_tools).toContain("complete_codex_security_scan");
-    expect(effective.disabled_tools).toContain("user_disabled_tool");
-    expect(effective.transport.cwd).toBe(resolve(PLUGIN_ROOT));
-    const ordinary = JSON.parse(
-      run(["mcp", "get", "codex-security", "--json"]),
-    );
-    expect(ordinary.disabled_tools).toBeNull();
-  });
+      };
+      const config = resolveCodexProfile(
+        await customValidationConfig(
+          profiled
+            ? { profile: "review", profiles: { review: settings } }
+            : settings,
+          PLUGIN_ROOT,
+        ),
+      );
+      const server = (config["mcp_servers"] as Record<string, unknown>)[
+        "codex-security"
+      ] as Record<string, unknown>;
+      const overrides = Object.entries(server).flatMap(([key, value]) => [
+        "-c",
+        `mcp_servers.codex-security.${key}=${JSON.stringify(value)}`,
+      ]);
+      const effective = JSON.parse(
+        run([...overrides, "mcp", "get", "codex-security", "--json"]),
+      );
+      expect(effective.disabled_tools).toContain(
+        "complete_codex_security_scan",
+      );
+      expect(effective.disabled_tools).toContain("user_disabled_tool");
+      expect(config).not.toHaveProperty("profile");
+      expect(config).not.toHaveProperty("profiles");
+      expect(effective.transport.cwd).toBe(resolve(PLUGIN_ROOT));
+      const ordinary = JSON.parse(
+        run(["mcp", "get", "codex-security", "--json"]),
+      );
+      expect(ordinary.disabled_tools).toBeNull();
+    });
+  }
 });
 
 const unexpectedValidation = rejecting("unexpected validation");

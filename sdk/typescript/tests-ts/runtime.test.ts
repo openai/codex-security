@@ -97,6 +97,7 @@ import {
   workbenchEnvironment,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  windowsCredentialAncestorAclScript,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -3929,12 +3930,13 @@ describe("runtime directories and plugin Python boundary", () => {
   test.each(["parent", "volume root"] as const)(
     "identifies an Everyone-owned %s in streamed Windows ACL descriptors",
     async (location) => {
-      const { home } = await credentialHome(false);
+      const home = String.raw`C:\parent\home`;
       const sid = "S-1-5-21-111-222-333-1001";
       const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-      const ancestors = credentialAncestors(home, directory);
-      const rejected = location === "parent" ? dirname(home) : parse(home).root;
-      ancestors[location === "parent" ? 0 : ancestors.length - 1] =
+      const ancestors = [directory, directory];
+      const rejected =
+        location === "parent" ? win32.dirname(home) : win32.parse(home).root;
+      ancestors[location === "parent" ? 1 : 0] =
         `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
 
       const failure = await inspectWindowsCredentialAclSnapshot(home, sid, {
@@ -3971,6 +3973,106 @@ describe("runtime directories and plugin Python boundary", () => {
       }
     },
   );
+
+  test.each([
+    "C:\\",
+    "\\\\?\\C:\\",
+    "\\\\server\\share",
+    "\\\\server\\share\\",
+    "\\\\?\\UNC\\server\\share",
+    "\\\\?\\UNC\\server\\share\\",
+  ])("rejects Windows volume root %s as a credential home", async (root) => {
+    const sid = "S-1-5-21-111-222-333-1001";
+    const privateDirectory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const readableRoot = `${privateDirectory}(A;OICI;FR;;;WD)`;
+    const output = windowsCredentialAclOutput([readableRoot, privateDirectory]);
+    const resolveDescriptorAliases = mock(async () => {});
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(root, sid, {
+        command: process.execPath,
+        args: ["--eval", `process.stdout.write(${JSON.stringify(output)})`],
+        resolveDescriptorAliases,
+      }),
+    ).rejects.toThrow("must be below a volume or share root");
+    expect(resolveDescriptorAliases).not.toHaveBeenCalled();
+  });
+
+  test.each(["share", "parent"] as const)(
+    "identifies the unsafe %s above an extended UNC credential home",
+    async (location) => {
+      const share = String.raw`\\?\UNC\server\share`;
+      const parent = `${share}\\parent`;
+      const sid = "S-1-5-21-111-222-333-1001";
+      const safe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const unsafe = `${safe}(A;OICI;FA;;;WD)`;
+      const output = windowsCredentialAclOutput([
+        location === "share" ? unsafe : safe,
+        location === "parent" ? unsafe : safe,
+        safe,
+      ]);
+
+      const snapshot = inspectWindowsCredentialAclSnapshot(
+        `${parent}\\home`,
+        sid,
+        {
+          command: process.execPath,
+          args: ["--eval", `process.stdout.write(${JSON.stringify(output)})`],
+        },
+      );
+      await expect(snapshot).rejects.toThrow(
+        `ancestor could not be trusted: ${location === "share" ? share : parent}.`,
+      );
+      if (location === "share") {
+        await expect(snapshot).rejects.toThrow(
+          "Choose a location outside this share",
+        );
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "enumerates Windows ACL ancestors from the extended UNC share to the parent",
+    () => {
+      const share = String.raw`\\?\UNC\localhost\codex-security-test`;
+      const parent = `${share}\\parent`;
+      const home = `${parent}\\home`;
+      const result = inspectWindowsTestAcl(
+        [
+          "function Write-CredentialAcl([string]$path) { $path }",
+          windowsCredentialAncestorAclScript(home),
+        ],
+        { ...process.env, CODEX_SECURITY_CREDENTIAL_ACL_PATH: home },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trimEnd().split(/\r?\n/u)).toEqual([share, parent]);
+    },
+  );
+
+  test("names the outermost Windows ancestor that allows replacement", async () => {
+    const { home } = await credentialHome(false);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const sandbox = "S-1-5-21-444-555-666-1002";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors = credentialAncestors(home, directory);
+    ancestors[ancestors.length - 1] =
+      `O:${sid}G:SYD:AI(A;OICIID;0x1301bf;;;${sandbox})(A;OICIID;FA;;;${sid})`;
+    ancestors[ancestors.length - 2] =
+      `O:${sid}G:SYD:(A;OICI;0x1301bf;;;${sandbox})(A;OICI;FA;;;${sid})`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
+        ],
+      }),
+    ).rejects.toThrow(
+      `ancestor could not be trusted: ${dirname(dirname(home))}.`,
+    );
+  });
 
   test("rejects incomplete combined Windows credential ACL inspections", async () => {
     const { home } = await credentialHome(false);
@@ -4590,7 +4692,9 @@ describe("runtime directories and plugin Python boundary", () => {
     );
     const home = join(ancestor, "codex-home");
     const sid = "S-1-5-21-111-222-333-1001";
-    const descriptor = `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors = credentialAncestors(home, directory);
+    ancestors[ancestors.length - 1] = `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
     const failure = await requirePrivateCredentialHome(
       await lstat(root),
       home,
@@ -4601,7 +4705,7 @@ describe("runtime directories and plugin Python boundary", () => {
             command: process.execPath,
             args: [
               "--eval",
-              `process.stdout.write(${JSON.stringify(`${descriptor}\n`)})`,
+              `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
             ],
           });
         },
@@ -5032,7 +5136,7 @@ describe("runtime directories and plugin Python boundary", () => {
           CODEX_SECURITY_STATE_DIR: state,
         }),
       ).rejects.toThrow(
-        "Windows credential-home ancestor allows another identity to replace the directory",
+        `ancestor could not be trusted: ${root}. Windows credential-home ancestor allows another identity to replace the directory`,
       );
 
       for (const ancestor of [root, state]) {
