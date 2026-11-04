@@ -61,55 +61,88 @@ Apply each fix alone. If a claimed defect in the other report survives, quote th
 
 type Pair = { id: number; left: number; right: number };
 function claim({
+  ruleId,
+  identity,
   title,
   summary,
   rootCause,
   remediation,
   locations,
   codeEvidence,
+  attackPath,
+  validation,
 }: Record<string, unknown>) {
-  return { title, summary, rootCause, remediation, locations, codeEvidence };
+  return {
+    ruleId,
+    identity,
+    title,
+    summary,
+    rootCause,
+    remediation,
+    locations,
+    codeEvidence,
+    attackPath,
+    validation,
+  };
+}
+
+type Claim = ReturnType<typeof claim>;
+
+function uniqueClaims(sources: Record<string, unknown>[]): Claim[] {
+  const seen = new Set<string>();
+  return sources.map(claim).filter((source) => {
+    const key = JSON.stringify(source);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// An answer must identify each confirmed item exactly once. Conflicting answers
+// and missing rows are both inconclusive.
+function singleAnswers<T>(answers: T[], key: keyof T) {
+  const result = new Map<T[keyof T], T | undefined>();
+  for (const answer of answers) {
+    const id = answer[key];
+    result.set(id, result.has(id) ? undefined : answer);
+  }
+  return result;
 }
 
 async function confirmSources(
   pairs: Pair[],
-  originals: Map<number, Record<string, unknown>[]>,
+  originals: Map<number, Claim[]>,
   compare: CompareReports,
 ) {
-  const cases = pairs.flatMap((pair) =>
-    originals
-      .get(pair.right)!
-      .flatMap((a) =>
-        originals
-          .get(pair.left)!
-          .map((b) => ({ pair, A: claim(a), B: claim(b) })),
-      ),
-  );
   const rejected = new Set<number>();
-  // Grade small independent pairs. A grouped report can carry many original claims.
-  for (let start = 0; start < cases.length; start += 4) {
-    const batch = cases
-      .slice(start, start + 4)
-      .filter(({ pair }) => !rejected.has(pair.id));
-    if (!batch.length) continue;
+  const batch: { pair: Pair; A: Claim; B: Claim }[] = [];
+  async function gradeBatch() {
     const rows = batch.map(({ A, B }, id) => ({ id, A, B }));
     const { sources } = JSON.parse(
       await compare(
         sourceInstructions + "\n" + JSON.stringify(rows),
         sourceSchema,
       ),
-    );
-    const same = new Set(
-      sources
-        .filter(
-          (s: { same: boolean; survivingPaths: string[] }) =>
-            s.same && !s.survivingPaths.length,
-        )
-        .map((s: { id: number }) => s.id),
-    );
-    for (const [id, { pair }] of batch.entries())
-      if (!same.has(id)) rejected.add(pair.id);
+    ) as { sources: { id: number; same: boolean; survivingPaths: string[] }[] };
+    const answers = singleAnswers(sources, "id");
+    for (const [id, { pair }] of batch.entries()) {
+      const answer = answers.get(id);
+      if (answer?.same !== true || answer.survivingPaths.length)
+        rejected.add(pair.id);
+    }
+    batch.length = 0;
   }
+  // Stream the cross product, so one rejected claim ends work on that pair.
+  for (const pair of pairs) {
+    nextPair: for (const A of originals.get(pair.right)!) {
+      for (const B of originals.get(pair.left)!) {
+        if (rejected.has(pair.id)) break nextPair;
+        batch.push({ pair, A, B });
+        if (batch.length === 4) await gradeBatch();
+      }
+    }
+  }
+  if (batch.length) await gradeBatch();
   return pairs.filter(({ id }) => !rejected.has(id));
 }
 
@@ -169,24 +202,25 @@ export async function checkSameFix(
     }
   }
   const matches = new Map<number, Set<number>>();
+  if (!batches.size) return matches;
+  const claims = new Map(
+    [...originals].map(([id, sources]) => [id, uniqueClaims(sources)]),
+  );
   const results = await Promise.allSettled(
     [...batches.values()].map(async (pairs) => {
       const reports = [
         ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
       ].map((id) => {
-        const [first, ...rest] = originals.get(id)!;
-        const { title, summary, rootCause, remediation } = first!;
+        const [first, ...rest] = claims.get(id)!;
+        const { codeEvidence: _codeEvidence, ...primary } = first!;
         return {
           id,
           primary: {
-            title,
-            summary,
-            rootCause,
-            remediation,
+            ...primary,
             locations: records[id]!.locations,
             evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
           },
-          attached: rest.map(claim),
+          attached: rest,
         };
       });
       const { reviews } = JSON.parse(
@@ -195,17 +229,27 @@ export async function checkSameFix(
           schema,
         ),
       );
-      const proposed: Pair[] = [];
-      for (const { pair, decision, leftEvidence, rightEvidence } of reviews) {
-        if (decision !== "same" || !pairs[pair]) continue;
-        const { left, right } = pairs[pair]!;
-        const path = evidence[left]![leftEvidence]?.path;
-        if (!path || path !== evidence[right]![rightEvidence]?.path) continue;
-        proposed.push(pairs[pair]!);
-      }
+      const answers = singleAnswers(
+        reviews as {
+          pair: number;
+          decision: string;
+          leftEvidence: number;
+          rightEvidence: number;
+        }[],
+        "pair",
+      );
+      const proposed = pairs.filter(({ id, left, right }) => {
+        const answer = answers.get(id);
+        if (answer?.decision !== "same") return false;
+        const path = evidence[left]![answer.leftEvidence]?.path;
+        return (
+          path !== undefined &&
+          path === evidence[right]![answer.rightEvidence]?.path
+        );
+      });
       for (const { left, right } of await confirmSources(
         proposed,
-        originals,
+        claims,
         compare,
       )) {
         const earlier = matches.get(right) ?? new Set<number>();
