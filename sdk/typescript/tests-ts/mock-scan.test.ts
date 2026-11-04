@@ -344,35 +344,46 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
   }
 });
 
-test("aborting mock generation leaves a terminal scan record", async () => {
-  const { client, repository, environment, python } = await fixture();
-  const controller = new AbortController();
-  const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
-  try {
-    await expect(
-      client.run(repository, {
-        mock: true,
-        signal: controller.signal,
-        onLifecycle,
-        onScanStarted: () => controller.abort(),
-      }),
-    ).rejects.toThrow(ScanInterruptedError);
-    const history = await runWorkbench(
-      { python, pluginRoot: PLUGIN_ROOT, environment },
-      ["list-scans", "--repository", repository],
-    );
-    expect(history["scans"]).toMatchObject([
-      { progress: { status: "failed" } },
-    ]);
-    const [saved] = history["scans"] as JsonObject[];
-    expect(onLifecycle.mock.calls.map(([snapshot]) => snapshot.status)).toEqual(
-      ["running", "failed"],
-    );
-    expect(saved?.["lifecycle"]).toEqual(onLifecycle.mock.lastCall?.[0]);
-  } finally {
-    await client.close();
-  }
-});
+test.each(["abort", "close", "timeout"] as const)(
+  "stopping mock generation via %s records its terminal outcome",
+  async (stop) => {
+    const { client, repository, environment, python } = await fixture();
+    const controller = new AbortController();
+    const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+    try {
+      await expect(
+        client.run(repository, {
+          mock: true,
+          signal: controller.signal,
+          onLifecycle,
+          onScanStarted: () => {
+            if (stop === "close") void client.close();
+            else if (stop === "timeout")
+              controller.abort(new DOMException("deadline", "TimeoutError"));
+            else controller.abort();
+          },
+        }),
+      ).rejects.toThrow(
+        stop === "close" ? "CodexSecurity is closed" : ScanInterruptedError,
+      );
+      const terminal = stop === "timeout" ? "failed" : "canceled";
+      const history = await runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        ["list-scans", "--repository", repository],
+      );
+      expect(history["scans"]).toMatchObject([
+        { progress: { status: terminal } },
+      ]);
+      const [saved] = history["scans"] as JsonObject[];
+      expect(
+        onLifecycle.mock.calls.map(([snapshot]) => snapshot.status),
+      ).toEqual(["running", terminal]);
+      expect(saved?.["lifecycle"]).toEqual(onLifecycle.mock.lastCall?.[0]);
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test("reports committed completion after the workbench response is lost", async () => {
   const { client, repository } = await fixture(async (options, args, input) => {

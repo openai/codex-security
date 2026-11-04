@@ -267,8 +267,11 @@ export function dependencies(
       }
       return result;
     },
-    preflight: async (repository: string) =>
-      options.preflight ?? fakePreflight(repository),
+    preflight: async (repository: string, { maxCostUsd }: ScanOptions = {}) =>
+      options.preflight ?? {
+        ...fakePreflight(repository),
+        ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+      },
     validate: async (validationOptions: ValidationOptions) =>
       options.onValidate?.(validationOptions) ?? {
         disposition: "deferred",
