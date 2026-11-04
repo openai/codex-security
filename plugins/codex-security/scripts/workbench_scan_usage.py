@@ -119,6 +119,7 @@ def collect_scan_usage(
             roots,
             warnings,
             worker_directories=worker_directories,
+            scan_directory=Path(scan["scan_dir"]) if worker_directories else None,
             started_at=started_at,
             completed_at=stopped_at,
         )
@@ -348,6 +349,7 @@ def _discover_rollout_sessions(
     warnings: set[str],
     *,
     worker_directories: dict[str, bool],
+    scan_directory: Path | None = None,
     started_at: datetime,
     completed_at: datetime | None,
 ) -> tuple[list[RolloutSession], set[str]]:
@@ -366,6 +368,9 @@ def _discover_rollout_sessions(
             columns = {str(row["name"]) for row in database.execute(f"PRAGMA table_info({table})")}
             if not required.issubset(columns):
                 raise ValueError("Codex state graph does not expose the required thread columns.")
+            if table == "threads" and worker_directories and not {"cwd", "created_at"} <= columns:
+                worker_directories = {}
+                warnings.add("worker_directories_unavailable")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
         root_ids: dict[str, str | None] = dict.fromkeys(roots)
@@ -383,8 +388,40 @@ def _discover_rollout_sessions(
                 _normalized_windows_path(path): required
                 for path, required in worker_directories.items()
             }
+            if scan_directory is not None:
+                scan_directory = Path(_normalized_windows_path(scan_directory))
         unmatched = {path for path, required in worker_directories.items() if required}
-        for directory in sorted(worker_directories):
+        directory_sources = {path: {path} for path in worker_directories}
+        if worker_directories and scan_directory and ".previous-" in scan_directory.name:
+            # Archived files move, but session working directories describe where execution ran.
+            # Confirm the original output with an already-bound session before including peers.
+            bound_directories = {
+                Path(row[0])
+                for row in database.execute(
+                    f"SELECT DISTINCT {directory_expression} FROM threads WHERE cwd IS NOT NULL "
+                    "AND id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(roots),),
+                )
+            }
+            relatives = {
+                Path(path).relative_to(scan_directory): path
+                for path in worker_directories
+                if Path(path).is_relative_to(scan_directory)
+            }
+            for marker in re.finditer(r"\.previous-", scan_directory.name):
+                if marker.start() == 0:
+                    continue
+                original = scan_directory.with_name(scan_directory.name[: marker.start()])
+                candidates = {original / relative: path for relative, path in relatives.items()}
+                # Older archives kept absolute discovery paths in their original directory.
+                if (
+                    original in bound_directories
+                    or candidates.keys() & bound_directories
+                    or any(Path(path).is_relative_to(original) for path in worker_directories)
+                ):
+                    for candidate, path in candidates.items():
+                        directory_sources.setdefault(str(candidate), set()).add(path)
+        for directory in sorted(directory_sources):
             for row in database.execute(
                 "SELECT id FROM threads WHERE cwd IS NOT NULL "
                 f"AND {directory_expression} = ? AND created_at >= ? "
@@ -420,11 +457,15 @@ def _discover_rollout_sessions(
                     and isinstance(payload := metadata.get("payload"), dict)
                     and (payload.get("id") or payload.get("session_id")) == root
                     and (created_at := _timestamp(payload.get("timestamp"))) is not None
-                    and created_at < started_millisecond
+                    and (
+                        created_at < started_millisecond
+                        or completed_at is not None
+                        and created_at > completed_at
+                    )
                 ):
                     continue
             if directory is not None:
-                unmatched.discard(directory)
+                unmatched.difference_update(directory_sources[directory])
             sessions[root] = RolloutSession(root, None, path)
             descendants = database.execute(
                 """
