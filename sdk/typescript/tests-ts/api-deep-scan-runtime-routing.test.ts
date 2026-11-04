@@ -456,6 +456,8 @@ test.each([
   }
 });
 
+// These stock routing tests disable plugins so a background marketplace fetch
+// cannot hold the temporary Codex home open after the app-server exits.
 test("stock Codex resolves ordered profile overrides and inherited transport policy in the scan", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
@@ -472,7 +474,6 @@ test("stock Codex resolves ordered profile overrides and inherited transport pol
         config: {
           "features.code_mode.enabled": true,
           features: {
-            // Marketplace Git helpers can keep the fixture open on Windows.
             plugins: false,
             code_mode: {
               enabled: true,
@@ -527,6 +528,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         env: { CODEX_HOME: home },
         config: {
           features: {
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],

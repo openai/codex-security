@@ -23,17 +23,18 @@ The reader derives the source finding ID from the export. The differences matter
 when a finding moves, an advisory affects several packages, or the export format
 changes.
 
-| Report                                                                                          | What identifies one record                                                                                                                                                               |
-| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md)           | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
-| [AWS Continuum](continuum.md)                                                                   | Continuum finding ARN. A list summary and a detailed response for that ARN update the same record.                                                                                       |
-| [Wiz](wiz.md)                                                                                   | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
-| [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)             | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
-| [GitHub advisories](github-security-advisories.md)                                              | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
-| [Snyk Open Source](snyk.md)                                                                     | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
-| [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)                         | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
-| [Semgrep CLI or CI reports](semgrep.md), [OpenGrep](opengrep.md)                                | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
-| [Semgrep Platform SAST](semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk) | Deployment, project ID, SAST product, full Git ref and native finding ID. The same occurrence keeps its identity when its file moves.                                                    |
+| Report                                                                                | What identifies one record                                                                                                                                                               |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
+| [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN update the same record.                                                                                       |
+| [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
+| [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
+| [GitHub advisories](github-security-advisories.md)                                    | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
+| [Snyk Open Source](snyk.md)                                                           | Native CLI JSON distinguishes manifest, package manager, advisory, package name and version, and dependency path. Plugin and SARIF reports use different identities.                     |
+| [Black Duck SCA](blackduck.md), [Veracode Static Analysis](veracode.md)               | Black Duck combines project version, component version, origin and advisory identity. Veracode scopes a native issue ID to its API origin, application and context.                      |
+| [Semgrep CLI or CI reports](semgrep.md), [OpenGrep](opengrep.md)                      | Semgrep prefers a fingerprint and falls back to rule, path and range. OpenGrep groups traces by rule, path and range. Both store provider `semgrep`. Use a separate OpenGrep source key. |
+| [Semgrep Guardian selections](semgrep.md#import-selected-guardian-findings)           | Deployment, repository name, Guardian tool, full ref and exact string ID. Guardian records stay separate from Web API occurrences.                                                       |
+| [Semgrep Platform findings](semgrep.md#existing-platform-findings)                    | Deployment, project ID, product, full Git ref and native finding ID. Web API SAST selections and full SAST collections share IDs.                                                        |
 
 Repeat local imports replace changed evidence for the same identity. Identical
 evidence is unchanged, and records omitted from a later report remain stored.
@@ -117,6 +118,24 @@ the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
 Use the same SDK version throughout a submission when possible.
+
+Older SDK checkpoints saved the destination repository ID without the catalog
+URL. After a repository rename, retry those requests with the original
+normalized findings and report metadata, omitting supplemental source
+repository declarations. A new declaration needs a matching current catalog
+entry or a URL recorded when the request was approved.
+
+If a hosted Semgrep or Snyk request is pending, rerun the original input to
+finish it before submitting updated evidence for any of the same findings.
+Selections with distinct scanner-issued IDs can proceed independently on the
+same deployment, account, repository, connector, provider and source key.
+When an older checkpoint establishes only the source, finish that request
+before submitting another selection for that source. Use the SDK build that
+created the request and include the original report context and caller-added
+fields. Older SDKs included some fields in the checkpoint filename without
+retaining them in the saved request. If the publisher cannot identify the
+deployment of an older request, rerun it on its original deployment. An
+identified repository reset retires the request and requires fresh approval.
 
 After an SDK upgrade, retry with the original input. An older SDK could approve
 different bytes from those its JSON export contained. When the SDK verifies
