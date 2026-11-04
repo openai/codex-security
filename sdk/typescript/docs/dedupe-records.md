@@ -364,3 +364,33 @@ errors for incomplete/uncertain remote outcomes, and owns remote cancellation
 and persistence. Fake-host tests do not establish live Managed Agents
 compatibility; that requires an integration test with the separately implemented
 adapter.
+
+### Opt-in review failure isolation
+
+Set `failurePolicy: "isolate"` in the version-1 run input to keep unaffected
+observations running after a recoverable review failure. Older CLI versions
+reject this field; hosts must select a CLI build supporting this contract before
+opting in. `dedupe --help` advertises the exact capability marker
+`failurePolicy: isolate` in the existing `--records` description. Hosts may
+probe that marker before opting in; removing or changing it requires versioning
+the capability contract. Omitting the field preserves the existing all-unresolved behavior and
+result shape.
+
+In this mode, a completed result additionally contains `isolated`, an array of
+`{ observationId, reason: "review_failed", message }` entries. Every isolated
+incoming observation appears as a singleton in `groups`. Isolation is not a
+DISTINCT model verdict. All previous and future merge edges involving these
+observations are excluded before grouping, including edges through a failed
+bridge. Successful unrelated comparisons retain their normal grouping rules.
+Only incoming observations in the failed review's `beneficiaryObservationIds`
+are isolated; candidate-only observations are never added as singletons.
+
+A host may mark a recoverable execution failure by returning JSON-RPC error data
+`{ "reviewFailure": { "version": 1, "disposition": "isolate" } }`. Send this marker
+only after execution has ended and cleanup is confirmed. Never mark cancellation,
+access or security failures, or uncertain execution or cleanup outcomes. These
+errors remain fatal. Failure to release a pending review remains fatal even if
+marked. Invalid final submissions and exhausted missing-submission correction
+are also isolatable after the host has returned a terminal result. SDK hosts can
+throw `RecordsReviewFailure` under the same completed-execution and cleanup
+conditions. Ordinary errors are not silently treated as successful new findings.
