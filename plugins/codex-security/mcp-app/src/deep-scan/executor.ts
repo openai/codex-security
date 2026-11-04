@@ -80,6 +80,7 @@ interface CodexSdkWorkerRuntimeSettings {
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
+  profileMcpServerNames?: string[];
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -211,17 +212,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? {}
           : { service_tier: this.modelSettings.serviceTier }),
         ...(discovery
-          ? {
-              mcp_servers: {
-                // A disabled server still needs a valid transport during native resolution.
-                "codex-security": { command: "node", enabled: false },
-                ...this.compactArtifactServer(discovery, includePathsFile),
-              },
-              ...workerSubagentConfig(
-                discovery.subagents,
-                runtimeSettings.config.features,
-              ),
-            }
+          ? workerSubagentConfig(
+              discovery.subagents,
+              runtimeSettings.config.features,
+            )
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
@@ -234,11 +228,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                   runtimeSettings.config.features),
                 apps: false,
                 plugins: false,
+                shell_tool: false,
                 view_image: false,
                 image_generation: false,
                 goals: false,
                 request_permissions_tool: false,
-                shell_tool: false,
+                computer_use: false,
                 unified_exec: false,
                 code_mode: false,
                 code_mode_only: false,
@@ -303,17 +298,23 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
-      if (!discovery && mcpServerNames.length) {
-        // Native CLI dotted overrides split server names containing dots. A TOML
-        // table preserves each literal key and the transport in the native config.
-        configOverrides.push(
-          ...profileConfigOverrides({
-            mcp_servers: Object.fromEntries(
-              mcpServerNames.map((name) => [name, { enabled: false }]),
-            ),
-          }),
-        );
-      }
+      const inheritedServers = new Set([
+        ...mcpServerNames,
+        ...(runtimeSettings.profileMcpServerNames ?? []),
+      ]);
+      // Merge flags into the existing transports. Native -c splits dotted keys
+      // even when the server name is quoted; a single TOML table preserves it.
+      const servers = discovery
+        ? {
+            "codex-security": inheritedServers.has("codex-security")
+              ? { enabled: false }
+              : { command: "node", enabled: false },
+            ...this.compactArtifactServer(discovery, includePathsFile),
+          }
+        : Object.fromEntries(
+            [...inheritedServers].map((name) => [name, { enabled: false }]),
+          );
+      configOverrides.push(...profileConfigOverrides({ mcp_servers: servers }));
       const prompt =
         request.kind === "compare"
           ? request.prompt
@@ -733,6 +734,11 @@ export async function workerRuntimeSettings(
         "utf8",
       ),
     );
+    if (isRecord(nativeProfileConfig.mcp_servers)) {
+      settings.profileMcpServerNames = Object.keys(
+        nativeProfileConfig.mcp_servers,
+      );
+    }
     if (isRecord(nativeProfileConfig.model_providers)) {
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
