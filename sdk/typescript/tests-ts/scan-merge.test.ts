@@ -836,11 +836,7 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
       const accepted = outcome === "same" || outcome === "exact repeat";
       expect(
         result.aggregate.findings.map((f) => f.provenance.sourceFindingIds),
-      ).toEqual(
-        accepted
-          ? [["a:0", "b:0", "c:0"]]
-          : [["a:0", "b:0"], ["c:0"]],
-      );
+      ).toEqual(accepted ? [["a:0", "b:0", "c:0"]] : [["a:0", "b:0"], ["c:0"]]);
       expect(result.newFindingScanIds).toEqual(accepted ? [] : ["c"]);
       if (outcome === "unavailable")
         expect(result.aggregate.scope?.limitations).toContain(
