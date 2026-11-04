@@ -431,12 +431,20 @@ for (const repair of [
       f.resultPath,
       scanId,
     );
+    const readDiscovery = () =>
+      readAcceptedDiscovery(
+        createDeepScanArtifacts(f.scanRoot),
+        f.worker,
+        scanId,
+      );
     const before = await artifactTree(f.scanRoot);
-    const { coverage } = await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    );
+    if (repair !== "matching closeout") {
+      // A missing receipt still needed by any observation prevents acceptance.
+      await assert.rejects(readDiscovery, /requested artifact is unavailable/);
+      assert.deepEqual(await artifactTree(f.scanRoot), before);
+      return;
+    }
+    const { coverage } = await readDiscovery();
     assert.deepEqual(await artifactTree(f.scanRoot), before);
     const reviewed = coverage.surfaces.find(
       (row: { label: string }) => row.label === "Synthetic review",
@@ -445,23 +453,11 @@ for (const repair of [
     const archivedMissing =
       "artifacts/deep_discovery/workers/discovery-0001/attempts/attempt-01/" +
       missing;
-    assert.equal(
-      reviewed.receiptRefs.includes(archivedMissing),
-      repair === "no valid replacement",
-    );
+    assert.ok(!reviewed.receiptRefs.includes(archivedMissing));
     assert.ok(
       reviewed.receiptRefs.some((ref: string) => ref.endsWith("/" + original)),
       "Keep independent readable evidence from the earlier observation.",
     );
-    if (repair === "independent source") {
-      const independent = coverage.surfaces.find(
-        (row: { label: string }) =>
-          row.label === "Independent incomplete review",
-      );
-      assert.ok(independent);
-      assert.equal(independent.disposition, "needs_follow_up");
-      assert.deepEqual(independent.receiptRefs, [archivedMissing]);
-    }
   });
 }
 
