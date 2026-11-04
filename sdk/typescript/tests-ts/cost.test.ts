@@ -3448,9 +3448,9 @@ describe("live scan cost tracking", () => {
 
   test("recovers live cost in one poll when denied logs become readable and empty", async () => {
     const { home, parent, usage } = await workerSessionFixture();
-    const logs = ["a.jsonl", "b.jsonl"].map((name) =>
-      join(dirname(parent), name),
-    );
+    const first = join(dirname(parent), "a.jsonl");
+    const second = join(dirname(parent), "b.jsonl");
+    const logs = [first, second];
     for (const path of logs) await writeFile(path, "{}\n");
     const costs: number[] = [];
     const { tracker } = manualCostTracker(home, {
@@ -3473,19 +3473,19 @@ describe("live scan cost tracking", () => {
       for (const path of logs) await writeFile(path, "");
       opens.length = 0;
       for (let poll = 0; poll < 3; poll++) await blocked();
-      expect(opens).toEqual([logs[0], logs[1], logs[0]]);
+      expect(opens).toEqual([first, second, first]);
       // The rotating probe reaches B after the traversal already skipped A.
-      denied.delete(logs[1]!);
+      denied.delete(second);
       opens.length = 0;
-      await expect(tracker.refresh()).rejects.toMatchObject({ path: logs[0] });
-      expect(opens).toEqual([logs[1], logs[0]]);
+      await expect(tracker.refresh()).rejects.toMatchObject({ path: first });
+      expect(opens).toEqual([second, first]);
       expect(costs).toEqual([]);
       denied.clear();
       opens.length = 0;
       const total = 2 * usage.input_tokens;
       expect((await tracker.refresh()).cost?.inputTokens).toBe(total);
       expect(costs).toEqual([total]);
-      expect(opens).toEqual([logs[0]]);
+      expect(opens).toEqual([first]);
       opens.length = 0;
       await tracker.refresh();
       expect(opens).toEqual([]);
