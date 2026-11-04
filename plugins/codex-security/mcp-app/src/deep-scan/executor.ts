@@ -52,17 +52,10 @@ import type {
   DeepScanConfig,
 } from "./types.js";
 
-import type {
-  createProviderProfile,
-  ProviderProfile,
-} from "../../../../../sdk/typescript/src/provider-profile.js";
-
 export interface CodexSdkWorkerModelSettings {
   nativeProfileHome?: string;
-  protectedProfileHome?: (home: string) => Promise<string | undefined>;
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
-  createProviderProfile?: typeof createProviderProfile;
   /** Resolved by the execution owner, including when reconstructing a scan. */
   codexOptions?: CodexOptions;
   model?: string;
@@ -149,7 +142,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         },
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
-    let providerProfile: ProviderProfile | undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
     const scopeInput = JSON.stringify({
       paths: includePaths,
@@ -265,29 +257,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const profileHome = this.modelSettings.nativeProfileHome;
       if (
         runtimeSettings.nativeProfile !== undefined &&
-        profileHome !== undefined &&
-        this.modelSettings.createProviderProfile
+        profileHome !== undefined
       ) {
         const boundHome = await fs.realpath(
           environmentVariable(childEnv, "CODEX_HOME", process.platform) ||
             join(homedir(), ".codex"),
         );
         if ((await fs.realpath(profileHome)) !== boundHome) {
-          // A worker-only denial cannot protect this profile from the running parent.
-          if (!(await this.modelSettings.protectedProfileHome?.(boundHome))) {
-            throw new DeepScanNonRetryableError(
-              "Restoring this private provider profile requires the current parent to deny access to the original Codex home. Resume from the original home or protect it in the parent sandbox.",
-            );
-          }
-          const profileConfig = parseToml(
-            await fs.readFile(
-              join(profileHome, `${runtimeSettings.nativeProfile}.config.toml`),
-              "utf8",
-            ),
-          );
-          providerProfile = await this.modelSettings.createProviderProfile(
-            boundHome,
-            profileConfig as Parameters<typeof createProviderProfile>[1],
+          // A previous coordinator can still have readers in the original home.
+          throw new DeepScanNonRetryableError(
+            "Resume this Deep Scan from its original Codex home to use a private provider profile.",
           );
         }
       }
@@ -437,8 +416,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? createCodexClient(codexOptions)
           : createCodexProfileClient<ThreadEvent>({
               ...codexOptions,
-              profileName:
-                providerProfile?.name ?? runtimeSettings.nativeProfile,
+              profileName: runtimeSettings.nativeProfile,
             });
       const threadOptions = {
         ...(this.modelSettings.model
@@ -543,14 +521,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     } catch (error) {
       throw classifyCodexWorkerError(error);
     } finally {
-      try {
-        await providerProfile?.cleanup();
-      } finally {
-        if (includePathsFile !== undefined)
-          await fs.rm(includePathsFile, { force: true });
-        if (deepConfigFile !== undefined)
-          await fs.rm(deepConfigFile, { force: true });
-      }
+      if (includePathsFile !== undefined)
+        await fs.rm(includePathsFile, { force: true });
+      if (deepConfigFile !== undefined)
+        await fs.rm(deepConfigFile, { force: true });
     }
   }
 

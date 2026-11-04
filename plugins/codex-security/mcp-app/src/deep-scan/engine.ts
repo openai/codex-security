@@ -1,6 +1,5 @@
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
-import { createProviderProfile } from "../../../../../sdk/typescript/src/provider-profile.js";
 import {
   loadDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
@@ -46,7 +45,6 @@ export function startDeepScanEngine(options: {
       onFinalized: options.onFinalized,
       prepareExecutor: async (owned) =>
         new CodexSdkWorkerExecutor({
-          createProviderProfile,
           parentTurn: options.parentTurn,
           ...restoredDeepScanWorkerSettings(
             await loadDeepScanExecutionSettings(

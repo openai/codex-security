@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,7 +82,18 @@ export async function testRestoredPrivateProfileHomes({
     const configPath = path.join(originalHome, "config.toml");
     await writeFile(
       configPath,
-      stringifyToml({ model: config.model, model_provider: provider }),
+      stringifyToml({
+        model: config.model,
+        model_provider: provider,
+        profile: "work",
+        features: {
+          api_key_cyber_access_programs: false,
+          api_key_model_discovery: false,
+        },
+        profiles: {
+          work: { features: { api_key_cyber_access_programs: true } },
+        },
+      }),
     );
     const sandbox = {
       filesystemDenies: [currentHome],
@@ -133,44 +144,9 @@ export async function testRestoredPrivateProfileHomes({
         network: { enabled: false },
       }),
     };
-    const recreated: {
-      name: string;
-      path: string;
-      cleanup(): Promise<void>;
-    }[] = [];
-    // Saved denials cannot authorize copying a secret into a currently readable home.
-    if (name !== "same") {
-      const exposed = new CodexSdkWorkerExecutor({
-        ...restoredDeepScanWorkerSettings(
-          {
-            ...saved,
-            parentSandbox: {
-              filesystemDenies: [],
-              literalFilesystemDenies: [originalHome],
-            },
-          },
-          { filesystemDenies: [currentHome] },
-          () => environment,
-        ),
-        createProviderProfile: () =>
-          assert.fail("wrote private profile into exposed home"),
-      });
-      await assert.rejects(
-        exposed.run(workerRequest(promptPath, fixture.root)),
-        /current parent to deny access to the original Codex home/,
-      );
-    }
-    const executor = new CodexSdkWorkerExecutor({
-      ...restoredDeepScanWorkerSettings(saved, sandbox, () => environment),
-      createProviderProfile: async (
-        home: string,
-        profileConfig: Record<string, unknown>,
-      ) => {
-        const profile = await createProviderProfile(home, profileConfig);
-        recreated.push(profile);
-        return profile;
-      },
-    });
+    const executor = new CodexSdkWorkerExecutor(
+      restoredDeepScanWorkerSettings(saved, sandbox, () => environment),
+    );
     owners.push({
       name,
       provider,
@@ -182,7 +158,6 @@ export async function testRestoredPrivateProfileHomes({
       promptPath,
       markerPath,
       environment,
-      recreated,
       executor,
     });
   }
@@ -214,6 +189,18 @@ export async function testRestoredPrivateProfileHomes({
               ? { resumeThreadId: `fixture-resumed-${owner.name}` }
               : {}),
           });
+          if (owner.currentHome !== owner.originalHome) {
+            const originalFiles = await readdir(owner.originalHome);
+            await assert.rejects(
+              owner.executor.run(request),
+              /original Codex home/,
+            );
+            assert.deepEqual(await readdir(owner.originalHome), originalFiles);
+            await assert.rejects(readFile(owner.markerPath), {
+              code: "ENOENT",
+            });
+            return;
+          }
           const result = await owner.executor.run(request);
           assert.equal(
             result.threadId,
@@ -244,6 +231,8 @@ export async function testRestoredPrivateProfileHomes({
             );
           }
           assertConfigOverrides(child.argv, {
+            "features.api_key_cyber_access_programs": true,
+            "features.api_key_model_discovery": false,
             [`model_providers.${owner.provider}.base_url`]: undefined,
             [`model_providers.${owner.provider}.env_key`]: undefined,
           });
@@ -265,8 +254,6 @@ export async function testRestoredPrivateProfileHomes({
             child.openaiAuthentication.CODEX_API_KEY,
             `synthetic-${owner.name}-worker-key`,
           );
-          for (const profile of owner.recreated)
-            await assert.rejects(readFile(profile.path), { code: "ENOENT" });
           await readFile(owner.current.path);
         }),
       );
@@ -278,16 +265,7 @@ export async function testRestoredPrivateProfileHomes({
         `native provider selections survive ${kind} child launches`,
       );
     }
-    assert.equal(owners[0].recreated.length, 0);
-    assert.equal(
-      new Set(
-        owners.flatMap((owner) =>
-          owner.recreated.map((profile) => profile.name),
-        ),
-      ).size,
-      4,
-    );
-    const owner = owners[1];
+    const owner = owners[0];
     const acceptedProfile = owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE;
     owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE = JSON.stringify({
       ...emptyWorkerPermissionProfile,
@@ -296,15 +274,11 @@ export async function testRestoredPrivateProfileHomes({
     await assert.rejects(
       owner.executor.run(workerRequest(owner.promptPath, fixture.root)),
     );
-    for (const profile of owner.recreated)
-      await assert.rejects(readFile(profile.path), { code: "ENOENT" });
     owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE = acceptedProfile;
     await writeFile(owner.promptPath, "CONFIG_ERROR\n");
     await assert.rejects(
       owner.executor.run(workerRequest(owner.promptPath, fixture.root)),
     );
-    for (const profile of owner.recreated)
-      await assert.rejects(readFile(profile.path), { code: "ENOENT" });
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();

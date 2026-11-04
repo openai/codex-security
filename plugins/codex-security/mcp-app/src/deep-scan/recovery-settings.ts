@@ -106,7 +106,8 @@ export async function captureDeepScanExecutionSettings(
     originalConfigPath = undefined;
   }
   // Reuse the SDK projection: custom provider credentials belong in the native home.
-  const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
+  const resolved = resolveCodexProfile(config);
+  const selected = scanPreflightCodexConfig(resolved);
   // A recovered scan can have a different continuation. Only its recorded owner
   // establishes original history; null means that historical binding is missing.
   const owner =
@@ -118,7 +119,7 @@ export async function captureDeepScanExecutionSettings(
         threadId: owner.threadId,
         startedAt: parent?.startedAt ?? owner.startedAt,
       });
-  const runtimeSettings = workerRuntimeSettingsFromConfig(config);
+  const runtimeSettings = workerRuntimeSettingsFromConfig(resolved);
   let runtimeConfigPath: string | undefined;
   let runtimeConfigSource: WorkerRuntimeConfigSource | undefined;
   const workerConfigPath = environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
@@ -464,7 +465,6 @@ export function restoredDeepScanWorkerSettings(
   environment: () => NodeJS.ProcessEnv = () => process.env,
 ): {
   nativeProfileHome: string;
-  protectedProfileHome: (home: string) => Promise<string | undefined>;
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
   codexOptions: CodexOptions;
@@ -510,8 +510,6 @@ export function restoredDeepScanWorkerSettings(
   if (settings.modelProvider !== "amazon-bedrock")
     delete config.model_providers;
   return {
-    protectedProfileHome: (home) =>
-      protectedRuntimeHome(home, currentParentSandbox),
     get nativeProfileHome() {
       return environment().CODEX_HOME || join(homedir(), ".codex");
     },
