@@ -3177,7 +3177,7 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each(["EACCES", "EPERM"])(
+  test.each(["EACCES", "EPERM", "EIO"])(
     "stops at the first unidentified log whose stat fails with %s on each poll",
     async (code) => {
       const home = await codexHome();
@@ -3222,6 +3222,8 @@ describe("live scan cost tracking", () => {
     ["EPERM", false, "observe"],
     ["EACCES", true, "both"],
     ["EPERM", false, "both"],
+    ["EIO", false, "observe"],
+    ["EIO", false, "both"],
   ] as const)(
     "retains and retries a %s worker when its parent appears later (identified: %j, tracking: %s)",
     async (code, identified, tracking) => {

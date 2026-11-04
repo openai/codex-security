@@ -71,6 +71,12 @@
 - keep the viewport anchored during worker updates ([#2298](https://github.com/openai/codex-security/pull/2298))
 - attribute comparison sessions to usage and logs ([#2299](https://github.com/openai/codex-security/pull/2299))
 - require consistent evidence before merging reports ([#2301](https://github.com/openai/codex-security/pull/2301))
+- preserve inherited MCP transports and native profile server names ([#2303](https://github.com/openai/codex-security/pull/2303))
+- stop on known policy refusal messages ([#1035](https://github.com/openai/codex-security/pull/1035))
+- preserve healthy worker updates on rollout I/O errors ([#2178](https://github.com/openai/codex-security/pull/2178))
+- guide cross-mode matching with saved evidence ([#832](https://github.com/openai/codex-security/pull/832))
+- preserve valid evidence during stopped scan recovery ([#171](https://github.com/openai/codex-security/pull/171))
+- explain omitted informational findings ([#155](https://github.com/openai/codex-security/pull/155))
 
 <!-- release-section: highlights:end -->
 
