@@ -1006,12 +1006,18 @@ describe("imported finding SDK sessions", () => {
   });
 
   test("assessment preserves explicit web-search and shell-network settings", async () => {
-    const settings: JsonObject[] = [
-      { web_search: "disabled" },
-      { web_search: "cached" },
-      { profile: "offline", profiles: { offline: { web_search: "disabled" } } },
+    const settings: [JsonObject, string][] = [
+      [{ web_search: "disabled" }, "disabled"],
+      [{ web_search: "cached" }, "cached"],
+      [
+        {
+          profile: "offline",
+          profiles: { offline: { web_search: "disabled" } },
+        },
+        "disabled",
+      ],
     ];
-    for (const codexOverrides of settings) {
+    for (const [codexOverrides, expectedWebSearch] of settings) {
       const { security, repository, captured } = await skillSession(undefined, {
         ...codexOverrides,
         sandbox_workspace_write: { network_access: false },
@@ -1028,7 +1034,7 @@ describe("imported finding SDK sessions", () => {
           ...captured.codex!.configOverrides!.map((value) => parse(value)),
         ),
       ).toMatchObject({
-        ...codexOverrides,
+        web_search: expectedWebSearch,
         sandbox_workspace_write: { network_access: false },
       });
       expect(captured.thread?.webSearchMode).toBeUndefined();

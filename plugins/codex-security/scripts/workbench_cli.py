@@ -8,7 +8,6 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dependency_imports.workbench import add_arguments as add_dependency_import_arguments
 from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
@@ -394,6 +393,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     export_findings.add_argument("--validate-only", action="store_true")
 
     subparsers.add_parser("finding-issues")
+
+    # The inspection-only parser returns before loading persistence and report readers.
+    from dependency_imports.workbench import add_arguments as add_dependency_import_arguments
 
     add_dependency_import_arguments(subparsers)
     subparsers.add_parser("database-info")
