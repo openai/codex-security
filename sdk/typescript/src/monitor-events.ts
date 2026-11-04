@@ -63,13 +63,16 @@ function combine(records: SecurityEventBatch[]): SecurityEventBatch {
   }
   return {
     ...records[0]!,
-    groups: Array.from(groups, ([id, { fresh, history }]) => ({
-      id,
-      events: [...fresh.values()],
-      contextEvents: [...history.values()].filter(
-        (event) => !fresh.has(securityEventId(event)),
-      ),
-    })),
+    groups: Array.from(groups, ([id, { fresh, history }]) => {
+      for (const eventId of history.keys()) {
+        if (fresh.has(eventId)) history.delete(eventId);
+      }
+      return {
+        id,
+        events: [...fresh.values()],
+        contextEvents: [...history.values()],
+      };
+    }),
   };
 }
 
@@ -104,11 +107,12 @@ async function readUntil<T>(
 }
 
 /** @internal */
-export async function* monitorSecurityEventsInternal(
-  batches: AsyncIterable<unknown>,
+export async function* monitorSecurityEventsInternal<T>(
+  batches: AsyncIterable<T>,
   options: MonitorSecurityEventsOptions,
   surface: CodexSecuritySurface,
   review = reviewSecurityEventsInternal,
+  decode: (input: T) => unknown = (input) => input,
 ): AsyncGenerator<LiveSecurityEventReview> {
   const { signal } = options;
   const batchSize =
@@ -176,7 +180,7 @@ export async function* monitorSecurityEventsInternal(
       count++;
       let record: SecurityEventBatch;
       try {
-        record = parseSecurityEventBatch(next.value);
+        record = parseSecurityEventBatch(decode(next.value));
       } catch (cause) {
         throw new CodexSecurityError(
           `Live input line ${count}: ${errorMessage(cause)}`,

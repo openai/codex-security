@@ -441,26 +441,18 @@ const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 
 // Consume only as much stdin as the reviewer requests. A transport chunk can
 // contain several records or just part of a multibyte character.
-async function* readLiveEventLines(input: Readable): AsyncGenerator<unknown> {
+async function* readLiveEventLines(input: Readable): AsyncGenerator<string> {
   let partial = "";
-  let line = 0;
-  function parse(value: string): unknown {
-    line++;
-    try {
-      return parseSecurityEventInputText(value.replace(/\r$/, ""));
-    } catch (cause) {
-      throw new CodexSecurityError(
-        `Live input line ${line}: ${errorMessage(cause)}`,
-        { cause },
-      );
-    }
-  }
   for await (const chunk of input.setEncoding("utf8")) {
-    const parts = (partial + chunk).split("\n");
-    partial = parts.pop()!;
-    for (const part of parts) yield parse(part);
+    const parts: string[] = chunk.split("\n");
+    const tail = parts.pop()!;
+    for (const part of parts) {
+      yield (partial + part).replace(/\r$/, "");
+      partial = "";
+    }
+    partial += tail;
   }
-  if (partial) yield parse(partial);
+  if (partial) yield partial.replace(/\r$/, "");
 }
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
@@ -5307,6 +5299,7 @@ export async function main(
               },
               "cli",
               review,
+              parseSecurityEventInputText,
             );
             for await (const result of results) {
               const line = JSON.stringify(result) + "\n";
