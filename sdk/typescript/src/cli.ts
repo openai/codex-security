@@ -9022,6 +9022,7 @@ function directPatchDigest(
 
 interface PatchPublication {
   branch: string;
+  sshCommand?: string;
   // Opaque Git path keys, using Latin-1 to preserve filename bytes.
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
@@ -9035,6 +9036,7 @@ async function patchPublicationDestination(
   repository: string,
   branch: string,
   dependencies: CliDependencies,
+  approvedSshCommand?: string,
 ) {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
@@ -9064,6 +9066,13 @@ async function patchPublicationDestination(
     throw new CodexSecurityError(
       "Patch publication requires a network push URL for origin.",
     );
+  // A branch-conditional include can change core.sshCommand after the patch
+  // branch is created. Reuse the trusted transport selected before the turn.
+  const getSshCommand = async () =>
+    (approvedSshCommand ??= await publicationSshCommand(
+      repository,
+      dependencies,
+    ));
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -9139,6 +9148,7 @@ async function patchPublicationDestination(
       gitlab,
       command,
       pushRemotes,
+      getSshCommand,
       existing: candidates[0],
     };
   const { hostname: apiHost, host: apiEndpoint } = new URL(candidates[0]!.url);
@@ -9152,9 +9162,8 @@ async function patchPublicationDestination(
         remote,
         apiHost,
         apiEndpoint,
-        repository,
-        dependencies,
         run,
+        getSshCommand,
       );
       if (hostedRepository) {
         hosted = true;
@@ -9173,7 +9182,15 @@ async function patchPublicationDestination(
     }
     if (hosted) break;
   }
-  return { remote, target, gitlab, command, pushRemotes, existing };
+  return {
+    remote,
+    target,
+    gitlab,
+    command,
+    pushRemotes,
+    existing,
+    getSshCommand,
+  };
 }
 
 function isNetworkPatchRemote(remote: string) {
@@ -9243,9 +9260,8 @@ async function githubPatchRepository(
   remote: string,
   apiHost: string,
   apiEndpoint: string,
-  repository: string,
-  dependencies: CliDependencies,
   run: (command: "git" | "gh" | "glab", args: string[]) => Promise<string>,
+  getSshCommand: () => Promise<string>,
 ): Promise<string | undefined> {
   const uri = remote.includes("://");
   const url = uri ? new URL(remote) : patchScpRemote(remote)!;
@@ -9260,7 +9276,7 @@ async function githubPatchRepository(
       ...(url.port ? ["-p", url.port] : []),
       username ? `${username}@${sshHost}` : sshHost,
     ];
-    const sshCommand = await publicationSshCommand(repository, dependencies);
+    const sshCommand = await getSshCommand();
     const settings = await run("git", [
       "-c",
       `alias.codex-security-ssh-config=!${sshCommand} -G`,
@@ -9442,6 +9458,7 @@ async function preparePatchPublication(
       );
     });
   }
+  let sshCommand: string | undefined;
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -9473,6 +9490,7 @@ async function preparePatchPublication(
       );
       for (const remote of destination.pushRemotes) {
         const ssh = isSshPatchRemote(remote);
+        if (ssh) sshCommand = await destination.getSshCommand();
         const refs = await dependencies.runRepositoryCommand(
           "git",
           [
@@ -9488,14 +9506,7 @@ async function preparePatchPublication(
           {
             maxBuffer: Infinity,
             environment: {
-              ...(ssh
-                ? {
-                    GIT_SSH_COMMAND: await publicationSshCommand(
-                      repository,
-                      dependencies,
-                    ),
-                  }
-                : {}),
+              ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
               GIT_CONFIG_COUNT: String(configurationCount + 1),
               [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
               [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
@@ -9578,6 +9589,7 @@ async function preparePatchPublication(
     ignoredFiles,
     ignoredDigests,
     untrackedRepositoryDigests,
+    sshCommand,
     tree,
     root,
   };
@@ -9720,12 +9732,25 @@ async function publishPatchBranch(
   body: string,
   stderr: Writable,
   dependencies: CliDependencies,
+  approvedSshCommand?: string,
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    const { remote, target, gitlab, command, pushRemotes, existing } =
-      await patchPublicationDestination(repository, branch, dependencies);
+    const {
+      remote,
+      target,
+      gitlab,
+      command,
+      pushRemotes,
+      existing,
+      getSshCommand,
+    } = await patchPublicationDestination(
+      repository,
+      branch,
+      dependencies,
+      approvedSshCommand,
+    );
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
     if (existing) {
@@ -9752,9 +9777,8 @@ async function publishPatchBranch(
             pushRemote,
             base.hostname,
             base.host,
-            repository,
-            dependencies,
             run,
+            getSshCommand,
           );
           if (!hostedRepository) continue;
           headRepository = await run("gh", [
@@ -9818,14 +9842,21 @@ async function publishPatchBranch(
           branch,
           dependencies,
         );
-      await run("git", [
-        "push",
-        ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
-        "--set-upstream",
-        `--force-with-lease=refs/heads/${branch}:`,
-        "origin",
-        branch,
-      ]);
+      await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "push",
+          ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
+          "--set-upstream",
+          `--force-with-lease=refs/heads/${branch}:`,
+          "origin",
+          branch,
+        ],
+        repository,
+        pushRemotes.some(isSshPatchRemote)
+          ? { environment: { GIT_SSH_COMMAND: await getSshCommand() } }
+          : undefined,
+      );
       url = await run(
         command,
         gitlab
@@ -10416,7 +10447,14 @@ async function createPatchPullRequest(
     }
     throw error;
   }
-  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+  return publishPatchBranch(
+    repository,
+    branch,
+    body,
+    stderr,
+    dependencies,
+    publication.sshCommand,
+  );
 }
 
 async function requireCleanPatchPullRequestBase(

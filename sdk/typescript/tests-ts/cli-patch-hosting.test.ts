@@ -87,6 +87,73 @@ describe("patch change tracking", () => {
     },
   );
 
+  test("push uses the SSH command approved before branch-conditional configuration activates", async () => {
+    const { directory, git } = await publicationRepository();
+    const external = await fixtures.create("patch-ssh-transport-");
+    const marker = join(external, "marker");
+    const script = join(external, "transport.cjs");
+    const globalConfig = join(external, "user.gitconfig");
+    await writeFile(
+      script,
+      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.argv[2]); process.exit(1);`,
+    );
+    const command = (label: string) =>
+      `node "${script.replaceAll("\\", "/")}" ${label}`;
+    git(
+      "config",
+      "--file",
+      globalConfig,
+      "core.sshCommand",
+      command("approved"),
+    );
+    git(
+      "config",
+      "--file",
+      join(directory, ".git", "patch-transport"),
+      "core.sshCommand",
+      command("checkout"),
+    );
+    git(
+      "config",
+      "includeIf.onbranch:codex-security/**.path",
+      "patch-transport",
+    );
+    git("remote", "set-url", "origin", "git@gitlab.com:example/repository.git");
+
+    const environment = { GIT_CONFIG_GLOBAL: globalConfig };
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: async (args, output) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: (tool, args, cwd, options) => {
+          if (tool === "glab") return "";
+          if (args.includes("ls-remote")) {
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
+              command("approved"),
+            );
+            return "";
+          }
+          return runGitRepositoryCommand(tool, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
+        },
+      },
+      { localHosting: false },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(git("config", "--get", "core.sshCommand")).toBe(command("checkout"));
+    expect(await readFile(marker, "utf8")).toBe("approved");
+  });
+
   test.each(
     [false, true].flatMap((resume) =>
       ["github.com", "gitlab.com"].flatMap((host) =>
@@ -1012,6 +1079,14 @@ describe("patch change tracking", () => {
                   options,
                 );
               if (args[0] === "push") {
+                if (
+                  transport.startsWith("scp") ||
+                  transport.startsWith("ssh") ||
+                  transport === "www-scp"
+                )
+                  expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
+                    effectiveCommand,
+                  );
                 pushes++;
                 expect(args).toEqual([
                   "push",
