@@ -142,7 +142,7 @@ In the SDK, use `new CodexSecurity({ codexOverrides: { daybreak: true } })`.
 In project files, set `daybreak: true` inside the `codex` mapping. Use `false`
 to explicitly turn it off.
 The setting carries through saved scan recipes, resumed scans, Deep Scan
-discovery and reducer workers, and `scan --patch`. Standalone `validate`,
+discovery workers, and `scan --patch`. Standalone `validate`,
 `patch`, and `verify-fix` accept the same `--codex daybreak=true` override.
 Threads created by these commands retain the setting when resumed in Codex.
 Scans use isolated configuration, so set it on the CLI, SDK client, or project
@@ -152,8 +152,7 @@ For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
 an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
 or set top-level `daybreak = true` in the configuration loaded by the runner.
 Deep Scan inherits the active turn's effective access program from its saved
-Codex session, including an explicit Standard selection. Discovery and reducer
-workers retain that selection when resumed. If the host does not supply a
+Codex session, including an explicit Standard selection. Discovery workers retain that selection when resumed. If the host does not supply a
 persisted turn context, workers use their runner configuration; CLI and SDK scans
 use the explicit scan settings above.
 
@@ -181,7 +180,7 @@ codex-security scan /path/to/repository \
 In the SDK, select your model through `codexOverrides.model` and pass
 `auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
 Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan.
-The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+The selection reaches discovery workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
 `access_programs.cyber` is a Responses API field. Use `--cyber-access-program`
@@ -836,11 +835,16 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
   --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
-For `scan --mode deep`, `--workers` controls discovery concurrency and
-`--subagents` controls subagents per worker. `--stop-after-no-new`,
-`--max-discovery-runs`, and `--max-time` stop discovery by novelty, count,
-or duration. At the deadline, discovery stops; the scan then combines and returns
-completed findings.
+Deep Scan repeats Standard scans in batches of up to `--workers`, with
+`--subagents` per scan. It merges each completed batch in launch order.
+It uses source locations, cited code and weakness descriptions to match repeated
+findings. Each group keeps its first description, all reported locations, and
+the original observations. Later batches receive the titles and primary
+locations of retained findings so workers can investigate other reachable paths.
+`--stop-after-no-new` counts consecutive
+completed scans that added no findings. `--max-discovery-runs` caps the total
+number started, including failures. `--max-time` stops discovery and returns
+the findings from completed scans.
 
 For TypeScript, see the [SDK Deep Scan example](../README.md#configure-deep-scans).
 
@@ -968,7 +972,7 @@ starts or outcomes, or make another provider's traffic visible to OpenAI.
 
 Disable Codex usage analytics and built-in metrics with
 `--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
-patch-risk assessment, and Deep Scan discovery and reducer workers, including
+patch-risk assessment, and Deep Scan discovery workers, including
 resumed workers. Selected-profile settings take precedence over root settings.
 Explicit OpenTelemetry settings also carry into scan patches and Deep Scan
 workers, including exporter choices and prompt-logging controls.
@@ -976,6 +980,15 @@ Model-request attribution metadata remains attached when analytics are disabled.
 The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
 patching and verification preserve ambient project trust.
+
+For scan outcomes, the workbench saves a separate, local `lifecycle` record
+with the scan ID, launch surface, available release versions, mode, timestamps,
+and committed status. A completed scan indicates whether it produced reportable
+findings. Use `codex-security scans list --json` for the current repository.
+To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
+with its output directory. Imported scans have lifecycle mode `import`. The SDK
+exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
@@ -1253,6 +1266,11 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
+If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
+a string task ID, the command reports its line number and leaves the ledger untouched.
+Restore a complete ledger backup that includes every committed attempt, or start
+a separate campaign in a new `--output-dir`.
+
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
 stops only that repository for this invocation. Failed recovery checkouts remain;
@@ -1326,7 +1344,7 @@ Each guide shows how to preview its input for a local repository. Follow the [sh
 to confirm the import and read the resulting records.
 
 Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `publish findings`,
-`findings imported`, `import sonar`, and `import github-advisories`. Only `1`
+`findings imported`, `import sonar`, `import semgrep`, `import snyk`, and `import github-advisories`. Only `1`
 enables these commands in help and schemas. The SDK's corresponding operations
 require the flag in their effective environment. Pure normalizers, file readers,
 and the existing `import github` alert collector remain available independently.
@@ -1345,6 +1363,13 @@ source key and finding ID reports created, updated, or unchanged records.
 Records omitted from the new selection stay stored. An import with exclusions
 exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
 
+Use `publish findings FILE --provider semgrep --to local` for a
+[selected Guardian MCP capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings)
+or a [saved Semgrep Web API selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Guardian uses its existing sign-in. Its imported IDs are separate from Web API IDs.
+To [collect a full Semgrep project and branch](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch), use
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`. Both saved formats support local and Cloud import.
+
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
 
@@ -1356,30 +1381,43 @@ SARIF compatibility, and the local preview.
 
 ## Publish findings to Cloud
 
-Use the [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) to prepare a supported input
-and follow the [shared publication steps](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#save-or-publish-and-verify)
-to preview and confirm it. The following settings and result fields apply to
-scanner publication across providers.
+Use `publish findings FILE` for a [saved scanner report](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
+If you're collecting live issues with `import sonar`, [publish from the Sonar preview's saved capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/sonar.md#import-and-verify).
 
 ### Preview and publish
 
-With `--to cloud`, `--repository` accepts a connected GitHub or GitHub Enterprise
-repository URL or Cloud repository ID. A unique URL and its ID resolve to the
-same destination and saved submission. Use the ID if several connectors share
-the URL. Use a file-backed ChatGPT login for the selected Cloud
-account. If you use your regular Codex login, set `cli_auth_credentials_store = "file"`
-in Codex `config.toml` and sign in again. API-key-only and keyring-only logins
-cannot publish. The destination needs an authorized environment. It can receive
-scanner findings before its first native scan.
+Set `--to cloud`. For `--repository`, use the connected GitHub or GitHub
+Enterprise repository URL or its Cloud ID. Either works for retries. If
+several connectors share the URL, use the ID. You can import before the
+repository's first native scan.
 
-Cloud preview reads current source versions and lists the account, endpoint,
-repository, and environments. Existing source records keep their environment.
-New records use the repository's current authorized default. The terminal
-summarizes severities, shows up to five finding IDs and titles, and identifies
-the evidence file and up to five exclusions. Inspect the full preview and every
-exclusion with `--dry-run --format json`.
-The interactive confirmation defaults to No and identifies skipped records.
-Without a terminal, uploading requires `--yes`.
+Cloud requires a file-backed ChatGPT login. To use your regular Codex login,
+set `cli_auth_credentials_store = "file"` in Codex `config.toml`, then sign in
+again with the ChatGPT account you want to use.
+
+### Review the Cloud destination
+
+Run the command with `--dry-run --format json`. Check `accountId`,
+`cloudApiUrl`, `destination` and `source.source_key`. Compare `findings` and
+`excluded` with the records you meant to import.
+
+- **Private findings inbox.** If the preview includes `privateImport`, the
+  report goes to your inbox. The repository and connector identify the
+  suggested assessment target. Check `format`, `bytes` and `sha256` in
+  `privateImport` to identify the upload. For an Endor Finding, an Endor
+  `list.objects` response or a Wiz vulnerability JSON export, the CLI can
+  send the original bytes when Cloud accepts the format and every record
+  matches your selection. Other inputs, including arrays of selected Endor
+  Findings, use `security.findings.v1`.
+- **Repository publisher.** Check `repository.environment_id` in each entry
+  of `requests`. The publisher checks the current source versions. Existing
+  records keep their environment. New records use the repository's authorized
+  default.
+
+To import, run the same command without `--dry-run` and confirm. The terminal
+shows the file, exclusions, severities and up to five finding IDs and titles.
+The prompt defaults to No. For a noninteractive import, add `--yes` after
+reviewing the full JSON preview.
 
 ### Configure an alternate Cloud deployment
 
@@ -1398,15 +1436,21 @@ instructions. API requests always use the API root. The older
 
 ### Resume interrupted imports
 
-The publisher saves request IDs and bodies privately in the configured state
-directory before uploading batches of up to 100 findings within Cloud payload
-limits. After a lost response, use the same input, destination, account, API
-endpoint, and state directory to resume. Deployments have separate checkpoints
-even if their account and repository IDs match. Check `cloudApiUrl` for the API
-endpoint and `savedSubmission` for the checkpoint. A repository reset retires
-the old request and requires a fresh preview and approval. If a newer CLI
-rejects the original report during parsing, use the CLI version that prepared
-the saved submission to resume it.
+If the result includes `savedSubmission`, keep that checkpoint. Rerun the
+original command with `--dry-run --format json` using the same input, account,
+destination, API endpoint and state directory. Check `cloudApiUrl`. If
+`resumed` is true, confirm to continue the saved submission. If it's false,
+review the new submission before confirming.
+
+- **Private inbox.** The CLI checks the report digest and reuses its saved
+  request IDs. It can read an accepted job even if the deployment has since
+  disabled uploads. After an inbox reset, check the new report format, size
+  and digest before confirming.
+- **Repository publisher.** The CLI saves each request privately before
+  sending up to 100 findings. Retries use the same publisher, request IDs and
+  bodies. If the repository has been reset, preview and confirm a fresh
+  submission.
+
 [Retry a Cloud submission](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md#retry-a-cloud-submission)
 
 ### Results and exit codes
@@ -1414,20 +1458,38 @@ the saved submission to resume it.
 | Status        | Exit code | Meaning                                                                      |
 | ------------- | --------- | ---------------------------------------------------------------------------- |
 | `empty`       | 0         | No records were available to upload. Check the report for coverage warnings. |
-| `complete`    | 0         | All selected records were acknowledged and read back.                        |
-| `partial`     | 1         | Some records were excluded locally or rejected by Cloud.                     |
+| `complete`    | 0         | The inbox processed every record, or the publisher verified each one.                        |
+| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed.                     |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation.      |
 | `failed`      | 2         | Preparation failed before upload.                                            |
 
 For a clean zero-record report, the CLI returns `empty` before checking a Cloud
-destination or asking for confirmation. A local import still checks the selected
-checkout and creates no workbench database. Existing findings stay open.
-A failed scan or a selection consisting entirely of Cloud exclusions returns an
-error. JSON and JSONL include every excluded position, source ID when known, and
-reason. SARIF reports must contain a scanner run with a results array. Failed
-invocations, error notifications and malformed arrays stop the import. Invalid
-individual results are excluded and reported alongside any remaining findings. An empty Snyk plugin
-bundle must show a successful Open Source scan.
+destination or asking for confirmation. Local imports still validate the checkout
+and create no workbench database. Failed scans and selections containing only
+excluded records return an error. Existing findings stay open. SARIF reports may
+contain no runs or omit a run’s results. An empty selection describes the report,
+not whether a scan completed. Null or malformed arrays, unsuccessful
+invocations and error notifications stop the import. JSON output includes every
+excluded record and its reason.
+
+For a partial or interrupted import, check `excluded` and any `error` before
+retrying. Some records may already have reached Cloud.
+
+- **Private inbox.** In `privateJob`, check the job `status`, `counts.error`
+  and `counts.unprocessed`. The receipt also identifies the job (`id`) and the
+  uploaded file (`input.file_id`). The CLI reads the job receipt, so a
+  successful import can show `verified: 0`. To share a finding, open it in
+  your inbox, assess it against a pinned repository revision and publish the
+  reportable assessment.
+- **Repository publisher.** `verified` counts records whose identity the CLI
+  confirmed by reading them back. If the version matches the receipt, the CLI
+  also checks the evidence. A newer version can have different evidence and
+  still count as verified. `unacknowledged` counts records awaiting a receipt,
+  including records Cloud accepted if the response was lost. Use `client_id`
+  to match a receipt item to its request and `source_finding_id` in `failures`
+  to find a failed vendor record. Counts include earlier batches with receipts.
+  When present, `cloudUrl` opens the repository. Assessment and sharing are
+  separate steps.
 
 With `--format json` or `--format jsonl`, add `--full-output` for an envelope.
 Failed and interrupted imports set `ok` to `false` and `error.code` to
@@ -1435,20 +1497,18 @@ Failed and interrupted imports set `ok` to `false` and `error.code` to
 Other formats reject `--full-output` before reading the file or contacting
 Cloud. Ctrl-C and SIGTERM retain exit codes 130 and 143.
 
-`verified` and `unacknowledged` are counts. Each receipt item identifies a
-request item by `client_id`. Each entry in `failures` identifies the vendor
-record by `source_finding_id`. A lost response can leave accepted records
-unacknowledged. Review `error` before retrying, and check `excluded` for local
-input errors. Counts include previously acknowledged batches in the same
-saved submission.
+Progress goes to stderr and JSON results to stdout. The repository publisher
+uploads sequentially and uses up to four concurrent requests for lookups and
+readback.
 
-Progress goes to stderr and JSON results to stdout. Lookups and readback use up
-to four concurrent requests. Uploads are sequential. Saved receipts and
-readback verify source-record identity and evidence. Codex assessment and
-visibility in the shared Cloud Findings view are separate. `cloudUrl`, when
-available, links to the destination repository in Cloud.
+### Import Snyk findings
 
-### Import Snyk Open Source findings
+For an existing monitored Snyk project, use
+`codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
+and save its output for `publish findings --provider snyk` with `--to local` or `--to cloud`. Set
+`SNYK_TOKEN` with read access. The default product is Open Source. Select
+`--snyk-product code` for Code and `--snyk-api-origin` for a regional API
+(default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
 
 Use `--provider snyk` for Open Source SCA vulnerabilities. Native CLI JSON, plugin
 exports, and Open Source SARIF can produce different occurrence IDs. Use a
@@ -1460,32 +1520,6 @@ collection and preview commands.
 The [Wiz guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/wiz.md) shows how to preview saved package vulnerabilities,
 SAST findings, repository secrets, or IaC findings. The format reference below
 describes the fields to preserve when preparing those exports.
-
-#### Review the Cloud destination
-
-The preview shows which Cloud destination will receive the selected records.
-When the deployment advertises private import for the scanner, the CLI puts a
-report in the signed-in account’s **private findings inbox**. The preview
-identifies its format and byte count. For complete Endor findings and Wiz
-vulnerability JSON exports, the CLI sends the original bytes when Cloud
-advertises the format and every record matches the reviewed selection. Other
-selections and in-memory collectors use `security.findings.v1`. The CLI
-attaches the selected repository and connector as a suggested assessment
-target. Review the selection, exclusions, source key and destination before
-confirming.
-
-The job receipt contains the file and job identifiers and record counts. To
-share a finding, open it in Cloud, assess it against a pinned repository
-revision, and explicitly publish a reportable assessment. An import can
-finish with record errors. Check the error and unprocessed counts in the
-receipt.
-
-Repeat the same command to recover an interrupted private import. The CLI
-checks the report digest, reuses its saved request IDs, and reads an accepted
-job even when new uploads are disabled. Resetting the inbox requires a new
-preview and confirmation. Deployments and scanners using the repository
-publisher continue to show the repository destination and per-finding receipts.
-An in-flight repository publication resumes on its original protocol.
 
 #### Select findings and a destination
 

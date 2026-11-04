@@ -699,9 +699,11 @@ test("zero-result SARIF retains coverage warnings and resolves notification seve
     { executionSuccessful: false, exitCodeDescription: "Scanner timed out" },
   ];
   expect(() => normalizeEndorSarif(report)).toThrow("Scanner timed out");
-  expect(() => normalizeEndorSarif({ ...report, runs: [] })).toThrow(
-    "no scanner runs",
-  );
+  expect(normalizeEndorSarif({ ...report, runs: [] })).toMatchObject({
+    read: 0,
+    findings: [],
+    excluded: [],
+  });
 });
 
 test("covered SARIF diagnostics survive exclusions and retain unsuccessful invocation details", () => {

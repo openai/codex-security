@@ -13,7 +13,10 @@ import {
   semgrepJson,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
-import { snykJson } from "./support/snyk-import-fixtures.js";
+import { normalizeEndorSarif } from "../src/endor-findings.js";
+import { normalizeSemgrepSarif } from "../src/semgrep-findings.js";
+import { normalizeSnykSarif } from "../src/snyk-findings.js";
+import { snykSarif, snykJson } from "./support/snyk-import-fixtures.js";
 import {
   removeTemporaryDirectory,
   temporaryDirectory,
@@ -268,3 +271,49 @@ test("overlapping vendor IDs and advisories stay distinct on SQLite replay", asy
     stored.find((record) => record.provider === "wiz"),
   );
 });
+
+test.each([
+  ["endor", endorSarif, normalizeEndorSarif],
+  [
+    "semgrep",
+    semgrepSarif,
+    (input: unknown) =>
+      normalizeSemgrepSarif(input, { sourceRepositoryUrl: repositoryUrl }),
+  ],
+  ["snyk", snykSarif, normalizeSnykSarif],
+] as const)(
+  "%s SARIF accepts no-data exports and rejects failed or malformed reports",
+  (_provider, fixture, normalize) => {
+    const report: any = fixture();
+    expect(normalize({ ...report, runs: [] })).toMatchObject({
+      read: 0,
+      findings: [],
+      excluded: [],
+    });
+    const run = report.runs[0];
+    delete run.results;
+    expect(normalize(report)).toMatchObject({
+      read: 0,
+      findings: [],
+      excluded: [],
+    });
+    for (const results of [null, {}, "invalid"]) {
+      run.results = results;
+      expect(() => normalize(report)).toThrow("must be an array");
+    }
+    delete run.results;
+    run.invocations = [{ executionSuccessful: false }];
+    expect(() => normalize(report)).toThrow("unsuccessful invocation");
+    run.invocations = [
+      {
+        executionSuccessful: true,
+        toolExecutionNotifications: [
+          { level: "error", message: { text: "Synthetic scan failure" } },
+        ],
+      },
+    ];
+    expect(() => normalize(report)).toThrow("Synthetic scan failure");
+    for (const runs of [null, {}, "invalid"])
+      expect(() => normalize({ ...report, runs })).toThrow("must be an array");
+  },
+);

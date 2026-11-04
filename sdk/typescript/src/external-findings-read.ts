@@ -10,11 +10,17 @@ import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
-  normalizeSnykFindings,
+  normalizeSnykFile,
+  readSnykReport,
   snykJsonProjectRepository,
   snykRepositoryUrls,
 } from "./snyk-findings.js";
-import { normalizeSemgrepFindings } from "./semgrep-findings.js";
+import {
+  isSemgrepSarifDriver,
+  normalizeSemgrepFindings,
+  readSemgrepReport,
+} from "./semgrep-findings.js";
+import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import {
   normalizeEndorFindings,
@@ -93,11 +99,52 @@ export function localFindingRepositories(
   return [];
 }
 
+/** Repository claims retained by the Semgrep SARIF reader. */
+export function semgrepSarifRepositories(
+  { evidence }: ExternalFinding,
+  allowPartialCloudUrl = false,
+): { url: string; branch?: string }[] {
+  const data = evidence.source_data;
+  const document = data?.["documentContext"];
+  const driver = data?.["driverContext"];
+  const partial = allowPartialCloudUrl && document === undefined;
+  if (
+    (!partial && (!isRecord(document) || document["version"] !== "2.1.0")) ||
+    !isRecord(driver) ||
+    typeof driver["name"] !== "string" ||
+    !isSemgrepSarifDriver(driver["name"]) ||
+    !isRecord(data?.["result"])
+  )
+    return [];
+  const context = data["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [
+              {
+                url: reference["repositoryUri"],
+                ...(!partial &&
+                  typeof reference["branch"] === "string" && {
+                    branch: reference["branch"],
+                  }),
+              },
+            ]
+          : [],
+      )
+    : [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
+  references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   if (options.provider === "sonar") {
     const url = options.sourceRepositoryUrl;
@@ -124,11 +171,15 @@ export async function readExternalFindings(
     options.provider === "semgrep" ||
     options.provider === "endor"
   ) {
-    const input = await readScannerJson(path);
+    const input = await (options.provider === "snyk"
+      ? readSnykReport(path)
+      : options.provider === "semgrep"
+        ? readSemgrepReport(path)
+        : readScannerJson(path));
     let findings: ExternalFindings;
     let sourceRepositories: ExternalSourceRepository[];
     if (options.provider === "snyk") {
-      findings = normalizeSnykFindings(input, target);
+      findings = await normalizeSnykFile(input, target, references);
       sourceRepositories = findings.findings.flatMap((finding) =>
         localFindingRepositories("snyk", finding),
       );
@@ -140,14 +191,15 @@ export async function readExternalFindings(
     } else {
       findings = normalizeSemgrepFindings(
         input,
-        { sourceRepositoryUrl: options.sourceRepositoryUrl ?? "" },
+        {
+          sourceRepositoryUrl: options.sourceRepositoryUrl,
+          sourceRepositories: references,
+        },
         target,
       );
-      sourceRepositories = findings.findings.flatMap(({ evidence }) =>
-        sarifRepositoryUrls(
-          evidence.source_data?.["runContext"],
-          "Semgrep",
-        ).map((url) => ({ url })),
+      if (semgrepPlatformReportRepository(findings)) return { findings };
+      sourceRepositories = findings.findings.flatMap((finding) =>
+        semgrepSarifRepositories(finding),
       );
     }
     const emptySnyk =
@@ -170,8 +222,11 @@ export async function readExternalFindings(
       )[options.provider];
       const urls = new Set(sourceRepositories.map(({ url }) => url));
       for (const run of input["runs"])
-        for (const url of sarifRepositoryUrls(run, producer)) urls.add(url);
-      sourceRepositories = [...urls].map((url) => ({ url }));
+        for (const url of sarifRepositoryUrls(run, producer))
+          if (!urls.has(url)) {
+            urls.add(url);
+            sourceRepositories.push({ url });
+          }
     } else if (emptySnyk) {
       for (const project of Array.isArray(input) ? input : [input]) {
         if (!isRecord(project)) continue;

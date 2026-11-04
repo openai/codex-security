@@ -13,7 +13,6 @@ import {
   sarifRepositoryUrls,
   sarifRunResults,
   strings,
-  sarifRuns,
   successfulSarifInvocations,
   text,
   validateSarifRuleReference,
@@ -230,7 +229,7 @@ export function normalizeEndorSarif(
     notifications: [] as unknown[],
     repositories: new Set<string>(),
   };
-  const entries = sarifRuns(document).flatMap((value) => {
+  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
     successfulSarifInvocations(run, "Endor", coverage);
     const tool = record(run["tool"], "SARIF tool");
