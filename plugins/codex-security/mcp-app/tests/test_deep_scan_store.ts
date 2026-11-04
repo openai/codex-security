@@ -1,5 +1,5 @@
 import { readJson } from "./support/json.ts";
-import { mock, test } from "node:test";
+import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -12,7 +12,28 @@ const { WorkbenchDeepScanStore, parseDeepScan } = await importSource(
   join(import.meta.dirname, "../src/deep-scan/store.ts"),
 );
 
-test(async function testBeginProtocolAndParsing() {
+await testBeginProtocolAndParsing();
+await testScopeResponseParsing();
+await testCanonicalCommitProtocol();
+await testTerminalProtocol();
+testRunErrorParsing();
+testLegacyResponseNormalization();
+testConfiguredMaximumDurationParsing();
+await testWriteSerializationAndRecovery();
+await testBeginUsesTheWriteQueue();
+await testHeartbeatBypassesBlockedWriteQueue();
+await testOwnershipReadClearsStaleLease();
+await testWorkerResponseParsing();
+await testReplaceableDiscoveryFailureProtocol();
+await testTransientIdempotentPersistenceRetries();
+await testTransientTimeoutAndNestedCauseRetries();
+await testPersistenceRetriesRemainInsideTheWriteQueue();
+await testPersistenceRetryExhaustionPreservesDiagnostics();
+await testDeterministicPersistenceFailuresAreNotRetried();
+await testNonIdempotentMutationsAreNotRetried();
+testInvalidPersistedConfig();
+
+async function testBeginProtocolAndParsing() {
   const scanId = randomUUID();
   const calls: { args: string[]; input?: string }[] = [];
   const runner = async (args: string[], input?: string) => {
@@ -91,9 +112,9 @@ test(async function testBeginProtocolAndParsing() {
   );
   assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
   assert.deepEqual(scoped.filePaths, ["README.md"]);
-});
+}
 
-test(async function testScopeResponseParsing() {
+async function testScopeResponseParsing() {
   const scanId = randomUUID();
   for (const field of ["includePaths", "filePaths"] as const) {
     for (const paths of [
@@ -124,154 +145,9 @@ test(async function testScopeResponseParsing() {
       );
     }
   }
-});
+}
 
-test(async function testCanonicalCommitProtocol() {
-  const scanId = randomUUID();
-  const reducerId = randomUUID();
-  const resultManifestPath =
-    "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
-  const runWorkbench = mock.fn(async (args: string[]) => stateResult(scanId));
-  const store = new WorkbenchDeepScanStore(runWorkbench);
-  await store.commitDedup({
-    id: reducerId,
-    scanId,
-    newFindings: 1,
-    resultManifestPath,
-  });
-  assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
-    "commit-deep-scan-dedup",
-    "--scan-id",
-    scanId,
-    "--worker-id",
-    reducerId,
-    "--result-manifest-path",
-    resultManifestPath,
-    "--new-findings-count",
-    "1",
-  ]);
-});
-
-test(async function testTerminalProtocol() {
-  const scanId = randomUUID();
-  const omittedWorkerIds = [randomUUID(), randomUUID()];
-  const calls: string[][] = [];
-  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
-    calls.push(args);
-    return stateResult(scanId, {
-      deepScan: {
-        status: args[0] === "finish-deep-scan" ? "succeeded" : "failed",
-        manifestPath: flagValue(args, "--manifest-path"),
-        terminalReason:
-          args[0] === "finish-deep-scan" ? "saturated" : undefined,
-        error: args[0] === "fail-deep-scan" ? "fixture failure" : undefined,
-      },
-    });
-  });
-  await store.finish({
-    scanId,
-    reason: "saturated",
-    manifestPath: "/fixture/scans/run/coordinator-manifest.json",
-    omittedWorkerIds,
-  });
-  await store.fail(
-    scanId,
-    "fixture failure",
-    "failed",
-    "/fixture/scans/run/coordinator-failure-manifest.json",
-  );
-  assert.deepEqual(
-    repeatedFlagValues(calls[0], "--omitted-worker-id"),
-    omittedWorkerIds,
-  );
-  assert.equal(
-    flagValue(calls[1], "--manifest-path"),
-    "/fixture/scans/run/coordinator-failure-manifest.json",
-  );
-});
-
-test(function testRunErrorParsing() {
-  const createdAt = "2026-08-12T19:00:00Z";
-  const state = parseDeepScan(
-    stateResult(randomUUID(), {
-      deepScan: {
-        status: "failed",
-        error: "discovery retries exhausted",
-        createdAt,
-      },
-    }),
-  );
-  assert.equal(state.createdAt, createdAt);
-  assert.equal(state.error, "discovery retries exhausted");
-});
-
-test(function testLegacyResponseNormalization() {
-  for (const ignored of [undefined, null, "", false, [], {}]) {
-    const result = stateResult(" ");
-    const state: Record<string, unknown> = result.deepScan;
-    Object.assign(state, {
-      userContext: ignored,
-      coordinatorGeneration: ignored,
-      terminalReason: ignored,
-      consecutiveErrors: null,
-      workers: null,
-      dedupInputs: null,
-      extra: "discard",
-    });
-    Object.assign(result.deepScan.config, {
-      workers: Number.MAX_SAFE_INTEGER + 1,
-      stopAfterConsecutiveErrors: null,
-    });
-    const parsed = parseDeepScan(result);
-    assert.equal(parsed.scanId, " ");
-    assert.equal(parsed.config.workers, Number.MAX_SAFE_INTEGER + 1);
-    assert.equal(parsed.config.stopAfterConsecutiveErrors, 6);
-    assert.equal(parsed.consecutiveErrors, 0);
-    assert.deepEqual(parsed.persistedWorkers, []);
-    assert.deepEqual(parsed.persistedDedupInputs, []);
-    for (const field of [
-      "userContext",
-      "coordinatorGeneration",
-      "terminalReason",
-    ]) {
-      assert.equal(Object.hasOwn(parsed, field), true);
-      assert.equal(parsed[field], undefined);
-    }
-    assert.equal(Object.hasOwn(parsed, "extra"), false);
-  }
-  for (const [deepScan, diagnostic] of [
-    [null, "did not return deepScan."],
-    [{ status: "unknown" }, "did not return deepScan.config."],
-    [
-      { status: "unknown", config: {} },
-      "Unsupported Deep Scan status: unknown",
-    ],
-    [
-      { status: "running", config: {} },
-      "returned invalid deepScan.config.stopAfterNoNew.",
-    ],
-  ] as const) {
-    assert.throws(
-      () => parseDeepScan({ deepScan }),
-      (error: Error) => error.message.endsWith(diagnostic),
-    );
-  }
-});
-
-test(function testConfiguredMaximumDurationParsing() {
-  for (const maxTimeHours of [0.25, 2.5, 95, 96]) {
-    const state = parseDeepScan(
-      stateResult(randomUUID(), {
-        deepScan: { config: { maxTimeHours } },
-      }),
-    );
-    assert.equal(state.config.maxTimeHours, maxTimeHours);
-  }
-  const legacyState = parseDeepScan(stateResult(randomUUID()));
-  assert.equal(Object.hasOwn(legacyState.config, "maxTimeHours"), false);
-});
-
-test(async function testWriteSerializationAndRecovery() {
+async function testWriteSerializationAndRecovery() {
   const calls: string[][] = [];
   const firstGate = Promise.withResolvers<void>();
   const runner = async (args: string[]) => {
@@ -319,9 +195,9 @@ test(async function testWriteSerializationAndRecovery() {
     ["1", "2"],
     "later writes must retain invocation order through the persistence queue",
   );
-});
+}
 
-test(async function testBeginUsesTheWriteQueue() {
+async function testBeginUsesTheWriteQueue() {
   const scanId = randomUUID();
   const calls: string[][] = [];
   const firstGate = Promise.withResolvers<void>();
@@ -349,9 +225,9 @@ test(async function testBeginUsesTheWriteQueue() {
     calls.map((args: string[]) => args[0]),
     ["update-progress", "begin-deep-scan"],
   );
-});
+}
 
-test(async function testHeartbeatBypassesBlockedWriteQueue() {
+async function testHeartbeatBypassesBlockedWriteQueue() {
   const scanId = randomUUID();
   const handoffClaimToken = randomUUID();
   const scanDir = await mkdtemp(join(tmpdir(), "deep-scan-heartbeat-"));
@@ -403,9 +279,9 @@ test(async function testHeartbeatBypassesBlockedWriteQueue() {
     await Promise.allSettled([blockedWrite, heartbeat]);
     await rm(scanDir, { recursive: true, force: true });
   }
-});
+}
 
-test(async function testOwnershipReadClearsStaleLease() {
+async function testOwnershipReadClearsStaleLease() {
   const scanId = randomUUID();
   const calls: string[][] = [];
   let generation = 2;
@@ -472,9 +348,9 @@ test(async function testOwnershipReadClearsStaleLease() {
       "2",
     ]);
   }
-});
+}
 
-test(async function testWorkerResponseParsing() {
+async function testWorkerResponseParsing() {
   const scanId = randomUUID();
   const workerId = randomUUID();
   const mutation = {
@@ -520,9 +396,9 @@ test(async function testWorkerResponseParsing() {
   assert.equal(worker.mergeState, "buffered");
   assert.equal(worker.threadId, "thread-worker");
   assert.equal(worker.error, "worker was rate limited");
-});
+}
 
-test(async function testReplaceableDiscoveryFailureProtocol() {
+async function testReplaceableDiscoveryFailureProtocol() {
   const scanId = randomUUID();
   const workerId = randomUUID();
   let invocation!: string[];
@@ -565,9 +441,80 @@ test(async function testReplaceableDiscoveryFailureProtocol() {
   );
   assert.equal(worker.status, "canceled");
   assert.equal(worker.consecutiveErrors, 2);
-});
+}
 
-test(async function testTransientIdempotentPersistenceRetries() {
+async function testCanonicalCommitProtocol() {
+  const scanId = randomUUID();
+  const reducerId = randomUUID();
+  const resultManifestPath =
+    "/fixture/scans/run/artifacts/deep_discovery/dedup/result.json";
+  const runWorkbench = mock.fn(async (args: string[]) => stateResult(scanId));
+  const store = new WorkbenchDeepScanStore(runWorkbench);
+  const workerId = randomUUID();
+  await store.recordIteration({
+    id: reducerId,
+    scanId,
+    workerIds: [workerId],
+    resultPath: resultManifestPath,
+    noNewStreak: 2,
+    consecutiveErrors: 0,
+  });
+  assert.deepEqual(runWorkbench.mock.calls.at(-1)?.arguments[0], [
+    "record-deep-scan-iteration",
+    "--scan-id",
+    scanId,
+    "--worker-id",
+    reducerId,
+    "--input-worker-id",
+    workerId,
+    "--result-manifest-path",
+    resultManifestPath,
+    "--no-new-streak",
+    "2",
+    "--consecutive-errors",
+    "0",
+  ]);
+}
+
+async function testTerminalProtocol() {
+  const scanId = randomUUID();
+  const omittedWorkerIds = [randomUUID(), randomUUID()];
+  const calls: string[][] = [];
+  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
+    calls.push(args);
+    return stateResult(scanId, {
+      deepScan: {
+        status: args[0] === "finish-deep-scan" ? "succeeded" : "failed",
+        manifestPath: flagValue(args, "--manifest-path"),
+        terminalReason:
+          args[0] === "finish-deep-scan" ? "saturated" : undefined,
+        error: args[0] === "fail-deep-scan" ? "fixture failure" : undefined,
+      },
+    });
+  });
+  await store.finish({
+    scanId,
+    reason: "saturated",
+    manifestPath: "/fixture/scans/run/coordinator-manifest.json",
+    omittedWorkerIds,
+  });
+  await store.fail(
+    scanId,
+    "fixture failure",
+    "failed",
+    "/fixture/scans/run/coordinator-failure-manifest.json",
+  );
+  assert.deepEqual(
+    repeatedFlagValues(calls[0], "--omitted-worker-id"),
+    omittedWorkerIds,
+  );
+  assert.equal(
+    flagValue(calls[1], "--manifest-path"),
+    "/fixture/scans/run/coordinator-failure-manifest.json",
+  );
+}
+
+async function testTransientIdempotentPersistenceRetries() {
   for (const scenario of idempotentPersistenceScenarios()) {
     const calls: string[][] = [];
     const store = new WorkbenchDeepScanStore(async (args: string[]) => {
@@ -602,9 +549,9 @@ test(async function testTransientIdempotentPersistenceRetries() {
       `${scenario.operation} must preserve its original identities and inputs`,
     );
   }
-});
+}
 
-test(async function testTransientTimeoutAndNestedCauseRetries() {
+async function testTransientTimeoutAndNestedCauseRetries() {
   for (const failure of [
     Object.assign(new Error("workbench command timed out"), {
       code: "ETIMEDOUT",
@@ -640,37 +587,42 @@ test(async function testTransientTimeoutAndNestedCauseRetries() {
       `expected one exact replay for ${failure.message}`,
     );
   }
-});
+}
 
-test(async function testPersistenceRetriesRemainInsideTheWriteQueue() {
+async function testPersistenceRetriesRemainInsideTheWriteQueue() {
   const scanId = randomUUID();
   const calls: string[] = [];
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push(args[0]);
-    if (args[0] === "claim-deep-scan-dedup" && calls.length === 1) {
+    if (args[0] === "record-deep-scan-iteration" && calls.length === 1) {
       throw new Error("sqlite3.OperationalError: database is locked");
     }
-    return {};
+    return stateResult(scanId);
   });
 
-  const claim = store.claimDedup({
+  const claim = store.recordIteration({
     id: randomUUID(),
     scanId,
     workerIds: [randomUUID()],
-    promptPath: "/fixture/reducer/prompt.md",
-    artifactDir: "/fixture/reducer/output",
+    resultPath: "/fixture/iteration/result.json",
+    noNewStreak: 0,
+    consecutiveErrors: 0,
   });
   const progress = store.updateProgress({ scanId, phase: "discovery" });
   await Promise.all([claim, progress]);
 
   assert.deepEqual(
     calls,
-    ["claim-deep-scan-dedup", "claim-deep-scan-dedup", "update-progress"],
+    [
+      "record-deep-scan-iteration",
+      "record-deep-scan-iteration",
+      "update-progress",
+    ],
     "later mutations must not interleave with an idempotent persistence replay",
   );
-});
+}
 
-test(async function testPersistenceRetryExhaustionPreservesDiagnostics() {
+async function testPersistenceRetryExhaustionPreservesDiagnostics() {
   const scanId = randomUUID();
   const reducerId = randomUUID();
   const originalFailure = Object.assign(
@@ -688,23 +640,24 @@ test(async function testPersistenceRetryExhaustionPreservesDiagnostics() {
   const originalConsoleError = console.error;
   const store = new WorkbenchDeepScanStore(async (args: string[]) => {
     calls.push([...args]);
-    if (args[0] === "claim-deep-scan-dedup") throw originalFailure;
+    if (args[0] === "record-deep-scan-iteration") throw originalFailure;
     return {};
   });
   console.error = (event) => events.push(event);
 
   try {
     await assert.rejects(
-      store.claimDedup({
+      store.recordIteration({
         id: reducerId,
         scanId,
         workerIds: [randomUUID()],
-        promptPath: "/fixture/reducer/prompt.md",
-        artifactDir: "/fixture/reducer/output",
+        resultPath: "/fixture/iteration/result.json",
+        noNewStreak: 0,
+        consecutiveErrors: 0,
       }),
       (error: Error & Record<string, unknown>) => {
         assert.equal(error.name, "DeepScanPersistenceError");
-        assert.equal(error.operation, "claim-deep-scan-dedup");
+        assert.equal(error.operation, "record-deep-scan-iteration");
         assert.equal(error.scanId, scanId);
         assert.equal(error.workerId, reducerId);
         assert.equal(error.attempts, 3);
@@ -738,7 +691,7 @@ test(async function testPersistenceRetryExhaustionPreservesDiagnostics() {
   );
   const event = JSON.parse(events[0]);
   assert.equal(event.event, "persistence_retry_exhausted");
-  assert.equal(event.operation, "claim-deep-scan-dedup");
+  assert.equal(event.operation, "record-deep-scan-iteration");
   assert.equal(event.scanId, scanId);
   assert.equal(event.workerId, reducerId);
   assert.equal(event.attempts, 3);
@@ -755,9 +708,9 @@ test(async function testPersistenceRetryExhaustionPreservesDiagnostics() {
     "update-progress",
     "exhaustion must not wedge subsequent persistence",
   );
-});
+}
 
-test(async function testDeterministicPersistenceFailuresAreNotRetried() {
+async function testDeterministicPersistenceFailuresAreNotRetried() {
   for (const diagnostic of [
     "Reducer must claim an ordered prefix of buffered discovery results.",
     "sqlite3.DatabaseError: database disk image is malformed",
@@ -840,9 +793,9 @@ test(async function testDeterministicPersistenceFailuresAreNotRetried() {
       );
     }
   }
-});
+}
 
-test(async function testNonIdempotentMutationsAreNotRetried() {
+async function testNonIdempotentMutationsAreNotRetried() {
   for (const operation of ["progress", "fail", "begin"]) {
     const expected = new Error("sqlite3.OperationalError: database is locked");
     const attempts = mock.fn(Promise.reject.bind(Promise, expected));
@@ -869,9 +822,101 @@ test(async function testNonIdempotentMutationsAreNotRetried() {
       `${operation} must not gain a new persistence retry policy`,
     );
   }
-});
+}
 
-test(function testInvalidPersistedConfig() {
+function idempotentPersistenceScenarios() {
+  const scanId = randomUUID();
+  const workerId = randomUUID();
+  const reducerId = randomUUID();
+  const mutation = {
+    id: workerId,
+    kind: "discovery" as const,
+    promptPath: "/fixture/discovery/prompt.md",
+    artifactDir: "/fixture/discovery/output",
+    attempt: 1,
+  };
+  const resultManifestPath = "/fixture/discovery/output/result.json";
+
+  return [
+    ...(
+      [
+        { status: "running" },
+        { status: "running", threadId: "thread-worker" },
+        { status: "queued" },
+        { status: "failed" },
+        { status: "canceled" },
+        { status: "succeeded", resultManifestPath },
+      ] satisfies Partial<
+        import("../src/deep-scan/types.js").DeepScanWorkerMutation
+      >[]
+    ).map((update) => ({
+      operation: "upsert-deep-scan-worker",
+      result: stateResult(scanId, {
+        deepScan: {
+          workers: [
+            {
+              ...mutation,
+              status: update.status,
+              sdkThreadId: update.threadId,
+              mergeState: update.status === "succeeded" ? "buffered" : "none",
+              resultManifestPath: update.resultManifestPath,
+              completionSequence: update.status === "succeeded" ? 1 : undefined,
+            },
+          ],
+        },
+      }),
+      invoke: (store: Store) =>
+        store.updateWorker({ ...mutation, scanId, ...update }),
+    })),
+    {
+      operation: "record-deep-scan-iteration",
+      result: stateResult(scanId),
+      invoke: (store: Store) =>
+        store.recordIteration({
+          id: reducerId,
+          scanId,
+          workerIds: [workerId],
+          resultPath: mutation.promptPath,
+          noNewStreak: 1,
+          consecutiveErrors: 0,
+        }),
+    },
+    {
+      operation: "finish-deep-scan",
+      result: stateResult(scanId, {
+        deepScan: {
+          status: "succeeded",
+          terminalReason: "saturated",
+          manifestPath: "/fixture/scans/run/coordinator-manifest.json",
+        },
+      }),
+      invoke: (store: Store) =>
+        store.finish({
+          scanId,
+          reason: "saturated",
+          manifestPath: "/fixture/scans/run/coordinator-manifest.json",
+          omittedWorkerIds: [],
+        }),
+    },
+    {
+      operation: "record-deep-scan-publication-failure",
+      result: stateResult(scanId, {
+        deepScan: {
+          status: "canceled",
+          error: "Saved result publication failed: fixture publication failure",
+        },
+      }),
+      invoke: (store: Store) =>
+        store.recordStoppedPublicationFailure(
+          scanId,
+          "Saved result publication failed: fixture publication failure",
+          3,
+        ),
+    },
+  ];
+}
+
+function testInvalidPersistedConfig() {
   assert.throws(
     () =>
       parseDeepScan(
@@ -920,108 +965,87 @@ test(function testInvalidPersistedConfig() {
       `invalid configured duration ${String(maxTimeHours)} must be rejected`,
     );
   }
-});
+}
 
-function idempotentPersistenceScenarios() {
-  const scanId = randomUUID();
-  const workerId = randomUUID();
-  const reducerId = randomUUID();
-  const mutation = {
-    id: workerId,
-    kind: "discovery" as const,
-    promptPath: "/fixture/discovery/prompt.md",
-    artifactDir: "/fixture/discovery/output",
-    attempt: 1,
-  };
-  const resultManifestPath = "/fixture/discovery/output/result.json";
+function testConfiguredMaximumDurationParsing() {
+  for (const maxTimeHours of [0.25, 2.5, 95, 96]) {
+    const state = parseDeepScan(
+      stateResult(randomUUID(), {
+        deepScan: { config: { maxTimeHours } },
+      }),
+    );
+    assert.equal(state.config.maxTimeHours, maxTimeHours);
+  }
+  const legacyState = parseDeepScan(stateResult(randomUUID()));
+  assert.equal(Object.hasOwn(legacyState.config, "maxTimeHours"), false);
+}
 
-  return [
-    ...(
-      [
-        { status: "running" },
-        { status: "running", threadId: "thread-worker" },
-        { status: "queued" },
-        { status: "failed" },
-        { status: "canceled" },
-        { status: "succeeded", resultManifestPath },
-      ] satisfies Partial<
-        import("../src/deep-scan/types.js").DeepScanWorkerMutation
-      >[]
-    ).map((update) => ({
-      operation: "upsert-deep-scan-worker",
-      result: stateResult(scanId, {
-        deepScan: {
-          workers: [
-            {
-              ...mutation,
-              status: update.status,
-              sdkThreadId: update.threadId,
-              mergeState: update.status === "succeeded" ? "buffered" : "none",
-              resultManifestPath: update.resultManifestPath,
-              completionSequence: update.status === "succeeded" ? 1 : undefined,
-            },
-          ],
-        },
-      }),
-      invoke: (store: Store) =>
-        store.updateWorker({ ...mutation, scanId, ...update }),
-    })),
-    {
-      operation: "claim-deep-scan-dedup",
-      result: {},
-      invoke: (store: Store) =>
-        store.claimDedup({
-          id: reducerId,
-          scanId,
-          workerIds: [workerId],
-          promptPath: "/fixture/reducer/prompt.md",
-          artifactDir: "/fixture/reducer/output",
-        }),
-    },
-    {
-      operation: "commit-deep-scan-dedup",
-      result: stateResult(scanId),
-      invoke: (store: Store) =>
-        store.commitDedup({
-          id: reducerId,
-          scanId,
-          newFindings: 1,
-          resultManifestPath: "/fixture/reducer/output/result.json",
-        }),
-    },
-    {
-      operation: "finish-deep-scan",
-      result: stateResult(scanId, {
-        deepScan: {
-          status: "succeeded",
-          terminalReason: "saturated",
-          manifestPath: "/fixture/scans/run/coordinator-manifest.json",
-        },
-      }),
-      invoke: (store: Store) =>
-        store.finish({
-          scanId,
-          reason: "saturated",
-          manifestPath: "/fixture/scans/run/coordinator-manifest.json",
-          omittedWorkerIds: [],
-        }),
-    },
-    {
-      operation: "record-deep-scan-publication-failure",
-      result: stateResult(scanId, {
-        deepScan: {
-          status: "canceled",
-          error: "Saved result publication failed: fixture publication failure",
-        },
-      }),
-      invoke: (store: Store) =>
-        store.recordStoppedPublicationFailure(
-          scanId,
-          "Saved result publication failed: fixture publication failure",
-          3,
-        ),
-    },
-  ];
+function testRunErrorParsing() {
+  const createdAt = "2026-08-12T19:00:00Z";
+  const state = parseDeepScan(
+    stateResult(randomUUID(), {
+      deepScan: {
+        status: "failed",
+        error: "discovery retries exhausted",
+        createdAt,
+      },
+    }),
+  );
+  assert.equal(state.createdAt, createdAt);
+  assert.equal(state.error, "discovery retries exhausted");
+}
+
+function testLegacyResponseNormalization() {
+  for (const ignored of [undefined, null, "", false, [], {}]) {
+    const result = stateResult(" ");
+    const state: Record<string, unknown> = result.deepScan;
+    Object.assign(state, {
+      userContext: ignored,
+      coordinatorGeneration: ignored,
+      terminalReason: ignored,
+      consecutiveErrors: null,
+      workers: null,
+      dedupInputs: null,
+      extra: "discard",
+    });
+    Object.assign(result.deepScan.config, {
+      workers: Number.MAX_SAFE_INTEGER + 1,
+      stopAfterConsecutiveErrors: null,
+    });
+    const parsed = parseDeepScan(result);
+    assert.equal(parsed.scanId, " ");
+    assert.equal(parsed.config.workers, Number.MAX_SAFE_INTEGER + 1);
+    assert.equal(parsed.config.stopAfterConsecutiveErrors, 6);
+    assert.equal(parsed.consecutiveErrors, 0);
+    assert.deepEqual(parsed.persistedWorkers, []);
+    assert.deepEqual(parsed.persistedDedupInputs, []);
+    for (const field of [
+      "userContext",
+      "coordinatorGeneration",
+      "terminalReason",
+    ]) {
+      assert.equal(Object.hasOwn(parsed, field), true);
+      assert.equal(parsed[field], undefined);
+    }
+    assert.equal(Object.hasOwn(parsed, "extra"), false);
+  }
+  for (const [deepScan, diagnostic] of [
+    [null, "did not return deepScan."],
+    [{ status: "unknown" }, "did not return deepScan.config."],
+    [
+      { status: "unknown", config: {} },
+      "Unsupported Deep Scan status: unknown",
+    ],
+    [
+      { status: "running", config: {} },
+      "returned invalid deepScan.config.stopAfterNoNew.",
+    ],
+  ] as const) {
+    assert.throws(
+      () => parseDeepScan({ deepScan }),
+      (error: Error) => error.message.endsWith(diagnostic),
+    );
+  }
 }
 
 function stateResult(

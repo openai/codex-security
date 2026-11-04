@@ -31,7 +31,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
-    delayedReducerDoesNotReplaceStoppedState,
+    delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
     concurrentOwnershipReadsKeepReplacementResult,
     lateFailurePersistenceKeepsStoppedState,
@@ -705,14 +705,14 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     }
   }
 
-  async function delayedReducerDoesNotReplaceStoppedState() {
+  async function delayedIterationDoesNotReplaceStoppedState() {
     for (const status of ["canceled", "failed"] as const) {
       const fixture = await fixtureRun(config);
       fixture.run.coordinatorGeneration = 1;
       const store = new FakeStore(fixture.run);
       const commitResponse = pausePoint();
-      const commit = store.commitDedup.bind(store);
-      store.commitDedup = async (input) => {
+      const commit = store.recordIteration.bind(store);
+      store.recordIteration = async (input) => {
         const response = await commit(input);
         await commitResponse.pause();
         return response;

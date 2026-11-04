@@ -3,7 +3,7 @@ import { runHostProtocol } from "./host-protocol.js";
 import {
   type HostedScanInput,
   HostedScanPreparationError,
-  runHostedScan,
+  runHostedScanInternal,
 } from "./hosted-scan.js";
 import {
   ScanExecutionEventSchema,
@@ -27,7 +27,7 @@ export async function runHostedScanProtocol(
           ? { reason: error.reason }
           : undefined,
       run: async (params, execute, signal, onEvent) =>
-        await runHostedScan(params as HostedScanInput, {
+        await runHostedScanInternal("cli", params as HostedScanInput, {
           signal,
           onEvent,
           executor: {

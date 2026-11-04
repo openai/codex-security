@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import copy
 import hashlib
 import json
 import unittest
@@ -6,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
+from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = PLUGIN_DIR / "examples" / "legacy-completed-scan"
@@ -35,10 +39,10 @@ def schema_validator(name: str, *references: str) -> Draft202012Validator:
 
 
 class ScanContractExamplesTest(unittest.TestCase):
-    def assert_invalid(self, validator, document, message):
+    def assert_invalid(self, schema: str, payload: dict[str, Any], message: str) -> None:
         with self.assertRaises(ValidationError) as caught:
-            validator.validate(document)
-        self.assertIn(message, caught.exception.message)
+            schema_validator(schema).validate(payload)
+        self.assertRegex(caught.exception.message, message)
 
     def test_examples_match_schemas(self) -> None:
         for name in ("scan-manifest", "findings", "coverage"):
@@ -50,31 +54,10 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_object(schema_path))
 
-    def test_manifest_identifies_and_hashes_the_example_documents(self):
-        scan = example("scan-manifest")["scan"]
-        self.assertEqual(scan["findingsRef"], "findings.json")
-        self.assertEqual(scan["coverageRef"], "coverage.json")
-        self.assertEqual(
-            {item["path"] for item in scan["artifacts"]}, {"findings.json", "coverage.json"}
-        )
-        for item in scan["artifacts"]:
-            contents = (EXAMPLE_DIR / item["path"]).read_bytes()
-            self.assertEqual(json.loads(contents)["scanId"], scan["id"])
-            self.assertEqual(hashlib.sha256(contents).hexdigest(), item["sha256"])
-
-    def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self):
-        reducer = schema_validator(
-            "tools/deep-reducer", "definitions/artifact-common", "tools/scan-draft"
-        )
-        Draft202012Validator.check_schema(reducer.schema)
-        standard = schema_validator("tools/scan-draft", "definitions/artifact-common")
-        reduction_input = reducer.schema["$defs"]["reductionInput"]
-        self.assertNotIn("reviewState", reduction_input["properties"])
-        self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
-        self.assertIs(reduction_input["additionalProperties"], False)
-
-        required_finding = {
+    def test_standard_draft_requires_review_state(self) -> None:
+        finding = {
             "ruleId": "cross-site-scripting.response",
+            "identity": {"anchor": "response-output"},
             "title": "Unescaped response output",
             "summary": "Request input reaches a response.",
             "severity": {"level": "high"},
@@ -87,187 +70,207 @@ class ScanContractExamplesTest(unittest.TestCase):
             "remediation": "Escape the response.",
             "provenance": {"source": "local_plugin"},
         }
-        finding = {**required_finding, "identity": {"anchor": "response-output"}}
-        request = {"scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba", "findings": [finding]}
         coverage = {
             "surfaces": [{"label": "HTTP responses", "disposition": "reported"}],
             "explicitExclusions": [{"pattern": "docs/", "reason": "Documentation only."}],
         }
-        draft = {**request, "reviewState": {**coverage, "deferred": []}}
-        standard.validate(draft)
-        reducer.validate(request)
-        reducer.validate({**request, "findings": []})
-        reducer.validate(
-            {
-                **request,
-                "complete": True,
-                "handoffClaimToken": "2ea75b4f-f9b2-49b4-a5a9-2a8de8ca9047",
-                "scope": {"summary": "HTTP responses"},
-                "threatModel": {"summary": "Untrusted requests reach responses."},
-            }
-        )
-        self.assertFalse(standard.is_valid(request))
-        for field in ("surfaces", "explicitExclusions", "deferred"):
-            with self.subTest(standard_missing_coverage_field=field):
-                partial = draft["reviewState"].copy()
-                del partial[field]
-                self.assertFalse(standard.is_valid({**request, "reviewState": partial}), field)
-        self.assertFalse(reducer.is_valid({**request, "reviewState": coverage}))
-        for field in (
-            "source_worker_id",
-            "unknown_field",
-            "resultPath",
-            "consumedWorkerIds",
-            "schemaVersion",
-        ):
-            with self.subTest(extra_field=field):
-                self.assertFalse(reducer.is_valid({**request, field: "not allowed"}), field)
-        for field in required_finding:
-            with self.subTest(missing_field=field):
-                partial = finding.copy()
-                del partial[field]
-                for validator, payload in ((reducer, request), (standard, draft)):
-                    self.assertFalse(validator.is_valid({**payload, "findings": [partial]}), field)
-        for field in ("scanId", "findings"):
-            with self.subTest(missing_field=field):
-                partial = request.copy()
-                del partial[field]
-                self.assertFalse(reducer.is_valid(partial), field)
-        self.assertFalse(reducer.is_valid({"candidates": [], "merges": []}))
 
-    def test_manifest_requires_snapshot_signal_for_target_kind(self):
-        validator = schema_validator("scan-manifest")
-        manifest = example("scan-manifest")
-        scan = manifest["scan"]
-        original = scan["target"]
-        for kind, field in (
+        request = {
+            "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+            "findings": [finding],
+        }
+
+        standard_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
+        standard_request = {
+            **request,
+            "reviewState": {**coverage, "deferred": []},
+        }
+        standard_validator.validate(standard_request)
+        self.assertFalse(standard_validator.is_valid(request))
+        self.assertFalse(standard_validator.is_valid({**request, "reviewState": coverage}))
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
+            with self.subTest(standard_missing_coverage_field=missing_field):
+                partial = dict(standard_request["reviewState"])
+                del partial[missing_field]
+                self.assertFalse(
+                    standard_validator.is_valid({**standard_request, "reviewState": partial})
+                )
+        for missing_field in (
+            "ruleId",
+            "title",
+            "summary",
+            "severity",
+            "confidence",
+            "taxonomy",
+            "locations",
+            "remediation",
+            "provenance",
+        ):
+            with self.subTest(missing_field=missing_field):
+                incomplete_finding = {
+                    field: value for field, value in finding.items() if field != missing_field
+                }
+                self.assertFalse(
+                    standard_validator.is_valid(
+                        {**standard_request, "findings": [incomplete_finding]}
+                    )
+                )
+
+    def test_manifest_identifies_and_hashes_the_example_documents(self) -> None:
+        scan = example("scan-manifest")["scan"]
+        self.assertEqual(scan["id"], example("findings")["scanId"])
+        self.assertEqual(scan["id"], example("coverage")["scanId"])
+        self.assertEqual(scan["findingsRef"], "findings.json")
+        self.assertEqual(scan["coverageRef"], "coverage.json")
+        self.assertEqual(
+            {item["path"] for item in scan["artifacts"]}, {"coverage.json", "findings.json"}
+        )
+        for artifact in scan["artifacts"]:
+            path = EXAMPLE_DIR / artifact["path"]
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), artifact["sha256"])
+
+    def test_manifest_requires_snapshot_signal_for_target_kind(self) -> None:
+        for kind, missing_field in (
             ("git_revision", "revision"),
             ("git_worktree", "snapshotDigest"),
             ("git_diff", "snapshotDigest"),
             ("directory_snapshot", "snapshotDigest"),
         ):
             with self.subTest(kind=kind):
-                scan["target"] = {**original, "kind": kind}
-                del scan["target"][field]
-                self.assert_invalid(validator, manifest, field)
+                manifest = example("scan-manifest")
+                target = manifest["scan"]["target"]
+                target["kind"] = kind
+                target.pop(missing_field, None)
+                self.assert_invalid("scan-manifest", manifest, missing_field)
 
-    def test_manifest_rejects_unversioned_snapshot_digest(self):
+    def test_manifest_rejects_unversioned_snapshot_digest(self) -> None:
         manifest = example("scan-manifest")
         manifest["scan"]["target"]["snapshotDigest"] = "sha256:worktree-example"
-        self.assert_invalid(schema_validator("scan-manifest"), manifest, "does not match")
+        self.assert_invalid("scan-manifest", manifest, "does not match")
 
-    def test_manifest_rejects_credential_bearing_remote(self):
+    def test_manifest_rejects_invalid_timestamp(self) -> None:
         manifest = example("scan-manifest")
+        manifest["scan"]["startedAt"] = "2026-99-99T00:00:00Z"
+        self.assert_invalid("scan-manifest", manifest, "is not a 'date-time'")
+
+    def test_manifest_rejects_credential_bearing_remote(self) -> None:
         for remote in (
             "https://token@example.com/repo",
             "https://example.com/repo?token=secret",
             "https://example.com/repo#token",
         ):
             with self.subTest(remote=remote):
+                manifest = example("scan-manifest")
                 manifest["scan"]["target"]["remote"] = remote
-                self.assert_invalid(schema_validator("scan-manifest"), manifest, "does not match")
+                self.assert_invalid("scan-manifest", manifest, "does not match")
 
-    def test_manifest_rejects_invalid_timestamp(self):
-        manifest = example("scan-manifest")
-        manifest["scan"]["startedAt"] = "2026-99-99T00:00:00Z"
-        self.assert_invalid(schema_validator("scan-manifest"), manifest, "is not a 'date-time'")
-
-    def test_manifest_accepts_only_fixed_hardening_portfolio_path(self):
-        validator = schema_validator("scan-manifest")
-        manifest = example("scan-manifest")
-        scan = manifest["scan"]
-        scan["hardening"] = {"portfolioPath": "hardening/hardening.md"}
-        validator.validate(manifest)
-        scan["hardening"]["portfolioPath"] = "../hardening.md"
-        self.assert_invalid(validator, manifest, "was expected")
-
-    def test_manifest_rejects_unsafe_artifact_path(self):
-        validator = schema_validator("scan-manifest")
-        manifest = example("scan-manifest")
-        scan = manifest["scan"]
-
-        artifacts = scan["artifacts"]
+    def test_manifest_rejects_unsafe_artifact_path(self) -> None:
         for path in ("../../secret.json", "/tmp/secret.json", "exports\\results.sarif"):
             with self.subTest(path=path):
-                scan["artifacts"] = [*artifacts, {**artifacts[0], "path": path}]
-                self.assert_invalid(validator, manifest, "does not match")
+                manifest = example("scan-manifest")
+                manifest["scan"]["artifacts"].append(
+                    {
+                        "path": path,
+                        "sha256": "0" * 64,
+                        "mediaType": "application/json",
+                    }
+                )
+                self.assert_invalid("scan-manifest", manifest, "does not match")
 
-    def test_manifest_requires_one_record_for_each_canonical_document(self):
-        validator = schema_validator("scan-manifest")
-        manifest = example("scan-manifest")
-        scan = manifest["scan"]
-        artifacts = scan["artifacts"]
+    def test_manifest_requires_one_record_for_each_canonical_document(self) -> None:
         for path in ("findings.json", "coverage.json"):
             with self.subTest(path=path):
-                scan["artifacts"] = [item for item in artifacts if item["path"] != path]
-                self.assert_invalid(validator, manifest, "does not contain items matching")
-                scan["artifacts"] = [*artifacts, {**artifacts[0], "path": path}]
-                self.assert_invalid(validator, manifest, "Too many items match")
+                manifest = example("scan-manifest")
+                artifacts = manifest["scan"]["artifacts"]
+                manifest["scan"]["artifacts"] = [
+                    artifact for artifact in artifacts if artifact["path"] != path
+                ]
+                self.assert_invalid("scan-manifest", manifest, "does not contain items matching")
 
-    def test_findings_accept_safe_writeup_and_reject_unsafe_path(self):
-        saved = schema_validator("findings")
-        document = example("findings")
-        finding = document["findings"][0]
-        finding["writeup"] = {"reportPath": "findings/unsafe-archive/unsafe-archive.md"}
-        saved.validate(document)
-        finding["writeup"]["reportPath"] = "../outside.md"
-        self.assert_invalid(saved, document, "does not match")
+                manifest["scan"]["artifacts"] = artifacts + [copy.deepcopy(artifacts[0])]
+                manifest["scan"]["artifacts"][-1]["path"] = path
+                self.assert_invalid("scan-manifest", manifest, "Too many items match")
 
-    def test_findings_accept_code_evidence_call_stack_role(self):
-        saved = schema_validator("findings")
-        standard = schema_validator("tools/scan-draft", "definitions/artifact-common")
-        document = example("findings")
-        finding = document["findings"][0]
+    def test_manifest_accepts_only_fixed_hardening_portfolio_path(self) -> None:
+        manifest = example("scan-manifest")
+        manifest["scan"]["hardening"] = {"portfolioPath": "hardening/hardening.md"}
+        schema_validator("scan-manifest").validate(manifest)
 
-        evidence = {
-            "id": "request-input",
-            "label": "Request field",
-            "path": "src/handler.py",
-            "startLine": 12,
-            "role": "user_input",
-            "code": "value = request.json['value']",
-            "explanation": "Request input.",
+        manifest["scan"]["hardening"]["portfolioPath"] = "../hardening.md"
+        self.assert_invalid("scan-manifest", manifest, "was expected")
+
+    def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
+        findings = example("findings")
+        findings["findings"][0]["writeup"] = {
+            "reportPath": "findings/unsafe-archive/unsafe-archive.md"
         }
+        schema_validator("findings").validate(findings)
+
+        findings["findings"][0]["writeup"]["reportPath"] = "../outside.md"
+        self.assert_invalid("findings", findings, "does not match")
+
+    def test_findings_accept_code_evidence_call_stack_role(self) -> None:
+        draft_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
+        findings = example("findings")
+        findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "request-input",
+                "label": "Request field enters the handler",
+                "path": "src/handler.py",
+                "startLine": 12,
+                "role": "user_input",
+                "code": "value = request.json['value']",
+                "explanation": "The request controls value before the handler forwards it.",
+            }
+        ]
+        schema_validator("findings").validate(findings)
         draft_finding = {
-            k: v
-            for k, v in finding.items()
-            if k not in {"findingId", "occurrenceId", "fingerprints"}
+            key: value
+            for key, value in findings["findings"][0].items()
+            if key not in {"findingId", "occurrenceId", "fingerprints"}
         }
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "reviewState": {"surfaces": [], "explicitExclusions": [], "deferred": []},
+            "reviewState": saved_coverage(),
         }
-        cases = ((saved, document, finding), (standard, draft, draft_finding))
-        for validator, payload, entry in cases:
-            entry["codeEvidence"] = [evidence]
-            validator.validate(payload)
-        for missing in ("code", "explanation"):
-            with self.subTest(missing=missing):
-                partial = evidence.copy()
-                value = partial.pop(missing)
-                if missing == "code":
-                    partial["snippet"] = value
-                for validator, payload, entry in cases:
-                    entry["codeEvidence"] = [partial]
-                    self.assert_invalid(validator, payload, f"'{missing}' is a required property")
-        finding["codeEvidence"] = [{**evidence, "role": ""}]
-        self.assert_invalid(saved, document, "should be non-empty")
+        draft_validator.validate(draft)
 
-    def test_coverage_accepts_unresolved_work(self):
-        coverage = example("coverage")
-        surface = coverage["surfaces"][0]
-        surface["disposition"] = "needs_follow_up"
-        coverage["deferred"] = [{"id": "deferred_archive_review", "reason": "Runtime unavailable."}]
-        schema_validator("coverage").validate(coverage)
+        for field, replacement in (("code", "snippet"), ("explanation", None)):
+            with self.subTest(missing=field):
+                invalid_findings = copy.deepcopy(findings)
+                evidence = invalid_findings["findings"][0]["codeEvidence"][0]
+                value = evidence.pop(field)
+                if replacement is not None:
+                    evidence[replacement] = value
+                self.assert_invalid(
+                    "findings", invalid_findings, f"'{field}' is a required property"
+                )
 
-    def test_coverage_rejects_receipt_ref_outside_artifacts(self):
-        coverage = example("coverage")
-        surface = coverage["surfaces"][0]
+                invalid_draft = copy.deepcopy(draft)
+                invalid_draft["findings"][0]["codeEvidence"][0] = evidence
+                self.assertFalse(draft_validator.is_valid(invalid_draft))
+
+        findings["findings"][0]["codeEvidence"][0]["role"] = ""
+        self.assert_invalid("findings", findings, "should be non-empty")
+
+    def test_coverage_rejects_receipt_ref_outside_artifacts(self) -> None:
         for ref in ("report.md", "artifacts/../report.md", "artifacts\\receipt.jsonl"):
             with self.subTest(ref=ref):
-                surface["receiptRefs"] = [ref]
-                self.assert_invalid(schema_validator("coverage"), coverage, "does not match")
+                coverage = example("coverage")
+                coverage["surfaces"][0]["receiptRefs"] = [ref]
+                self.assert_invalid("coverage", coverage, "does not match")
+
+    def test_coverage_accepts_unresolved_work(self) -> None:
+        coverage = example("coverage")
+        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
+        coverage["deferred"] = [
+            {
+                "id": "deferred_archive_review",
+                "reason": "Runtime verification remains unavailable.",
+            }
+        ]
+        schema_validator("coverage").validate(coverage)
 
 
 if __name__ == "__main__":

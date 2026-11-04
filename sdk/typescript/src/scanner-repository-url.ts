@@ -10,30 +10,33 @@ import type {
 } from "./external-findings.js";
 import { requiredText } from "./scanner-import.js";
 
-function repositorySegment(encoded: string): boolean {
+function repositorySegment(
+  encoded: string,
+  allowEncodedQueryAndFragment: boolean,
+): boolean {
   try {
     const segment = decodeURIComponent(encoded);
     return (
       Boolean(segment) &&
       segment.trim() === segment &&
       !["", ".", ".."].includes(segment.replace(/\.git$/iu, "")) &&
-      !/[/\\?#\p{Cc}]|%[\da-f]{2}/iu.test(segment)
+      !/[/\\\p{Cc}]|%[\da-f]{2}/iu.test(segment) &&
+      (allowEncodedQueryAndFragment || !/[?#]/u.test(segment))
     );
   } catch {
     return false;
   }
 }
 
-export function declaredScannerRepositoryUrl(
-  value: unknown,
-  provider: string,
-  target: ExternalImportTarget = "cloud",
-): string {
-  const source = requiredText(value, `${provider} --source-repository-url`);
+export function validScannerRepositoryUrl(
+  source: string,
+  target: ExternalImportTarget,
+  allowEncodedQueryAndFragment = false,
+): boolean {
   const url = URL.parse(source);
   const parts = /^https?:\/\/([^/?#\\]+)\/([^?#\\]+)$/iu.exec(source);
   const segments = parts?.[2]?.replace(/\/$/u, "").split("/") ?? [];
-  if (
+  return !(
     !url ||
     !parts ||
     parts[1]!.includes("@") ||
@@ -41,8 +44,22 @@ export function declaredScannerRepositoryUrl(
     url.username ||
     url.password ||
     segments.length < (target === "local" ? 1 : 2) ||
-    !segments.every(repositorySegment)
-  )
+    !segments.every((segment) =>
+      repositorySegment(segment, allowEncodedQueryAndFragment),
+    )
+  );
+}
+
+export function declaredScannerRepositoryUrl(
+  value: unknown,
+  provider: string,
+  target: ExternalImportTarget = "cloud",
+  {
+    allowEncodedQueryAndFragment = false,
+  }: { allowEncodedQueryAndFragment?: boolean } = {},
+): string {
+  const source = requiredText(value, `${provider} --source-repository-url`);
+  if (!validScannerRepositoryUrl(source, target, allowEncodedQueryAndFragment))
     throw new Error(
       `${provider} --source-repository-url requires an HTTP(S) repository path without credentials, query, fragment, or ambiguous path segments.`,
     );
