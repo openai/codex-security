@@ -479,6 +479,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       subagents: 0,
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 2,
+      postScanPrompt,
       outputDir: join(f.directory, "output"),
       onScanRegistered(scan) {
         scanId = scan.scanId;
@@ -534,7 +535,18 @@ async function assertSavedState(f, scanId, owner) {
     const workers = deepScan.workers.filter(
       (worker) => worker.status === "succeeded",
     );
-    assert.equal(workers.length, 3);
+    assert.equal(
+      workers.filter((worker) => worker.kind === "discovery").length,
+      2,
+    );
+    const checkpoints = workers.filter((worker) => worker.kind === "dedup");
+    // One checkpoint is committed after each sequential Standard scan.
+    assert.equal(checkpoints.length, 2);
+    assert.ok(
+      checkpoints.some(
+        (worker) => worker.acceptedResultSha256 === selected.resultSha256,
+      ),
+    );
     for (const worker of workers) {
       const attempt = deepScan.attempts.find(
         (entry) =>
@@ -546,9 +558,7 @@ async function assertSavedState(f, scanId, owner) {
         attempt.acceptedResultPath,
         attempt.acceptedResultSha256,
       );
-      if (worker.kind === "dedup") {
-        assert.equal(selected.resultSha256, attempt.acceptedResultSha256);
-      } else {
+      if (worker.kind === "discovery") {
         const input = deepScan.dedupInputs.find(
           (entry) => entry.discoveryWorkerId === worker.id,
         );

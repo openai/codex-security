@@ -1356,8 +1356,24 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(
     draft = json.loads(result_path.read_text())
     draft["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
     result_path.write_text(json.dumps(draft))
-    _, reducer_path, _ = committed_standard_reducer(
-        state_dir, codex_home, scan_dir, scan_id, worker_id, result_path
+    _, _, reducer_path = worker_paths(scan_dir, "dedup-0001")
+    reducer_path.write_bytes(result_path.read_bytes())
+    run_workbench(
+        state_dir,
+        "record-deep-scan-iteration",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        str(uuid.uuid4()),
+        "--result-manifest-path",
+        str(reducer_path),
+        "--input-worker-id",
+        worker_id,
+        "--no-new-streak",
+        "0",
+        "--consecutive-errors",
+        "0",
+        environment={"CODEX_HOME": str(codex_home)},
     )
     reduced = json.loads(reducer_path.read_text())
     accepted_summary = reduced["findings"][0]["summary"]

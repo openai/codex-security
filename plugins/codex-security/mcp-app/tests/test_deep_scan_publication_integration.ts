@@ -402,12 +402,8 @@ for (const [
       "succeeded",
       terminal?.error ?? "Coordinator did not succeed",
     );
-    const accepted = persisted.persistedWorkers.find(
-      (worker) => worker.resultManifestPath === results[1],
-    )?.acceptedResultPath;
-    assert.ok(accepted);
     assert.deepEqual(publications, [
-      { coordinatorGeneration: 2, resultPath: accepted },
+      { coordinatorGeneration: 2, resultPath: results[1] },
     ]);
 
     const beforeCompletion = await snapshot(run);
@@ -921,7 +917,7 @@ async function commitReducers(
       }),
     );
     fixture.setTime(offsets[batch]);
-    await store.recordIteration({
+    const committed = await store.recordIteration({
       id,
       scanId: run.scanId,
       workerIds,
@@ -930,7 +926,11 @@ async function commitReducers(
       consecutiveErrors: 0,
     });
     fixture.setTime(0);
-    results.push(resultManifestPath);
+    const accepted = committed.persistedWorkers?.find(
+      (worker) => worker.id === id,
+    )?.acceptedResultPath;
+    assert.ok(accepted);
+    results.push(accepted);
   }
   return results;
 }

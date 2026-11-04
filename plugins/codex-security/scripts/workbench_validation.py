@@ -68,7 +68,24 @@ path_within_scope = finalizer.path_within_scope
 
 
 def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | None:
-    return db.deep_scan.final_deep_scan_reducer(connection, scan_id)
+    # Publication follows the durable reducer sequence, not completion timestamps.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        directory = Path(worker["prompt_path"]).parent
+        label = directory.parent.name if directory.name == "output" else directory.name
+        match = re.fullmatch(r"dedup-([0-9]+)", label)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    return max(
+        (
+            worker
+            for worker in db.saved_results._saved_workers(connection, scan_id)
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
 
 
 def has_verified_selected_result(

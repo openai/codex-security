@@ -952,7 +952,15 @@ export class DeepScanCoordinator {
           !this.discoveryDeadlineReached && streak >= config.stopAfterNoNew
             ? "saturated"
             : "capped";
-        return { reason, result: resultPath ? result : undefined, resultPath };
+        const checkpoint = this.state.persistedWorkers?.find(
+          (worker) =>
+            worker.kind === "dedup" && worker.resultManifestPath === resultPath,
+        );
+        return {
+          reason,
+          result: resultPath ? result : undefined,
+          resultPath: checkpoint?.acceptedResultPath ?? resultPath,
+        };
       }
 
       const count = Math.min(
