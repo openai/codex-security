@@ -10802,6 +10802,12 @@ async function executeScan(
       data: {
         dryRun: true,
         ...effectivePreflight,
+        ...(effectivePreflight.maxCostUsd === undefined
+          ? {}
+          : {
+              costLimitNote:
+                "The limit uses reported token usage at short-context API prices. In-flight requests can push the estimate above the limit. Actual charges and ChatGPT allowance depend on your account.",
+            }),
         ...(arguments_.projectConfig === undefined
           ? {}
           : {
