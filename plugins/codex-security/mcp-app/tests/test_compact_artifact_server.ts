@@ -89,6 +89,8 @@ try {
       await testParentToolList(bundle);
       await testDiscoveryWorkerToolList(bundle);
     });
+    await test(`${label}: discovery workers share peer notes within their scan`, () =>
+      testDiscoveryPeerNotes(bundle));
   }
   await test("shipped: plugin-owned drafts require validation evidence", () =>
     testPluginDraftEvidence(shipped));
@@ -1537,6 +1539,90 @@ async function testParentToolList(bundle: string) {
     );
   } finally {
     await client.close();
+  }
+}
+
+async function testDiscoveryPeerNotes(bundle: string) {
+  const scanId = randomUUID();
+  const root = await mkdtemp(path.join(temporaryRoot, "peer-notes-"));
+  const otherRoot = await mkdtemp(
+    path.join(temporaryRoot, "other-peer-notes-"),
+  );
+  const clients: Client[] = [];
+  const worker = async (scan: string, boardRoot: string, author: string) => {
+    const output = path.join(boardRoot, "workers", author, "output");
+    await mkdir(output, { recursive: true });
+    const client = await startClient(bundle, {
+      CODEX_SECURITY_SCAN_ID: scan,
+      CODEX_SECURITY_ARTIFACT_ROOT: output,
+      CODEX_SECURITY_REPO_ROOT: root,
+      CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
+      CODEX_SECURITY_DISCOVERY_BOARD_ROOT: boardRoot,
+      CODEX_SECURITY_DISCOVERY_WORKER: author,
+    });
+    clients.push(client);
+    return toolCaller(client, author);
+  };
+  try {
+    const first = await worker(scanId, root, "discovery-0001");
+    const second = await worker(scanId, root, "discovery-0002");
+    const other = await worker(randomUUID(), otherRoot, "discovery-0001");
+    const lead = { message: "Check the caller at api.ts:16." };
+    const post = "post_deep_scan_peer_note";
+    const read = "read_deep_scan_peer_notes";
+    assert.deepEqual(
+      requireSuccessfulTool(await first(read, {}), "no peers yet"),
+      { notes: [] },
+    );
+    const [{ threadId }, another] = await Promise.all([
+      first(post, lead),
+      second(post, { message: "Checking the decoder." }),
+    ]).then((responses) =>
+      responses.map((response) =>
+        requireSuccessfulTool<{ threadId: string }>(response, "post lead"),
+      ),
+    );
+    assert.notEqual(threadId, another.threadId);
+    assert.deepEqual(
+      requireSuccessfulTool(await first(post, lead), "retry lead"),
+      { id: threadId, threadId },
+    );
+    assert.equal(
+      requireSuccessfulTool<{ notes: unknown[] }>(
+        await second(read, {}),
+        "read leads",
+      ).notes.length,
+      2,
+    );
+    const reply = {
+      threadId,
+      message: "The caller checks the permission at api.ts:12.",
+    };
+    const { id } = requireSuccessfulTool<{ id: string }>(
+      await second(post, reply),
+      "peer reply",
+    );
+    const resumed = await worker(scanId, root, "discovery-0001");
+    assert.deepEqual(
+      requireSuccessfulTool(await resumed(read, { threadId }), "read reply"),
+      {
+        notes: [
+          { ...lead, id: threadId, threadId, author: "discovery-0001" },
+          { ...reply, id, author: "discovery-0002" },
+        ],
+      },
+    );
+    assert.equal(
+      (await second(post, { ...reply, author: "discovery-0001" })).isError,
+      true,
+    );
+    assert.deepEqual(
+      requireSuccessfulTool(await other(read, {}), "isolated scan"),
+      { notes: [] },
+    );
+    assert.equal((await other(post, reply)).isError, true);
+  } finally {
+    await Promise.all(clients.map((client) => client.close()));
   }
 }
 

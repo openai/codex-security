@@ -5,7 +5,7 @@ description: Run repeated Standard security scans of a repository or scoped path
 
 # Deep Security Scan
 
-The host runs Standard audits and merges their findings. Later passes receive the titles and locations already reported. The host stops when consecutive audits add nothing new or the configured scan or time limit is reached. Its final report includes every accepted audit.
+The host runs Standard audits and merges their findings. Workers in the same scan can exchange investigation leads and verify each other’s evidence. Later passes receive the titles and locations already reported. The host stops when consecutive audits add nothing new or the configured scan or time limit is reached. Its final report includes every accepted audit.
 
 1. Resolve the authorized target and scope. For a scoped directory use that directory as `targetPath` and `scope: "."`. For a continuation, call `get_codex_security_scan_context` with its `scanId` and supplied `handoffClaimToken`. Use the saved identity, scope and mode. Follow `../../references/scan-prologue.md` for source access and context updates.
 2. For a new target, call `inspect_codex_security_setup({ targetPath, scope: ".", mode: "deep", projectConfigPath? })`. Show the effective settings and their sources. `max_discovery_runs` caps the total number of Standard scans, including when several run together. Pass a project file only when the user selected it. Existing scans use their saved configuration.
