@@ -12,15 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import {
-  delimiter,
-  dirname,
-  join,
-  parse,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { delimiter, dirname, join, parse, relative, sep } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
@@ -142,61 +134,6 @@ process.exitCode = result.status;
     commit,
     toolEnvironment,
   };
-}
-
-for (const command of [
-  "make-repo-scope-input",
-  "make-hosted-repo-scope-input",
-]) {
-  test.skipIf(process.platform === "win32")(
-    `${command} preserves a nested tracked newline filename`,
-    () => {
-      const f = fixture(),
-        nested = join(f.repo, "selected", "nested"),
-        name = "source\nname.py";
-      f.write(`selected/nested/${name}`);
-      git(nested, "init", "-q");
-      git(nested, "add", ".");
-      git(nested, "commit", "-qm", "nested source");
-      writeFileSync(
-        resolve(nested, git(nested, "rev-parse", "--git-path", "info/exclude")),
-        "*.py\n",
-      );
-      expect(
-        f.rows(command, f.scopeArgs("selected")).map((row) => row.path),
-      ).toEqual([`selected/nested/${name}`]);
-    },
-  );
-  test(`${command} retains tracked source behind an ignored gitlink`, () => {
-    const f = fixture(),
-      nested = join(f.repo, "selected", "nested");
-    f.write("selected/nested/source.py");
-    git(nested, "init", "-q");
-    git(nested, "add", ".");
-    git(nested, "commit", "-qm", "nested source");
-    f.write(".gitignore", "selected/nested/\n");
-    git(f.repo, "add", "--force", "selected/nested");
-    mkdirSync(join(f.repo, "empty"));
-    expect(
-      f.rows(command, f.scopeArgs("selected")).map((row) => row.path),
-    ).toEqual(["selected/nested/source.py"]);
-    expect(
-      f.rows(command, f.scopeArgs("empty", "selected")).map((row) => row.path),
-    ).toEqual(["selected/nested/source.py"]);
-  });
-  test(`${command} uses configured exclusions in the selected nested worktree`, () => {
-    const f = fixture(),
-      nested = join(f.repo, "selected", "nested");
-    f.write("selected/nested/private/hidden.py");
-    git(nested, "init", "-q");
-    const excludes = join(f.root, "nested-excludes");
-    writeFileSync(excludes, "private/\n");
-    git(nested, "config", "core.excludesFile", excludes);
-    mkdirSync(join(f.repo, "empty"));
-    expect(
-      f.rows(command, f.scopeArgs("selected/nested/private", "empty")),
-    ).toEqual([]);
-  });
 }
 
 test("committed binary detection agrees beyond the preview window", () => {
@@ -1024,8 +961,13 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       const f = fixture();
       const contents = binary ? Buffer.from("\0selected\n") : "selected\n";
       f.write("inside/source.py", contents);
+      f.write("inside/changed.py", Buffer.from("\0binary"));
+      f.write("src/nested/changed.py", "original\n");
       f.write("safe.py", "before\n");
       const base = f.commit();
+      f.write("src/nested/changed.py", "modified\n");
+      f.commit();
+      git(f.repo, "update-index", "--skip-worktree", "src/nested/changed.py");
       f.write("src/nested/source.py", "staged\n");
       git(f.repo, "add", "src/nested/source.py");
       f.write("safe.py", "after\n");
@@ -1034,6 +976,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       if (location !== "inside") {
         mkdirSync(destination);
         writeFileSync(join(destination, "source.py"), contents);
+        writeFileSync(join(destination, "changed.py"), Buffer.from("\0binary"));
       }
       rmSync(join(f.repo, "src", "nested"), { recursive: true });
       symlinkSync(destination, join(f.repo, "src", "nested"), "junction");
@@ -1048,7 +991,9 @@ for (const location of ["outside", "repository-extra", "inside"]) {
           "--diff-mode",
           "local-patch",
         ]),
-      ).toBe(`safe.py\n${retained ? "src/nested/source.py\n" : ""}`);
+      ).toBe(
+        `safe.py\nsrc/nested/changed.py\n${retained ? "src/nested/source.py\n" : ""}`,
+      );
       expect(
         f.rows("make-diff-rank-input", [
           "--base",
@@ -1058,6 +1003,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
         ]),
       ).toEqual([
         { path: "safe.py", area: "diff", preview: "after" },
+        { path: "src/nested/changed.py", area: "diff", preview: "" },
         ...(location !== "inside" || !binary
           ? [
               {

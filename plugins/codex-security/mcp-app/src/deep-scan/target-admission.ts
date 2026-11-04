@@ -6,7 +6,7 @@ import {
   scopePath,
   ScopePathNotFoundError,
 } from "../helpers/generate-inventory.js";
-import { fsPath, lstat, regular } from "../helpers/inventory-paths.js";
+import { lstat } from "../helpers/inventory-paths.js";
 import type { DeepScanRunState } from "./types.js";
 
 /** Validate all registered selections, then admit the first physically nonempty member. */
@@ -21,13 +21,14 @@ export async function checkSelectedTargets(
     await setImmediate();
     signal.throwIfAborted();
     const target = scopePath(run.targetPath, path, undefined, true, true);
-    if (!relative(run.targetPath, target) && !lstat(target).isDirectory())
+    const info = lstat(target);
+    if (!relative(run.targetPath, target) && !info.isDirectory())
       throw new Error(
         `Deep Scan repository is no longer a directory: ${target}`,
       );
-    if (storedFiles.has(path) && !regular(target))
+    if (storedFiles.has(path) && !info.isFile())
       throw new Error(`Selected file is no longer a regular file: ${path}`);
-    return target;
+    return { target, isFile: info.isFile() };
   };
   // Missing or unsafe selections fail the initial scope and file-type checks,
   // even when another selected member contains a directory entry.
@@ -37,7 +38,9 @@ export async function checkSelectedTargets(
   for (const path of selections) {
     let target: string;
     try {
-      target = await checkedPath(path);
+      const selection = await checkedPath(path);
+      if (selection.isFile) return;
+      target = selection.target;
     } catch (error) {
       signal.throwIfAborted();
       // A previously validated directory may become unavailable before its entry probe.
@@ -53,9 +56,8 @@ export async function checkSelectedTargets(
       continue;
     }
     try {
-      if (storedFiles.has(path) || regular(target)) return;
       const directory = await opendir(
-        process.platform === "win32" ? encodeGitPath(target) : fsPath(target),
+        encodeGitPath(target),
         // Node accepts raw entry names; OpenDirOptions omits this encoding.
         { encoding: "buffer" as BufferEncoding, bufferSize: 1 },
       );
