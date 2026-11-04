@@ -458,6 +458,7 @@ export async function capturePatchGitControls(
     objectDirectory: process.env["GIT_OBJECT_DIRECTORY"],
     alternateObjectDirectories: process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
   },
+  automaticPublication = false,
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -849,6 +850,7 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
+  let checkoutCleanFilter = false;
   const captureReferences = async (checkout: string): Promise<void> => {
     const origins = await runConfigFields(checkout, [
       "config",
@@ -1021,6 +1023,41 @@ export async function capturePatchGitControls(
       }
     }
     for (const path of activeConfigurations) await rememberConfiguration(path);
+    if (
+      automaticPublication &&
+      !checkoutCleanFilter &&
+      origins.some(
+        (key, index) =>
+          index % 2 === 1 && /^filter\..+\.(clean|process)$/u.test(key),
+      )
+    ) {
+      const entries = await runConfigFields(checkout, [
+        "config",
+        "--null",
+        "--show-scope",
+        "--show-origin",
+        "--includes",
+        "--get-regexp",
+        "^filter\\..+\\.(clean|process)$",
+      ]);
+      const drivers = new Map<string, boolean>();
+      for (let index = 0; index + 2 < entries.length; index += 3) {
+        const setting = entries[index + 2]!;
+        const separator = setting.indexOf("\n");
+        const key = separator < 0 ? setting : setting.slice(0, separator);
+        drivers.set(
+          key,
+          separator >= 0 &&
+            separator + 1 < setting.length &&
+            !(await userSelectedConfig(
+              entries[index],
+              configPath(entries[index + 1]!),
+              checkout,
+            )),
+        );
+      }
+      checkoutCleanFilter = [...drivers.values()].includes(true);
+    }
     for (const path of globalConfigurationPaths)
       await rememberSelectedConfiguration(relativeFile(checkout, path), true);
     const localConfig = (
@@ -1537,6 +1574,22 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
+    if (capture && checkoutCleanFilter) {
+      // Inspect the original checkout before status or add can invoke a filter.
+      for (const checkout of visited) {
+        const local = await runBytes(root, checkout, [
+          "ls-files",
+          "--others",
+          "--directory",
+          "--no-empty-directory",
+          "-z",
+        ]);
+        if (local.length)
+          throw new Error(
+            "Cannot automatically publish from a checkout with local-only files and a checkout-selected Git filter. Run patch without --create-pr and review the changes before publishing.",
+          );
+      }
+    }
     for (const { path, userSelected } of pendingStoragePaths) {
       try {
         const children = [join(path, "objects"), join(path, "tmp")];

@@ -1262,6 +1262,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
 
 interface SkillRunOptions {
   readonly signal?: AbortSignal;
+  automaticPublication?: boolean;
   context?: string;
   contextFile?: string;
   knowledgeBasePath?: string;
@@ -7259,6 +7260,9 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                get automaticPublication() {
+                  return options.createPr && publication === undefined;
+                },
                 onBeforeTurn: preparePatch,
                 verificationMode: options.verificationMode,
               },
@@ -7441,6 +7445,7 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                automaticPublication: options.createPr,
                 onBeforeTurn: preparePatch,
                 verificationMode: options.verificationMode,
               },
@@ -9728,32 +9733,6 @@ async function preparePatchPublication(
     );
   }
   const root = await patchRepositoryRoot(repository, dependencies);
-  const filters = await patchScopedConfig(
-    "^filter\\..*\\.(clean|process)$",
-    root,
-    dependencies,
-  );
-  for (let index = 0; index + 2 < filters.length; index += 3) {
-    const entry = filters[index + 2]!;
-    const separator = entry.indexOf("\n");
-    if (
-      separator < 0 ||
-      !entry.slice(separator + 1).trim() ||
-      (await operatorPatchConfig(filters[index]!, filters[index + 1]!, root))
-    )
-      continue;
-    // ls-files inventories untracked and ignored paths without running filters.
-    const local = await patchGitRecords(
-      root,
-      ["ls-files", "--others", "--directory", "-z"],
-      dependencies,
-    );
-    if (local.some(Boolean))
-      throw new CodexSecurityError(
-        "Cannot automatically publish from a checkout with local-only files and a checkout-selected Git filter. Review and publish the patch separately.",
-      );
-    break;
-  }
   const paths = await patchGitRecords(
     repository,
     [
@@ -12156,6 +12135,7 @@ async function runSkill(
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
           ),
         },
+        options.automaticPublication,
       )
     : undefined;
   const patchPermissions =
@@ -14104,6 +14084,12 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
+          get automaticPublication() {
+            return (
+              publication === undefined &&
+              (arguments_.createPr || patchSelection?.createPullRequest)
+            );
+          },
           onBeforeTurn: async (signal) => {
             if (
               publication === undefined &&
