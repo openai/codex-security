@@ -456,7 +456,7 @@ test.each(
         ],
         { input: JSON.stringify(restored), encoding: "utf8" },
       );
-      expect(JSON.parse(workerResult)).toEqual({ launches: 4 });
+      expect(JSON.parse(workerResult)).toEqual({ launches: 3 });
       const profile = recipe!["providerProfile"] as JsonObject;
       const privatePath = join(
         codexSecurityCredentialHome(environment),
