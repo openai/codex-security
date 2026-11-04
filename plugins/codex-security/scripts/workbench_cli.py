@@ -186,7 +186,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     publication_failure.add_argument("--coordinator-generation", type=positive_int)
 
     get_scan = add_command("get-scan", "--scan-id")
-    get_scan.add_argument("--occurrence-id")
+    detail = get_scan.add_mutually_exclusive_group()
+    detail.add_argument("--occurrence-id")
+    detail.add_argument("--progress-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")

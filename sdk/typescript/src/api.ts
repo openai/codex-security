@@ -2934,7 +2934,11 @@ export class CodexSecurity {
                 ...workbenchOptions,
                 signal: AbortSignal.any([signal, progressSignal]),
               },
-              workbenchArgs("get-scan", { scanId }),
+              workbenchArgs("get-scan", {
+                scanId,
+                // Custom plugins may predate the compact progress projection.
+                progressOnly: this.config.pluginPath === undefined,
+              }),
             ),
           onProgress:
             mode === "deep"

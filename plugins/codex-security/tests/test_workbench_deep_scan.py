@@ -350,6 +350,47 @@ def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> N
     assert "other completed scans" in save(sources, check=False)["stderr"]
 
 
+def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    worker, *_ = deep.dispatch_discovery_worker(name="discovery-0001")
+    deep.record_iteration(name="dedup-0001", input_worker_ids=[worker], new_findings_count=1)
+    manifest = deep.directory / "coordinator.json"
+    manifest.write_text("{}")
+    before = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", str(manifest)
+    )["deepScan"]
+
+    target = tmp_path / "target"
+    registration = run_workbench(
+        deep.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(deep.directory),
+        "--archive-existing",
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "deep",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+            }
+        ),
+        environment=deep_environment(deep.codex_home),
+    )
+    archived = Path(registration["archivedScanDir"])
+    after = deep.read("thread-deep-scan")
+    assert Path(after["manifestPath"]) == archived / manifest.name
+    for old, current in zip(before["workers"], after["workers"], strict=True):
+        assert old["id"] == current["id"]
+        for field in ("promptPath", "artifactDir", "resultManifestPath"):
+            path = Path(current[field])
+            assert path == archived / Path(old[field]).relative_to(deep.directory)
+            assert path.exists()
+
+
 def test_existing_generation_safely_claims_and_reclaims_without_schema_migration(
     tmp_path: Path,
 ) -> None:
@@ -867,6 +908,9 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
 
     def independent_reviews() -> dict[str, int | bool]:
         context = get_scan(deep.state_dir, deep.id)
+        assert get_scan(deep.state_dir, deep.id, "--progress-only") == {
+            "scan": {"progress": context["scan"]["progress"]}
+        }
         return context["scan"]["progress"]["independentReviews"]
 
     assert independent_reviews() == {

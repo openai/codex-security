@@ -651,13 +651,15 @@ if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
 
 
-def _latest_iteration(workers: Iterable[Any]) -> Any | None:
-    def iteration_order(worker: Any) -> tuple[int, str, str]:
-        output = Path(worker["result_manifest_path"]).parent
-        label = output.parent.name if output.name == "output" else output.name
-        match = re.fullmatch(r"dedup-([0-9]+)", label)
-        return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
+def _iteration_order(worker: Any) -> tuple[int, str, str]:
+    result = worker["result_manifest_path"]
+    output = Path(result).parent if result else Path(worker["artifact_dir"])
+    label = output.parent.name if output.name == "output" else output.name
+    match = re.fullmatch(r"dedup-([0-9]+)", label)
+    return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
 
+
+def _latest_iteration(workers: Iterable[Any]) -> Any | None:
     return max(
         (
             worker
@@ -666,7 +668,7 @@ def _latest_iteration(workers: Iterable[Any]) -> Any | None:
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
         ),
-        key=iteration_order,
+        key=_iteration_order,
         default=None,
     )
 
