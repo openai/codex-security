@@ -11,7 +11,9 @@ import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
+import { once } from "node:events";
+import { text } from "node:stream/consumers";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
@@ -966,12 +968,26 @@ print(json.dumps([*parent, list(workers)]))`,
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.structuredContent.completion;
+      const sealed = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        resumedScanId,
+      ]);
+      const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
+      assert.equal(usage.coverage, "unavailable");
+      assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
-        scan: { progress: { status: "complete" }, reportAvailable: true },
+        scan: {
+          progress: { status: "complete" },
+          reportAvailable: true,
+          usage,
+        },
       });
       assert.deepEqual(resumed.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
+        completedAudits: 2,
+        terminalReason: "saturated",
         manifestPath,
         reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
@@ -1337,31 +1353,29 @@ async function testCliDeepScanEngine({
     ]);
     return { scanId: registration.scanId as string, scanDir };
   };
+  const request = (scanId: string) => ({
+    scanId,
+    threadId,
+    model: "gpt-6.1-sol",
+    reasoningEffort: "max",
+    permissionProfile: (parentSandboxState as { permissionProfile: unknown })
+      .permissionProfile,
+  });
+  const engineEnvironment = {
+    ...environment,
+    CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
+  };
   const launch = (scanId: string, overrides: NodeJS.ProcessEnv = {}) => {
     const execution = execFileAsync(
       process.execPath,
       [serverBundlePath, "--deep-scan-engine"],
       {
-        env: {
-          ...environment,
-          CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase,
-          ...overrides,
-        },
+        env: { ...engineEnvironment, ...overrides },
         encoding: "utf8",
         timeout: 30_000,
       },
     );
-    execution.child.stdin!.write(
-      JSON.stringify({
-        scanId,
-        threadId,
-        model: "gpt-6.1-sol",
-        reasoningEffort: "max",
-        permissionProfile: (
-          parentSandboxState as { permissionProfile: unknown }
-        ).permissionProfile,
-      }) + "\n",
-    );
+    execution.child.stdin!.write(JSON.stringify(request(scanId)) + "\n");
     return execution;
   };
   const completed = await register("cli-engine-completed", true);
@@ -1370,7 +1384,35 @@ async function testCliDeepScanEngine({
   const helperStartIndex = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).length;
-  const result = await launch(completed.scanId);
+  const verbose = fork(serverBundlePath, ["--deep-scan-engine"], {
+    env: engineEnvironment,
+    execArgv: [],
+    timeout: 30_000,
+    silent: true,
+  });
+  const diagnosticEvents: unknown[] = [];
+  verbose.on("message", (event) => diagnosticEvents.push(event));
+  const output = Promise.all([
+    text(verbose.stdout!),
+    text(verbose.stderr!),
+    once(verbose, "close"),
+  ]);
+  verbose.stdin!.write(
+    JSON.stringify({ ...request(completed.scanId), diagnosticsVersion: 1 }) +
+      "\n",
+  );
+  const [stdout, stderr, [code]] = await output;
+  assert.equal(code, 0, stderr);
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "discovery_accepted",
+    ),
+  );
+  assert.ok(
+    diagnosticEvents.some(
+      (entry) => (entry as { event: string }).event === "coordinator_terminal",
+    ),
+  );
   const helperLaunches = (
     await readLogLines(environment.FAKE_WORKBENCH_LAUNCH_LOG!)
   ).slice(helperStartIndex);
@@ -1381,7 +1423,7 @@ async function testCliDeepScanEngine({
     assert.equal(launch.args.length, 7);
     assert.equal(launch.cwd, pluginRoot);
   }
-  assert.deepEqual(JSON.parse(result.stdout), {
+  assert.deepEqual(JSON.parse(stdout), {
     scanId: completed.scanId,
     manifestPath: path.join(completed.scanDir, "scan-manifest.json"),
   });
