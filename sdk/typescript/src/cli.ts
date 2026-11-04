@@ -7942,14 +7942,14 @@ async function runDependencyScan(
     )(
       config,
       interactive
-        ? (auth, signal) =>
+        ? async (auth, signal) =>
             chooseInteractiveAuthentication(
               {
                 auth,
-                config: {
-                  ...DEFAULT_CODEX_CONFIG,
-                  ...config.codexOverrides,
-                },
+                config: await mergedCodexConfig(
+                  config,
+                  scanCodexHome(dependencies.environment),
+                ),
                 command: "scan",
                 signal,
               },

@@ -2560,7 +2560,20 @@ test.each([
   },
   { label: "no stored sign-in", stored: false, choice: "api-key", prompts: 0 },
   { label: "no API key", key: false, choice: "chatgpt", prompts: 0 },
-  { label: "external provider", external: true, choice: "api-key", prompts: 0 },
+  {
+    label: "external provider",
+    external: "inline",
+    flags: ["--provider", "fireworks", "--model", "synthetic-model"],
+    choice: "api-key",
+    prompts: 0,
+  },
+  {
+    label: "native provider profile",
+    external: "file",
+    flags: ["--codex", 'profile="advisories"'],
+    choice: "api-key",
+    prompts: 0,
+  },
 ] satisfies {
   label: string;
   choice: "chatgpt" | "api-key";
@@ -2570,7 +2583,7 @@ test.each([
   input?: boolean;
   stored?: boolean;
   key?: boolean;
-  external?: boolean;
+  external?: "inline" | "file";
 }[])(
   "dependency CLI chooses authentication lazily: $label",
   async (scenario) => {
@@ -2594,6 +2607,13 @@ test.each([
       Object.assign(f.environment, {
         FIREWORKS_API_KEY: "synthetic-fireworks-key",
       });
+    if (external === "file") {
+      Object.assign(f.environment, { CODEX_HOME: f.codexHome });
+      await writeFile(
+        join(f.codexHome, "advisories.config.toml"),
+        'model_provider = "fireworks"\n[model_providers.fireworks]\nenv_key = "FIREWORKS_API_KEY"\n',
+      );
+    }
     const originalEnvironment = { ...f.environment };
     const deps = cliDependencies({ environment: f.environment });
     deps.createDependencySecurity = (_config, chooser) => {
@@ -2622,11 +2642,7 @@ test.each([
     const { stderr, runCli } = createCliTest(main, {
       stderr: !("terminal" in scenario) || scenario.terminal,
     });
-    const flags = external
-      ? ["--provider", "fireworks", "--model", "synthetic-model"]
-      : "flags" in scenario
-        ? (scenario.flags ?? [])
-        : [];
+    const flags = "flags" in scenario ? (scenario.flags ?? []) : [];
     expect(
       await runCli(
         [
