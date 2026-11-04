@@ -1,7 +1,5 @@
-import {
-  repositoryUrlKey,
-  validateExternalEvidence,
-} from "./external-import-contract.js";
+import { validateExternalEvidence } from "./external-import-contract.js";
+import type { ExternalSourceRepository } from "./external-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
@@ -17,6 +15,7 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import {
   platformLocationPath,
   requireSemgrepFullRef,
+  selectionRepository,
 } from "./semgrep-platform-findings.js";
 
 export const guardianSelectionFormat = "semgrep-guardian-selection/v1";
@@ -161,6 +160,7 @@ export async function collectSelectedSemgrepGuardianFindings(
 export function normalizeGuardianSelection(
   document: Record<string, unknown>,
   declaredUrl?: string,
+  references: readonly ExternalSourceRepository[] = [],
 ) {
   // Guardian returns a repository name. The caller supplies its verified SCM mapping.
   const url = declaredScannerRepositoryUrl(
@@ -168,11 +168,12 @@ export function normalizeGuardianSelection(
     "Guardian",
     "local",
   );
+  const repositoryBinding = selectionRepository(url, references);
   if (
     declaredUrl !== undefined &&
-    repositoryUrlKey(
+    repositoryBinding.key(
       declaredScannerRepositoryUrl(declaredUrl, "Guardian", "local"),
-    ) !== repositoryUrlKey(url)
+    ) !== repositoryBinding.key(url)
   )
     throw new Error(
       "Guardian selection does not match the declared source repository URL.",

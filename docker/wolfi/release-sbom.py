@@ -38,6 +38,15 @@ def enrich(sbom, components):
                               "referenceLocator": purl}],
         })
 
+    for i, item in enumerate(components.get("bundled_tokenizer", [])):
+        add(npm_ids[PurePosixPath("node_modules/@openai/codex-security")], {
+            "SPDXID": f"SPDXRef-tokenizer-{i}", "name": item["name"], "versionInfo": item["version"],
+            "downloadLocation": "NOASSERTION", "licenseDeclared": item["licenses"][0]["license"]["id"],
+            "filesAnalyzed": False, "sourceInfo": "Bundled in the SDK embedding tokenizer.",
+            "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
+                              "referenceLocator": item["purl"]}],
+        })
+
     for i, item in enumerate(components["bundled_native"]):
         path = PurePosixPath(item["path"])
         owner = next(npm_ids[p] for p in path.parents if p in npm_ids)
