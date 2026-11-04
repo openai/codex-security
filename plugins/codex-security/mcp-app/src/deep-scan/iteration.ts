@@ -454,7 +454,11 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
       )
         return visibleGroups();
       delete visible.provenance.deepScanRepairGroups;
-      groups.set(target, { finding: visible, target });
+      groups.set(target, {
+        finding: visible,
+        target,
+        representative: parts[0]!.representative,
+      });
       continue;
     }
     const originals = new Map(
@@ -670,7 +674,13 @@ export async function mergeBatch(
     group.target = group.id;
     group.worker = worker;
   }
-  if (repairs && retained.some((group) => group.worker >= 0)) {
+  const reviewable = retained.filter(
+    (group) =>
+      group.target === group.id &&
+      !incomplete.has(group.target) &&
+      (repairs || (fallbackMatches.size > 0 && group.id < previous)),
+  );
+  if (reviewable.some((group) => group.worker >= 0)) {
     const sources = new Map<number, Record<string, unknown>[]>();
     for (const group of retained) {
       if (incomplete.has(group.target)) continue;
@@ -682,12 +692,10 @@ export async function mergeBatch(
     }
     const reviewFailures = new Set<string>();
     const matches = await checkSameFix(
-      retained.filter(
-        (group) => group.target === group.id && !incomplete.has(group.target),
-      ),
+      reviewable,
       priorTargets,
       records,
-      repairs,
+      repairs ?? new Map(),
       sources,
       compare,
       (error) => {
