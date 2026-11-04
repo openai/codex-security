@@ -1112,16 +1112,6 @@ function bindSnykFinding(
   return { ...repository, issueId };
 }
 
-/** Recognize a retained hosted report before verifying its selected issues. */
-export function isSnykRestReport(
-  input: ExternalFindings & Partial<SnykIssuesFindings>,
-): boolean {
-  return (
-    input.snykRestContext !== undefined ||
-    input.findings.some(isSnykRestFinding)
-  );
-}
-
 function readIssues(document: Resource, selected: Scope) {
   if (document["complete"] !== true)
     throw new Error("Expected a complete Snyk REST Issues export.");

@@ -256,15 +256,14 @@ class DeepScan:
         prompt_path: Path,
         artifact_dir: Path,
         input_worker_ids: list[str],
-    ) -> dict[str, object]:
-        return seed_legacy_reducer(
+    ) -> None:
+        seed_legacy_reducer(
             self.state_dir,
             self.id,
             worker_id,
             str(prompt_path),
             str(artifact_dir),
-            *(item for worker in input_worker_ids for item in ("--input-worker-id", worker)),
-            environment=deep_environment(self.codex_home),
+            *input_worker_ids,
         )
 
     def finish(
@@ -663,7 +662,7 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
             deep.id,
             reducer_id,
             str(result),
-            "1",
+            1,
             environment=deep_environment(deep.codex_home),
         )
 
