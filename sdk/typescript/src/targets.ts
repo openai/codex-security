@@ -933,11 +933,13 @@ export async function gitMarkerRoot(
 export async function gitProtectionRoots(
   repository: string,
   signal?: AbortSignal,
+  destinationFallback: string | null = null,
 ): Promise<string[]> {
-  const roots = await Promise.all([
+  const [destination, origin] = await Promise.all([
     gitMarkerRoot(repository, signal, "outermost"),
     walkGitMarkers(resolve(repository), signal, "outermost"),
   ]);
+  const roots = [destination ?? destinationFallback, origin];
   return [...new Set(roots.filter((root): root is string => root !== null))];
 }
 

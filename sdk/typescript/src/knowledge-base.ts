@@ -17,7 +17,7 @@ import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import {
-  gitMarkerRoot,
+  gitProtectionRoots,
   isGitMetadataDirectory,
   nullIfMissingFile,
 } from "./targets.js";
@@ -49,14 +49,14 @@ export async function knowledgeBaseProtectedRoots(
   snapshot: KnowledgeBaseSnapshot,
   signal?: AbortSignal,
 ): Promise<string[]> {
-  return snapshot.protectedRoots === undefined
-    ? await Promise.all(
-        snapshot.sources.map(
-          async (source) =>
-            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        ),
-      )
-    : [...snapshot.protectedRoots];
+  if (snapshot.protectedRoots !== undefined)
+    return [...snapshot.protectedRoots];
+  const roots = await Promise.all(
+    snapshot.sources.map((source) =>
+      gitProtectionRoots(source, signal, source),
+    ),
+  );
+  return roots.flat();
 }
 
 /** @internal Extract once so campaign identity and workers use identical inputs. */
@@ -87,9 +87,8 @@ export async function readKnowledgeBaseSnapshot(
       }
 
       const source = await realpath(path);
-      protectedRoots.add(
-        (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-      );
+      for (const root of await gitProtectionRoots(path, signal, source))
+        protectedRoots.add(root);
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
         : [source];

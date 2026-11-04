@@ -38,7 +38,6 @@ import {
   expandHome,
 } from "../../../../sdk/typescript/src/codex-home.js";
 import {
-  gitMarkerRoot,
   gitProtectionRoots,
   nullIfMissingFile,
 } from "../../../../sdk/typescript/src/targets.js";
@@ -464,18 +463,29 @@ export async function prepareNativeScan(
   const executionPaths = publicationOnly
     ? {}
     : resolveExecutionPaths(config, input.scan.scanDir, inheritedEnvironment);
+  // Saved recipes name canonical documents. Their snapshot also protects the original checkout.
+  const knowledgeBaseSnapshot =
+    recipe && options.knowledgeBasePaths?.length
+      ? await restoreScanKnowledge(
+          input.scan.scanDir,
+          input.scan.targetPath,
+          recipe.scanInputs,
+        )
+      : semanticInputs?.knowledgeBaseSnapshot;
   const protectedRoots = [
     input.scan.scanDir,
-    ...(await Promise.all(
-      [input.scan.targetPath, ...(options.knowledgeBasePaths ?? [])].map(
-        async (path) => {
-          const source = expandHome(path, inheritedEnvironment);
-          return (await gitMarkerRoot(source, signal, "outermost")) ?? source;
-        },
-      ),
-    )),
+    ...(knowledgeBaseSnapshot?.protectedRoots ?? []),
   ];
   if (!publicationOnly) {
+    for (const path of [
+      input.scan.targetPath,
+      ...(options.knowledgeBasePaths ?? []),
+    ]) {
+      const source = expandHome(path, inheritedEnvironment);
+      protectedRoots.push(
+        ...(await gitProtectionRoots(source, signal, source)),
+      );
+    }
     const files = [
       ...MODEL_FILE_SETTINGS.map((key) => executionPaths[key]),
       ...(input.projectConfigPaths ?? []).map((path) =>
@@ -556,20 +566,8 @@ export async function prepareNativeScan(
     options: {
       ...options,
       ...deep.settings,
-      ...(input.recipe === undefined
-        ? { knowledgeBaseSnapshot: semanticInputs?.knowledgeBaseSnapshot }
-        : {
-            resumeScanId: input.scan.scanId,
-            ...(options.knowledgeBasePaths?.length
-              ? {
-                  knowledgeBaseSnapshot: await restoreScanKnowledge(
-                    input.scan.scanDir,
-                    input.scan.targetPath,
-                    input.recipe.scanInputs,
-                  ),
-                }
-              : {}),
-          }),
+      ...(recipe === undefined ? {} : { resumeScanId: input.scan.scanId }),
+      knowledgeBaseSnapshot,
       inheritedPermissions,
       target:
         recipe?.target?.kind === "paths"

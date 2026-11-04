@@ -856,6 +856,9 @@ test("native preparation excludes scan output and selected source directories fr
   const scanDir = join(root, "scan");
   const knowledgeRoot = join(root, "knowledge");
   const documents = join(knowledgeRoot, "docs");
+  const knowledgeOrigin = join(root, "knowledge-origin");
+  const knowledgeLink = join(knowledgeOrigin, "linked-docs");
+  const knowledgeFile = join(knowledgeLink, "architecture.md");
   const external = join(root, "external");
   const project = join(root, "project");
   const projectFile = join(project, "scan.json");
@@ -872,18 +875,36 @@ test("native preparation excludes scan output and selected source directories fr
   ]);
   try {
     await mkdir(scanDir, { mode: 0o700 });
-    for (const directory of [repository, documents, project, external]) {
+    for (const directory of [
+      repository,
+      documents,
+      knowledgeOrigin,
+      project,
+      external,
+    ]) {
       await mkdir(directory, { recursive: true });
     }
     await mkdir(join(knowledgeRoot, ".git"));
+    await mkdir(join(knowledgeOrigin, ".git"));
+    await symlink(
+      documents,
+      knowledgeLink,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     await writeFile(projectFile, "{}");
     await writeFile(
       join(documents, "architecture.md"),
       "Synthetic architecture.",
     );
-    const snapshot = await readKnowledgeBaseSnapshot([documents]);
+    const snapshot = await readKnowledgeBaseSnapshot([knowledgeFile]);
     await saveScanKnowledge(scanDir, snapshot);
-    for (const directory of [scanDir, knowledgeRoot, project, external]) {
+    const protectedDirectories = [
+      scanDir,
+      knowledgeRoot,
+      knowledgeOrigin,
+      project,
+    ];
+    for (const directory of [...protectedDirectories, external]) {
       await writeFile(join(directory, name), "inert executable fixture");
       await chmod(join(directory, name), 0o700);
     }
@@ -894,7 +915,7 @@ test("native preparation excludes scan output and selected source directories fr
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
     for (const saved of [false, true]) {
       if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
-      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
+      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgeFile;
       const request = {
         ...input(),
         scan: { ...input().scan, targetPath: repository, scanDir },
@@ -903,7 +924,7 @@ test("native preparation excludes scan output and selected source directories fr
           ? {
               recipe: {
                 auth: "api-key",
-                knowledgeBasePaths: [documents],
+                knowledgeBasePaths: snapshot.sources,
                 scanInputs: scanInputIdentity(
                   input().scan.userContext,
                   snapshot,
@@ -913,7 +934,7 @@ test("native preparation excludes scan output and selected source directories fr
             }
           : {}),
       };
-      for (const directory of [scanDir, knowledgeRoot, project]) {
+      for (const directory of protectedDirectories) {
         process.env.CODEX_CLI_PATH = join(directory, name);
         await assert.rejects(
           prepareNativeExecution(request),
@@ -921,9 +942,7 @@ test("native preparation excludes scan output and selected source directories fr
         );
       }
       delete process.env.CODEX_CLI_PATH;
-      process.env.PATH = [scanDir, knowledgeRoot, project, external].join(
-        delimiter,
-      );
+      process.env.PATH = [...protectedDirectories, external].join(delimiter);
       const prepared = await prepareNativeExecution(request);
       const environment = prepared.client.dependencies.environment;
       assert.equal(environment.CODEX_CLI_PATH, join(external, name));
