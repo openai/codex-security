@@ -4,7 +4,6 @@ import json
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_db import BUDGET_COST, BUDGET_WARNING
 
 

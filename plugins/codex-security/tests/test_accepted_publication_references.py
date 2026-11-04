@@ -6,7 +6,6 @@ from argparse import Namespace
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state
 
 

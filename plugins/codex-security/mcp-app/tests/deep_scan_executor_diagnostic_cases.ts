@@ -84,18 +84,6 @@ export function testCodeModeFrameDiagnosticBoundaries(
   }
 }
 
-export function workerPermissionProfileOverride(args: readonly string[]) {
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("default_permissions=")),
-    ['default_permissions="codex_security_deep_scan_worker"'],
-  );
-  const overrides = args.filter((arg: string) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.equal(overrides.length, 1);
-  return overrides[0];
-}
-
 export function testWorkerErrorClassificationPreservesExplicitFailures({
   classifyCodexWorkerError,
   DeepScanNonRetryableError,

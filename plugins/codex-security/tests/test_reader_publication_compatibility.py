@@ -12,10 +12,6 @@ from pathlib import Path
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_stop_conditions import canceled_discovery_output
-from test_deep_scan_stop_conditions import deadline_scan as deadline_scan
-from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import committed_standard_reducer, deep_scan_fixture
 from workbench_test_support import (
     finish_deep_scan,
@@ -82,7 +78,7 @@ def test_capped_deadline_replays_selected_publication(
     workbench_api, workbench_db, deadline_scan, digest_bound
 ):
     scan = deadline_scan
-    canceled_discovery_output(workbench_db, scan)
+    scan.canceled_discovery_output(workbench_db)
     accepted = selected_publication(
         workbench_api, workbench_db, scan, reason="capped", digest_bound=digest_bound
     )
