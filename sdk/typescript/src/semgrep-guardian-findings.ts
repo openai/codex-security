@@ -55,6 +55,7 @@ export function guardianFindingRepository(
   const url = guardianImportRepository(data["sourceRepositoryUrl"], provider);
   if (generated) {
     const row = record(data["finding"], "Original Guardian finding");
+    requireGuardianRowScope(data, row);
     if (source_finding_id !== guardianId(data, row["id"]))
       throw new CodexSecurityError(
         "The normalized finding ID does not match the original Guardian finding.",
@@ -113,6 +114,32 @@ function selectionScope(request: unknown, findingIds: unknown) {
   return { tool: name, deployment, repository, ref, ids };
 }
 
+function requireGuardianRowScope(
+  scope: Record<string, unknown>,
+  row: Record<string, unknown>,
+): void {
+  const id = row["id"];
+  const repository = record(row["repository"], "Guardian finding repository");
+  if (
+    repository["name"] !== scope["repository"] ||
+    (row["ref"] != null && row["ref"] !== scope["ref"])
+  )
+    throw new Error(
+      `Guardian finding ${id} does not match the selected repository and ref.`,
+    );
+  const expected =
+    scope["tool"] === "get_semgrep_sast_findings" ? "sast" : "sca";
+  if (
+    row["issueType"] != null &&
+    text(row["issueType"])
+      ?.toLowerCase()
+      .replace(/^issue_type_/u, "") !== expected
+  )
+    throw new Error(
+      `Guardian finding ${id} does not match the selected product.`,
+    );
+}
+
 function selectedRows(
   scope: ReturnType<typeof selectionScope>,
   structuredContent: unknown,
@@ -129,25 +156,7 @@ function selectedRows(
     const id = row["id"];
     if (rows.has(id))
       throw new Error(`Guardian returned duplicate finding ID ${id}.`);
-    const repository = record(row["repository"], "Guardian finding repository");
-    if (
-      repository["name"] !== scope.repository ||
-      (row["ref"] != null && row["ref"] !== scope.ref)
-    )
-      throw new Error(
-        `Guardian finding ${id} does not match the selected repository and ref.`,
-      );
-    const expected =
-      scope.tool === "get_semgrep_sast_findings" ? "sast" : "sca";
-    if (
-      row["issueType"] != null &&
-      text(row["issueType"])
-        ?.toLowerCase()
-        .replace(/^issue_type_/u, "") !== expected
-    )
-      throw new Error(
-        `Guardian finding ${id} does not match the selected product.`,
-      );
+    requireGuardianRowScope(scope, row);
     rows.set(id, row);
   }
   return Array.from(scope.ids, (id) => {

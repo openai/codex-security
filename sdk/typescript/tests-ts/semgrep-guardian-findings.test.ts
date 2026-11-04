@@ -233,6 +233,39 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
   expect(await fixture.read()).toHaveLength(0);
 });
 
+test("normalized Guardian imports verify the original finding against the selected scope", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  const original = normalized.findings[0]!;
+  for (const changed of [
+    { ...row, repository: { name: "other/service" } },
+    { ...row, ref: "refs/heads/other" },
+    { ...row, issueType: "ISSUE_TYPE_SCA" },
+  ]) {
+    await expect(
+      fixture.prepareNormalized({
+        ...normalized,
+        findings: [
+          {
+            ...original,
+            evidence: {
+              ...original.evidence,
+              source_data: {
+                ...original.evidence.source_data,
+                finding: changed,
+              },
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow(/does not match the selected/);
+  }
+});
+
 test("normalized Guardian repository claims use the checkout's HTTP port identity", async () => {
   await using fixture = await isolatedGitReportFixture(
     "guardian.json",
