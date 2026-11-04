@@ -2346,9 +2346,11 @@ or the [Bedrock workflow](https://github.com/openai/codex-security/blob/main/exa
 
 ### Local pre-commit checks
 
-`install-hook` checks staged and unstaged changes, blocking the commit on scan
-failure or findings at/above its threshold (`high` by default). Use required CI
-for enforcement; local hooks are optional.
+The generated hook runs a `--working-tree` scan and blocks the commit on scan
+failure or findings at or above its threshold (`high` by default). It uses the
+checkout's normal index for staged and unstaged changes, so it can include changes
+outside a partial commit and miss content staged only in a separate index.
+Use required CI for enforcement because local hooks are optional.
 
 Install the CLI outside the target repository and run that copy directly. `npx`
 can select a repository-local package. Before installation, inspect:
@@ -2366,11 +2368,12 @@ codex-security install-hook /path/to/repository
 ```
 
 To migrate an existing generated hook, verify it is a regular file used only by
-this repository and contains only the generated command. Preserve its severity.
-The installer can update older `npx` hooks when the severity matches. New hooks
-record absolute Node/CLI paths. If those change, back up and remove the verified
-generated hook, then reinstall with the same threshold. Restore the backup if
-installation fails. The installer respects `core.hooksPath`.
+this repository and contains only the generated commands. Rerun `install-hook`
+with `--fail-on-severity` set to its original threshold. It recognizes the legacy
+`npx` hook and supported earlier templates with matching absolute Node and CLI
+paths. If it refuses to overwrite the verified hook, back it up, remove it and
+reinstall with the same threshold. Restore the backup if installation fails. The installer
+respects `core.hooksPath`.
 
 ## Import SonarQube Cloud issues
 
