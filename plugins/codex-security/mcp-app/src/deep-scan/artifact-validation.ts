@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { dirname, posix, relative, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
@@ -117,6 +118,7 @@ export async function validateDiscoveryArtifacts(
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
+  additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -177,7 +179,11 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [provenance],
+    reviews: [
+      additionalModel
+        ? { ...provenance, threatModel: additionalModel }
+        : provenance,
+    ],
     surfaces,
     explicitExclusions: coverage.explicitExclusions.map(project),
     deferred: coverage.deferred.map((item, index) => ({
@@ -214,7 +220,13 @@ export function addScanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
 ): void {
-  const coverage = scanCoverage(worker, scanDir);
+  const model = worker.result.threatModel;
+  aggregate.threatModel ??= model;
+  const additionalModel =
+    model && !isDeepStrictEqual(model, aggregate.threatModel)
+      ? model
+      : undefined;
+  const coverage = scanCoverage(worker, scanDir, additionalModel);
   const previous = aggregate.sourceCoverage;
   if (!previous) {
     aggregate.sourceCoverage = coverage;

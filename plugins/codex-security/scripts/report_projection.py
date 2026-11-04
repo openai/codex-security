@@ -860,6 +860,20 @@ def build_report_markdown(
             values = _strings(threat_model.get(key))
             if values:
                 lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
+    reviews = scan.get("reviewState", {}).get("reviews")
+    if isinstance(reviews, list) and any(
+        isinstance(review, dict) and isinstance(review.get("threatModel"), dict)
+        for review in reviews
+    ):
+        lines.extend(
+            [
+                "",
+                (
+                    "Other reviews recorded different threat models. See the `threatModel` fields "
+                    "in `scan.reviewState.reviews` in the [scan manifest](scan-manifest.json)."
+                ),
+            ]
+        )
     lines.extend(["", "## Findings", ""])
     if findings:
         if deep_presentation:

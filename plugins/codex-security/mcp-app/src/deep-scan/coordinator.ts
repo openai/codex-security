@@ -821,10 +821,11 @@ export class DeepScanCoordinator {
       );
       dispatched += count;
       this.state = { ...this.state, dispatchedCount: dispatched };
-      const previousFindings = result.findings.map(
-        ({ title, locations: [site] }) =>
-          `${site.path}:${site.startLine} ${title}`,
-      );
+      const previousFindings = result.findings.map(({ title, locations }) => {
+        const site =
+          locations.find(({ role }) => role === "root_control") ?? locations[0];
+        return `${site.path}:${site.startLine} ${title}`;
+      });
       const outcomes = await this.scanBatch(count, scanLabel, previousFindings);
       signal.throwIfAborted();
       batch = [];
