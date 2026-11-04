@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { hash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   readFile,
   readdir,
@@ -11,7 +12,15 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { dependencies } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -46,7 +55,8 @@ describe("patch change tracking", () => {
         : directory;
       if (linked) git("worktree", "add", "--detach", checkout, "HEAD");
       const parentGit = repositoryGit(checkout);
-      const nested = join(checkout, "nested");
+      const nestedName = linked ? `nested${delimiter}checkout` : "nested";
+      const nested = join(checkout, nestedName);
       await mkdir(nested);
       const childGit = repositoryGit(nested);
       childGit("init", "--quiet");
@@ -60,7 +70,7 @@ describe("patch change tracking", () => {
         "-m",
         "Nested baseline",
       );
-      parentGit("add", "nested");
+      parentGit("add", nestedName);
       parentGit("commit", "-m", "Record nested checkout");
 
       const outside = await fixtures.create("patch-external-pack-");
@@ -86,10 +96,20 @@ describe("patch change tracking", () => {
         ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
         {
           currentDirectory: checkout,
-          onRepositoryCommand: (tool, args, cwd, options) => {
-            if (args.includes("pack-objects"))
-              expect(options?.patchSnapshot).toEqual([objectDirectory]);
-            return runGitRepositoryCommand(tool, args, cwd, options);
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (!args.includes("pack-objects"))
+              return runGitRepositoryCommand(tool, args, cwd, options);
+            expect(options?.patchSnapshot).toEqual([objectDirectory]);
+            expect(options?.environment?.["GIT_OBJECT_DIRECTORY"]).toBe(
+              objectDirectory,
+            );
+            const childPack = join(nested, ".git", "objects", "pack");
+            if (process.platform !== "win32") await chmod(childPack, 0o555);
+            try {
+              return await runGitRepositoryCommand(tool, args, cwd, options);
+            } finally {
+              if (process.platform !== "win32") await chmod(childPack, 0o755);
+            }
           },
           onCodex: model,
         },
