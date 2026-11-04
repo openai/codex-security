@@ -123,7 +123,7 @@ jobs:
         run: pnpm --dir sdk/typescript run format
       - name: Check MCP formatting
         run: pnpm --dir plugins/codex-security/mcp-app exec prettier --check "**/*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}"
-      - name: Audit changed MCP and eval lockfiles
+      - name: Audit changed dependency inventories
         if: needs.classify-changes.outputs.audit-lockfiles != ''
         uses: ./.github/actions/audit-pnpm-lockfiles
         with:

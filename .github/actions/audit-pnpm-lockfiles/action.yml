@@ -2,7 +2,7 @@ name: Audit pnpm lockfiles
 description: Check selected dependency trees locally against the vulnerability database.
 inputs:
   targets:
-    description: Space-separated workspaces to audit (mcp and/or evals).
+    description: Space-separated inventories to audit (mcp, evals, tokenizer).
     required: true
 runs:
   using: composite
@@ -18,14 +18,17 @@ runs:
       run: |
         read -ra targets <<< "$TARGETS"
         for target in "${targets[@]}"; do
+          echo "Auditing $target dependencies"
+          sbom="$RUNNER_TEMP/$target.cdx.json"
           case "$target" in
-            mcp) scope=(--dir plugins/codex-security/mcp-app sbom --prod) ;;
-            evals) scope=(--dir evals/triage-finding sbom) ;;
+            mcp) pnpm --dir plugins/codex-security/mcp-app sbom --prod --lockfile-only --sbom-format cyclonedx > "$sbom" ;;
+            evals) pnpm --dir evals/triage-finding sbom --lockfile-only --sbom-format cyclonedx > "$sbom" ;;
+            tokenizer)
+              pnpm --dir sdk/typescript exec node scripts/build-embedding-tokenizer.mjs
+              sbom="sdk/typescript/dist/server/embedding-tokenizer.cdx.json"
+              ;;
             *) echo "Unknown audit target: $target" >&2; exit 1 ;;
           esac
-          echo "Auditing $target lockfile"
-          sbom="$RUNNER_TEMP/$target.cdx.json"
-          pnpm "${scope[@]}" --lockfile-only --sbom-format cyclonedx > "$sbom"
           trivy sbom --offline-scan --disable-telemetry --skip-version-check \
             --exit-code 1 --severity HIGH,CRITICAL "$sbom"
         done
