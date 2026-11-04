@@ -381,20 +381,21 @@ function insertRunningWorker(database: DatabaseSync) {
   `);
 }
 
-test("legacy worker retries require a distinct registered thread for each attempt", (t) => {
-  for (const attempts of [2, 3]) {
+test("legacy retries can reuse a recorded thread and still verify usage", (t) => {
+  for (const thread of ["first-thread", "retry-thread", null]) {
     const database = memory(t, 62);
     insertRunningWorker(database);
     database
       .prepare(
-        "UPDATE deep_scan_workers SET attempt = ?, sdk_thread_id = 'retry-thread'",
+        "UPDATE deep_scan_workers SET attempt = 3, started_at = 'started', sdk_thread_id = ?",
       )
-      .run(attempts);
+      .run(thread);
+    if (thread === null) database.exec("DELETE FROM deep_scan_worker_threads");
     applyMigrations(database);
     assert.equal(
       database.prepare("SELECT worker_usage_gap FROM deep_scan_runs").get()
         ?.worker_usage_gap,
-      attempts === 2 ? 0 : 1,
+      thread === null ? 1 : 0,
     );
   }
 });

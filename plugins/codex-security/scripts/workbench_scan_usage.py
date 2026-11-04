@@ -893,11 +893,7 @@ def _read_rollout_usage(
             if (
                 prefix_missing_cache is not None
                 and refines_classification
-                and (
-                    any(delta[key] > 0 for key in prefix_missing_cache)
-                    or delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
-                    > cache_write_capacity + completed_capacity
-                )
+                and any(delta[key] > 0 for key in prefix_missing_cache)
             ):
                 # The newly classified tokens could have occurred before this scan.
                 ambiguous_legacy_cache = True
@@ -1002,7 +998,7 @@ def _missing_cache_fields(payload: Mapping[str, Any]) -> set[str]:
 def _unclassified_prefix(missing: set[str], baseline: dict[str, int]) -> set[str] | None:
     if baseline["inputTokens"] == baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]:
         return None
-    return missing
+    return missing or None
 
 
 def _retain_cache_baseline(

@@ -2648,24 +2648,40 @@ export class CodexSecurity {
           };
         }
       }
+      let replayOverrides: JsonObject = {};
       if (fileProfile) {
         recipeConfig["profile"] = profileName;
         delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
-        const replayOverrides = privateReplayOverrides(overrides, recipeConfig);
+        replayOverrides = privateReplayOverrides(overrides, recipeConfig);
         resolveNestedConfigPaths(replayOverrides, scanDir);
-        if (
-          options.resumeScanId === undefined &&
-          Object.keys(replayOverrides).length > 0
-        ) {
-          savedProviderProfile = await createProviderProfile(
-            codexSecurityCredentialHome(this.#dependencies.environment),
-            replayOverrides,
-            { replay: true },
-          );
+      } else {
+        // The readable recipe can contain a provider's defaults in place of its overrides.
+        for (const key of [
+          "openai_base_url",
+          "chatgpt_base_url",
+          "model_providers",
+        ]) {
+          const value = workerRuntimeConfig[key];
+          if (
+            value !== undefined &&
+            !isDeepStrictEqual(value, recipeConfig[key])
+          ) {
+            replayOverrides[key] = value;
+          }
         }
+      }
+      if (
+        options.resumeScanId === undefined &&
+        Object.keys(replayOverrides).length > 0
+      ) {
+        savedProviderProfile = await createProviderProfile(
+          codexSecurityCredentialHome(this.#dependencies.environment),
+          replayOverrides,
+          { replay: true },
+        );
       }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
