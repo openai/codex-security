@@ -130,19 +130,15 @@ export async function prepareEval(
   await mkdir(join(runtime, "references"), { recursive: true });
   const core = await readFile(corePromptPath, "utf8");
   await writeFile(join(runtime, "references/core-scan.md"), core);
-  for (const name of [
-    "threat-model.md",
-    "finding-detail-fields.md",
-    "default-severity-rubric.md",
-    "final-report.md",
+  for (const path of [
+    "references/threat-model.md",
+    "references/finding-detail-fields.md",
+    "references/default-severity-rubric.md",
+    "references/final-report.md",
+    "schemas",
+    "examples/completed-scan",
   ]) {
-    await cp(
-      join(pluginRoot, "references", name),
-      join(runtime, "references", name),
-    );
-  }
-  for (const name of ["schemas", "examples/completed-scan"]) {
-    await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
+    await cp(join(pluginRoot, path), join(runtime, path), { recursive: true });
   }
   const prompt = [
     "Perform a static security review of the repository below.",
