@@ -10,7 +10,10 @@ import type {
 } from "./models.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 import { bundledPluginRoot } from "./runtime.js";
-import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
+import {
+  isAbortFromSignal,
+  safeScopePath as sharedSafeScopePath,
+} from "./contract-values.js";
 export {
   DEFERRED_PATH_LOCATION,
   SEALED_DEFERRED_PATH_RULE,
@@ -67,7 +70,7 @@ async function translateContractError<T>(
   try {
     return await operation();
   } catch (error) {
-    if (signal?.aborted) throw abortReason(signal);
+    if (signal && isAbortFromSignal(error, signal)) throw abortReason(signal);
     if (error instanceof ContractValidationError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof Error && error.name === "SealedContractSchemaError")

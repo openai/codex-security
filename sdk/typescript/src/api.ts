@@ -48,6 +48,7 @@ import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
+import { isAbortFromSignal } from "./contract-values.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
   VerificationModeSchema,
@@ -5883,7 +5884,7 @@ async function requireScanArtifacts(
     try {
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
+      if (signal.aborted) throw error;
       let cause = error;
       while (cause instanceof Error && cause.cause !== undefined)
         cause = cause.cause;
@@ -6822,19 +6823,8 @@ function wasScanCanceled(
   }
   if (error instanceof ScanExecutionError)
     return error.result.status === "canceled";
-  if (
-    !signal.aborted ||
-    costStopped ||
-    signal.reason instanceof HostProtocolError
-  )
-    return false;
-  return (
-    Object.is(error, signal.reason) ||
-    (isRecord(error) &&
-      error["name"] === "AbortError" &&
-      (error["cause"] === undefined ||
-        Object.is(error["cause"], signal.reason)))
-  );
+  if (costStopped || signal.reason instanceof HostProtocolError) return false;
+  return isAbortFromSignal(error, signal);
 }
 
 function throwIfPatchAborted(signal?: AbortSignal, repository = ""): void {

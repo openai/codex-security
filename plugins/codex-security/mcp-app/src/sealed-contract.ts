@@ -34,6 +34,7 @@ import {
   SEALED_DEFERRED_PATH_RULE,
   deriveFindingIdentity,
   hasRequiredFindingText,
+  isAbortFromSignal,
   safeScopePath,
   safeRelativePath,
   portableRelativePath,
@@ -716,7 +717,7 @@ async function requireScanRoot(
     return root;
   } catch (error) {
     root?.reader.close();
-    throwIfAborted(signal);
+    if (isAbortFromSignal(error, signal)) throwIfAborted(signal);
     if (error instanceof ContractValidationError) throw error;
     throw new ContractValidationError(
       "Scan directory must be an existing non-symlink directory.",
@@ -746,7 +747,7 @@ async function verifyScanRoot(
     root.reader.verify();
     throwIfAborted(signal);
   } catch (error) {
-    throwIfAborted(signal);
+    if (isAbortFromSignal(error, signal)) throwIfAborted(signal);
     throw new ContractValidationError(
       "Scan directory changed while reading the canonical contract.",
       { cause: error },
@@ -887,7 +888,7 @@ async function readJson(
   try {
     return parseJson(path, await readFile(path, { signal }));
   } catch (error) {
-    throwIfAborted(signal);
+    if (isAbortFromSignal(error, signal)) throwIfAborted(signal);
     if (error instanceof ContractValidationError) throw error;
     if (nodeErrorCode(error) === "ENOENT") {
       throw new ContractValidationError(
@@ -1056,7 +1057,7 @@ async function loadContractValidators(
       join(pluginRoot, "schemas", schemaName),
       signal,
     ).catch((error: unknown) => {
-      throwIfAborted(signal);
+      if (isAbortFromSignal(error, signal)) throwIfAborted(signal);
       const message = error instanceof Error ? error.message : String(error);
       throw new ContractSchemaError(
         profile === "tracking" &&

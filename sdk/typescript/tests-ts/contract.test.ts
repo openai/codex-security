@@ -299,6 +299,7 @@ describe("canonical scan contract", () => {
         import.meta.url,
       )("node:fs/promises");
       const original = { lstat: files.lstat, realpath: files.realpath };
+      const controller = new AbortController();
       let replaced = false;
       const inspecting = spyOn(files, "lstat").mockImplementation((async (
         ...args: Parameters<typeof original.lstat>
@@ -310,6 +311,7 @@ describe("canonical scan contract", () => {
             value:
               typeof metadata.ino === "bigint" ? identity : Number(identity),
           });
+          if (replaced) controller.abort();
         }
         return metadata;
       }) as typeof original.lstat);
@@ -326,11 +328,17 @@ describe("canonical scan contract", () => {
       }) as typeof original.realpath);
       try {
         await expect(
-          readScanFile(scanDir, "coverage.json", "coverage.json"),
+          readScanFile(
+            scanDir,
+            "coverage.json",
+            "coverage.json",
+            controller.signal,
+          ),
         ).rejects.toThrow(
           "Scan directory must be an existing non-symlink directory",
         );
         expect(replaced).toBe(true);
+        expect(controller.signal.aborted).toBe(true);
       } finally {
         resolving.mockRestore();
         inspecting.mockRestore();
