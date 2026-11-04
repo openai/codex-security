@@ -122,7 +122,8 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             # Existing scan values survive the upgrade. Later nullable columns
             # have no launch or recovery metadata to backfill for these rows.
             for column in updated.keys() - original.keys():
-                assert updated.pop(column) is None
+                added_value = updated.pop(column)
+                assert added_value is None
             assert updated == original
 
         connection.execute(
