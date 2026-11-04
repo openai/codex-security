@@ -488,7 +488,10 @@ else {
               recipe ? "saved-test-tier" : "current-test-tier",
             );
             if (scenario === "provider") {
-              assert.equal(row.openai, "synthetic-openai-selected");
+              assert.equal(
+                row.openai,
+                row.kind === "exec" ? "synthetic-openai-selected" : undefined,
+              );
               assert.equal(
                 effective.model_providers.synthetic_provider.env_key,
                 "OPENAI_API_KEY",
@@ -517,16 +520,15 @@ else {
               } else if (scenario.endsWith("-http-headers")) {
                 assert.equal(provider.env_key, undefined);
                 assert.equal(row.literalCredentialInEnvironment, false);
-                if (
-                  row.kind === "exec" ||
-                  scenario.endsWith("-env-http-headers")
-                )
+                if (row.kind === "exec")
                   assert.equal(
                     row.providerHeaders.Authorization,
                     scenario.endsWith("-env-http-headers")
                       ? "synthetic-openai-selected"
                       : "synthetic-provider-header",
                   );
+                else if (scenario.endsWith("-env-http-headers"))
+                  assert.equal(row.providerHeaders.Authorization, undefined);
                 assert.equal(
                   row.argv.some((argument) =>
                     argument.includes("synthetic-provider-header"),

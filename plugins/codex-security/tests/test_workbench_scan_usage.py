@@ -2559,7 +2559,7 @@ def test_fresh_completion_does_not_promote_a_running_cost_estimate(
     assert json.loads(receipt) == {"usage": completed["usage"]}
 
 
-def _record_composition_thread(fixture: ScanFixture, directory: Path, thread_id: str) -> None:
+def _record_composition_thread(fixture: ScanFixture, directory: Path, thread_id: str) -> str:
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
         row = connection.execute(
             "SELECT id FROM scans WHERE scan_dir = ?", (str(directory),)
@@ -2580,6 +2580,7 @@ def _record_composition_thread(fixture: ScanFixture, directory: Path, thread_id:
         thread_id,
         environment=fixture.environment,
     )
+    return child
 
 
 def test_completion_counts_child_scan_sessions_and_descendants(tmp_path: Path) -> None:
@@ -2697,8 +2698,9 @@ def test_completion_recovers_replaced_child_scan_threads(tmp_path: Path) -> None
     after_scan = counted + timedelta(days=1)
     artifact = fixture.scan_dir / "artifacts" / "usage-worker"
     private_directory(artifact)
-    for thread_id in ["sdk-first-attempt", "sdk-current-attempt", "sdk-current-attempt"]:
-        _record_composition_thread(fixture, artifact, thread_id)
+    child = _record_composition_thread(fixture, artifact, "sdk-first-attempt")
+    for _ in range(2):
+        _record_composition_thread(fixture, artifact, "sdk-current-attempt")
 
     _state_graph(
         fixture.environment,
@@ -2778,6 +2780,7 @@ def test_completion_recovers_replaced_child_scan_threads(tmp_path: Path) -> None
                 (str(working_directory), int(after_scan.timestamp()), "later-missing-worker"),
             ],
         )
+    fail_scan(fixture.state_dir, child, "Pass retired.", environment=fixture.environment)
     arguments = ("--thread-id", "scan-parent", "--turn-id", "turn-scan-parent")
     completed = _complete_scan(fixture, *arguments)["scan"]
     usage = completed["usage"]

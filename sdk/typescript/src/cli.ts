@@ -1664,7 +1664,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          { providerEnvKey },
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -1707,9 +1706,7 @@ export async function runCodexSkillCommand(
         }
       }
       if (authentication.method === "api_key" && providerEnvKey !== undefined) {
-        const providerKey = environmentEntry(
-          processEnvironment,
-        );
+        const providerKey = environmentEntry(processEnvironment, providerEnvKey);
         if (providerKey !== undefined) {
           selected = { ...selected, [providerEnvKey]: providerKey };
         }
@@ -11055,7 +11052,7 @@ async function executeScan(
           auth = await chooseInteractiveAuthentication(
             {
               auth,
-              provider: providerOptions.provider,
+              config: restored,
               command: "scan",
               signal: preparationAbortController.signal,
             },
