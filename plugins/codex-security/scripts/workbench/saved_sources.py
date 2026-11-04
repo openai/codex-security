@@ -965,7 +965,6 @@ def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
     }
 
 
-
 def _iteration_order(worker: Any) -> tuple[int, str, str]:
     result = worker["result_manifest_path"]
     output = Path(result).parent if result else Path(worker["artifact_dir"])
