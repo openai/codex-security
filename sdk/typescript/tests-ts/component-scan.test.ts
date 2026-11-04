@@ -473,7 +473,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
 });
 
 test.each([true, false])(
-  "saves the registered scan ID for failed components (lifecycle observer: %p)",
+  "keeps the registered scan ID on a failed receipt when the component client aborts (lifecycle observer: %p)",
   async (observe) => {
     const paths = await fixture();
     const controller = new AbortController();

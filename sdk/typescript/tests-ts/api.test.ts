@@ -3483,6 +3483,7 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "get-scan") {
+            expect(args).toContain("--progress-only");
             return {
               scan: {
                 progress: {
@@ -3817,6 +3818,40 @@ if __name__ == "__main__":
     ]);
     await client.close();
   });
+
+  test.each([true, false])(
+    "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
+    async (failureFirst) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const message = "Synthetic native turn failure";
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (!failureFirst) controller.abort();
+        try {
+          yield { type: "turn.failed", error: { message } };
+        } finally {
+          // The reader closes a failed stream after observing its terminal event.
+          if (failureFirst) controller.abort();
+        }
+      }
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan")
+            stopped = args;
+          return mockWorkbench(args, input);
+        },
+      });
+      await expect(
+        client.run(repository, { signal: controller.signal }),
+      ).rejects.toThrow();
+      expect(controller.signal.aborted).toBe(true);
+      expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
+      if (failureFirst) expect(stopped).toContain(`--message=${message}`);
+    },
+  );
 
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();

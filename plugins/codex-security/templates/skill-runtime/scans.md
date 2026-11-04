@@ -16,11 +16,11 @@ After completion, read `get_codex_security_completed_scan` and return the genera
 
 ## deep-scan
 
-Resolve the authorized target and scope. For a scoped directory, use that directory as `targetPath` and `scope: "."`. Continue a supplied `scanId` through `get_codex_security_scan_context` with its handoff token when present. Use the saved configuration, identity, scope and mode. Immediately persist requested context additions, edits or clearances through `update_codex_security_scan_context` using the complete replacement and current handoff token. Leave phase transitions to the running coordinator.
+Resolve the authorized target and scope. For a scoped directory, use that directory as `targetPath` and `scope: "."`. Continue a supplied `scanId` through `get_codex_security_scan_context` with its handoff token when present. Use the saved configuration, identity and scope. If its mode is Standard or diff, continue with the corresponding scan skill. Immediately persist requested context additions, edits or clearances through `update_codex_security_scan_context` using the complete replacement and current handoff token. Leave phase transitions to the running coordinator.
 
 For a new target, call `inspect_codex_security_setup({ targetPath, scope: ".", mode: "deep", projectConfigPath? })`. Show the effective settings and their sources. Pass a project file only when the user selected it.
 
-Call `start_codex_security_deep_scan` with the existing scan ID and claim token or with the new target, scope, exact user context and selected project file. The coordinator owns worker setup, progress and completion. Use the returned `completion` and link the generated `report.md` and canonical artifacts. Report measured usage per `<plugin_dir>/references/final-report.md`.
+Call `start_codex_security_deep_scan` with the existing scan ID and claim token or with the new target, scope, exact user context and selected project file. The coordinator owns worker setup, progress and completion. Use the returned `completion` and link the generated `report.md` and canonical artifacts. Use `completion.scan.usage` and any separate cost estimate to report usage per `<plugin_dir>/references/final-report.md`.
 
 ## checkpoints
 
