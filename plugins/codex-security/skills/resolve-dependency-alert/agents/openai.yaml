@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resolve Dependency Alert"
+  short_description: "Trace vulnerable packages and prepare a compatible upgrade"
+  default_prompt: "Use $resolve-dependency-alert to check which versions this alert affects and recommend a fix."

@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import { CodexSecurityError } from "./errors.js";
+import type { Finding } from "./models.js";
 
 export const FindingPatchSchema = z.object({
   occurrenceId: z.string(),
@@ -36,6 +38,43 @@ export interface RemediationPromptInput {
   instructions?: string;
   validationInstructions?: string;
   verificationMode?: z.infer<typeof VerificationModeSchema>;
+}
+
+export class VerificationFindingTooLargeError extends CodexSecurityError {}
+
+export async function verificationBatches(
+  findings: readonly Finding[],
+  pluginRoot: string,
+  verificationMode?: RemediationPromptInput["verificationMode"],
+): Promise<Finding[][]> {
+  const limit = MAX_CODEX_INPUT_CHARACTERS;
+  const emptyPrompt = await remediationPrompt({
+    operation: "verify",
+    pluginRoot,
+    verificationMode,
+    contents: [],
+    verificationIds: [],
+  });
+  const overhead = characterCount(emptyPrompt);
+  const batches: Finding[][] = [];
+  let remaining = 0;
+  for (const finding of findings) {
+    const size =
+      characterCount(JSON.stringify(finding)) +
+      characterCount(JSON.stringify(finding.occurrenceId));
+    if (overhead + size > limit) {
+      throw new VerificationFindingTooLargeError(
+        `Finding ${finding.occurrenceId} cannot fit in one complete Codex verification request. The request requires ${overhead + size} characters, but Codex accepts at most ${limit}. To verify another finding from this scan, run codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID. For this finding, run a narrower scan that records smaller evidence, then retry.`,
+      );
+    }
+    if (size > remaining) {
+      batches.push([]);
+      remaining = limit - overhead;
+    }
+    batches.at(-1)!.push(finding);
+    remaining -= size + 2; // Reserve a comma in each JSON array for the next finding.
+  }
+  return batches;
 }
 
 /** Local and hosted remediation use the same skills and result instructions. */
