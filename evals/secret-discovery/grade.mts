@@ -86,14 +86,21 @@ function matches(finding: Finding, expected: Expected) {
     .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .trim();
+  const runtimeLeak = expected.id === "runtime-disclosure";
+  const relevantCategory = runtimeLeak
+    ? /disclos|expos|leak|access[- ]control|authenticat|authoriz/i.test(
+        category,
+      )
+    : secretCategory.test(category);
   return (
     !negatedSecretCategory.test(category) &&
-    secretCategory.test(category) &&
+    relevantCategory &&
     finding.taxonomy?.cwe?.some((value) => {
       const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
       return (
         expected.cwes.includes(cwe) ||
-        (["CWE-200", "CWE-540"].includes(cwe) &&
+        (!runtimeLeak &&
+          ["CWE-200", "CWE-540"].includes(cwe) &&
           explicitSecretCategory.test(category))
       );
     }) &&

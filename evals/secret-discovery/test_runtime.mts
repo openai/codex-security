@@ -274,7 +274,13 @@ async function nativeFixture(
   });
   const result = {
     findings: prepared.fixture.positives.map((expected) => ({
-      taxonomy: { category: "hardcoded-credentials", cwe: [expected.cwes[0]] },
+      taxonomy: {
+        category:
+          expected.id === "runtime-disclosure"
+            ? "sensitive-data-exposure"
+            : "hardcoded-credentials",
+        cwe: [expected.cwes[0]],
+      },
       locations: [
         { path: expected.path, startLine: expected.line, role: "root_control" },
       ],

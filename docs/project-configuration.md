@@ -146,6 +146,10 @@ limits, and aggregation and reporting can continue afterward.
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
+For an example of using `scan.instructions_file` to delegate known-format key
+and token findings to another scanner, see
+[checked-in credentials](../sdk/typescript/docs/cli.md#checked-in-credentials).
+
 See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 

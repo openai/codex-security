@@ -30,6 +30,14 @@ Before editing, inspect the affected implementation, its direct callers, nearby 
 
 Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
 
+### Credentials exposed in source
+
+Make the safe repository change even when the credential owner still has work to do. Trace the consuming code and use its established secret store or configuration mechanism. Use a synthetic credential in any local checks. Never use the exposed credential, contact its issuer, or rotate it yourself.
+
+In the patch report, describe what changed in the checkout and what the owner must do at the issuer. Name the credential type, known issuer, and affected consumer without repeating the value. Give the owner the applicable steps to replace or revoke it, update dependent deployments, and confirm that the old credential is disabled. Cite an official management page or runbook when its location is known; otherwise name the responsible service or ask the owner to identify it. Removing a literal leaves historical copies usable if the original credential still works.
+
+For example, if source shows a deployment reads a registry token, describe how to provision a scoped replacement, update that deployment's secret, check an ordinary image pull with the replacement, and revoke the old token in the registry. Report only the steps actually completed as evidence. If the code change is verified but retirement of the exposed credential is unconfirmed, keep the change and list its files and verification. Report the overall finding as `blocked`. In the reason, state both the source outcome and the outstanding owner action, including when the checkout was already cleaned up.
+
 ## Implementation Workflow
 
 1. Trace the reported path and inspect only the context needed to identify the real shared boundary. Return `no_change` when repository evidence shows that the reported path is already safe; do not make a speculative change.
@@ -54,6 +62,8 @@ Confirm review concerns against source or, in standard mode, focused execution b
 ## Workbench Remediation Stages
 
 When a Codex Security workbench request includes a scan ID, occurrence ID, remediation request ID, action token, and expected version, follow only the requested remediation stage. The stage boundary changes when code may be written, but it does not weaken the validation requirements above.
+
+For a credential exposure, record successful Generate and Apply stages for the source change as usual. If Verify lacks evidence of retirement, record `failed` for that stage and explain the verified code change and the owner's outstanding revocation step in the summary.
 
 Before creating or entering any work copy, select Python and Git from a controlled empty directory outside all checkouts. Verify that each trusted tool's absolute invocation path, resolved parent directory, and resolved executable are outside the selected target, its enclosing checkout, and all capture and rehearsal workspaces. Use the host-selected Python (`CODEX_SECURITY_PYTHON_COMMAND` in SDK runs). If absent, use a trusted absolute `PYTHON`, a host-managed runtime, or a verified system interpreter. Invoke its quoted absolute path with `-I` to import helpers from the installed plugin's scripts directory. From the same directory call `workbench_target.trusted_git_executable(target)`, which honors `CODEX_SECURITY_GIT` or discovers Git when that variable is absent. Pin the verified absolute invocation path it returns in the helper process's `CODEX_SECURITY_GIT` environment and pass it to child helpers. Stop if either tool cannot be verified. For workbench Generate and Apply Git commands, pass `offline=True` and the real target to `workbench_target.git_command`, use `-C` for the working directory, and set `-c core.hooksPath=<empty private directory>`.
 

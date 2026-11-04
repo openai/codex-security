@@ -6,6 +6,8 @@ Validate the supplied claim and candidate set. A standalone request for one find
 
 For each candidate, establish the attacker-controlled source, closest relevant control, sensitive sink, reachable path, trust boundary, and concrete impact. Use `../../../references/static-finding-assessment.md` for static evidence and proof gaps. A matching advisory, dangerous API, helper name, or missing guard is a lead; it is not a finding without a supported security impact.
 
+For a candidate credential exposure, apply [Secrets Exposed In Source](../../../references/core-scan.md#secrets-exposed-in-source). If the applicable reporting preference excludes this standalone key or token, record the policy reason in its disposition. Assess a surviving exposure from source without trying the credential.
+
 Choose evidence that tests the claimed boundary. A focused unit test, realistic interface reproduction, sanitizer, debugger trace, or static analysis can each be appropriate. Use runtime validation when it would resolve a material uncertainty and setup is proportionate. Do not rank methods by language or tool name, and do not require a build or live deployment when source evidence settles the claim.
 
 When setup fails, determine whether a targeted harness, existing test, or disposable build copy can exercise the original code. Record missing services, dependencies, or configuration as proof gaps, not evidence of safety. Do not replace the target with a reimplementation and claim it proves the original behavior. Check logs or process status before stopping a command that may still be making progress.

@@ -7,16 +7,22 @@ model finding hints, locations, or expected labels. Every fixture credential and
 key is generated locally, grants no access to a service, and is never used to contact
 or authenticate to one.
 
-The six positive cases cover active source, an unused source constant,
-integration-test source, a hidden environment file containing a database URL,
-JSON credentials, and an embedded private signing key. Negative controls cover
-environment references, placeholders, a public key, public identifiers, and a
-digest. The model must discover the positive cases from the source itself.
+The default run expects eight exposures: active, unused, and integration-test
+credentials, a password in a database URL, a JSON client secret, a private
+signing key, a provider-format API token in release configuration, and a public
+endpoint returning a token supplied at runtime. The external-scanner run adds
+a root `SECURITY.md` delegating standalone provider-format API token literals.
+The release configuration still contains the token, but reporting it as a
+standalone exposure now fails. The other seven cases remain reportable in both
+runs. Controls include environment references, placeholders, a public key, a
+public ID, a digest, and a provider-shaped value generated only for a parser
+test. The values are freshly generated for each run.
 
-To pass, the final `findings` must include every positive case with an
-appropriate CWE, a credential-related category, and the source location that
-exposes the credential. Generic disclosure CWEs (`CWE-200`, `CWE-540`) count only
-when the category names credential, secret, hardcoding, or private-key exposure.
+To pass, the final `findings` must account for every in-policy exposure with
+appropriate taxonomy and a location identifying the exposure. The grader
+scores the public response leak separately from hardcoding. Generic disclosure
+CWEs (`CWE-200`, `CWE-540`) count for source literals only when the category
+names credential, secret, hardcoding, or private-key exposure.
 Mentions in resolved questions, intermediate responses, or deferred coverage
 do not count.
 
@@ -48,10 +54,12 @@ locally with esbuild and adds no dependencies.
 ```sh
 pnpm --dir sdk/typescript run build:evals
 node --experimental-strip-types evals/secret-discovery/run.mts
+node --experimental-strip-types evals/secret-discovery/run.mts --external-token-scanner
 ```
 
 An optional positional argument selects a model. When omitted, Codex selects
-its default. The report cannot name that model because the SDK's turn result
+its default. Each command runs one independent model turn and the report records
+the selected reporting policy. The report cannot name that model because the SDK's turn result
 does not expose it. Runs consume model usage and use the caller's existing
 file-based Codex login or authentication environment.
 
@@ -99,6 +107,26 @@ The script prints grading results and token usage, saves `report.json` and
 The source fixture and temporary model state are removed on exit. Reports may
 contain generated fixture values; no real service credentials are supplied to
 the model.
+
+## Review the remediation
+
+After each model run, read the finding's `remediation`, `validation`, and
+severity/confidence rationales in `result.json`. Record the following judgments
+alongside the discovery score. The deterministic grader checks locations and
+evidence. The reviewer assesses the advice.
+
+- For the committed database password and, in the default run, the provider
+  token, does the finding identify who must rotate, revoke, or establish prior
+  retirement of the exposed credential? Does it also explain how to remove the
+  literal and prevent future commits? A code change alone cannot establish that
+  a previously usable credential was retired.
+- For the public status response, does the proposed code change stop returning
+  the credential? Does the advice cover retiring an exposed value if this path
+  was deployed, without claiming that the reviewer used it or proved it live?
+- For each exposure, does the report distinguish what the source establishes
+  from outstanding questions about live status, audience, and privileges? A
+  report that promises complete incident resolution from a source patch fails
+  this review even when its discovery score passes.
 
 ## Deterministic checks
 

@@ -68,6 +68,8 @@ for SDK and plugin usage, including Deep Scan workers.
 
 Scans use your existing `SECURITY.md` guidance. You can optionally
 [draft or update a policy](#generate-securitymd) before scanning.
+If another scanner handles recognizable API keys and tokens, you can
+[delegate those alerts and keep other credential findings](sdk/typescript/docs/cli.md#checked-in-credentials).
 
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:

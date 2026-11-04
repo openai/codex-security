@@ -27,6 +27,10 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 4. In standard mode, run the original reproducer, focused regression checks, or legitimate-behavior checks only when they can run without modifying the repository. Preserve exact static evidence when runtime checks are unavailable.
 5. Return one result per supplied finding, in the requested order. Treat closed tickets, unrelated passing tests, and the absence of a new scan finding as insufficient proof.
 
+For a credential exposed in source, report the checkout's condition and the old credential's status separately. Cite the affected source location and any supplied issuer or owner evidence identifying the old credential and confirming it was disabled, revoked, or expired. A new token, a merged patch, and a successful deployment can each coexist with a usable old key. Never replay the exposed credential or contact its issuer. Use a synthetic value for permitted local checks.
+
+If the checkout is clean and retirement is unconfirmed, return `inconclusive`. Say what the patch achieved and ask the owner for confirmation from the issuer. For example: “The deploy job now reads its token from the secret store. Confirm that the registry disabled the previously committed token.” If evidence establishes that the old credential remains usable and exposed, return `still_vulnerable`. Reserve `fixed` for evidence that closes the original exposure and preserves legitimate use.
+
 ## Result Contract
 
 For interactive conversations, use readable Markdown unless the caller requests another format. Give a verdict for each finding, explain the supporting evidence with source references, and identify relevant checks and remaining proof gaps.

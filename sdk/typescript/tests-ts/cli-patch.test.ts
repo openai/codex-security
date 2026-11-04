@@ -977,7 +977,7 @@ describe("scan and patch workflow", () => {
     const remote = join(directory, "remote.git");
     const url = "https://github.example.test/example/repository/pull/17";
     const expectedBody = [
-      "Applies a security fix generated for SEC-123.",
+      "Applies the repository changes generated for SEC-123.",
       "",
       "## Patch risk assessment",
       "",
@@ -1090,7 +1090,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-SEC-123",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedBody,
       ]);
@@ -1502,7 +1502,7 @@ describe("scan and patch workflow", () => {
     const result = resultWithFindings(["high", "medium"]);
     result.findings.findings[0]!.title = "Synthetic private finding";
     const expectedPullRequestBody = [
-      "Applies verified security fixes from a completed scan.",
+      "Applies verified code changes for findings from a completed scan.",
       "",
       "## Patch risk assessment",
       "",
@@ -1630,7 +1630,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-scan",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedPullRequestBody,
       ]);
@@ -1837,6 +1837,78 @@ describe("scan and patch workflow", () => {
       expect(onRepositoryCommand).not.toHaveBeenCalled();
     }
   });
+
+  test.each(["scan", "patch"])(
+    "%s keeps the source change and reports outstanding credential retirement",
+    async (command) => {
+      const repository = await temporaryDirectory("credential-source-patch-");
+      const path = "deploy.env";
+      const result = resultWithFindings(["high"]);
+      const patch = {
+        occurrenceId: "occ_1",
+        status: "blocked",
+        files: [path],
+        verification: "The deployment reads the token from its environment.",
+        reason:
+          "Source cleaned up. The owner must revoke the old registry token.",
+      };
+      try {
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        await writeFile(join(repository, path), "TOKEN=synthetic-fixture\n");
+        git("add", path);
+        git(
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "-m",
+          "Fixture",
+        );
+        const outcome = await runWorkflow(
+          command === "scan"
+            ? [
+                "scan",
+                repository,
+                "--patch",
+                "--fail-on-severity",
+                "high",
+                "--create-pr",
+                "--json",
+              ]
+            : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: repository,
+            result,
+            onWorkbench: () => savedScan(result, "scan-1", repository),
+            onRepositoryCommand: runGitRepositoryCommand,
+            onCodex: async (_args, output) => {
+              await writeFile(
+                join(repository, path),
+                "TOKEN=${REGISTRY_TOKEN}\n",
+              );
+              output?.stdout.write(JSON.stringify({ patches: [patch] }));
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(1);
+        expect(outcome.stderr).toContain(patch.reason);
+        const response = JSON.parse(outcome.stdout);
+        expect(response.patches).toEqual([patch]);
+        expect(response.pullRequest).toBeUndefined();
+        if (command === "patch") {
+          expect(response).toMatchObject({ applied: true, files: [path] });
+          expect(response.error.message).toContain("in your working tree");
+        }
+        expect(git("diff", "--name-only")).toBe(path);
+        expect(git("branch", "--show-current")).toBe("main");
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     for (const status of ["blocked", "no_change", "outside"] as const) {
@@ -2378,9 +2450,9 @@ describe("scan and patch workflow", () => {
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
-            "fix: patch verified security findings",
+            "fix: apply security patch",
             "--description",
-            ">>>\nApplies verified security fixes from a completed scan.",
+            ">>>\nApplies verified code changes for findings from a completed scan.",
             "--yes",
             "--repo",
             selector,

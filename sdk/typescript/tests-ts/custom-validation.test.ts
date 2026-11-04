@@ -404,6 +404,8 @@ describe("custom validation", () => {
           "Synthetic proof.\n",
         );
         expect(prompt).toContain(f.prompt);
+        expect(prompt).toMatch(/never use the discovered credential/i);
+        expect(prompt).toMatch(/validity as unchecked/i);
         // Structured outputs cannot resolve plugin URIs or use regex lookaround.
         expect(JSON.stringify(schema)).not.toContain("codex-security://");
         expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
@@ -1287,6 +1289,7 @@ describe("custom validation", () => {
     );
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
+    expect(standard).toContain("## Secrets Exposed In Source");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
     expect(standard).toContain("`complete: false` checkpoint");
