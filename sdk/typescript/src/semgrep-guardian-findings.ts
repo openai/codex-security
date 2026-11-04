@@ -46,7 +46,8 @@ export function guardianImportRepository(value: unknown, provider: string) {
 export function guardianFindingRepository(
   { source_finding_id, evidence }: ExternalFinding,
   provider: string,
-  reportUrl?: string,
+  reportUrl: string | undefined,
+  sameRepositories: (urls: string[]) => boolean,
 ) {
   const data = evidence.source_data ?? {};
   const generated = guardianFindingId.test(source_finding_id);
@@ -60,7 +61,7 @@ export function guardianFindingRepository(
       );
   }
   for (const claim of [reportUrl, evidence.details?.repository?.url]) {
-    if (claim && repositoryUrlKey(claim) !== repositoryUrlKey(url))
+    if (claim && claim !== url && !sameRepositories([claim, url]))
       throw new CodexSecurityError(
         "Guardian repository does not match the normalized finding or report.",
       );

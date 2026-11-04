@@ -947,6 +947,7 @@ export async function prepareLocalImport(
       finding,
       options.provider,
       guardianReportUrl,
+      sameRepositories,
     );
     if (guardian) sources.set(guardian, { url: guardian });
     const url = evidence.details?.repository?.url;
