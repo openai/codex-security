@@ -1720,13 +1720,26 @@ def test_stopped_scan_recovers_latest_numbered_iteration_after_upgrade(tmp_path:
         state_dir, codex_home, scan_dir, scan_id, first_id, name="dedup-0001"
     )
     legacy.write_text(first.read_text())
-    write_checkpoint(legacy.parent / "checkpoints", json.loads(legacy.read_text()))
+    checkpoint = write_checkpoint(legacy.parent / "checkpoints", json.loads(legacy.read_text()))
     seal_legacy_reducer(state_dir, scan_id, legacy_id, str(legacy), "0")
+    # The post-upgrade iteration can extend a historical reducer with a recorded digest.
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_attempts SET status = 'succeeded', completed_at = CURRENT_TIMESTAMP, "
+            "accepted_result_path = ?, accepted_result_sha256 = ? WHERE worker_id = ? AND attempt = 1",
+            (str(checkpoint), checkpoint.stem, legacy_id),
+        )
 
-    worker_id, _ = accepted_standard_worker(
-        state_dir, codex_home, scan_dir, scan_id, name="second-worker"
-    )
     finding = standard_finding(tmp_path, scan_id, target)
+    worker_id, _ = accepted_standard_worker(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        name="second-worker",
+        findings=[finding],
+        legacy=False,
+    )
     finding["provenance"]["deepScanRepairGroups"] = [{"order": 0, "sources": [f"{worker_id}:1"]}]
     _, _, result = worker_paths(scan_dir, "dedup-0002")
     model = {"summary": "The most recent scan found another trust boundary."}
