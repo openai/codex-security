@@ -2591,6 +2591,42 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     },
   );
 
+  test("binds signing and packaging to the verified native artifact and rechecks the live tag", () => {
+    const { jobs } = Bun.YAML.parse(
+      protectedReleaseWorkflow,
+    ) as WorkflowContract;
+    const check = workflowStepShell(
+      protectedReleaseWorkflow,
+      "Revalidate protected release tag",
+    );
+    for (const job of ["sign-darwin", "verify"]) {
+      const download = jobs[job]?.steps?.find(
+        (step) => step.name === "Download verified native payload",
+      );
+      expect(download?.with).toMatchObject({
+        "artifact-ids": "${{ needs.native.outputs.artifact-id }}",
+        "digest-mismatch": "error",
+      });
+    }
+    const signer = jobs["sign-darwin"]!.steps!;
+    const setup = signer.findIndex(
+      (step) => step.name === "Set up Developer ID signing",
+    );
+    expect(signer[setup - 1]).toMatchObject({
+      name: "Revalidate tag before Developer ID signing",
+      run: check,
+    });
+    const publisher = jobs["publish"]!.steps!;
+    const initial = publisher.findIndex(
+      (step) => step.name === "Publish initial npm release",
+    );
+    expect(publisher[initial - 1]).toMatchObject({
+      name: "Revalidate protected release tag",
+      if: "needs.verify.outputs.mode == 'publish'",
+      run: check,
+    });
+  });
+
   test("rejects manually publishing a tag older than npm latest", async () => {
     const script = workflowStepShell(
       protectedReleaseWorkflow,

@@ -143,12 +143,72 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Download verified native payload
+      - &require-release-native
+        name: Require the verified native artifact ID
+        env:
+          NATIVE_ARTIFACT_ID: ${{ needs.native.outputs.artifact-id }}
+        run: test -n "$NATIVE_ARTIFACT_ID"
+      - &download-release-native
+        name: Download verified native payload
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: native-universal-${{ github.sha }}
-          path: unsigned
+          artifact-ids: ${{ needs.native.outputs.artifact-id }}
+          path: plugins/codex-security/native/prebuilt
+          merge-multiple: true
           digest-mismatch: error
+      - name: Revalidate tag before Developer ID signing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: &revalidate-release-tag |
+          set -euo pipefail
+
+          invalid_tag() {
+            echo "Protected npm release tag must still point to the verified commit." >&2
+            exit 1
+          }
+
+          if [[ "$GITHUB_REF_TYPE" != "tag" ||
+                "$GITHUB_REF" != "refs/tags/$GITHUB_REF_NAME" ]]; then
+            invalid_tag
+          fi
+
+          if ! tag_fields="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )"; then
+            invalid_tag
+          fi
+          IFS=$'\t' read -r tag_type tag_object <<< "$tag_fields"
+          if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
+            invalid_tag
+          fi
+
+          case "$tag_type" in
+            commit)
+              tag_commit="$tag_object"
+              ;;
+            tag)
+              if ! tag_commit="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                  --jq 'if .object.type == "commit" then .object.sha else empty end'
+              )"; then
+                invalid_tag
+              fi
+              ;;
+            *)
+              invalid_tag
+              ;;
+          esac
+
+          if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ ||
+                "$tag_commit" != "$GITHUB_SHA" ]]; then
+            invalid_tag
+          fi
+          echo "Protected npm release tag matches the verified commit."
+
       - name: Set up Developer ID signing
         uses: openai/codex/.github/actions/setup-akv-pkcs11-codesigning@9ff072db8ae43d413c8d205ebf22b54b83c72cef
         with:
@@ -169,7 +229,7 @@ jobs:
           set -euo pipefail
           for target in darwin-arm64 darwin-x64; do
             mkdir -p "signed/$target"
-            cp "unsigned/$target/unix.node" "signed/$target/unix.node"
+            cp "plugins/codex-security/native/prebuilt/$target/unix.node" "signed/$target/unix.node"
             rcodesign sign --config-file /dev/null --shallow --for-notarization \
               --pkcs11-library "$OAI_AKV_PKCS11_LIBRARY" \
               --pkcs11-certificate-file "$OAI_AKV_SIGNING_CERTIFICATE_PEM" \
@@ -189,7 +249,8 @@ jobs:
     needs: [eligibility, native, sign-darwin]
     if: >-
       !cancelled() && needs.eligibility.result == 'success' && needs.native.result == 'success' &&
-      ((needs.eligibility.outputs.mode == 'publish' && needs.sign-darwin.result == 'success') ||
+      ((needs.eligibility.outputs.mode == 'publish' && needs.sign-darwin.result == 'success' &&
+        needs.sign-darwin.outputs.artifact-id != '') ||
        (needs.eligibility.outputs.mode == 'recover' && needs.sign-darwin.result == 'skipped'))
     runs-on: ubuntu-latest
     permissions:
@@ -201,9 +262,8 @@ jobs:
       version: ${{ needs.eligibility.outputs.version }}
     steps:
       - *checkout-release
-      - &download-release-native
-        name: Prepare native runtime
-        uses: ./.github/actions/download-native
+      - *require-release-native
+      - *download-release-native
 
       - name: Overlay signed Darwin addons for publication
         if: needs.eligibility.outputs.mode == 'publish'
@@ -345,6 +405,7 @@ jobs:
         suite: [1, 2, 3, mcp]
     steps:
       - *checkout-release
+      - *require-release-native
       - *download-release-native
       - *setup-release-firewall
       - *setup-release-node
@@ -383,7 +444,7 @@ jobs:
   macos-review-items:
     name: release tests / packaged macOS review items
     needs: verify
-    if: needs.verify.outputs.mode == 'publish'
+    if: needs.verify.outputs.mode == 'publish' && needs.verify.outputs.artifact-id != ''
     runs-on: macos-15
     permissions:
       contents: read
@@ -404,7 +465,8 @@ jobs:
   publish:
     needs: [verify, test, macos-review-items]
     if: >-
-      !cancelled() && needs.verify.result == 'success' && needs.test.result == 'success' &&
+      !cancelled() && needs.verify.result == 'success' && needs.verify.outputs.artifact-id != '' &&
+      needs.test.result == 'success' &&
       ((needs.verify.outputs.mode == 'publish' && needs.macos-review-items.result == 'success') ||
        (needs.verify.outputs.mode == 'recover' && needs.macos-review-items.result == 'skipped'))
     name: ${{ needs.verify.outputs.mode == 'recover' && 'Verify existing npm release' || 'Publish npm and container images' }}
@@ -499,54 +561,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          invalid_tag() {
-            echo "Protected npm release tag must still point to the verified commit." >&2
-            exit 1
-          }
-
-          if [[ "$GITHUB_REF_TYPE" != "tag" ||
-                "$GITHUB_REF" != "refs/tags/$GITHUB_REF_NAME" ]]; then
-            invalid_tag
-          fi
-
-          if ! tag_fields="$(
-            gh api \
-              "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
-              --jq '[.object.type, .object.sha] | @tsv'
-          )"; then
-            invalid_tag
-          fi
-          IFS=$'\t' read -r tag_type tag_object <<< "$tag_fields"
-          if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
-            invalid_tag
-          fi
-
-          case "$tag_type" in
-            commit)
-              tag_commit="$tag_object"
-              ;;
-            tag)
-              if ! tag_commit="$(
-                gh api \
-                  "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
-                  --jq 'if .object.type == "commit" then .object.sha else empty end'
-              )"; then
-                invalid_tag
-              fi
-              ;;
-            *)
-              invalid_tag
-              ;;
-          esac
-
-          if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ ||
-                "$tag_commit" != "$GITHUB_SHA" ]]; then
-            invalid_tag
-          fi
-          echo "Protected npm release tag matches the verified commit."
+        run: *revalidate-release-tag
 
       - name: Publish initial npm release
         if: needs.verify.outputs.mode == 'publish' && github.ref_name == 'npm-v0.1.0'
