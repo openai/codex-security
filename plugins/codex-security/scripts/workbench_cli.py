@@ -154,6 +154,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
     upsert_deep_worker.add_argument("--sdk-thread-id")
     upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
     upsert_deep_worker.add_argument(
         "--replaceable-failure-kind",
         choices=("policy_refusal", "transient_error", "invalid_discovery_artifacts"),

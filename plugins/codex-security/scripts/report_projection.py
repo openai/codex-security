@@ -879,7 +879,19 @@ def build_report_markdown(
             if values:
                 lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
     lines.extend(["", "## Findings", ""])
+    informational_count = sum(
+        finding["severity"]["level"] == "informational" for finding in findings_document["findings"]
+    )
+    informational_note = ""
+    if informational_count:
+        noun = "finding" if informational_count == 1 else "findings"
+        informational_note = (
+            f"This report omits details for {informational_count} informational {noun}. "
+            "See `findings.json` or export the findings as SARIF or CSV."
+        )
     if findings:
+        if informational_note:
+            lines.extend([informational_note, ""])
         if deep_presentation:
             lines.extend(
                 [
@@ -926,18 +938,15 @@ def build_report_markdown(
             "canceled",
             "interrupted",
         }
-        lines.extend(
-            [
-                "### No findings",
-                "",
-                (
-                    "No findings were retained before the scan stopped. "
-                    "The scan did not complete. No vulnerability conclusion can be drawn."
-                    if stopped
-                    else "No findings were reported."
-                ),
-            ]
+        heading = "### No reportable findings" if informational_note else "### No findings"
+        message = informational_note or (
+            "No findings were retained before the scan stopped."
+            if stopped
+            else "No findings were reported."
         )
+        if stopped:
+            message += " The scan did not complete. No vulnerability conclusion can be drawn."
+        lines.extend([heading, "", message])
     if hardening_portfolio_path is not None:
         lines.extend(
             [
