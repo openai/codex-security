@@ -862,6 +862,11 @@ service_tier = "ultrafast"
     const completedWorker = partial!.workers.find(
       (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
     );
+    const interruptedWorker = partial!.workers.find(
+      (worker: PersistedDeepScanWorker) =>
+        worker.kind === "discovery" && worker.status === "running",
+    );
+    assert.ok(interruptedWorker);
     const completedDraft = await readJson(completedWorker.resultManifestPath);
     assert.equal(completedDraft.scanId, resumedScanId);
     assert.deepEqual(completedDraft.findings, []);
@@ -1087,11 +1092,12 @@ print(json.dumps([*parent, list(workers)]))`,
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
       assert.deepEqual(
         new Set(workerRows.map(([id]: [string, string]) => id)),
-        new Set(
-          successfulDiscoveries.map(
+        new Set([
+          interruptedWorker.id,
+          ...successfulDiscoveries.map(
             (worker: PersistedDeepScanWorker) => worker.id,
           ),
-        ),
+        ]),
       );
       for (const [id, digest] of workerRows) {
         const firstRunning = helperLaunches.find(
