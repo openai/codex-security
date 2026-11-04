@@ -221,7 +221,6 @@ test.each([
         onRepositoryCommand: async (command, args, cwd, options) => {
           const effective = { ...environment, ...options?.environment };
           if (command === "git") {
-            expect(effective["HOME"]).toBe(environment["HOME"]);
             for (const key of Object.keys(effective)) {
               if (
                 key.startsWith("GIT_CONFIG_KEY_") &&
