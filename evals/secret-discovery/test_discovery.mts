@@ -169,6 +169,7 @@ for (const category of [
   "not-a-private-key",
   "non-hardcoded-credential",
   "non-sensitive-data-exposure",
+  "no sensitive information disclosure",
   "not-a-password-exposure",
   "non-token-exposure",
   "non-api-key-exposure",
@@ -229,6 +230,40 @@ test("accepts a secret's valid source range and sensitive-data category", () => 
   result.findings[0].locations[0].endLine = fixture.positives[0].line + 1;
   result.findings[0].taxonomy.category = "sensitive-data-exposure";
   assert.equal(gradeResult(result, fixture).passed, true);
+});
+
+test("sensitive information disclosure requires a credential-specific CWE for source literals", () => {
+  const result = retainedResult();
+  for (const cwe of ["CWE-798", "CWE-200", "CWE-540"]) {
+    result.findings[0].taxonomy = {
+      category: "Sensitive information disclosure",
+      cwe: [cwe],
+    };
+    assert.equal(gradeResult(result, fixture).passed, cwe === "CWE-798", cwe);
+  }
+});
+
+test("response-specific categories identify the runtime leak with CWE-201", () => {
+  const result = retainedResult();
+  const index = fixture.positives.findIndex(
+    (expected) => expected.id === "runtime-disclosure",
+  );
+  const runtime = result.findings[index];
+  for (const category of [
+    "Sensitive information in response",
+    "Insertion of Sensitive Information Into Sent Data",
+    "sensitive-information-in-response",
+  ]) {
+    runtime.taxonomy = { category, cwe: ["CWE-201"] };
+    assert.equal(gradeResult(result, fixture).passed, true, category);
+    runtime.taxonomy.cwe = ["CWE-200"];
+    assert.equal(gradeResult(result, fixture).passed, false, category);
+  }
+  runtime.taxonomy = { category: "Response", cwe: ["CWE-201"] };
+  assert.equal(gradeResult(result, fixture).passed, false);
+  runtime.taxonomy.category = "Sensitive information in response";
+  result.findings[0].taxonomy.category = runtime.taxonomy.category;
+  assert.equal(gradeResult(result, fixture).cases[0].found, false);
 });
 
 for (const category of [
@@ -686,19 +721,19 @@ for (const role of ["supporting", "expected_control"]) {
   });
 }
 
-test("accepts real credential-use sinks without treating them as separate exposures", () => {
+test("accepts a credential-use location only alongside its matched exposure", () => {
   const result = retainedResult();
   for (const [index, expected] of fixture.positives.entries()) {
     if (expected.consumerLine === null) continue;
-    const sink = {
+    const use: SourceLocation = {
       path: expected.path,
       startLine: expected.consumerLine,
       endLine: expected.lineCount,
-      role: "credential-use sink",
     };
-    result.findings[index].locations.push(sink);
+    if (expected.id === "private-key") use.role = "Signing operation";
+    result.findings[index].locations.push(use);
     const onlyConsumer = retainedResult();
-    onlyConsumer.findings[index].locations = [sink];
+    onlyConsumer.findings[index].locations = [use];
     assert.equal(gradeResult(onlyConsumer, fixture).cases[index].found, false);
   }
   assert.equal(gradeResult(result, fixture).passed, true);
@@ -707,7 +742,7 @@ test("accepts real credential-use sinks without treating them as separate exposu
     ["README.md", 1, "sink"],
     ["src/absent.py", 5, "sink"],
     ["src/client.py", 1, "credential-use sink"],
-    ["src/client.py", 7, "sinking"],
+    ["src/client.py", 6, "Authentication use"],
   ] as const) {
     const invalid = retainedResult();
     invalid.findings[0].locations.push({ path, startLine, role });

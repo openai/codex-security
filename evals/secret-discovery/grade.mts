@@ -26,18 +26,18 @@ export interface Result {
 
 const explicitSecretTerms =
   /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
-const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposures?`;
+const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?(?:exposure|disclosure)s?`;
 const explicitSecretCategory = new RegExp(
   String.raw`\b(?:${explicitSecretTerms.source})\b`,
   "i",
 );
 const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
+const responseCategory =
+  /^(?:sensitive information in response|insertion of sensitive information into sent data)$/i;
 const negatedSecretCategory = new RegExp(
   String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
   "i",
 );
-// Deep Scan recognizes sink as a word in a final finding's free-text location role.
-const sinkRole = /(?:^|[^a-z])sink(?:$|[^a-z])/i;
 const supportingLocation = (location: SourceLocation) =>
   /^(?:supporting|support|context|consumer|expected_control)$/.test(
     location.role ?? "",
@@ -105,6 +105,9 @@ function matches(
       if (expected.cwes.includes(cwe)) {
         return (
           relevantCategory ||
+          (runtimeLeak &&
+            cwe === "CWE-201" &&
+            responseCategory.test(category.replaceAll("-", " "))) ||
           (cwe === "CWE-321" &&
             /^(?:embedded[- ]+)?cryptographic[- ]+keys?$/i.test(category))
         );
@@ -189,8 +192,7 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
             !matchedCases.some(
               (expected) =>
                 matchesLocation(location, expected) ||
-                (sinkRole.test(location.role ?? "") &&
-                  matchesConsumer(location, expected)),
+                matchesConsumer(location, expected),
             )),
       )
       .map((location) => location.path);
