@@ -1,5 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
-import { mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "yaml";
@@ -252,9 +252,8 @@ test("SDK preflight binds parsed project routing to the original checkout across
     }),
   );
   const loaded = await loadProjectConfig(join(selected, "scan.json"));
-  await rm(selected);
-  await rm(controlled);
-  await rm(join(operator, "scan.json"));
+  await rename(controlled, join(checkout, "previous-settings"));
+  await rename(operator, join(root, "previous-operator"));
   await using security = new TestClient(loaded.config, {
     environment: {
       CODEX_HOME: join(root, "home"),
