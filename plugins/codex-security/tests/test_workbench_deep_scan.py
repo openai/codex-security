@@ -194,6 +194,7 @@ class DeepScan:
         thread_id: str | None = None,
         error: str | None = None,
         replaceable_failure_kind: str | None = None,
+        terminal_failure: bool = False,
         coordinator_generation: int | None = None,
         check: bool = True,
     ) -> dict[str, object]:
@@ -209,6 +210,7 @@ class DeepScan:
             *(("--attempt", str(attempt)) if attempt is not None else ()),
             *(("--sdk-thread-id", thread_id) if thread_id is not None else ()),
             *(("--error-message", error) if error is not None else ()),
+            *(("--terminal-failure",) if terminal_failure else ()),
             *(
                 ("--replaceable-failure-kind", replaceable_failure_kind)
                 if replaceable_failure_kind is not None
@@ -797,6 +799,51 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
         ]
         == 1
     )
+
+
+@pytest.mark.parametrize("terminal,cancel", [(False, False), (True, False), (True, True)])
+def test_worker_failure_diagnostic_survives_coordinator_adoption(
+    tmp_path: Path, terminal: bool, cancel: bool
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    claim = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    generation = claim["deepScan"]["coordinatorGeneration"]
+    worker, prompt, artifacts, _ = deep.dispatch_discovery_worker(
+        name="discovery-1", succeed=False, coordinator_generation=generation
+    )
+    message = "Worker stopped by policy."
+    failed = deep.upsert_worker(
+        worker_id=worker,
+        prompt_path=prompt,
+        artifact_dir=artifacts,
+        status="failed",
+        error=message,
+        terminal_failure=terminal,
+        coordinator_generation=generation,
+    )["deepScan"]
+    expected = message if terminal else None
+    assert (failed["status"], failed["error"]) == ("running", expected)
+    assert failed["workers"][0]["error"] == message
+
+    expire_deep_scan_coordinator(deep.state_dir, deep.id)
+    adopted = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert adopted["coordinatorDisposition"] == "adopted"
+    assert adopted["deepScan"]["error"] == expected
+    generation = ("--coordinator-generation", str(adopted["deepScan"]["coordinatorGeneration"]))
+    manifest = deep.directory / "finish.json"
+    manifest.write_text("{}")
+    if terminal:
+        assert message in deep.finish("capped", manifest, *generation, check=False)["stderr"]
+    if cancel:
+        deep.command("cancel-scan", "--thread-id", "thread-deep-scan")
+        final = deep.read("thread-deep-scan")
+        assert (final["status"], final["error"]) == ("canceled", None)
+    else:
+        final = deep.command("fail-deep-scan", "--message", "Cleanup failed.", *generation)[
+            "deepScan"
+        ]
+        assert final["error"] == (expected or "Cleanup failed.")
+    assert final["workers"][0]["error"] == message
 
 
 @pytest.mark.cross_platform

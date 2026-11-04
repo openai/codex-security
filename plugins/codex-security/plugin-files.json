@@ -71,6 +71,7 @@
     "scripts/finding_preview.py",
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
+    "scripts/legacy_findings.py",
     "scripts/posix_scan_local_files.py",
     "scripts/report_projection.py",
     "scripts/review_state.py",
