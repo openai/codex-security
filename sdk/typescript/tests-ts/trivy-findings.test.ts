@@ -14,109 +14,68 @@ function normalizeAtRoot(input: unknown) {
   return normalizeTrivyFindings(input, "cloud", ".");
 }
 
-test("infers a whole checkout only when Git metadata corroborates the remote", () => {
-  const report = trivyReport();
-  for (const ArtifactName of [".", "apps/web", "/checkout/apps/web", undefined])
-    expect(() => normalizeTrivyFindings({ ...report, ArtifactName })).toThrow(
-      "--trivy-scan-root",
-    );
-  const ambiguousOrigin = { ...report, Metadata: { RepoURL: "r:org/repo" } };
-  expect(() => normalizeTrivyFindings(ambiguousOrigin)).toThrow(
-    "--trivy-scan-root",
-  );
-  const remote = { ...report, ArtifactName: report.Metadata.RepoURL };
-  const labelOnly = { ...remote, Metadata: {} };
-  expect(() => normalizeTrivyFindings(labelOnly)).toThrow("--trivy-scan-root");
-  const scoped = normalizeTrivyFindings(labelOnly, "cloud", "apps/web")
-    .findings[0]!;
-  expect(scoped.evidence.packages![0]!.manifest_path).toBe(
-    "apps/web/package-lock.json",
-  );
-  expect(scoped.evidence.source_data?.["report"]).toMatchObject({
-    ArtifactName: remote.ArtifactName,
-  });
-  const displayName = "arbitrary filesystem display label";
-  expect(
-    normalizeAtRoot({ ...report, ArtifactName: displayName }).findings[0]!
-      .evidence.source_data?.["report"],
-  ).toMatchObject({ ArtifactName: displayName });
-  const colonDirectory = { ...report, ArtifactName: "apps:web" };
-  expect(() => normalizeTrivyFindings(colonDirectory)).toThrow(
-    "--trivy-scan-root",
-  );
-  expect(
-    normalizeTrivyFindings(colonDirectory, "local", "packages@v2/apps:web")
-      .findings[0]!.evidence.packages![0]!.manifest_path,
-  ).toBe("packages@v2/apps:web/package-lock.json");
-  expect(
-    normalizeTrivyFindings(colonDirectory, "local", "apps:web").findings[0]!
-      .evidence.packages![0]!.manifest_path,
-  ).toBe("apps:web/package-lock.json");
-  const inferred = normalizeTrivyFindings(remote);
-  expect(inferred).toEqual(normalizeAtRoot(remote));
-  expect(inferred.findings[0]!.evidence.source_data?.["scanRoot"]).toBe(".");
-  expect(() => normalizeTrivyFindings(remote, "cloud", "apps/web")).toThrow(
-    "--trivy-scan-root",
-  );
-  expect(() =>
-    normalizeTrivyFindings({ ...remote, ArtifactType: "filesystem" }),
-  ).toThrow("--trivy-scan-root");
-});
+const origin = trivyReport().Metadata.RepoURL;
+const schemeLess = origin.replace("https://", "");
 
-test("corroborates Trivy's scheme-less repository target", () => {
-  const report = {
-    ...trivyReport(),
-    ArtifactName: "github.com/example/project",
-  };
-  const inferred = normalizeTrivyFindings(report);
-  expect(inferred.findings[0]!.evidence.packages![0]!.manifest_path).toBe(
-    "package-lock.json",
-  );
-  expect(() => normalizeTrivyFindings(report, "cloud", "apps/web")).toThrow(
-    "must be .",
-  );
-  const targetOnly = { ...report, Metadata: {} };
-  const selected = normalizeAtRoot(targetOnly);
-  expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
-    ArtifactName: report.ArtifactName,
-  });
-  expect(
-    trivyRepositoryUrl(selected.findings[0]!.evidence.source_data!["report"]),
-  ).toBeNull();
-  for (const uncorroborated of [
-    { ...report, Metadata: {} },
-    { ...report, ArtifactName: "github.com/example/other" },
-    { ...report, ArtifactName: "./github.com/example/project" },
-    { ...report, ArtifactType: "filesystem" },
-    { ...report, Metadata: { RepoURL: "http://github.com/example/project" } },
+function repositoryReport(ArtifactName: string, RepoURL?: string) {
+  return { ...trivyReport(), ArtifactName, Metadata: { RepoURL } };
+}
+
+test("filesystem labels and uncorroborated repository targets require a scan root", () => {
+  for (const report of [
+    ...[".", "apps/web", "/checkout/apps/web", "apps:web", undefined].map(
+      (ArtifactName) => ({ ...trivyReport(), ArtifactName }),
+    ),
+    repositoryReport(".", "r:org/repo"),
+    repositoryReport(origin),
+    repositoryReport(schemeLess),
+    repositoryReport(schemeLess, origin.replace("https:", "http:")),
+    repositoryReport("./" + schemeLess, origin),
+    repositoryReport(schemeLess + "-other", origin),
+    { ...repositoryReport(origin, origin), ArtifactType: "filesystem" },
+    { ...repositoryReport(schemeLess, origin), ArtifactType: "filesystem" },
   ])
-    expect(() => normalizeTrivyFindings(uncorroborated)).toThrow(
-      "--trivy-scan-root",
-    );
+    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
 });
 
-test("a mixed-case HTTPS label and lowercase Git metadata require explicit-root inspection", () => {
-  const report = {
-    ...trivyReport(),
-    ArtifactName: "HTTPS://github.com/example/project",
-  };
-  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
-  const batch = normalizeTrivyFindings(report, "local", "apps/web");
-  const retained = batch.findings[0]!.evidence.source_data!["report"];
-  expect(retained).toMatchObject({
-    ArtifactName: report.ArtifactName,
-    Metadata: { RepoURL: report.Metadata.RepoURL },
-  });
-  expect(() => trivyRepositoryUrl(retained, report.Metadata.RepoURL)).toThrow(
-    "different repositories",
+test.each([
+  [origin, "apps/web"],
+  ["arbitrary filesystem display label", "."],
+  ["apps:web", "packages@v2/apps:web"],
+  ["apps:web", "apps:web"],
+  [schemeLess, "."],
+] as const)("retains artifact %s inside explicit root %s", (target, root) => {
+  const { evidence } = normalizeTrivyFindings(
+    repositoryReport(target),
+    "local",
+    root,
+  ).findings[0]!;
+  expect(evidence.packages![0]!.manifest_path).toBe(
+    root === "." ? "package-lock.json" : root + "/package-lock.json",
   );
-  const targetOnly = { ...report, Metadata: {} };
-  expect(() => normalizeTrivyFindings(targetOnly)).toThrow("--trivy-scan-root");
-  const selected = normalizeAtRoot(targetOnly);
-  expect(selected.findings[0]!.evidence.source_data!["report"]).toMatchObject({
-    ArtifactName: report.ArtifactName,
-  });
+  const retained = evidence.source_data!["report"];
+  expect(retained).toMatchObject({ ArtifactName: target });
+  if (target === schemeLess) expect(trivyRepositoryUrl(retained)).toBeNull();
 });
+
+test.each([
+  [origin, origin],
+  [schemeLess, origin],
+  ["ssh://git@git.1/org/project", "ssh://git@git.1/org/project"],
+  [
+    "https://github.com/example/%E2%84%AAit",
+    "ssh://git@github.com/example/Kit.git",
+  ],
+])(
+  "infers the whole checkout for corroborated target %s and remote %s",
+  (artifact, remote) => {
+    const report = repositoryReport(artifact, remote);
+    expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
+    expect(() => normalizeTrivyFindings(report, "local", "nested")).toThrow(
+      "must be .",
+    );
+  },
+);
 
 test.each([
   ["é/repo", "%C3%A9/repo", true],
@@ -165,60 +124,34 @@ test.each([
   },
 );
 
-test("identical SSH declarations can use an SSH-config host alias", () => {
-  const url = "ssh://git@git.1/org/project";
-  const report = {
-    ...trivyReport(),
-    ArtifactName: url,
-    Metadata: { RepoURL: url },
-  };
-  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
-  const native = { ...report, Metadata: { RepoURL: "git@git.1:org/project" } };
-  expect(() => normalizeTrivyFindings(native)).toThrow("--trivy-scan-root");
-  expect(() => trivyRepositoryUrl(native)).toThrow("different repositories");
-});
+const enterpriseTarget = "https://git.example.test/org/project";
 
-test("a GitHub SSH path corroborates its encoded HTTP spelling", () => {
-  const report = {
-    ...trivyReport(),
-    ArtifactName: "https://github.com/example/%E2%84%AAit",
-    Metadata: { RepoURL: "ssh://git@github.com/example/Kit.git" },
-  };
-  expect(normalizeTrivyFindings(report)).toEqual(normalizeAtRoot(report));
-  report.ArtifactName = "https://github.com/example/Kit";
-  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
-});
-
-test("requires a scan root for aliases on an unverified Git host", () => {
-  const report = {
-    ...trivyReport(),
-    ArtifactName: "https://git.example.test/org/project",
-    Metadata: { RepoURL: "git@git.example.test:org/project.git" },
-  };
-  const scoped = normalizeTrivyFindings(report, "local", "apps/web");
-  expect(scoped.findings[0]!.evidence.packages![0]!.manifest_path).toBe(
-    "apps/web/package-lock.json",
-  );
-  for (const [ArtifactName, RepoURL] of [
-    [report.ArtifactName, report.Metadata.RepoURL],
-    [report.ArtifactName, "https://git.example.test/org/Project"],
-    [report.ArtifactName, "https://git.example.test/org/other"],
-    [report.ArtifactName, "https://other.example.test/org/project"],
-    [report.ArtifactName, "https://git.example.test:8443/org/project"],
-    [
-      "http://git.example.test/org/project",
-      "http://git.example.test/ORG/other",
-    ],
-  ]) {
-    const different = { ...report, ArtifactName, Metadata: { RepoURL } };
-    expect(() => normalizeTrivyFindings(different)).toThrow(
-      "--trivy-scan-root",
-    );
-    expect(() => trivyRepositoryUrl(different)).toThrow(
+test.each([
+  [origin.replace("https:", "HTTPS:"), origin],
+  ["ssh://git@git.1/org/project", "git@git.1:org/project"],
+  ["https://github.com/example/Kit", "ssh://git@github.com/example/Kit.git"],
+  [enterpriseTarget, "git@git.example.test:org/project.git"],
+  [enterpriseTarget, "https://git.example.test/org/Project"],
+  [enterpriseTarget, "https://git.example.test/org/other"],
+  [enterpriseTarget, "https://other.example.test/org/project"],
+  [enterpriseTarget, "https://git.example.test:8443/org/project"],
+  ["http://git.example.test/org/project", "http://git.example.test/ORG/other"],
+])(
+  "conflicting artifact %s and origin %s require explicit inspection",
+  (artifact, remote) => {
+    const report = repositoryReport(artifact, remote);
+    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+    const retained = normalizeTrivyFindings(report, "local", "apps/web")
+      .findings[0]!.evidence.source_data!["report"];
+    expect(retained).toMatchObject({
+      ArtifactName: artifact,
+      Metadata: { RepoURL: remote },
+    });
+    expect(() => trivyRepositoryUrl(retained)).toThrow(
       "different repositories",
     );
-  }
-});
+  },
+);
 
 test("a repository display label cannot supply an SSH account omitted from Git metadata", () => {
   const report = {

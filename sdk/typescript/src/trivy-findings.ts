@@ -1,15 +1,14 @@
 import { posix, sep } from "node:path";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
-import { isGitHubCloudHost, parseGitRemote } from "./git-remote.js";
+import type { ExternalFindings } from "./external-findings.js";
+import { isGitHubCloudHost, isGitSsh, parseGitRemote } from "./git-remote.js";
 import {
-  ambiguousHostedHttpPath,
   hostedRepositoryUrlKey,
   normalizeHostedGitRepositoryUrl,
 } from "./hosted-git-repository.js";
-import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
+import { REPORTABLE_SEVERITIES } from "./scan-settings.js";
 import {
   array,
   normalizeRecords,
@@ -22,27 +21,10 @@ import {
   text,
 } from "./scanner-import.js";
 
-export function validateTrivyRepositoryUrl(value: string): void {
-  if (
-    /[\x00-\x20\x7f]/u.test(value) &&
-    (/^https?:\/\//iu.test(value) ||
-      /^https?:$/u.test(URL.parse(value)?.protocol ?? ""))
-  )
-    throw new CodexSecurityError(
-      "HTTP(S) repository URLs must percent-encode spaces and control characters.",
-    );
-  if (ambiguousHostedHttpPath(value))
-    throw new CodexSecurityError(
-      "The repository URL has an HTTP path that does not match its Git path.",
-    );
-}
-
 type NativeRecord = Record<string, unknown>;
 
 const urlScheme = /^[a-z][a-z\d+.-]*:\/\//iu;
 const javaArchiveAncestor = /\.(?:jar|war|ear|par)\//iu;
-
-const sshProtocols = new Set(["ssh:", "git+ssh:", "ssh+git:"]);
 
 const curlUrlPrefix = /^(?:(?:https?|ftps?)::)?(?:https?|ftps?):\/{1,3}/iu;
 const unsafeRepositoryUrl =
@@ -71,7 +53,7 @@ function networkRepository(value: unknown): string | null {
   const remote = parseGitRemote(source);
   if (!remote) return null;
   const { url } = remote;
-  const ssh = sshProtocols.has(url.protocol);
+  const ssh = isGitSsh(url.protocol);
   if (url.password || (!ssh && url.username) || /[?#\t\r\n]/u.test(source))
     throw new Error(unsafeRepositoryUrl);
   if (url.protocol === "file:") return null;
@@ -131,79 +113,18 @@ export function trivyRemoteKey(
   const url = checkout
     ? normalized.replace(/^(https?:\/\/)[^/\\?#]*@/iu, "$1")
     : normalized;
-  return hostedRepositoryUrlKey(url, true);
+  return hostedRepositoryUrlKey(
+    url,
+    true,
+    false,
+    cloudRepositoryUrl ? "cloud" : "local",
+  );
 }
 
 const sshScheme = /^(?:ssh|git\+ssh|ssh\+git):\/\//u;
 
 function userlessSsh(url: string): boolean {
   return sshScheme.test(url) && !new URL(url).username;
-}
-
-function requireUnambiguousHttpTarget(url: string): void {
-  if (/^https?:\/\//iu.test(url) && !/^https?:\/\//u.test(url))
-    throw new Error(
-      "Trivy's mixed-case HTTP target cannot identify the Git transport. Verify the source remote and regenerate the report.",
-    );
-}
-
-function requireTrivySshUsers(urls: readonly string[]): void {
-  if (urls.some(userlessSsh))
-    throw new Error(
-      "Trivy omitted the SSH user, so this report cannot identify its source repository. Verify the recorded remote’s SSH account, host, port and path, or use a verified HTTPS remote, then regenerate the report.",
-    );
-}
-
-/** A canonical occurrence ID can identify a projected native repository declaration. */
-export function retainedTrivyReport({
-  source_finding_id: id,
-  evidence,
-}: ExternalFinding): unknown {
-  const report = evidence.source_data?.["report"];
-  if (
-    !isRecord(report) ||
-    report["SchemaVersion"] !== undefined ||
-    !/^trivy:[a-f0-9]{64}$/u.test(id)
-  )
-    return report;
-  const metadata = report["Metadata"];
-  return isRecord(metadata) && typeof metadata["RepoURL"] === "string"
-    ? { ...report, SchemaVersion: 2 }
-    : report;
-}
-
-export function identifiesTrivyReport(report: unknown): boolean {
-  if (!isRecord(report) || report["SchemaVersion"] !== 2) return false;
-  const scanner = report["Trivy"];
-  const metadata = report["Metadata"];
-  return (
-    (isRecord(scanner) && typeof scanner["Version"] === "string") ||
-    ((report["ArtifactType"] === "repository" ||
-      report["ArtifactType"] === "filesystem") &&
-      isRecord(metadata) &&
-      typeof metadata["RepoURL"] === "string")
-  );
-}
-
-/** Each selected finding must retain the repository asserted by a native batch header. */
-export function trivyBatchSourceUrls(
-  input: ExternalFindings,
-  bind: boolean,
-): string[] {
-  const batch = trivyReportRemotes(input.report);
-  if (bind) requireTrivyBinding(batch);
-  for (const finding of input.findings) {
-    const typedUrl = finding.evidence.details?.repository?.url;
-    const row = trivyReportRemotes(retainedTrivyReport(finding));
-    if (typedUrl && (bind || batch.urls.length || row.urls.length))
-      validateTrivyRepositoryUrl(typedUrl);
-    if (bind) requireTrivyBinding(row);
-    if (batch.urls.length && !typedUrl && !row.urls.length)
-      throw new Error(
-        "For a repository-bound Trivy report, retain the source repository in each finding's source_data.report or details.repository.url.",
-      );
-  }
-  return batch.urls;
 }
 
 const headerFields = [
@@ -213,20 +134,6 @@ const headerFields = [
   "ReportID",
   "CreatedAt",
 ];
-
-/** A native header supplies provenance for the selected rows, not independent run metadata. */
-export function isTrivyReportHeader(report: NativeRecord): boolean {
-  return (
-    report["SchemaVersion"] === 2 &&
-    (report["ArtifactType"] === "repository" ||
-      report["ArtifactType"] === "filesystem") &&
-    Object.keys(report).every(
-      (field) =>
-        headerFields.includes(field) ||
-        ["ArtifactName", "Trivy", "Metadata", "Results"].includes(field),
-    )
-  );
-}
 
 // Go may rewrite escaped separators or unreserved bytes in mixed Unicode paths.
 // Only escape spaces and non-ASCII bytes when existing escapes are unambiguous.
@@ -278,14 +185,6 @@ export function trivyReportRemotes(report: unknown) {
     urls: [repository, artifact].filter((url) => url !== null),
     uncorroboratedTarget: repository ? null : artifact,
   };
-}
-
-export function requireTrivyBinding({
-  urls,
-  uncorroboratedTarget,
-}: ReturnType<typeof trivyReportRemotes>): void {
-  requireTrivySshUsers(urls);
-  if (uncorroboratedTarget) requireUnambiguousHttpTarget(uncorroboratedTarget);
 }
 
 function matchingTrivyRemotes(
@@ -384,19 +283,17 @@ function pick(source: NativeRecord, fields: string[]): NativeRecord {
   );
 }
 
-function packageKeys(
-  id: unknown,
-  identifier: unknown,
-  name: unknown,
-  version: unknown,
-  path: unknown,
-) {
+function packageKeys(row: NativeRecord, inventory: boolean) {
+  const path = row[inventory ? "FilePath" : "PkgPath"];
+  const identifier = row[inventory ? "Identifier" : "PkgIdentifier"];
+  const name = row[inventory ? "Name" : "PkgName"];
+  const version = row[inventory ? "Version" : "InstalledVersion"];
   const file = repositoryPath(path) ?? text(path);
   const key = (kind: string, value: unknown) =>
     text(value) && JSON.stringify([kind, value, file]);
   const native = isRecord(identifier) ? identifier : {};
   return {
-    id: key("id", id),
+    id: key("id", row[inventory ? "ID" : "PkgID"]),
     uid: key("uid", native["UID"]),
     purl: key("purl", native["PURL"]),
     bomRef: key("bomRef", native["BOMRef"]),
@@ -416,13 +313,7 @@ function indexPackages(packages: unknown): PackageIndex {
   const index: PackageIndex = new Map();
   for (const value of array(packages ?? [], "Trivy Packages")) {
     const pkg = record(value, "Trivy package");
-    const keys = packageKeys(
-      pkg["ID"],
-      pkg["Identifier"],
-      pkg["Name"],
-      pkg["Version"],
-      pkg["FilePath"],
-    );
+    const keys = packageKeys(pkg, true);
     const match = { pkg, keys };
     for (const key of Object.values(keys))
       if (key) index.set(key, index.has(key) ? null : match);
@@ -431,13 +322,7 @@ function indexPackages(packages: unknown): PackageIndex {
 }
 
 function matchingPackage(vulnerability: NativeRecord, index: PackageIndex) {
-  const keys = packageKeys(
-    vulnerability["PkgID"],
-    vulnerability["PkgIdentifier"],
-    vulnerability["PkgName"],
-    vulnerability["InstalledVersion"],
-    vulnerability["PkgPath"],
-  );
+  const keys = packageKeys(vulnerability, false);
   const supplied = (["uid", "id", "purl", "bomRef"] as const).filter(
     (field) => keys[field],
   );
@@ -563,16 +448,9 @@ export function normalizeTrivyFindings(
   const findings = normalizeRecords(
     entries,
     (entry) => {
-      const {
-        result,
-        packages,
-        vulnerability,
-        advisory,
-        name,
-        targetPath,
-        pkgPath,
-        packagePath,
-      } = occurrence(entry, root);
+      const row = occurrence(entry, root);
+      const { result, packages, vulnerability, advisory, name, targetPath } =
+        row;
       const identifier = vulnerability["PkgIdentifier"];
       const purl = isRecord(identifier) ? text(identifier["PURL"]) : null;
       const ecosystem =
@@ -581,12 +459,12 @@ export function normalizeTrivyFindings(
       const pkg = matchingPackage(vulnerability, packages);
       const manifest = nonManifestTypes.has(result.Type) ? null : targetPath;
       // Trivy uses the same spelling for archive members and files in exploded archives.
-      let declaration = pkgPath ? packagePath : manifest;
+      let declaration = row.pkgPath ? row.packagePath : manifest;
       if (
         result.Type === "jar" &&
-        pkgPath !== null &&
-        javaArchiveAncestor.test(pkgPath) &&
-        /\.(?:jar|ear|war)$/u.test(pkgPath)
+        row.pkgPath !== null &&
+        javaArchiveAncestor.test(row.pkgPath) &&
+        /\.(?:jar|ear|war)$/u.test(row.pkgPath)
       )
         declaration = null;
       const locations: { path: string; line: number | null }[] = [];
@@ -614,9 +492,8 @@ export function normalizeTrivyFindings(
         {
           title: text(vulnerability["Title"]) ?? `${advisory} in ${name}`,
           severity:
-            severity && ["critical", "high", "medium", "low"].includes(severity)
-              ? severity
-              : "unknown",
+            REPORTABLE_SEVERITIES.find((level) => level === severity) ??
+            "unknown",
           description: text(vulnerability["Description"]),
           url: text(vulnerability["PrimaryURL"]),
           advisory_ids: [

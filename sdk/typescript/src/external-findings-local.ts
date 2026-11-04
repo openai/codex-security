@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import {
   semgrepLegacyRepositoryWitnesses,
   semgrepPlatformFindingBinding,
@@ -12,12 +11,6 @@ import {
   gitTransportBytes,
   hostedRepositoryMatches,
 } from "./hosted-git-repository.js";
-import {
-  retainedTrivyReport,
-  trivyBatchSourceUrls,
-  trivyRemoteKey,
-  trivyReportRemotes,
-} from "./trivy-findings.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -26,8 +19,6 @@ import {
 } from "./external-imports-feature.js";
 import {
   cloneImportPreview,
-  checkRetainedTrivyProvider,
-  checkTrivyReportProvider,
   snapshotImportOptions,
   snapshotNormalizedFindings,
   snapshotSourceRepositories,
@@ -84,7 +75,6 @@ import {
   expandHome,
   requireOutputOutsideRepositories,
   runWorkbench,
-  sameFile,
   workbenchEnvironment,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
@@ -557,97 +547,6 @@ export async function configuredFetchRemotes(
   return remotes;
 }
 
-// Typed web links and explicit curl helper arguments use a case-insensitive URL scheme.
-function trivyUrlArgument(url: string) {
-  return url.replace(/^(?:https?|ftps?):\/\//iu, (scheme) =>
-    scheme.toLowerCase(),
-  );
-}
-
-function localTrivySources(
-  input: ExternalFindings,
-  references: readonly ExternalSourceRepository[],
-) {
-  const urls = new Set(trivyBatchSourceUrls(input, false));
-  for (const finding of input.findings) {
-    const typedUrl = finding.evidence.details?.repository?.url;
-    if (typedUrl) urls.add(trivyUrlArgument(typedUrl));
-    for (const url of trivyReportRemotes(retainedTrivyReport(finding)).urls)
-      urls.add(url);
-  }
-  for (const { platform, url } of references)
-    urls.add(platform === "github" ? trivyUrlArgument(url) : url);
-  return [...urls].map((url) => ({ url }));
-}
-
-async function matchTrivyCheckout(
-  repository: string,
-  trivy: ExternalFindings,
-  references: readonly ExternalSourceRepository[],
-  protectedRoots: string[],
-  environment: WorkbenchCommandOptions["environment"],
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const sources = localTrivySources(trivy, references);
-  const trivyKeys = new Set(sources.map(({ url }) => trivyRemoteKey(url)));
-  let remotes: string[] | undefined;
-  if (await hasGitMetadata(repository, signal)) {
-    const gitProtectedRoots = [
-      ...protectedRoots,
-      await abortable(() => canonicalConfigPath(process.cwd()), signal),
-    ];
-    const root = resolve(
-      await abortable(
-        () =>
-          gitOutput(
-            repository,
-            ["rev-parse", "--show-toplevel"],
-            signal,
-            { LC_ALL: "C" },
-            undefined,
-            "utf8",
-            gitProtectedRoots,
-            environment,
-          ),
-        signal,
-      ),
-    );
-    if (
-      root !== repository &&
-      !(await abortable(() => sameFile(root, repository), signal))
-    )
-      throw new CodexSecurityError(
-        `Trivy finding paths are checkout-relative. Git found the checkout at ${JSON.stringify(root)}. Select it with --repository and set --trivy-scan-root relative to it.`,
-      );
-    if (sources.length)
-      remotes = await readHostedGitRemotes(
-        repository,
-        gitProtectedRoots,
-        environment,
-        signal,
-        trivyKeys,
-      );
-  }
-  if (remotes) trivyBatchSourceUrls(trivy, true);
-  if (trivyKeys.size > 1)
-    throw new CodexSecurityError(
-      "Trivy source URLs identify different repositories.",
-    );
-  const source = sources[0]!;
-  if (
-    remotes &&
-    !remotes.some(
-      (url) =>
-        !/^(?:https?|ftps?):\/\/[^/?#@]*@[^/?#@]*@/iu.test(url) &&
-        trivyKeys.has(trivyRemoteKey(url, undefined, true)),
-    )
-  )
-    throw new CodexSecurityError(
-      `Imported repository ${JSON.stringify(source.url)} does not match a configured remote of ${repository}. Select the matching local repository.`,
-    );
-  return remotes !== undefined;
-}
-
 async function requireMatchingRepository(
   repository: string,
   provider: Provider,
@@ -840,7 +739,6 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
-  checkTrivyReportProvider(options.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
     current.snykRestContext = structuredClone(input.snykRestContext);
@@ -863,7 +761,6 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
-    checkRetainedTrivyProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -1313,31 +1210,20 @@ export async function prepareLocalImport(
     false,
   );
   const selected = manualSource ? new URL(manualSource) : undefined;
-  const matchesRepositoryRemote =
-    options.provider === "trivy"
-      ? await matchTrivyCheckout(
-          repository,
-          current,
-          references,
-          workbenchOptions.protectedRoot,
-          workbenchOptions.environment,
-          dependencies.signal,
-        )
-      : await requireMatchingRepository(
-          repository,
-          options.provider,
-          ordinarySources,
-          strictSources,
-          hosted,
-          (source, bound) =>
-            bound ? platformFor(source) : loosePlatformFor(source),
-          snyk,
-          workbenchOptions.protectedRoot,
-          workbenchOptions.environment,
-          dependencies.signal,
-          selected?.protocol === "https:" ? selected.hostname : undefined,
-          fetchRemotes,
-        );
+  const matchesRepositoryRemote = await requireMatchingRepository(
+    repository,
+    options.provider,
+    ordinarySources,
+    strictSources,
+    hosted,
+    (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
+    snyk,
+    workbenchOptions.protectedRoot,
+    workbenchOptions.environment,
+    dependencies.signal,
+    selected?.protocol === "https:" ? selected.hostname : undefined,
+    fetchRemotes,
+  );
   dependencies.signal?.throwIfAborted();
   const preview = {
     ...cloneImportPreview(current),

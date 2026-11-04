@@ -15,8 +15,7 @@ export type Provider =
   | "blackduck"
   | "veracode"
   | "sonar"
-  | "continuum"
-  | "trivy";
+  | "continuum";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;

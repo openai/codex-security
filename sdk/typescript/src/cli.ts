@@ -3660,7 +3660,7 @@ export async function main(
     publication.command("findings", {
       description:
         "Preview and import a saved scanner report locally or to Cloud.",
-      hint: "Choose the reader with --provider and keep --source-key stable for reimports. See the scanner import guide for accepted formats, repository requirements and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/schema-guide.md. Gzip is supported. --to local stores unassessed evidence without Cloud login. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3691,11 +3691,6 @@ export async function main(
           .optional()
           .describe(
             "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
-          ),
-        trivyScanRoot: optionValue("--trivy-scan-root")
-          .optional()
-          .describe(
-            "Repository-relative directory scanned by Trivy. Use . for the repository root. Required unless Git metadata confirms a whole-checkout scan.",
           ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
@@ -10292,6 +10287,21 @@ async function executeScan(
         registeredScan = scan;
         scanDir = scan.scanDir;
       },
+      onLifecycle: verbose
+        ? (scan) =>
+            diagnostic("scan.lifecycle", {
+              scan_id: scan.scanId,
+              mode: scan.mode,
+              status: scan.status,
+              started_at: scan.startedAt,
+              finished_at: scan.finishedAt,
+              has_reportable_findings: scan.hasReportableFindings,
+              surface: scan.surface,
+              package_version: scan.packageVersion,
+              plugin_version: scan.pluginVersion,
+              mock: scan.mock,
+            })
+        : undefined,
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -10703,9 +10713,14 @@ async function executeScan(
     }
   }
 
+  const registration = {
+    registration_observed: registeredScan !== undefined,
+    scan_id: registeredScan?.scanId,
+  };
   if (requestedSignal !== null) {
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
+      ...registration,
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
@@ -10755,6 +10770,7 @@ async function executeScan(
         costLimitFailure === undefined
           ? undefined
           : formatScanCost(costLimitFailure.cost),
+      ...registration,
     });
     errorOutput.write(`${message}\n`);
     if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
@@ -10807,6 +10823,7 @@ async function executeScan(
     diagnostic("scan.failed", {
       classification: "unknown",
       message: "Scan completed without a result.",
+      ...registration,
     });
     errorOutput.write("scan completed without a result\n");
     printFailedScanReference(registeredScan, phase, arguments_, errorOutput);

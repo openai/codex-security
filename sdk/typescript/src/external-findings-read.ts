@@ -12,7 +12,6 @@ import {
   readSemgrepFindings,
 } from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
-import { readTrivyFindings } from "./trivy-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -34,7 +33,6 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
   snyk: "snyk",
   semgrep: "semgrep",
-  trivy: "trivy",
   // OpenGrep uses the existing SAST contract; evidence retains its scanner origin.
   opengrep: "semgrep",
   endor: "endor",
@@ -57,7 +55,6 @@ export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
   inspectorProjectMap?: ReadonlyMap<string, string>;
-  trivyScanRoot?: string;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -138,15 +135,6 @@ export async function readExternalFindings(
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
-  if (options.provider === "trivy") {
-    if (options.sourceRepositoryUrl !== undefined)
-      throw new Error(
-        "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
-      );
-    return {
-      findings: await readTrivyFindings(path, target, options.trivyScanRoot),
-    };
-  }
   if (options.provider === "sonar") {
     const url = options.sourceRepositoryUrl;
     const findings = await readSonarFindings(path, url ?? "", target);

@@ -94,7 +94,6 @@ export async function readHostedGitRemotes(
   protectedRoots: string[],
   environment?: NodeJS.ProcessEnv,
   signal?: AbortSignal,
-  literalTrivySources?: ReadonlySet<string>,
 ): Promise<string[] | undefined> {
   const readGit = (args: readonly string[]) => {
     const overrides: NodeJS.ProcessEnv = { LC_ALL: "C" };
@@ -269,34 +268,25 @@ export async function readHostedGitRemotes(
     const curl = curlHelper.test(transport.toLowerCase());
     // Git uses the scheme spelling in the implicit git-remote-<scheme> executable name.
     const effectiveHelper = helper ?? transport;
-    // A mixed-case Trivy RepoURL records the literal Git helper spelling. Match
-    // that exact source without interpreting it as the standard HTTP helper.
-    const literal =
-      curl &&
-      helper === undefined &&
-      literalTrivySources?.has(url) &&
-      transport !== transport.toLowerCase();
-    const recognized =
-      literal ||
-      (curl
-        ? await recognizedCurlHelper(
-            effectiveHelper,
-            repository,
-            async () =>
-              (
-                await trustedGitCommand(
-                  repository,
-                  true,
-                  environment ?? process.env,
-                  protectedRoots,
-                  signal,
-                )
-              ).environment,
-            async (args) => utf8(await readGit(args)),
-          )
-        : helper === undefined &&
-          (!url.includes("://") ||
-            /^(?:ssh|git\+ssh|ssh\+git|git)$/u.test(transport)));
+    const recognized = curl
+      ? await recognizedCurlHelper(
+          effectiveHelper,
+          repository,
+          async () =>
+            (
+              await trustedGitCommand(
+                repository,
+                true,
+                environment ?? process.env,
+                protectedRoots,
+                signal,
+              )
+            ).environment,
+          async (args) => utf8(await readGit(args)),
+        )
+      : helper === undefined &&
+        (!url.includes("://") ||
+          /^(?:ssh|git\+ssh|ssh\+git|git)$/u.test(transport));
     // libcurl rejects raw ASCII control characters and spaces that URL() may discard.
     if (!recognized || (curl && /[\x00-\x20\x7f]/u.test(url))) {
       hasUnverifiedRemote = true;
@@ -323,11 +313,7 @@ export async function readHostedGitRemotes(
           throw error;
       }
     }
-    remotes.push(
-      literalTrivySources && helper !== undefined && curl
-        ? transport.toLowerCase() + url.slice(transport.length)
-        : url,
-    );
+    remotes.push(url);
   }
   return hasUnverifiedRemote || remotes.length ? remotes : undefined;
 }

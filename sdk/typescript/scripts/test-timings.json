@@ -519,7 +519,7 @@
     "darwin": 8.9,
     "win32": 11.2
   },
-  "deep-scan-reducer-recovery.test.ts": {
+  "deep-scan-worker-recovery.test.ts": {
     "linux": 0.4,
     "darwin": 0.5,
     "win32": 0.6

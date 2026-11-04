@@ -1,5 +1,4 @@
 import {
-  normalizeTrivyFindings,
   CodexSecurity,
   importGitHubCodeScanningAlerts,
   importGitHubAdvisories,
@@ -12,6 +11,7 @@ import {
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
   normalizeSnykFindingsExport,
+  normalizeTrivyFindings,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type FindingImportRequest,
