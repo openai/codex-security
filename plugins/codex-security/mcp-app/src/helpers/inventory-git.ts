@@ -15,6 +15,7 @@ import {
   dirname,
   delimiter,
   isAbsolute,
+  parse,
   resolve,
   sep,
 } from "node:path";
@@ -353,19 +354,64 @@ function gitProcess(repo: string, args: string[]) {
 export async function runRipgrep(
   args: string[],
   repo: string,
+  scope: string,
 ): Promise<ToolResult> {
-  if (!windows) return runTool("rg", args, repo);
+  const scopedArgs = [...args, "--", scope];
+  if (!windows) return runTool("rg", scopedArgs, repo);
   const inherited = inheritedToolPaths([
     "RIPGREP_CONFIG_PATH",
     "CODEX_SECURITY_GIT",
   ]);
-  const rawWindowsLookup = [repo, ...args, ...Object.values(inherited)].some(
-    rawToolValue,
-  );
+  const rawWindowsLookup = [
+    repo,
+    ...scopedArgs,
+    ...Object.values(inherited),
+  ].some(rawToolValue);
   const command = trustedTool("rg", repo, rawWindowsLookup);
   if (!command)
     throw Object.assign(new Error("spawn rg ENOENT"), { code: "ENOENT" });
-  return runTool(command, args, repo);
+  if (!repo.startsWith("\\\\?\\") && repo.length < 260)
+    return runTool(command, scopedArgs, repo);
+
+  const portable = (path: string) => {
+    const value = path.replaceAll("/", "\\");
+    return /^\\\\\\?\\UNC\\/iu.test(value)
+      ? "\\\\" + value.slice(8)
+      : value.replace(/^\\\\\\?\\(?=[a-z]:\\)/iu, "");
+  };
+  const root = portable(repo);
+  if (root.length < 260 && sameFile(repo, root))
+    return runTool(command, scopedArgs, root);
+  if (environmentValue("RIPGREP_CONFIG_PATH")) {
+    // Operator globs and ignore files can be relative to the working directory.
+    try {
+      return await runTool(command, scopedArgs, repo);
+    } catch (cause) {
+      throw new Error(
+        "Could not start ripgrep in the Windows repository directory required by RIPGREP_CONFIG_PATH.",
+        { cause },
+      );
+    }
+  }
+  // CreateProcessW can't use a long or extended current directory. Supply the
+  // scope as an operand and return the same relative names as a run from repo.
+  const result = await runTool(
+    command,
+    [...args, "--path-separator", "/", "--", resolve(repo, scope)],
+    parse(root).root,
+  );
+  if (result.status !== 0) return result;
+  const prefix = /^\.([/\\]|$)/u.test(scope) ? "./" : "";
+  const rows = decodeGitPath(result.stdout).split("\0").filter(Boolean);
+  const output = rows.map((path) => {
+    const absolute = portable(path);
+    if (!isAbsolute(absolute))
+      throw new Error(
+        "Ripgrep returned a relative path for an absolute scope.",
+      );
+    return prefix + inside(root, absolute) + "\0";
+  });
+  return { ...result, stdout: encodeGitPath(output.join("")) };
 }
 
 export async function runTool(
