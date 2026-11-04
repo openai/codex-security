@@ -196,7 +196,7 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
     return binary
 
 
-def _protected_repository_root(target: Path) -> Path:
+def protected_repository_root(target: Path) -> Path:
     root = target.resolve()
     if root.is_file():
         root = root.parent
@@ -230,7 +230,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repository = protected_repository_root(protected_root)
     except (OSError, RuntimeError):
         return None
 

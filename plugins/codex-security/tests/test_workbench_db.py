@@ -1446,6 +1446,52 @@ def test_workbench_inspects_target_without_submitting_workspace(tmp_path: Path) 
     assert workspace["setup"] == {"submitted": False}
 
 
+def test_native_deep_target_preserves_checkout_boundary(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    initialize_git_repository(source)
+    initialize_git_repository(target)
+    (target / "subdir").mkdir()
+    nested = source / "nested"
+    nested.mkdir()
+    alias = nested / "target-link"
+    alias.symlink_to(target, target_is_directory=True)
+    through_parent = tmp_path / "parent-link"
+    through_parent.symlink_to(nested, target_is_directory=True)
+    chain = tmp_path / "chained-link"
+    chain.symlink_to(alias, target_is_directory=True)
+
+    def begin(selected: Path, *, check: bool = True) -> dict[str, Any]:
+        return run_workbench(
+            state_dir,
+            "begin-deep-scan",
+            "--thread-id",
+            "target-origin",
+            "--target-path",
+            str(selected),
+            "--scan-root",
+            str(tmp_path / "scans"),
+            check=check,
+        )
+
+    for selected in (alias, alias / "subdir" / "..", through_parent / alias.name, chain):
+        rejected = begin(selected, check=False)
+        assert rejected["returncode"] != 0
+        assert "canonical target path" in rejected["stderr"]
+
+    host_alias = tmp_path / "host-link"
+    host_alias.symlink_to(target, target_is_directory=True)
+    started = begin(host_alias)
+    assert started["scan"]["targetPath"] == str(target.resolve())
+    assert begin(target)["scan"]["scanId"] == started["scan"]["scanId"]
+    assert begin(source / ".." / target.name)["scan"]["scanId"] == started["scan"]["scanId"]
+    within = target / "within"
+    within.symlink_to(target / "subdir", target_is_directory=True)
+    inspected = run_workbench(state_dir, "inspect-target", "--target-path", str(within))
+    assert inspected["targetPath"] == str((target / "subdir").resolve())
+
+
 def assert_unversioned_codebase_scan_starts(
     state_dir: Path,
     target: Path,
