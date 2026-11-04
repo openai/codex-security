@@ -643,7 +643,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         "completed": 1,
         "active": 0,
         "maximum": 2,
-        "consolidating": False,
+        "consolidating": True,
     }
     assert (paused["reportAvailable"], paused["findingCount"], paused["artifacts"]) == (
         False,
@@ -1102,8 +1102,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         "active": 0,
         "completed": 1,
         "maximum": 40,
-        "consolidating": False,
+        "consolidating": True,
     }
+    deep.record_iteration(
+        name="dedup-0001", input_worker_ids=[first_worker_id], new_findings_count=0
+    )
+    assert independent_reviews()["consolidating"] is False
 
 
 @pytest.mark.parametrize(

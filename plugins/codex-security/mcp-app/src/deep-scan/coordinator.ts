@@ -1077,7 +1077,7 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
         this.state,
-        false, // Historical inputs are immutable; repair the host checkpoint.
+        "previously-accepted",
       );
       recovered.push({
         id: worker.id,

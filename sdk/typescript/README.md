@@ -4,8 +4,8 @@ Run Codex Security from TypeScript or the command line to find, validate, and fi
 security vulnerabilities in your code. The package includes the Codex runtime,
 security plugin, and TypeScript declarations. It uses ES modules.
 
-- Scan repositories, selected paths, or Git changes. Deep scans run parallel
-  discovery workers on repositories and selected paths.
+- Scan repositories, selected paths, or Git changes. Deep scans repeat Standard
+  scans of the selected scope and merge their findings after each batch.
 - Validate findings, generate patches, and verify existing fixes.
 - Draft security policies and retain threat models.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
@@ -392,9 +392,9 @@ const result = await security.run("/path/to/repository", {
 });
 ```
 
-`workers` controls concurrent discovery workers; `subagents` controls delegation
-within each worker. Time and run limits apply to discovery. After discovery
-stops, the scan combines and returns completed findings. See
+`workers` controls concurrent Standard scans and `subagents` controls delegation
+within each scan. Time and run limits apply to discovery. The coordinator merges
+completed findings before the next batch starts. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
 Deep discovery retains its enforced deadline, with a default and maximum of
 5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
