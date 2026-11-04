@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_workbench_deep_scan import DeepScan, begin_target_scan
+from test_workbench_deep_scan import DeepScan, begin_target_scan, start_empty_target_scan
 from workbench_test_support import run_workbench, worker_paths
 
 
@@ -202,6 +202,73 @@ def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path
     assert replay["dedupInputs"] == second_commit["dedupInputs"]
     assert replay["completionSequence"] == second_commit["completionSequence"]
     assert replay["noNewStreak"] == second_commit["noNewStreak"]
+
+
+@pytest.mark.parametrize("kind", ["discovery", "dedup"])
+def test_iteration_refuses_to_bind_unsigned_legacy_result(tmp_path: Path, kind: str) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    source, _, _, mutable = deep.dispatch_discovery_worker(name="discovery-1")
+    unbound = source
+    if kind == "dedup":
+        previous = deep.record_iteration(
+            name="dedup-1", input_worker_ids=[source], new_findings_count=0
+        )
+        reducer = next(worker for worker in previous["workers"] if worker["kind"] == "dedup")
+        unbound = reducer["id"]
+        mutable = Path(reducer["resultManifestPath"])
+        source = deep.dispatch_discovery_worker(name="discovery-2")[0]
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as db:
+        db.execute("DELETE FROM deep_scan_attempts WHERE worker_id = ?", (unbound,))
+    mutable.write_text(
+        json.dumps({"scanId": deep.id, "findings": [], "threatModel": {"summary": "replacement"}})
+    )
+    with pytest.raises(subprocess.CalledProcessError) as rejected:
+        deep.record_iteration(name="later", input_worker_ids=[source], new_findings_count=0)
+    assert "recorded result digest" in rejected.value.stderr
+    later_output = deep.directory / "artifacts" / "deep_discovery" / "later"
+    assert not list(later_output.glob("accepted-*.json"))
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as db:
+        assert db.execute(
+            "SELECT merge_state FROM deep_scan_workers WHERE id = ?", (source,)
+        ).fetchone() == ("buffered",)
+        assert db.execute("SELECT count(*) FROM deep_scan_merge_claims").fetchone() == (
+            int(kind == "dedup"),
+        )
+
+
+def test_legacy_claims_retain_exact_worker_bytes_without_attempts(
+    tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    source = deep.dispatch_discovery_worker(name="discovery-1")[0]
+    first = deep.record_iteration(name="dedup-1", input_worker_ids=[source], new_findings_count=0)
+    reducer = first["dedupInputs"][0]["dedupWorkerId"]
+    second_source = deep.dispatch_discovery_worker(name="discovery-2")[0]
+    committed = deep.record_iteration(
+        name="dedup-2", input_worker_ids=[second_source], new_findings_count=0
+    )
+    predecessor = next(
+        claim for claim in committed["mergeClaims"] if claim["previousWorkerId"] == reducer
+    )
+    source_ref = first["dedupInputs"][0]
+    deep_scan = sys.modules["deep_scan_workbench"]
+    monkeypatch.setattr(deep_scan, "_dependencies", SimpleNamespace(**workbench_api))
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as db:
+        db.row_factory = sqlite3.Row
+        scan = db.execute("SELECT * FROM scans WHERE id = ?", (deep.id,)).fetchone()
+        db.execute("DELETE FROM deep_scan_attempts WHERE worker_id IN (?, ?)", (source, reducer))
+        for worker_id, path, digest in [
+            (source, source_ref["resultManifestPath"], source_ref["resultManifestSha256"]),
+            (reducer, predecessor["previousResultPath"], predecessor["previousResultSha256"]),
+        ]:
+            worker = db.execute(
+                "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
+            ).fetchone()
+            Path(worker["result_manifest_path"]).unlink()
+            assert deep_scan.worker_result_reference(db, scan, worker) == (path, digest)
+            Path(path).write_bytes(b"{}")
+            with pytest.raises(SystemExit, match="changed after acceptance"):
+                deep_scan.worker_result_reference(db, scan, worker)
 
 
 def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(

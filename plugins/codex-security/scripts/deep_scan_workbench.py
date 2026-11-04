@@ -1545,13 +1545,38 @@ def worker_result_reference(
 ) -> tuple[str, str]:
     accepted = connection.execute(
         "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
-        "WHERE worker_id = ? AND attempt = ?",
-        (worker["id"], worker["attempt"]),
+        "WHERE scan_id = ? AND worker_id = ? AND attempt = ?",
+        (scan["id"], worker["id"], worker["attempt"]),
     ).fetchone()
-    if accepted is not None and accepted["accepted_result_path"]:
-        return accepted["accepted_result_path"], accepted["accepted_result_sha256"]
-    # Old accepted workers have no attempt history; freeze their current accepted result on claim.
-    return snapshot_accepted_result(scan, worker)
+    if accepted and all(accepted):
+        return accepted[0], accepted[1]
+
+    # Migrated workers may have a frozen reducer input or predecessor without an attempt row.
+    if worker["kind"] == "discovery":
+        references = connection.execute(
+            "SELECT DISTINCT result_manifest_path, result_manifest_sha256 FROM deep_scan_dedup_inputs "
+            "WHERE scan_id = ? AND discovery_worker_id = ? AND (attempt IS NULL OR attempt = ?) "
+            "AND result_manifest_path IS NOT NULL AND result_manifest_sha256 IS NOT NULL",
+            (scan["id"], worker["id"], worker["attempt"]),
+        ).fetchall()
+    else:
+        references = connection.execute(
+            "SELECT DISTINCT previous_result_path, previous_result_sha256 FROM deep_scan_merge_claims "
+            "WHERE scan_id = ? AND previous_worker_id = ? "
+            "AND previous_result_path IS NOT NULL AND previous_result_sha256 IS NOT NULL",
+            (scan["id"], worker["id"]),
+        ).fetchall()
+    if len(references) != 1:
+        raise SystemExit(
+            "Accepted Deep Scan worker requires an unambiguous recorded result digest."
+        )
+    path, digest = references[0]
+    frozen = deep_scan_path(scan, path, "Accepted worker result", kind="file")
+    scan_dir = Path(scan["scan_dir"])
+    relative = Path(frozen).relative_to(scan_dir).as_posix()
+    if dependencies().scan_local_file_digest(scan_dir, relative) != f"sha256:{digest}":
+        raise SystemExit("The recorded Deep Scan worker result changed after acceptance.")
+    return frozen, digest
 
 
 def upsert_deep_scan_worker(
@@ -1869,13 +1894,6 @@ def record_deep_scan_iteration(
                VALUES (?, ?, 'dedup', 'succeeded', 1, ?, ?, ?, ?, ?, ?)""",
             (checkpoint_id, scan_id, result, str(Path(result).parent), result, now, now, now),
         )
-        record_worker_attempt(
-            connection,
-            scan,
-            require_deep_scan_worker(connection, checkpoint_id),
-            now,
-            validated_result_sha256=getattr(args, "validated_input_sha256", None),
-        )
         previous_path, previous_digest = (
             worker_result_reference(connection, scan, previous) if previous else (None, None)
         )
@@ -1909,6 +1927,13 @@ def record_deep_scan_iteration(
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (scan_id, checkpoint_id, worker_id, index, worker["attempt"], path, digest),
             )
+        record_worker_attempt(
+            connection,
+            scan,
+            require_deep_scan_worker(connection, checkpoint_id),
+            now,
+            validated_result_sha256=getattr(args, "validated_input_sha256", None),
+        )
         connection.execute(
             "UPDATE deep_scan_runs SET phase = 'discovery', consecutive_no_new = ?, consecutive_errors = ?, updated_at = ? WHERE scan_id = ?",
             (args.no_new_streak, args.consecutive_errors, now, scan_id),
