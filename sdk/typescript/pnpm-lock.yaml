@@ -41,9 +41,6 @@ importers:
       ink:
         specifier: 8.0.0
         version: 8.0.0(@types/react@19.3.0)(react@19.3.1)
-      js-tiktoken:
-        specifier: 1.0.21
-        version: 1.0.21
       papaparse:
         specifier: 5.7.0
         version: 5.7.0
@@ -108,6 +105,9 @@ importers:
       ink-testing-library:
         specifier: 4.0.0
         version: 4.0.0(@types/react@19.3.0)
+      js-tiktoken:
+        specifier: 1.0.21
+        version: 1.0.21
       json-schema-to-typescript:
         specifier: 16.0.0
         version: 16.0.0

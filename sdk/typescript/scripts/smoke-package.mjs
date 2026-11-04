@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { Tiktoken } from "js-tiktoken/lite";
+import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import { spawnSync } from "node:child_process";
 import {
   chmod,
@@ -436,6 +438,40 @@ try {
     ],
     { cwd: consumer },
   );
+
+  // Compare the installed encoder's exact request chunks with the upstream
+  // encoding from this test's build dependencies, including a split Unicode input.
+  const { OpenAiFindingEmbedder } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/api.js")).href
+  );
+  const finding = { description: "🔒 café 中文 ".repeat(1800) };
+  const expected = new Tiktoken(cl100kBase).encode(
+    JSON.stringify(finding),
+    [],
+    [],
+  );
+  const chunks = [];
+  const embedder = new OpenAiFindingEmbedder(
+    "synthetic",
+    async (_url, init) => {
+      const { model, dimensions, input } = JSON.parse(init.body);
+      chunks.push(...input);
+      return Response.json({
+        model,
+        data: input.map((_, index) => ({
+          index,
+          embedding: Array(dimensions).fill(1),
+        })),
+      });
+    },
+  );
+  await embedder.embed([finding]);
+  assert.ok(expected.length > 8192);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.length),
+    [8192, expected.length - 8192],
+  );
+  assert.deepEqual(chunks.flat(), expected);
 
   await cp(
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),

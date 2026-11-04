@@ -12,6 +12,8 @@ WOLFI = "https://packages.wolfi.dev/os"
 REGISTRY = "https://registry.npmjs.org/"
 APP = "usr/lib/codex-security/"
 ENTRYPOINT = "/usr/local/bin/codex-security-entrypoint"
+SCANNER = "node_modules/@openai/codex-security"
+TOKENIZER_BOM = APP + SCANNER + "/dist/server/embedding-tokenizer.cdx.json"
 SOURCES = "usr/share/licenses/codex-security/SOURCES.json"
 APK_DATABASES = {"lib/apk/db/installed", "usr/lib/apk/db/installed"}
 # A package can contain other package.json files (for example, in examples/).
@@ -66,7 +68,7 @@ def inspect_layer(fs):
             check(ent.isfile(), f"Unexpected public key format: {path}")
             keys[path.removeprefix("etc/apk/keys/")] = fs.extractfile(ent).read()
         elif ent.isfile():
-            if path in APK_DATABASES or path in {"etc/apk/repositories", APP + "package-lock.json", SOURCES}:
+            if path in APK_DATABASES or path in {"etc/apk/repositories", APP + "package-lock.json", SOURCES, TOKENIZER_BOM}:
                 raw[path] = fs.extractfile(ent).read()
             elif path.startswith(APP) and NPM_MANIFEST.fullmatch(path[len(APP):]):
                 manifests[path[len(APP):-len("/package.json")]] = json.load(fs.extractfile(ent))
@@ -173,6 +175,12 @@ def verify(archive, lock):
         "public_upstream_packages":len(apks)-local, "local_scanner_packages":local,
         "keyring_sha256":{k:"sha256:"+v for k,v in key_hashes.items()},
         "signed_build_manifest":"SHA256SUMS", "manifest_signature":"SHA256SUMS.sig"}
+    # Older scanner releases install js-tiktoken as a separate npm package.
+    if TOKENIZER_BOM in raw:
+        tokenizer = json.loads(raw[TOKENIZER_BOM])["components"]
+        for item in tokenizer:
+            check_license(item["name"], item["licenses"][0]["license"]["id"])
+        components["bundled_tokenizer"] = tokenizer
     return {"verification.json": verification, "public-components.json": components}
 
 
