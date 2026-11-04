@@ -427,6 +427,13 @@ async function collect({
   };
 }
 
+const unavailableGit: ToolResult = {
+  status: 127,
+  signal: null,
+  stdout: Buffer.alloc(0),
+  stderr: "",
+};
+
 export async function git(repo: string, args: string[]) {
   try {
     const execution = gitProcess(repo, args);
@@ -437,7 +444,7 @@ export async function git(repo: string, args: string[]) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return { status: 127, signal: null, stdout: Buffer.alloc(0), stderr: "" };
+  return unavailableGit;
 }
 
 export function decodeGitPath(data: Buffer): string {
@@ -489,6 +496,26 @@ function requireSuccess(result: ToolResult): Buffer {
           : `Git exited with status ${result.status}`),
     );
   return result.stdout;
+}
+
+export async function ignoredTrackedPaths(repo: string, scope: string) {
+  try {
+    const result = await git(repo, [
+      "ls-files",
+      "--cached",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      scope,
+    ]);
+    return result === unavailableGit ? [] : paths(requireSuccess(result));
+  } catch (error) {
+    throw new Error(
+      `git ls-files: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 export async function directoryPaths(
