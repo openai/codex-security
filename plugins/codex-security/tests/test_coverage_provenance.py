@@ -6,7 +6,6 @@ import uuid
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import interrupt_publication, read_review_state, write_checkpoint
 
 
