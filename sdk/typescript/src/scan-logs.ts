@@ -14,6 +14,7 @@ import {
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
+import { compareTimestamps } from "./timestamps.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -67,7 +68,7 @@ export function readSavedScanLogs(
       status === "running"
         ? null
         : terminal
-          ? (logCompletedAt ?? scan.progress?.updatedAt ?? "")
+          ? (scan.progress?.updatedAt ?? "")
           : "",
     logCompletedAt,
   });
@@ -91,10 +92,12 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
       const metadata = first["payload"];
       const threadId = metadata["id"];
       if (typeof threadId !== "string") break;
+      const timestamp = metadata["timestamp"];
       yield {
         threadId,
         parentThreadId: sessionParentThreadId(metadata),
-        startedAt: sessionStartedAt(metadata["timestamp"]),
+        timestamp: typeof timestamp === "string" ? timestamp : null,
+        startedAt: sessionStartedAt(timestamp),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
         path,
@@ -134,6 +137,11 @@ export async function readScanLogs(options: ScanLogOptions) {
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
+  let children: Map<string | undefined, SessionLog[]> | undefined;
+  const startsAfterCompletion = (timestamp: unknown) =>
+    typeof options.logCompletedAt === "string" &&
+    typeof timestamp === "string" &&
+    compareTimestamps(timestamp, options.logCompletedAt) >= 0;
 
   const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
@@ -145,14 +153,17 @@ export async function readScanLogs(options: ScanLogOptions) {
   const traversed = new Set(options.executionThreadIds ?? included);
   for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
-    for (const [session] of logs.values()) {
+    // Parentless workers can only belong to the root, in discovery order.
+    children ??= Map.groupBy(
+      logs.values().map(([session]) => session),
+      (session) => session.parentThreadId ?? root?.threadId,
+    );
+    for (const session of children.get(parentId) ?? []) {
       if (
         !traversed.has(session.threadId) &&
-        (session.parentThreadId === parentId ||
-          (root !== undefined &&
-            parent === root &&
-            session.parentThreadId === null &&
-            belongsToScan(session, root, options)))
+        (session.parentThreadId === parentId
+          ? !startsAfterCompletion(session.timestamp)
+          : parent !== undefined && belongsToScan(session, parent, options))
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
@@ -172,7 +183,6 @@ export async function readScanLogs(options: ScanLogOptions) {
   const events: Record<string, unknown>[] = [];
   // Recorded completion can precede the scan turn's final response. Keep that
   // turn's remaining events, then stop before a post-completion turn starts.
-  const completionBoundary = sessionStartedAt(options.logCompletedAt);
   for (const session of sessions) {
     let replaying = false;
     for await (const event of sessionEvents(session.path)) {
@@ -188,10 +198,7 @@ export async function readScanLogs(options: ScanLogOptions) {
         if (!taskStarted || !sessionOwnsTurn(session, payload)) continue;
         replaying = false;
       }
-      if (taskStarted && completionBoundary !== null) {
-        const timestamp = sessionStartedAt(event["timestamp"]);
-        if (timestamp !== null && timestamp >= completionBoundary) break;
-      }
+      if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
       events.push({ threadId: session.threadId, event });
     }
   }
@@ -223,12 +230,11 @@ function belongsToScan(
   ) {
     return false;
   }
-  if (completedAt !== undefined && completedAt !== null) {
-    const completed = Date.parse(completedAt);
-    if (!Number.isFinite(completed) || session.startedAt >= completed) {
-      return false;
-    }
-  }
+  const beforeCompletion =
+    typeof options.logCompletedAt === "string" && session.timestamp !== null
+      ? compareTimestamps(session.timestamp, options.logCompletedAt) < 0
+      : completedAt == null || session.startedAt < Date.parse(completedAt);
+  if (!beforeCompletion) return false;
 
   const roots = [scanDirectory];
   const name = basename(scanDirectory);

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -359,6 +360,7 @@ describe("deep-review worklists", () => {
       const f = fixture();
       const target = join(f.root, "target.jsonl");
       writeFileSync(target, "existing", { mode: 0o640 });
+      chmodSync(target, 0o640);
       symlinkSync(target, f.output);
       write(f.input, [candidate("a.py")]);
       const inputLink = join(f.root, "input-link");

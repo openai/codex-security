@@ -62,6 +62,14 @@ function commandEvent(command: string, id: string, timestamp?: string) {
   };
 }
 
+function taskStarted(turnId: string, timestamp?: string) {
+  return {
+    type: "event_msg",
+    ...(timestamp === undefined ? {} : { timestamp }),
+    payload: { type: "task_started", turn_id: turnId },
+  };
+}
+
 describe("saved scan logs", () => {
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
@@ -258,10 +266,12 @@ describe("saved scan logs", () => {
     },
   );
 
+  const justBeforeCompletion = "2026-08-11T12:03:00.123Z";
+  const preciseCompletion = "2026-08-11T12:03:00.123789Z";
   test.each([
-    ["complete", "2026-08-11T12:03:00.000Z"],
-    ["failed", "2026-08-11T12:03:00.000Z"],
-    ["canceled", "2026-08-11T12:03:00.000Z"],
+    ["complete", preciseCompletion],
+    ["failed", preciseCompletion],
+    ["canceled", preciseCompletion],
     ["complete", null],
     ["complete", undefined],
   ] as const)(
@@ -269,20 +279,14 @@ describe("saved scan logs", () => {
     async (status, logCompletedAt) => {
       const home = await temporaryHome();
       const scanDirectory = join(home, "scans", "resumed");
+      const artifacts = join(scanDirectory, "artifacts");
+      const afterCompletion = "2026-08-11T12:04:00.000Z";
       const resumed = [
-        {
-          timestamp: "2026-08-11T12:02:00.000Z",
-          type: "event_msg",
-          payload: { type: "task_started", turn_id: "resume-turn" },
-        },
+        taskStarted("resume-turn", "2026-08-11T12:02:00.000Z"),
         commandEvent("resumed scan work", "resume-call"),
       ];
       const followup = [
-        {
-          timestamp: "2026-08-11T12:04:00.000Z",
-          type: "event_msg",
-          payload: { type: "task_started", turn_id: "followup-turn" },
-        },
+        taskStarted("followup-turn", afterCompletion),
         commandEvent("post-scan followup", "post-call"),
       ];
       await writeSession(
@@ -294,29 +298,25 @@ describe("saved scan logs", () => {
         scanDirectory,
       );
       for (const [threadId, startedAt, directory] of [
-        [
-          "recorded-worker",
-          "2026-08-11T12:02:00.000Z",
-          join(scanDirectory, "artifacts"),
-        ],
-        [
-          "resumed-worker",
-          "2026-08-11T12:02:00.000Z",
-          join(scanDirectory, "artifacts"),
-        ],
-        [
-          "followup-worker",
-          "2026-08-11T12:04:00.000Z",
-          join(scanDirectory, "artifacts"),
-        ],
+        ["recorded-worker", afterCompletion, artifacts],
+        ["resumed-worker", justBeforeCompletion, artifacts],
+        ["followup-worker", afterCompletion, artifacts],
         [
           "unrelated-worker",
-          "2026-08-11T12:02:00.000Z",
+          justBeforeCompletion,
           join(home, "other-scan", "artifacts"),
         ],
       ] as const) {
         await writeSession(home, threadId, [], undefined, startedAt, directory);
       }
+
+      await writeSession(
+        home,
+        "followup-child",
+        [commandEvent("post-scan child work", "child-call")],
+        "parent",
+        afterCompletion,
+      );
 
       const result = await readSavedScanLogs(
         {
@@ -342,9 +342,12 @@ describe("saved scan logs", () => {
       ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
       expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
         logCompletedAt == null
-          ? ["parent", "recorded-worker"]
+          ? ["followup-child", "parent", "recorded-worker"]
           : ["parent", "recorded-worker", "resumed-worker"],
       );
+      expect(
+        result.events.some(({ threadId }) => threadId === "followup-child"),
+      ).toBe(logCompletedAt == null);
     },
   );
 
@@ -761,40 +764,29 @@ describe("saved scan logs", () => {
     );
   });
 
+  const scanCompletion = "2026-08-11T12:02:00.000Z";
+  const followupStart = "2026-08-11T12:03:00.000Z";
   test.each([
-    ["without a follow-up", "2026-08-11T12:02:00.000Z", null, false],
+    ["without a follow-up", scanCompletion, null, false],
+    ["with a follow-up", scanCompletion, followupStart, true],
+    ["with a follow-up at completion", followupStart, followupStart, true],
     [
-      "with a follow-up",
-      "2026-08-11T12:02:00.000Z",
-      "2026-08-11T12:03:00.000Z",
-      true,
-    ],
-    [
-      "with a follow-up at completion",
-      "2026-08-11T12:03:00.000Z",
-      "2026-08-11T12:03:00.000Z",
-      true,
-    ],
-    ["while running", null, "2026-08-11T12:03:00.000Z", false],
-    ["without completion", undefined, "2026-08-11T12:03:00.000Z", false],
-    ["with invalid completion", "invalid", "2026-08-11T12:03:00.000Z", false],
-    ["without a turn timestamp", "2026-08-11T12:02:00.000Z", undefined, false],
-    [
-      "with an invalid turn timestamp",
-      "2026-08-11T12:02:00.000Z",
-      "invalid",
+      "with a turn just before completion",
+      preciseCompletion,
+      justBeforeCompletion,
       false,
     ],
+    ["while running", null, followupStart, false],
+    ["without completion", undefined, followupStart, false],
+    ["with invalid completion", "invalid", followupStart, false],
+    ["without a turn timestamp", scanCompletion, undefined, false],
+    ["with an invalid turn timestamp", scanCompletion, "invalid", false],
   ] as const)(
     "preserves the finishing scan turn %s",
     async (_label, completedAt, followupAt, excludeFollowup) => {
       const home = await temporaryHome();
       const scanEvents = [
-        {
-          timestamp: "2026-08-11T12:00:00.000Z",
-          type: "event_msg",
-          payload: { type: "task_started", turn_id: "scan-turn" },
-        },
+        taskStarted("scan-turn", "2026-08-11T12:00:00.000Z"),
         {
           timestamp: "2026-08-11T12:01:59.000Z",
           type: "response_item",
@@ -829,11 +821,7 @@ describe("saved scan logs", () => {
         followupAt === null
           ? []
           : [
-              {
-                ...(followupAt === undefined ? {} : { timestamp: followupAt }),
-                type: "event_msg",
-                payload: { type: "task_started", turn_id: "followup-turn" },
-              },
+              taskStarted("followup-turn", followupAt),
               commandEvent("post-scan followup", "post-call"),
             ];
       await writeSession(home, "parent", [...scanEvents, ...followup]);

@@ -4,12 +4,14 @@ import { parseInputs, scanArguments, type Inputs } from './inputs.js';
 import { resolveTarget, type EventContext, type Target } from './targets.js';
 import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.js';
 import { runProcess, safeLogLines } from './process.js';
-import { analyzeResults, type ScanResults } from './results.js';
+import { analyzeResults, type ScanResults, type Severity } from './results.js';
 import { collectReports, uploadReports } from './artifacts.js';
 import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
 
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
+
 export const OUTPUT_NAMES = [
-  'sarif-path', 'json-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
+  'sarif-path', 'json-path', 'manifest-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
   'policy-status', 'report-status', 'exit-code', 'scanned-sha', 'analysis-ref', 'sarif-upload-ready',
   'critical-count', 'high-count', 'medium-count', 'low-count', 'informational-count', 'estimated-cost',
 ] as const;
@@ -30,7 +32,7 @@ async function context(): Promise<EventContext> {
 }
 function outputs(result: ScanResults, target: Target, exitCode: number): void {
   const values: Record<string, string | number | boolean> = {
-    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath,
+    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath, 'manifest-path': result.paths.manifestPath,
     'results-directory': result.paths.resultsDirectory, 'scan-status': result.scanStatus, 'policy-status': result.policyStatus,
     'report-status': result.reportStatus, 'exit-code': exitCode, 'scanned-sha': target.scannedSha,
     'analysis-ref': target.analysisRef, 'sarif-upload-ready': result.sarifUploadReady,
@@ -84,12 +86,14 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           ? 'Set CODEX_SECURITY_API_KEY in Actions secrets (or Dependabot secrets for Dependabot runs) and pass it as OPENAI_API_KEY to this step. No scan was started.'
           : `Pass ${API_KEY_ENVIRONMENT_VARIABLES[credentials.provider]} from Actions secrets to this step. No scan was started.`);
       }
-      tempRoot = await realpath(process.env.RUNNER_TEMP ?? '');
       if (!process.env.RUNNER_TEMP) throw new Error('RUNNER_TEMP is required.');
+      tempRoot = await realpath(process.env.RUNNER_TEMP);
       core.info(`Preparing Codex Security ${SUPPORTED_CLI_VERSION}. Scope: ${inputs.scope}; mode: ${inputs.mode}; effort: ${inputs.effort}.`);
       const preparationStarted = performance.now();
       let timer = heartbeat('CLI preparation', preparationStarted);
-      try { runtime = await deps.setupRuntime({actionRoot, tempRoot, log: core.info}); }
+      try {
+        runtime = await deps.setupRuntime({actionRoot, tempRoot, repository: target.repository, provider: inputs.provider, model: inputs.model, log: inputs.verbose ? core.info : undefined});
+      }
       finally { clearInterval(timer); }
       core.info(`CLI preparation completed in ${elapsed(preparationStarted)}.`);
       core.saveState('runtime-root', runtime.root);
@@ -141,12 +145,15 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         if (checkoutError) result.errors.unshift(checkoutError);
         if (interrupted) result.errors.unshift('Scan was interrupted or exceeded its execution limit.');
         let reportsValidated = false;
+        let artifactUrl: string | undefined;
         try {
           const reports = await collectReports(result);
           reportsValidated = true;
           if (inputs.uploadArtifacts) {
             core.info('Uploading validated report artifacts.');
-            await uploadReports(reports, inputs, tempRoot);
+            const artifactId = await uploadReports(reports, inputs, tempRoot);
+            if (artifactId !== undefined && process.env.GITHUB_RUN_ID)
+              artifactUrl = `${event.serverUrl}/${event.repository}/actions/runs/${process.env.GITHUB_RUN_ID}/artifacts/${artifactId}`;
           }
         } catch (error) {
           result.reportStatus = 'failed';
@@ -160,8 +167,12 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         core.info(`Findings: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(', ') : 'unavailable'}.`);
         core.info(`Estimated cost: ${result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error of result.errors) log(`Report diagnostic: ${error}`);
-        finalSummary = resultSummary(result, inputs, target);
-        if (inputs.annotations) emitAnnotations(result);
+        const displayResult = {
+          ...result,
+          findings: [...result.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]),
+        };
+        finalSummary = resultSummary(displayResult, inputs, target, artifactUrl);
+        if (inputs.annotations) emitAnnotations(displayResult);
         success = result.reportStatus !== 'failed' && result.scanStatus === 'completed' && result.policyStatus === 'passed';
         finalTitle = resultTitle(result, inputs);
       }
@@ -182,7 +193,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
         core.setOutput('sarif-upload-ready', 'false');
       }
     }
-    if (inputs?.summary !== false) {
+    if (inputs?.summary ?? (core.getInput('summary') !== 'false')) {
       try { await core.summary.addRaw(`## Codex Security\n\n**${finalTitle}**\n\n${finalSummary}`).write(); }
       catch { core.warning('Could not write the job summary.'); }
     }

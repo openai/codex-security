@@ -1,3 +1,4 @@
+import { nodeCommand } from "./support/shell.js";
 import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -150,7 +151,7 @@ describe("bundled workbench canonical paths", () => {
             "for selected, original, expected in cases:",
             "    assert selected.samefile(original)",
             "    assert target.directory_content_digest(selected) == target.directory_content_digest(original)",
-            "    subprocess.run([sys.executable, str(Path(sys.argv[1]) / 'generate_rank_input.py'), 'make-repo-scope-input', '--repo', str(selected), '--scopes-file', str(scopes), '--out', str(output)], check=True, capture_output=True)",
+            `    subprocess.run([${JSON.stringify(nodeCommand().command)}, str(Path(sys.argv[1]).parent / 'mcp' / 'helpers.mjs'), 'make-repo-scope-input', '--repo', str(selected), '--scopes-file', str(scopes), '--out', str(output)], check=True, capture_output=True)`,
             "    assert [json.loads(line)['path'] for line in output.read_text().splitlines()] == expected",
             "print(json.dumps({'targetsChecked': len(cases)}))",
           ].join("\n"),

@@ -35,6 +35,14 @@ test('provider and model inputs map directly to scan CLI arguments in both modes
   }
   assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
 });
+test('reasoning efforts pass through to both scan modes', () => {
+  for (const mode of ['standard', 'deep']) for (const effort of ['ultra', 'synthetic-future-effort', '--help']) {
+    const args = scanArguments(parse({mode, effort}), {repository:'/checkout'}, '/results');
+    assert.ok(args.includes(`--effort=${effort}`));
+    assert.ok(!args.includes(effort));
+  }
+  assert.equal(parse({effort:'  '}).effort, 'xhigh');
+});
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
   for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {
     const args = scanArguments(parse({mode, 'cyber-access-program':program}), {repository:'/checkout'}, '/results');
@@ -108,6 +116,11 @@ test('dry-run allows keyless configuration validation', () => {
   const dryArgs=scanArguments(parse({'dry-run':'true'}),{repository:'/checkout'},'/results');
   assert.equal(dryArgs[dryArgs.indexOf('--auth')+1],'auto'); assert.ok(dryArgs.includes('--dry-run'));
 });
+test('dry-run cannot be combined with findings enforcement', () => {
+  for (const threshold of ['low', 'medium', 'high', 'critical'])
+    assert.throws(() => parse({'dry-run':'true', 'fail-on-severity':threshold}), /dry-run requires fail-on-severity: none/);
+  assert.equal(parse({'dry-run':'true', 'fail-on-severity':'none'}).dryRun, true);
+});
 test('CLI arguments preserve literal values and enforce CI policy', () => {
   const input = parse({paths:'src/my folder',model:'model; echo never-execute', effort:'medium', 'max-cost':'5', 'fail-on-severity':'high'});
   const args = scanArguments(input, {repository:'/checkout'}, '/private/results');
@@ -117,7 +130,7 @@ test('CLI arguments preserve literal values and enforce CI policy', () => {
   assert.ok(!args.some(arg => arg.startsWith('approval_policy=')));
   assert.ok(!args.some(arg => arg.startsWith('approvals_reviewer=')));
   assert.ok(args.includes('analytics.enabled=false'));
-  assert.equal(args[args.indexOf('--effort') + 1], 'medium');
+  assert.ok(args.includes('--effort=medium'));
   assert.equal(args[args.indexOf('--max-cost') + 1], '5');
   assert.equal(args[args.indexOf('--fail-on-severity') + 1], 'high');
   assert.ok(!args.some(value => value.includes('API_KEY')));
