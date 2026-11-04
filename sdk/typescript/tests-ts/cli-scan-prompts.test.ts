@@ -31,6 +31,8 @@ describe("CLI scan prompts", () => {
           "validation.md",
           "--post-scan-prompt-file",
           "follow-up.md",
+          "--rubric",
+          "severity.md",
           "--json",
         ],
         dependencies({
@@ -43,6 +45,7 @@ describe("CLI scan prompts", () => {
       scanPrompt: "Review authentication boundaries.\n",
       validationPrompt: "Run the integration fixture.\n",
       postScanPrompt: "Draft confirmed fixes.\n",
+      rubricPath: join(root, "severity.md"),
     });
   });
 

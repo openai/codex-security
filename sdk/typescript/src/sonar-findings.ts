@@ -349,7 +349,7 @@ export function normalizeSonarFindings(
     ...scope,
     repositoryUrl: repository,
   };
-  const result = normalizeRecords(
+  return normalizeRecords(
     rows,
     ({ issue, page }, id) => {
       const component = requiredText(
@@ -415,8 +415,8 @@ export function normalizeSonarFindings(
     },
     ({ issue }) => requiredText(issue["key"], "Sonar issue key"),
     target,
-  );
-  return { ...result, report: context };
+    { report: context },
+  ) as ExternalFindings & { report: typeof context };
 }
 
 export async function readSonarFindings(

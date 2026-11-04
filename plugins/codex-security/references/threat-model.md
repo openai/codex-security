@@ -6,30 +6,13 @@ Model how the authorized software is used and which boundaries protect its asset
 
 - Identify the product, users, interfaces, components, and supported execution/deployment modes. Separate production, privileged administration/build/release workflows, and tests/examples; include each only within the authorized scope.
 - Follow representative inputs through actual entry points, controls, and sensitive consumers. Establish the actors, transferred data or authority, protected asset, and invariant. Use callers and effective behavior rather than keyword matches or a complete call graph.
+- For a changed interface, cite the in-scope registration that enables it and the evidence for who can invoke it. Identify registrations seen only in tests or in the baseline of a deletion. If the relevant snapshot or deployment configuration is unavailable, record reachability as unknown.
+- For library APIs, identify which protections the library enforces by default and which its callers must enable or implement.
 - For workers, extensions, native bindings, and tool APIs, distinguish available operations from enforced caller authority. Trace inherited permissions, brokered writes, ownership claims, and the component enforcing a restriction. Do not invent isolation between actors with the same authority.
 - When configuration or deployment changes a boundary, trace materially different paths from the consumer through helper returns, path derivation, configuration precedence, and mounts. Record effective locations, readers/writers or recipients, controls, and source evidence. A directory name, mount label, or separate setting does not prove isolation. Keep discrepancies between documented and actual behavior, including material platform differences.
 - For authorized mutations or publication, trace how the target, account, revision, audience, and payload stay bound through review and application. Do not infer permission from discovering that workflow.
 
 Cite inspected repository-relative paths and lines for code-established facts. Inspect generated or bundled implementation as data when it owns the control; use stable symbols when source lines are unavailable. Distinguish code evidence, provided deployment facts, assumptions, and unknowns. Verify cited paths/lines before returning, and stop expanding once the important boundaries and supporting evidence are clear. Represent secret-bearing configuration by its key/reference, location, recipients, and control, never by copying credential values or private context documents.
-
-## Locate Entry Points
-
-During architecture mapping or finding discovery, look for registrations that connect outside input to application code. Select relevant files from the authorized scope and use the supplied inventory when available. For a diff or a pinned revision, search the source supplied for that revision, including the baseline for deleted code.
-
-For current-checkout files, native ripgrep can locate HTTP routes, GraphQL definitions, serverless handlers, message consumers, server bindings and workflow triggers. Invoke the caller's verified native ripgrep executable by its absolute path with `--no-config -nH --no-heading --only-matching` and one `-e` argument per relevant expression below. After `--`, pass one or more in-scope regular files as separate literal path arguments. Use absolute paths or paths prefixed with `./`, retaining spaces and shell metacharacters. Check the resolved locations against the authorized scope and skip links. If a verified ripgrep executable is unavailable, use a trusted host source reader or another verified local search tool on those files.
-
-```text
-\b(app|router)\.(route|get|post|put|patch|delete|all|use)\s*\(\s*["'`]/|\b(HandleFunc|MapGet|MapPost)\s*\(|@(Get|Post|Request)Mapping\b
-\b(ApolloServer|GraphQLSchema|graphqlHTTP)\b|\btype\s+(Query|Mutation|Subscription)\b
-\bexports\.handler\s*=|\bexport\s+(const\s+handler\b|(async\s+)?function\s+handler\b)|\b(AWS::Lambda::Function|aws_lambda_function(_url)?)\b
-@(KafkaListener|RabbitListener|SqsListener)\b|\b(basic_consume|KafkaConsumer|consumer\.subscribe|channel\.consume)\s*\(
-\b(ListenAndServe(TLS)?|createServer|TcpListener::bind|net\.Listen|uvicorn\.run)\s*\(
-^\s*["']?on["']?\s*:
-```
-
-Inspect the surrounding source. Resolve imports, follow the registered handler, and check configuration to see who can reach it. In a workflow, read the actual event block and trace event-controlled values into commands or privileged steps. At a mutation, verify which caller can change which object's fields and whether the authorization check holds when the write occurs. For a queue or function handler, check who can publish an event and which authority the consumer uses.
-
-Text matches can occur in comments, example code or unrelated APIs. Follow multiline and computed registrations through callers even when the search returns no matches.
 
 ## Independent Review
 
