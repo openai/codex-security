@@ -629,3 +629,29 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
     db.execute("DELETE FROM scan_comparison_matches")
     for group in (["a", "a-repeat"], ["b"], ["c", "c-repeat"], ["unlinked"]):
         assert_history(group)
+
+
+def test_equivalent_finding_groups_keep_occurrence_ids(workbench_db, workbench_api, tmp_path):
+    for scan in ("before", "after"):
+        add_scan(workbench_db, f"selected-{scan}", tmp_path, target_id="checkout")
+        add_occurrence(
+            workbench_db,
+            f"selected-{scan}",
+            f"occurrence-{scan}",
+            finding_id=f"finding-{scan}",
+            path="src/a.py",
+        )
+    workbench_db.execute("UPDATE scans SET target_snapshot_digest = 'unchanged'")
+    compared = workbench_api["scan_history"].compare_scans(
+        workbench_db,
+        Namespace(before_scan_id="selected-before", after_scan_id="selected-after"),
+        require_scan=workbench_api["require_scan"],
+        read_coverage=lambda _: {},
+    )
+    assert len(compared["findings"]) == 1
+    finding = compared["findings"][0]
+    assert (finding["beforeOccurrenceId"], finding["afterOccurrenceId"]) == (
+        "occurrence-before",
+        "occurrence-after",
+    )
+    assert finding["status"] == "persisting"
