@@ -1007,8 +1007,19 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
+      const saved = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        resumedScanId,
+      ]);
+      assert.ok(saved.scan.usage);
       assert.deepEqual(completion, {
-        scan: { progress: { status: "complete" }, reportAvailable: true },
+        scan: {
+          progress: { status: "complete" },
+          reportAvailable: true,
+          usage: saved.scan.usage,
+          ...(saved.scan.cost && { cost: saved.scan.cost }),
+        },
       });
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
@@ -1201,6 +1212,27 @@ service_tier = "ultrafast"
       assert.equal(
         retry.result.structuredContent.reportPath,
         path.join(retry.result.structuredContent.scanDir, "report.md"),
+      );
+      assert.equal(
+        (await readLogLines(startLogPath)).length,
+        workerCountBeforeRetry,
+      );
+
+      const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
+      await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
+      const expired = await restartedServer.request(
+        6,
+        "tools/call",
+        toolCall(
+          "start_codex_security_deep_scan",
+          { targetPath: retryTarget, projectConfigPath: deadlineConfig },
+          "deadline-thread",
+        ),
+      );
+      assertNoError(expired);
+      assert.match(
+        expired.result.structuredContent.instructions,
+        /deadline elapsed before any Standard review completed/,
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
