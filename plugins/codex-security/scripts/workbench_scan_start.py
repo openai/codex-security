@@ -142,12 +142,12 @@ def archive_scan(
     if previous_scan is None and not (args.archive_existing and has_contents):
         yield archived_scan_dir
         return
-    artifacts = (
+    has_artifacts = (
         connection.execute(
-            "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (previous_scan["id"],)
-        ).fetchall()
+            "SELECT 1 FROM scan_artifacts WHERE scan_id = ? LIMIT 1", (previous_scan["id"],)
+        ).fetchone()
         if previous_scan is not None
-        else []
+        else None
     )
     moved = False
     try:
@@ -165,7 +165,7 @@ def archive_scan(
                 raise SystemExit(
                     "Cannot archive output containing the workbench state or active database."
                 )
-            if artifacts and not has_contents:
+            if has_artifacts and not has_contents:
                 raise SystemExit(
                     "The archived scan directory is required to preserve existing scan artifacts."
                 )
@@ -202,15 +202,42 @@ def archive_scan(
                     str(scan_dir),
                 ),
             )
-            for artifact in artifacts:
-                try:
-                    relative_path = Path(artifact["path"]).relative_to(scan_dir)
-                except ValueError:
-                    continue
-                connection.execute(
-                    "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-                    (str(archived_scan_dir / relative_path), previous_scan["id"], artifact["kind"]),
-                )
+
+            def archive_path(value: str | None) -> str | None:
+                if value is None or not Path(value).is_relative_to(scan_dir):
+                    return value
+                return str(archived_scan_dir / Path(value).relative_to(scan_dir))
+
+            connection.create_function("archive_path", 1, archive_path)
+            try:
+                for table, columns in (
+                    ("scan_artifacts", ("path",)),
+                    ("deep_scan_workers", ("prompt_path", "artifact_dir", "result_manifest_path")),
+                    (
+                        "deep_scan_runs",
+                        (
+                            "manifest_path",
+                            "canonical_inventory_path",
+                            "canonical_finding_report_path",
+                            "canonical_candidates_path",
+                            "dedupe_report_path",
+                            "seed_research_path",
+                            "work_ledger_path",
+                            "raw_candidates_path",
+                            "coverage_ledger_path",
+                            "findings_dir",
+                        ),
+                    ),
+                ):
+                    assignments = ", ".join(
+                        f"{column} = archive_path({column})" for column in columns
+                    )
+                    connection.execute(
+                        f"UPDATE {table} SET {assignments} WHERE scan_id = ?",
+                        (previous_scan["id"],),
+                    )
+            finally:
+                connection.create_function("archive_path", 1, None)
         # The caller commits registration before leaving this context. Older SDKs
         # supplied an already-moved directory; only restore moves we own.
         yield archived_scan_dir

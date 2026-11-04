@@ -1055,7 +1055,8 @@ works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage
 ### Troubleshooting
 
 Use `--verbose` or `CODEX_SECURITY_LOG_LEVEL=debug` for lifecycle, configuration,
-retry, and worker diagnostics on stderr. Diagnostic text is preserved in output,
+retry, and worker diagnostics on stderr. Direct Deep Scans include coordinator events
+such as worker retries and duplicate-comparison failures. Diagnostic text is preserved in output,
 saved failures, receipts, and patch-risk summaries. Review it for sensitive
 information before sharing; upstream Codex output may already be redacted.
 
