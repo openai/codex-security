@@ -778,6 +778,30 @@ test("a later source with a surviving path reopens the merge and counts as new",
   );
 });
 
+test("a context fallback rechecks a prior consolidation before counting it as new", async () => {
+  const [left, alias, clarification] = [
+    "Unchecked lookup",
+    "Another lookup caller",
+    "More detail on the lookup",
+  ].map((title) => ({ ...lookup, title }));
+  const { draft, terminal } = await scanLoop([[left, alias], [clarification]], {
+    workers: 1,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 1,
+    comparisons: [
+      [[0, 1], [1]],
+      () => {
+        throw new Error("Codex ran out of room in the model's context window.");
+      },
+      [[0, 1], [2]],
+    ],
+    sameFix: approvePairs,
+  });
+  assert.equal(draft.findings.length, 1);
+  assert.equal(draft.findings[0]!.provenance.sourceFindings?.length, 3);
+  assert.equal(terminal.terminalReason, "saturated");
+});
+
 test("a failed comparison waits for every started worker batch", async () => {
   const { checkSameFix } = await importSource(
     join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
@@ -937,6 +961,11 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
       },
     ],
   };
+  const singleton = legacy.findings[0]!;
+  const representative = { ...singleton, provenance: left.provenance };
+  Object.assign(singleton.provenance, {
+    deepScanRepairGroups: [{ order: 0, sources: ["old:0"], representative }],
+  });
   await mergeBatch(
     legacy,
     [worker("next", [alias])],

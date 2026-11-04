@@ -461,7 +461,11 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
       )
         return visibleGroups();
       delete visible.provenance.deepScanRepairGroups;
-      groups.set(target, { finding: visible, target });
+      groups.set(target, {
+        finding: visible,
+        target,
+        representative: parts[0]!.representative,
+      });
       continue;
     }
     const originals = new Map(

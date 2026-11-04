@@ -152,7 +152,7 @@ async function confirmSources(
           sources as { id: number; same: boolean; survivingPaths: string[] }[],
           (s) => s.id,
         )
-          .filter((s) => s.same && !s.survivingPaths.length)
+          .filter((s) => s.same === true && !s.survivingPaths.length)
           .map((s) => s.id),
       );
       for (const [id, { pair }] of part.entries())

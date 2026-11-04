@@ -1,3 +1,4 @@
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type {
@@ -43,6 +44,7 @@ export type DeepScanWorkerMutation = Omit<
   "completionSequence" | "consecutiveErrors" | "mergeState"
 > & {
   scanId: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 
@@ -59,6 +61,7 @@ export type DeepScanStore = Omit<
 export interface CodexWorkerArtifactContext {
   root: string;
   layout: "worker";
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */

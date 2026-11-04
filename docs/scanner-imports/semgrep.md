@@ -98,6 +98,10 @@ codex-security publish findings /path/to/private/guardian.json --provider semgre
   --to local --repository /path/to/project --source-key example/project/topic --dry-run --format json
 ```
 
+For normalized SDK imports, select the `semgrep` provider and keep each generated
+Guardian ID with its original finding and collection scope. The repository URL
+in each finding must agree with the report's mapping.
+
 Guardian records retain the original MCP fields. The summary omits end lines,
 CWEs, package versions and fix versions. Guardian and Web API records keep
 separate identities even when their IDs look identical. To verify a pair,
@@ -257,7 +261,8 @@ membership has changed. Retry the collection if it reports a change.
 
 On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
 a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
-past date triggers an immediate retry. Cancellation stops the wait.
+past date triggers an immediate retry. Cancellation stops the wait. Failed requests report
+the HTTP status and up to 64 KiB of the vendor response.
 
 A finding that identifies its repository only by name can use the project name,
 the Git URL path, or the final path component of either. For any other name,
