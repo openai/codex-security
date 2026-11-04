@@ -3956,7 +3956,7 @@ test.each([
     await writeFile(first.resultsPath, bytes);
     if (variation === "invalid-authority") {
       await expect(runMultiscan(options(paths, security))).rejects.toThrow(
-        "Invalid multiscan receipt",
+        "Multiscan recovery is required",
       );
     } else {
       expect(await runMultiscan(options(paths, security))).toMatchObject({

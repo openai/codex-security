@@ -1274,8 +1274,22 @@ function matchesTask(receipt: MultiscanReceipt, task: MultiscanTask): boolean {
   );
 }
 
-function parseReceipt(line: string): MultiscanReceipt {
-  const value: unknown = JSON.parse(line);
+function parseReceipt(
+  path: string,
+  line: string,
+  lineNumber: number,
+): MultiscanReceipt {
+  let value: unknown;
+  const invalid = `${path}:${lineNumber}: Multiscan recovery is required: results line ${lineNumber} is not a valid receipt.`;
+  const recovery =
+    "Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.";
+  try {
+    value = JSON.parse(line);
+  } catch (cause) {
+    throw new Error(`${invalid} ${errorMessage(cause)}. ${recovery}`, {
+      cause,
+    });
+  }
   if (
     !isRecord(value) ||
     !["id", "repository", "revision", "outputDir"].every(
@@ -1296,6 +1310,7 @@ function parseReceipt(line: string): MultiscanReceipt {
       "resolvedScope",
       "snapshotDigest",
       "error",
+      "warning",
     ].every(
       (field) => value[field] === undefined || typeof value[field] === "string",
     ) ||
@@ -1309,7 +1324,7 @@ function parseReceipt(line: string): MultiscanReceipt {
     (value["coverage"] !== undefined &&
       !["complete", "partial", "unknown"].includes(value["coverage"] as string))
   ) {
-    throw new Error("Invalid multiscan receipt");
+    throw new Error(`${invalid} ${recovery}`);
   }
   if (value["status"] === "completed_with_incomplete_coverage")
     value["status"] = "completed";
@@ -1334,15 +1349,7 @@ async function readReceipts(
   const receipts = new Map<string, MultiscanHistory>();
   for (const [index, line] of lines.entries()) {
     if (!line) continue;
-    let receipt: MultiscanReceipt;
-    try {
-      receipt = parseReceipt(line);
-    } catch (cause) {
-      throw new Error(
-        `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
-        { cause },
-      );
-    }
+    const receipt = parseReceipt(path, line, index + 1);
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {

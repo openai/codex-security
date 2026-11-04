@@ -278,7 +278,7 @@ async function readTargets(
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
-  return withHistoryDatabase(environment, signal, async (database) => {
+  return await withHistoryDatabase(environment, signal, async (database) => {
     if (typeof requestedId !== "string") {
       const columns = readRows<{ name: string }>(
         database,
