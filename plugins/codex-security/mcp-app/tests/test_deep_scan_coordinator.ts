@@ -33,7 +33,6 @@ import {
   DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
-  DeepScanNonRetryableError,
   AsyncLock,
   classifyCodexWorkerError,
   codexWorkerTurnError,
