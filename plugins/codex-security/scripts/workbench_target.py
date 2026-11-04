@@ -1169,7 +1169,7 @@ def copy_directory_excluding(
 
     # Empty placeholders retain parent directories while a patch is reversed.
     for path in junctions:
-        (destination / path).mkdir()
+        filesystem_path(destination / path).mkdir()
     return junctions
 
 
@@ -1178,8 +1178,9 @@ def restore_directory_junctions(source: Path, destination: Path, junctions: list
     destination = destination.resolve()
     for path in junctions:
         placeholder = require_remediation_target(str(destination / path))
-        os.chmod(placeholder, stat.S_IMODE((source / path).lstat().st_mode))
-        copy_directory_junction(source / path, placeholder)
+        source_junction = filesystem_path(source / path)
+        os.chmod(placeholder, stat.S_IMODE(source_junction.lstat().st_mode))
+        copy_directory_junction(source_junction, placeholder)
 
 
 def copy_git_worktree_files(
@@ -1260,7 +1261,7 @@ def copy_git_worktree_files(
             ):
                 junctions.add(relative)
     for path in junctions:
-        (destination / path).mkdir(parents=True, exist_ok=True)
+        filesystem_path(destination / path).mkdir(parents=True, exist_ok=True)
     copied_target = filesystem_path(destination if pathspec == "." else destination / pathspec)
     copied_target.mkdir(parents=True, exist_ok=True)
     return copied_target, sorted(junctions)

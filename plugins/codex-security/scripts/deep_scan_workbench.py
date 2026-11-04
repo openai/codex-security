@@ -15,7 +15,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
-from windows_paths import filesystem_path, portable_path, portable_relative_path
+from windows_paths import extended_path, filesystem_path, portable_path, portable_relative_path
 from workbench.handoff import require_current_continuation
 from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
 from workbench_constants import PHASES
@@ -1048,7 +1048,7 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
     scan = dependencies().require_scan(connection, scan_id)
     ledger = scan_directory_path(scan, "artifacts", "02_discovery", "candidate_ledger.jsonl")
     backups = sorted(
-        ledger.parent.glob(f".{ledger.name}.*.backup"),
+        extended_path(ledger.parent).glob(f".{ledger.name}.*.backup"),
         key=lambda backup: backup.stat().st_mtime_ns,
         reverse=True,
     )
@@ -1640,7 +1640,9 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
-        elif recorded_manifest == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+        elif recorded_manifest is not None and portable_path(
+            Path(recorded_manifest)
+        ) == portable_path(scan_directory_path(scan, "scan-manifest.json")):
             manifest_path = recorded_manifest
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (

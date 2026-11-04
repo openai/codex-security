@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from deep_scan_config import resolve_deep_scan_setup
-from windows_paths import filesystem_path, portable_path, portable_relative_path
+from windows_paths import (
+    filesystem_path,
+    portable_path,
+    portable_relative_path,
+    uses_windows_namespace,
+)
 from workbench_cli import parse_args
 from workbench_constants import DIFF_TARGET_KINDS, EMPTY_GIT_TREE, EMPTY_GIT_TREES, optional_text
 from workbench_target import (
@@ -26,7 +31,11 @@ def require_target(value: str) -> Path:
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise SystemExit("Scan target must be an absolute local directory path.")
+    if uses_windows_namespace(expanded):
+        raise SystemExit("Scan target must have an ordinary Windows drive or UNC path.")
     target = filesystem_path(expanded).resolve()
+    if uses_windows_namespace(target):
+        raise SystemExit("Scan target must have an ordinary Windows drive or UNC path.")
     if not target.is_dir():
         raise SystemExit(f"Scan target is not a readable local directory: {target}")
     return target

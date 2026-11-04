@@ -38,6 +38,57 @@ def test_filesystem_path_counts_utf16_units_and_preserves_spelling(windows_paths
         ) == PureWindowsPath("child")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "//?/C:/checkout./source",
+        "//?/C:/checkout /source",
+        "//?/C:/AUX.txt/source",
+        "//?/C:/LPT¹ .log",
+        "//?/C:/dir/file:stream",
+        "//?/UNC/server/share/checkout.",
+        "//?/UNC/./pipe/name",
+        "//?/Volume{123}/source",
+        "//./pipe/name",
+    ],
+)
+def test_verbatim_only_names_preserve_their_namespace(windows_paths, value):
+    path = PureWindowsPath(value)
+    assert windows_paths.uses_windows_namespace(path)
+    assert windows_paths.portable_path(path) == path
+    assert windows_paths.filesystem_path(path) == path
+    assert windows_paths.extended_path(path) == path
+
+
+def test_windows_path_conversion_keeps_relative_spelling_and_literal_leaf(windows_paths):
+    name = PureWindowsPath("sub/source.py")
+    assert windows_paths.filesystem_path(name) == name
+    checkout = PureWindowsPath("C:/checkout")
+    literal = PureWindowsPath("//?/C:/checkout/reports.")
+    assert windows_paths.portable_relative_path(literal, checkout) == PureWindowsPath("reports.")
+    assert windows_paths.extended_path(checkout / "reports.") == checkout / "reports."
+    assert not windows_paths.uses_windows_namespace(windows_paths.extended_path(checkout))
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows namespace I/O")
+def test_target_rejects_verbatim_only_sibling_without_changing_its_identity(tmp_path):
+    paths = load_script("windows_paths")
+    setup = load_script("workbench_setup")
+    ordinary = tmp_path / "reports"
+    ordinary.mkdir()
+    literal = paths.extended_path(tmp_path) / "reports."
+    literal.mkdir()
+    try:
+        assert not literal.samefile(ordinary)
+        assert paths.portable_path(literal).samefile(literal)
+        assert setup.require_target(str(ordinary)).samefile(ordinary)
+        with pytest.raises(SystemExit, match="ordinary Windows drive or UNC"):
+            setup.require_target(str(literal))
+    finally:
+        literal.rmdir()
+
+
 def test_target_lookup_preserves_both_legacy_ids_after_a_path_spelling_collision(
     windows_paths, monkeypatch, workbench_db
 ):

@@ -54,7 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
-from windows_paths import filesystem_path, portable_path, portable_relative_path
+from windows_paths import extended_path, filesystem_path, portable_path, portable_relative_path
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -1083,7 +1083,8 @@ def complete_budget_exhausted_scan(
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         candidates = (
             []
-            if run["manifest_path"] == str(portable_path(scan_dir / "scan-manifest.json"))
+            if portable_path(Path(run["manifest_path"]))
+            == portable_path(scan_dir / "scan-manifest.json")
             else budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message)
@@ -1624,7 +1625,11 @@ def register_cli_scan(
         connection.rollback()
         raise
     return {
-        **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
+        **(
+            {"archivedScanDir": str(portable_path(archived_scan_dir))}
+            if archived_scan_dir is not None
+            else {}
+        ),
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
         "scanDir": str(portable_path(scan_dir)),
@@ -2911,7 +2916,7 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         return artifacts
 
     for directories_seen, (current_directory, directory_names, file_names) in enumerate(
-        os.walk(poc_root, topdown=True, followlinks=False), start=1
+        os.walk(extended_path(poc_root), topdown=True, followlinks=False), start=1
     ):
         if directories_seen > FINDING_ARTIFACT_DIRECTORIES_LIMIT:
             break
