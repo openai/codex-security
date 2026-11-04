@@ -9196,6 +9196,20 @@ async function patchPublicationDestination(
     ).slice(output.length);
     if (appended) remotes.push(appended.replace(/\n$/u, ""));
   }
+  const fetchRemote = (
+    await run("git", ["remote", "get-url", "origin"], { trim: false })
+  ).replace(/\n$/u, "");
+  // Git dispatches helper names literally, including schemes that URL would lowercase.
+  for (const url of [fetchRemote, ...remotes]) {
+    if (
+      /^[A-Za-z0-9+.-]+::/u.test(url) ||
+      (/^[A-Za-z0-9+.-]+:\/\//u.test(url) &&
+        !/^(?:https?|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
+    )
+      throw new CodexSecurityError(
+        "Patch publication cannot use a Git remote helper selected by the checkout.",
+      );
+  }
   const remote = remotes.find(isNetworkPatchRemote);
   if (!remote)
     throw new CodexSecurityError(
@@ -9215,11 +9229,6 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
-  const fetchRemote = gitlab
-    ? (
-        await run("git", ["remote", "get-url", "origin"], { trim: false })
-      ).replace(/\n$/u, "")
-    : remote;
   const target =
     gitlab &&
     isNetworkPatchRemote(fetchRemote) &&
