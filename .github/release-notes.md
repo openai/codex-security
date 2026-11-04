@@ -65,6 +65,9 @@
 - preserve Guardian repository identity during replay ([#2308](https://github.com/openai/codex-security/pull/2308))
 - recover the latest public findings on interruption ([#2310](https://github.com/openai/codex-security/pull/2310))
 - forward component scan lifecycle and deep progress ([#2317](https://github.com/openai/codex-security/pull/2317))
+- align worker artifact validation with publication ([#2315](https://github.com/openai/codex-security/pull/2315))
+- bound remote error bodies and retain HTTP failure context ([#2320](https://github.com/openai/codex-security/pull/2320))
+- checkpoint accepted reviews before honoring stop conditions ([#2318](https://github.com/openai/codex-security/pull/2318))
 
 <!-- release-section: highlights:end -->
 
