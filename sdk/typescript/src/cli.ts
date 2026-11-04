@@ -9170,6 +9170,43 @@ async function withResolvedPatchRemote<T>(
   }
 }
 
+async function patchPreflightRemoteSettings(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  const entries = await patchTransportConfig(
+    "^remote\\.origin\\.(vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
+    repository,
+    dependencies,
+  );
+  const settings: string[] = [];
+  for (let index = 0; index + 2 < entries.length; index += 3) {
+    const entry = entries[index + 2]!;
+    const separator = entry.indexOf("\n");
+    const key = entry.slice("remote.origin.".length, separator);
+    if (key === "vcs")
+      throw new CodexSecurityError(
+        "Patch publication cannot use a Git remote helper selected through remote.origin.vcs.",
+      );
+    if (
+      (key === "uploadpack" || key === "receivepack") &&
+      entry.slice(separator + 1) !==
+        (key === "uploadpack" ? "git-upload-pack" : "git-receive-pack") &&
+      !(await operatorPatchConfig(
+        entries[index]!,
+        entries[index + 1]!,
+        repository,
+      ))
+    )
+      throw new CodexSecurityError(
+        `Patch publication cannot use a checkout-selected remote.origin.${key} command.`,
+      );
+    // ls-remote uses the upload service. Push uses the real origin's receive service.
+    if (key !== "receivepack") settings.push(entry);
+  }
+  return settings;
+}
+
 async function patchPublicationDestination(
   repository: string,
   branch: string,
@@ -9183,10 +9220,11 @@ async function patchPublicationDestination(
   ) => dependencies.runRepositoryCommand(command, args, repository, options);
   const getPushUrls = ["remote", "get-url", "--push", "--all", "origin"];
   const output = await run("git", getPushUrls, { trim: false });
-  const entries = (
+  const settings = await patchPreflightRemoteSettings(repository, dependencies);
+  const urls = (
     await run(
       "git",
-      ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
+      ["config", "--null", "--get-regexp", "^remote\\.origin\\.(pushurl|url)$"],
       { trim: false, environment: { GIT_CONFIG: undefined } },
     ).catch((error: unknown) => {
       if (isJsonObject(error) && error["code"] === 1) return "";
@@ -9195,12 +9233,6 @@ async function patchPublicationDestination(
   )
     .split("\0")
     .filter(Boolean);
-  const urls: string[] = [];
-  const settings: string[] = [];
-  for (const entry of entries) {
-    if (/^remote\.origin\.(pushurl|url)\n/u.test(entry)) urls.push(entry);
-    else settings.push(entry);
-  }
   const push = urls.filter((entry) =>
     entry.startsWith("remote.origin.pushurl\n"),
   );
