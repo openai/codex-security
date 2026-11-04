@@ -2293,7 +2293,7 @@ export class ScanCostTracker {
           await readSessionUsage(path, session, repository, progressThread);
         } catch (error) {
           if (session.threadId === null) {
-            if (!observeHealthySessions || !isAccessDenied(error)) throw error;
+            if (!observeHealthySessions || !isDeniedLogRead(error)) throw error;
             blocked ??= [session, error];
           }
           unreadable.set(session, error);
@@ -3676,9 +3676,11 @@ function subtractTokenUsage(
   });
 }
 
-function isAccessDenied(error: unknown): boolean {
+function isDeniedLogRead(error: unknown): boolean {
   return (
-    isRecord(error) && (error["code"] === "EACCES" || error["code"] === "EPERM")
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
   );
 }
 

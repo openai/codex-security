@@ -3177,6 +3177,42 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["EACCES", "EPERM"])(
+    "stops at the first unidentified log whose stat fails with %s on each poll",
+    async (code) => {
+      const home = await codexHome();
+      await Promise.all(
+        ["a", "b", "c", "d"].map((id) =>
+          writeSession(home, id, { input_tokens: 10 }),
+        ),
+      );
+      const options: ConstructorParameters<typeof ScanCostTracker>[0] = {
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      };
+      const tracker = new ScanCostTracker(options);
+      tracker.start("scan-thread");
+      options.onSessionEvent = () => {};
+      try {
+        using stat = spyOn(filesystem, "stat").mockImplementation(
+          async (path) => {
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "stat",
+              path: String(path),
+            });
+          },
+        );
+        for (const poll of [1, 2]) {
+          await expect(tracker.refresh()).rejects.toMatchObject({ code });
+          expect(stat).toHaveBeenCalledTimes(poll);
+        }
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([
     ["EACCES", true, "budget"],
     ["EACCES", false, "budget"],
