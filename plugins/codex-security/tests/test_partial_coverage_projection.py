@@ -19,6 +19,16 @@ from workbench_test_support import (
 )
 
 
+def worker_coverage_draft(scan, **coverage_updates):
+    """Build a completed worker result with coverage evidence and no findings."""
+    return {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {**scan.coverage, **coverage_updates},
+    }
+
+
 @pytest.fixture
 def stop_scan(workbench_api, monkeypatch):
     saved = workbench_api["saved_results"]
@@ -65,17 +75,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
         "receiptRefs": [],
     }
     task = {"id": "worker-task", "candidateId": candidate, "reason": "Validate worker evidence."}
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": [surface],
-            "deferred": [task],
-        },
-    }
+    draft = worker_coverage_draft(scan, completeness="partial", surfaces=[surface], deferred=[task])
     write_result_draft(result, draft, mtime_ns=300)
     originals = {result: result.read_bytes()}
     if has_head:
@@ -157,17 +157,9 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     }
     result.write_text(
         json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {
-                    **scan.coverage,
-                    "completeness": "partial",
-                    "surfaces": surfaces,
-                    "deferred": [deferred],
-                },
-            }
+            worker_coverage_draft(
+                scan, completeness="partial", surfaces=surfaces, deferred=[deferred]
+            )
         )
     )
     original = result.read_bytes()
@@ -506,17 +498,9 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
         )
         result.write_text(
             json.dumps(
-                {
-                    "scanId": scan.scan_id,
-                    "complete": True,
-                    "findings": [],
-                    "coverage": {
-                        **scan.coverage,
-                        "completeness": "partial",
-                        "surfaces": worker_surfaces,
-                        "deferred": [deferred],
-                    },
-                }
+                worker_coverage_draft(
+                    scan, completeness="partial", surfaces=worker_surfaces, deferred=[deferred]
+                )
             )
         )
         originals[result] = result.read_bytes()
@@ -571,14 +555,7 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
     worker_id = result.parent.name
     deferred = {"candidateId": "candidate-1", "reason": "Validate the current attempt."}
     result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {**scan.coverage, "completeness": "partial", "deferred": [deferred]},
-            }
-        )
+        json.dumps(worker_coverage_draft(scan, completeness="partial", deferred=[deferred]))
     )
     original = result.read_bytes()
     with workbench_db:
@@ -633,16 +610,7 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
         "  Which deployment controls apply?  ",
         {"question": "  Which runtime settings apply?  ", "followUpPrompt": " \t"},
     ]
-    result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {**scan.coverage, "openQuestions": questions},
-            }
-        )
-    )
+    result.write_text(json.dumps(worker_coverage_draft(scan, openQuestions=questions)))
     original = result.read_bytes()
     if selected_checkpoint:
         checkpoint = write_checkpoint(result.parent / "checkpoints", json.loads(result.read_text()))
@@ -700,16 +668,7 @@ def test_rejected_retry_preserves_original_finding_history(
         "disposition": "rejected",
         "receiptRefs": [],
     }
-    result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {**scan.coverage, "surfaces": [surface]},
-            }
-        )
-    )
+    result.write_text(json.dumps(worker_coverage_draft(scan, surfaces=[surface])))
     with workbench_db:
         workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
     other_result = scan.add_worker()
@@ -785,14 +744,7 @@ def test_stopped_recovery_keeps_current_parent_projection(
     worker_id = result.parent.name
     deferred = {"candidateId": "candidate-1", "reason": "The current review remains unresolved."}
     result.write_text(
-        json.dumps(
-            {
-                "scanId": scan.scan_id,
-                "complete": True,
-                "findings": [],
-                "coverage": {**scan.coverage, "completeness": "partial", "deferred": [deferred]},
-            }
-        )
+        json.dumps(worker_coverage_draft(scan, completeness="partial", deferred=[deferred]))
     )
     reducer = scan.add_worker()
     reducer.write_text(json.dumps({"scanId": scan.scan_id, "findings": []}))
@@ -937,24 +889,19 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
     receipt = result.parent / "artifacts" / "evidence.txt"
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text("Synthetic source-review evidence.")
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "complete",
-            "deferred": [],
-            "surfaces": [
-                {
-                    "id": "source-review",
-                    "label": "Accepted source review",
-                    "disposition": "no_issue_found",
-                    "receiptRefs": ["artifacts/evidence.txt"],
-                }
-            ],
-        },
-    }
+    draft = worker_coverage_draft(
+        scan,
+        completeness="complete",
+        deferred=[],
+        surfaces=[
+            {
+                "id": "source-review",
+                "label": "Accepted source review",
+                "disposition": "no_issue_found",
+                "receiptRefs": ["artifacts/evidence.txt"],
+            }
+        ],
+    )
     result.write_text(json.dumps(draft))
     checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
     os.utime(result, ns=(100, 100))
@@ -1021,12 +968,7 @@ def test_idless_accepted_surface_matches_projection_after_checkpoint_id_inferenc
         "disposition": "no_issue_found",
         "receiptRefs": [],
     }
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {**scan.coverage, "surfaces": [surface]},
-    }
+    draft = worker_coverage_draft(scan, surfaces=[surface])
     result.write_text(json.dumps(draft))
     checkpoint = write_checkpoint(
         result.parent / "checkpoints",
@@ -1161,17 +1103,7 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
         "reason": "Complete source follow-up.",
         "surfaceIds": [surface["id"]],
     }
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": [surface],
-            "deferred": [task],
-        },
-    }
+    draft = worker_coverage_draft(scan, completeness="partial", surfaces=[surface], deferred=[task])
     result.write_text(json.dumps(draft))
     projected_surface = {
         **surface,
@@ -1262,17 +1194,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
         "candidateId": candidate,
         "reason": "Complete candidate follow-up.",
     }
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": [surface],
-            "deferred": [task],
-        },
-    }
+    draft = worker_coverage_draft(scan, completeness="partial", surfaces=[surface], deferred=[task])
     result.write_text(json.dumps(draft))
     projected_candidate = (
         f"{worker_id}-attempt-1-candidate-{hashlib.sha256(candidate.encode()).hexdigest()}"
@@ -1413,17 +1335,9 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             receipt = result.parent / "artifacts" / f"{name}.txt"
             receipt.parent.mkdir(exist_ok=True)
             receipt.write_text(f"Synthetic {name} receipt.\n")
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": surfaces,
-            "deferred": deferred,
-        },
-    }
+    draft = worker_coverage_draft(
+        scan, completeness="partial", surfaces=surfaces, deferred=deferred
+    )
     if change == "reopened mixed receipts":
         draft["coverage"]["resolvedDeferred"] = [
             {"id": task["id"], "reason": "Earlier source follow-up completed."}
@@ -1647,17 +1561,7 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
         "disposition": "needs_follow_up",
         "receiptRefs": ["artifacts/review.txt"],
     }
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": [surface],
-            "deferred": [],
-        },
-    }
+    draft = worker_coverage_draft(scan, completeness="partial", surfaces=[surface], deferred=[])
     result.write_text(json.dumps(draft))
     projected = {
         **surface,
@@ -1825,17 +1729,9 @@ def test_deferred_projection_preserves_each_referenced_source_surface(
         {"id": f"task-{index}", "reason": f"Verify source {index}.", "surfaceIds": [surface["id"]]}
         for index, surface in enumerate(surfaces)
     ]
-    draft = {
-        "scanId": scan.scan_id,
-        "complete": True,
-        "findings": [],
-        "coverage": {
-            **scan.coverage,
-            "completeness": "partial",
-            "surfaces": surfaces,
-            "deferred": deferred,
-        },
-    }
+    draft = worker_coverage_draft(
+        scan, completeness="partial", surfaces=surfaces, deferred=deferred
+    )
     result.write_text(json.dumps(draft))
     original = result.read_bytes()
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):

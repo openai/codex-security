@@ -635,9 +635,7 @@ def compare_scans(
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
-    occurrences = {
-        row["id"]: row for row in chain(before_findings.values(), after_findings.values())
-    }
+    occurrences = before_findings | after_findings
     aliases = _confirmed_finding_aliases(connection, occurrences)
     groups = _finding_groups(before_findings, after_findings, saved_matches, aliases)
     uncertain = (
@@ -656,17 +654,8 @@ def compare_scans(
     }
 
     for previous_rows, current_rows, match_reason in groups:
-        previous = (
-            min(previous_rows, key=lambda row: SEVERITY_ORDER[row["severity"]])
-            if previous_rows
-            else None
-        )
-        current = (
-            min(current_rows, key=lambda row: SEVERITY_ORDER[row["severity"]])
-            if current_rows
-            else None
-        )
-        selected = current if current is not None else previous
+        selected_rows = current_rows or previous_rows
+        selected = min(selected_rows, key=lambda row: SEVERITY_ORDER[row["severity"]])
         item = {
             "findingId": selected["finding_id"],
             "path": selected["relative_path"],
@@ -677,18 +666,12 @@ def compare_scans(
         uncertain_reason = next(
             (
                 uncertain[(side, row["id"])]
-                for row in current_rows or previous_rows
+                for row in selected_rows
                 if (side, row["id"]) in uncertain
             ),
             None,
         )
-        if previous is None:
-            if uncertain_reason is None:
-                status = "new"
-            else:
-                status = "unknown"
-                item["reason"] = uncertain_reason
-        elif current is not None:
+        if previous_rows and current_rows:
             status = (
                 "reopened"
                 if any(
@@ -703,6 +686,8 @@ def compare_scans(
         elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
+        elif current_rows:
+            status = "new"
         elif not all(
             scan_covers_path(
                 after,
@@ -723,17 +708,17 @@ def compare_scans(
             status = "not_observed"
             item["reason"] = "Not observed in the later scan; remediation has not been verified."
         if len(previous_rows) == 1:
-            item["beforeOccurrenceId"] = previous["id"]
+            item["beforeOccurrenceId"] = previous_rows[0]["id"]
         elif previous_rows:
             item["beforeOccurrenceIds"] = [row["id"] for row in previous_rows]
         if len(current_rows) == 1:
-            item["afterOccurrenceId"] = current["id"]
+            item["afterOccurrenceId"] = current_rows[0]["id"]
         elif current_rows:
             item["afterOccurrenceIds"] = [row["id"] for row in current_rows]
-        if current is not None:
+        if current_rows:
             item["triage"] = {
-                "closeReason": current["close_reason"],
-                "status": current["triage_status"],
+                "closeReason": selected["close_reason"],
+                "status": selected["triage_status"],
             }
         item["status"] = status
         findings.append(item)
@@ -802,8 +787,10 @@ def save_scan_comparison(
     if not _same_repository(before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
-    before_findings = _scan_findings(connection, before["id"])
-    after_findings = _scan_findings(connection, after["id"])
+    allowed = {
+        "before": set(_scan_findings(connection, before["id"])),
+        "after": set(_scan_findings(connection, after["id"])),
+    }
     matches_json = (
         sys.stdin.read() if getattr(args, "matches_json_stdin", False) else args.matches_json
     )
@@ -821,10 +808,6 @@ def save_scan_comparison(
         not isinstance(payload.get(key, []), list) for key in ("matches", "uncertain", "related")
     ):
         raise SystemExit("Scan comparison matches must contain matches and uncertain arrays.")
-    allowed = {
-        "before": {row["id"] for row in before_findings.values()},
-        "after": {row["id"] for row in after_findings.values()},
-    }
     consumed: dict[str, dict[str, int]] = {"before": {}, "after": {}}
     for group, match in enumerate(payload["matches"]):
         if (
@@ -1119,10 +1102,7 @@ def _finding_groups(
     matches: list[dict[str, Any]],
     aliases: dict[str, str],
 ) -> list[tuple[list[sqlite3.Row], list[sqlite3.Row], str | None]]:
-    rows = {
-        side: {row["id"]: row for row in findings.values()}
-        for side, findings in (("before", before_findings), ("after", after_findings))
-    }
+    rows = {"before": before_findings, "after": after_findings}
     groups: dict[str, tuple[list[sqlite3.Row], list[sqlite3.Row], list[str]]] = {}
 
     def group(row: sqlite3.Row) -> tuple[list[sqlite3.Row], list[sqlite3.Row], list[str]]:
@@ -1250,6 +1230,7 @@ def finding_occurrence_conditions(
 
 
 def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sqlite3.Row]:
+    """Index one scan's finding rows by the occurrence IDs used in comparisons."""
     rows = connection.execute(
         """
         SELECT occurrences.*,
@@ -1268,7 +1249,7 @@ def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sq
         """,
         (scan_id,),
     )
-    return {row["finding_id"]: row for row in rows}
+    return {row["id"]: row for row in rows}
 
 
 def scan_covers_path(

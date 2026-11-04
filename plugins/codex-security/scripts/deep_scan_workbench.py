@@ -950,7 +950,8 @@ def claim_deep_scan_coordinator_locked(
             args.claim_token,
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
-        run, _ = require_running_deep_scan(connection, scan_id)
+        run = require_deep_scan_run(connection, scan_id)
+        require_running_deep_scan(run, scan)
         timestamp = dependencies().now()
         if args.coordinator_generation is not None:
             require_current_coordinator(run, args)
@@ -1098,26 +1099,11 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
         return
 
 
-def require_deep_scan_worker(connection: sqlite3.Connection, worker_id: str) -> sqlite3.Row:
-    worker_id = require_uuid(worker_id, "worker-id")
-    row = connection.execute(
-        "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
-    ).fetchone()
-    if row is None:
-        raise SystemExit("Codex Security Deep Scan worker not found.")
-    return row
-
-
-def require_running_deep_scan(
-    connection: sqlite3.Connection, scan_id: str
-) -> tuple[sqlite3.Row, sqlite3.Row]:
-    run = require_deep_scan_run(connection, scan_id)
-    scan = dependencies().require_scan(connection, run["scan_id"])
+def require_running_deep_scan(run: sqlite3.Row, scan: sqlite3.Row) -> None:
     if run["status"] != "running" or run["cancel_requested"]:
         raise SystemExit("Only a running Deep Scan can update orchestration state.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit("Only a running scan can update Deep Scan orchestration state.")
-    return run, scan
 
 
 def require_worker_transition(current: str, requested: str) -> None:
@@ -1169,7 +1155,7 @@ def upsert_deep_scan_worker(
             and args.status in {"succeeded", "failed", "canceled"}
         )
         if not cleanup_update and not terminal_repeat:
-            require_running_deep_scan(connection, scan_id)
+            require_running_deep_scan(run, scan)
         prompt_path = deep_scan_path(scan, args.prompt_path, "Worker prompt path", kind="file")
         artifact_dir = deep_scan_path(
             scan, args.artifact_dir, "Worker artifact directory", kind="directory"
@@ -1377,7 +1363,9 @@ def record_deep_scan_iteration(
     input_ids = [require_uuid(value, "input-worker-id") for value in args.input_worker_id]
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        run, scan = require_running_deep_scan(connection, scan_id)
+        run = require_deep_scan_run(connection, scan_id)
+        scan = dependencies().require_scan(connection, scan_id)
+        require_running_deep_scan(run, scan)
         require_current_coordinator(run, args)
         result = deep_scan_path(scan, args.result_manifest_path, "Iteration result", kind="file")
         existing = connection.execute(
@@ -1439,10 +1427,10 @@ def finish_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -
 def finish_deep_scan_locked(
     connection: sqlite3.Connection, args: argparse.Namespace, scan_id: str
 ) -> dict[str, Any]:
-    omitted_worker_ids = [
+    omitted_worker_ids = {
         require_uuid(value, "omitted-worker-id") for value in args.omitted_worker_id
-    ]
-    if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
+    }
+    if len(omitted_worker_ids) != len(args.omitted_worker_id):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
     promotion: tuple[Path, Path, Path | None] | None = None
     deadline_publication: (
@@ -1462,24 +1450,19 @@ def finish_deep_scan_locked(
         )
         standard_scan_manifest = manifest_path == str(Path(scan["scan_dir"]) / "scan-manifest.json")
 
-        buffered_worker_ids = [
+        buffered_worker_ids = {
             row["id"]
             for row in connection.execute(
                 """
                 SELECT id
                 FROM deep_scan_workers
                 WHERE scan_id = ? AND kind = 'discovery' AND merge_state = 'buffered'
-                ORDER BY completion_sequence, id
                 """,
                 (scan_id,),
             )
-        ]
+        }
         # Historical succeeded runs retain their exact omitted-worker replay contract.
-        omissions_match = (
-            set(omitted_worker_ids) == set(buffered_worker_ids)
-            if args.terminal_reason == "saturated" or run["status"] == "succeeded"
-            else not omitted_worker_ids and not buffered_worker_ids
-        )
+        omissions_match = omitted_worker_ids == buffered_worker_ids
         if run["status"] == "succeeded":
             if (
                 run["terminal_reason"] != args.terminal_reason
@@ -1497,7 +1480,7 @@ def finish_deep_scan_locked(
                 )
             connection.commit()
             return deep_scan_result(connection, scan_id)
-        require_running_deep_scan(connection, scan_id)
+        require_running_deep_scan(run, scan)
         if (
             args.terminal_reason == "saturated"
             and run["consecutive_no_new"] < run["stop_after_no_new"]

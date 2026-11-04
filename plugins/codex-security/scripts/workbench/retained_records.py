@@ -21,6 +21,7 @@ from finalize_scan_contract import (
     _validate_schema_node,
     finding_candidate_id,
 )
+from finalize_scan_contract import _schema_values_equal as same_raw_value
 from workbench.saved_coverage import _coverage_rows, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
 from workbench_coverage_receipts import resolve_coverage_receipts
@@ -332,8 +333,7 @@ def _recover_preserved_worker_coverage(
     """Repair coverage in the draft, append source warnings, and return whether coverage was discarded."""
     discarded_coverage = False
     for field in ("surfaces", "explicitExclusions", "deferred"):
-        rows = draft["reviewState"].get(field)
-        for row in rows if isinstance(rows, list) else []:
+        for row in _coverage_rows(draft["reviewState"], field):
             if isinstance(row, dict):
                 row.setdefault("id", _saved_coverage_id(row))
                 if field == "surfaces":
@@ -422,24 +422,6 @@ def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
         ):
             return False
     return True
-
-
-def same_raw_value(left: Any, right: Any) -> bool:
-    """Compare JSON values recursively, distinguishing booleans from numbers even when Python considers them equal."""
-    if isinstance(left, dict):
-        return (
-            isinstance(right, dict)
-            and left.keys() == right.keys()
-            and all(same_raw_value(value, right[key]) for key, value in left.items())
-        )
-    if isinstance(left, list):
-        return (
-            isinstance(right, list)
-            and len(left) == len(right)
-            and all(same_raw_value(a, b) for a, b in zip(left, right, strict=True))
-        )
-    # JSON numbers compare by value, but booleans are a distinct scalar type.
-    return isinstance(left, bool) == isinstance(right, bool) and left == right
 
 
 def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -554,8 +536,7 @@ def _saved_candidate_outcomes(
         }
         pending_candidates = set()
         for field in ("deferred", "surfaces"):
-            items = draft["reviewState"].get(field, [])
-            for item in items if isinstance(items, list) else []:
+            for item in _coverage_rows(draft["reviewState"], field):
                 if isinstance(item, dict) and (
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
                 ):

@@ -2599,9 +2599,6 @@ def scan_result(
             raise SystemExit("This finding does not belong to the selected scan.")
         if all(row["id"] != occurrence["id"] for row in occurrence_rows):
             occurrence_rows.append(occurrence)
-    finding_count = connection.execute(
-        "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()[0]
     severity_counts = {
         row["severity"]: row["count"]
         for row in connection.execute(
@@ -2614,6 +2611,7 @@ def scan_result(
             (scan["id"],),
         )
     }
+    finding_count = sum(severity_counts.values())
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
     independent_reviews = (
         deep_scan.independent_review_progress(connection, scan["id"])

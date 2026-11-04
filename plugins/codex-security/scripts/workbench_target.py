@@ -539,6 +539,19 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def _update_regular_file_digest(digest: Any, path: Path, prefix: bytes = b"") -> None:
+    """Record the file kind, byte count, and SHA-256 in the snapshot digest."""
+    content = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            content.update(chunk)
+            size += len(chunk)
+    update_digest_field(digest, prefix + b"kind", b"file")
+    update_digest_field(digest, prefix + b"size", str(size).encode())
+    update_digest_field(digest, prefix + b"content-sha256", content.digest())
+
+
 def _visible_git_character(char: str) -> str:
     if char in "\n\t" or unicodedata.category(char) not in {"Cc", "Cf"}:
         return char
@@ -720,26 +733,10 @@ def worktree_content_digest_for_context(
                 directory_content_digest(path.resolve()).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path, prefix=b"untracked-")
             except OSError as exc:
                 raise SystemExit(f"Could not read untracked file: {relative_path}") from exc
-            update_digest_field(digest, b"untracked-kind", b"file")
-            update_digest_field(
-                digest,
-                b"untracked-size",
-                str(content_size).encode(),
-            )
-            update_digest_field(
-                digest,
-                b"untracked-content-sha256",
-                content_digest.digest(),
-            )
         else:
             raise SystemExit(f"Unsupported untracked file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
@@ -1098,18 +1095,10 @@ def directory_content_digest(
         elif stat.S_ISDIR(mode):
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(mode):
-            content_digest = hashlib.sha256()
-            content_size = 0
             try:
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                        content_size += len(chunk)
+                _update_regular_file_digest(digest, path)
             except OSError as exc:
                 raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
-            update_digest_field(digest, b"kind", b"file")
-            update_digest_field(digest, b"size", str(content_size).encode())
-            update_digest_field(digest, b"content-sha256", content_digest.digest())
         else:
             raise UnsupportedLocalFileType(f"Unsupported local file type: {relative_path}")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
