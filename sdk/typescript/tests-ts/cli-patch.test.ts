@@ -4820,7 +4820,7 @@ describe("patch publication integrity", () => {
           onCodex,
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
-              if (args[0] === "config")
+              if (args[0] === "config" && args[1] === "--local")
                 return args.at(-1)?.endsWith("PatchCommit")
                   ? "verified-commit"
                   : "Synthetic body";

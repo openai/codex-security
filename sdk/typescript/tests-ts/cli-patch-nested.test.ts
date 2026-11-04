@@ -1412,8 +1412,12 @@ describe("patch change tracking", () => {
                   resolve(commandDirectory, environment["GIT_WORK_TREE"]),
                 ).toBe(root);
             }
-            expect(environment["GIT_CONFIG_COUNT"]).toBe("1");
-            expect(environment["SYNTHETIC_GIT_SETTING"]).toBe("preserved");
+            expect(environment).toMatchObject({
+              GIT_CONFIG_COUNT: "2",
+              GIT_CONFIG_KEY_1: "core.fsmonitor",
+              GIT_CONFIG_VALUE_1: "false",
+              SYNTHETIC_GIT_SETTING: "preserved",
+            });
             return runGitRepositoryCommand(command, args, cwd, {
               ...options,
               environment,

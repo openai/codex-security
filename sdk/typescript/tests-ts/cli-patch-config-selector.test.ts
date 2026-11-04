@@ -145,7 +145,9 @@ test.each([
       );
       expect(call.environment["GIT_CONFIG_GLOBAL"]).toBe(globalConfig);
       expect(call.environment["GIT_CONFIG_NOSYSTEM"]).toBe("1");
-      expect(call.environment["GIT_CONFIG_COUNT"]).toBe("1");
+      expect(call.environment["GIT_CONFIG_COUNT"]).toBe("2");
+      expect(call.environment["GIT_CONFIG_KEY_1"]).toBe("core.fsmonitor");
+      expect(call.environment["GIT_CONFIG_VALUE_1"]).toBe("false");
       expect(call.environment["GIT_CONFIG_KEY_0"]).toBe("core.quotePath");
       expect(call.environment["GIT_CONFIG_VALUE_0"]).toBe("false");
     }

@@ -189,7 +189,7 @@ test.each(
       filter,
       'process.stdout.write(require("node:fs").readFileSync(0,"utf8").toUpperCase());\n',
     );
-    const include = join(support, "filter-config");
+    const include = join(directory, ".git", "filter-config");
     git("config", "--file", include, "synthetic.marker", "alias-selected");
     git(
       "config",
