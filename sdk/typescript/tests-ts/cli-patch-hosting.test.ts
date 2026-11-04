@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { runRepositoryCommand } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
@@ -20,6 +21,108 @@ describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
+
+  test.each(["preflight", "push"] as const)(
+    "HTTP %s uses the operator credential helper without executing checkout helpers",
+    async (stage) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-credentials-");
+      let challenged = false;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch() {
+          challenged = true;
+          return new Response(null, {
+            status: 401,
+            headers: { "WWW-Authenticate": 'Basic realm="fixture"' },
+          });
+        },
+      });
+      try {
+        const remote = new URL("example/repository.git", server.url).href;
+        const marker = join(external, "helper-log");
+        const script = join(external, "helper.cjs");
+        const global = join(external, "global.gitconfig");
+        await writeFile(
+          script,
+          `require("node:fs").appendFileSync(${JSON.stringify(marker)}, process.argv[2] + "\\n");`,
+        );
+        const helper = (owner: string) =>
+          `!node "${script.replaceAll("\\", "/")}" ${owner}`;
+        // This helper is trusted even though its URL scope is more specific than a generic reset.
+        git(
+          "config",
+          "--file",
+          global,
+          `credential.${server.url.origin}.helper`,
+          helper("operator"),
+        );
+        const checkout = join(directory, ".git", "credentials.gitconfig");
+        git(
+          "config",
+          "--file",
+          checkout,
+          "credential.helper",
+          helper("checkout"),
+        );
+        git(
+          "config",
+          "--file",
+          checkout,
+          "core.askpass",
+          helper("checkout-askpass").slice(1),
+        );
+        git(
+          "config",
+          "--file",
+          global,
+          stage === "push"
+            ? "includeIf.onbranch:codex-security/**.path"
+            : "include.path",
+          checkout,
+        );
+        // Exercise local scope as well as a checkout-owned file included at global scope.
+        git("config", "credential.helper", helper("local"));
+        git("remote", "set-url", "origin", remote);
+        const environment = {
+          GIT_CONFIG_GLOBAL: global,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_TERMINAL_PROMPT: "0",
+          GITLAB_HOST: server.url.origin,
+          NO_PROXY: "127.0.0.1",
+        };
+        const outcome = await runWorkflow(
+          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          {
+            currentDirectory: directory,
+            environment,
+            onWorkbench: () =>
+              savedScan(resultWithFindings(["high"]), "scan-1", directory),
+            onCodex: async (args, output) => {
+              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+              completePatches(args, output);
+              return 0;
+            },
+            onRepositoryCommand: (tool, args, cwd, options) => {
+              if (tool !== "git") return "";
+              if (stage === "push" && args.includes("ls-remote")) return "";
+              return runRepositoryCommand(tool, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              });
+            },
+          },
+          { localHosting: false },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(challenged, outcome.stderr).toBe(true);
+        expect(await readFile(marker, "utf8")).toBe("operator\n");
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
 
   test.each(["local", "include"] as const)(
     "publication preflight refuses a checkout-selected SSH command from %s",
