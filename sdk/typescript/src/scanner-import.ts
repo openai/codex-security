@@ -228,14 +228,20 @@ export function stableId(prefix: string, fields: unknown[]): string {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const gunzipAsync = promisify(gunzip);
 
-async function readScannerBytes(path: string | FileHandle) {
+async function readScannerInput(path: string | FileHandle) {
   const bytes = await readFile(path);
   const gzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
   return { gzip, bytes: gzip ? await gunzipAsync(bytes) : bytes };
 }
 
+export async function readScannerBytes(
+  path: string | FileHandle,
+): Promise<Buffer> {
+  return (await readScannerInput(path)).bytes;
+}
+
 export async function readScannerText(path: string): Promise<string> {
-  const { bytes, gzip } = await readScannerBytes(path);
+  const { bytes, gzip } = await readScannerInput(path);
   const contents = strictUtf8.decode(bytes);
   // Empty JSONL is a valid stream of zero records; a blank JSON or CSV document isn't.
   if (!contents.trim()) {
@@ -262,7 +268,7 @@ export async function readScannerJson(
   path: string | FileHandle,
   parse: (json: string) => unknown = JSON.parse,
 ): Promise<unknown> {
-  const { bytes } = await readScannerBytes(path);
+  const bytes = await readScannerBytes(path);
   let decoded: string;
   try {
     decoded = strictUtf8.decode(bytes);

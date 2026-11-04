@@ -55,17 +55,20 @@ function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
+const severityLevels = new Map([
+  ["CRITICAL", "critical"],
+  ["HIGH", "high"],
+  ["MEDIUM", "medium"],
+  ["LOW", "low"],
+  ["ERROR", "high"],
+  ["WARNING", "medium"],
+  ["INFO", "low"],
+]);
+
 function severity(value: unknown): string {
-  const levels: Record<string, string> = {
-    CRITICAL: "critical",
-    HIGH: "high",
-    MEDIUM: "medium",
-    LOW: "low",
-    ERROR: "high",
-    WARNING: "medium",
-    INFO: "low",
-  };
-  return typeof value === "string" ? (levels[value] ?? "unknown") : "unknown";
+  return typeof value === "string"
+    ? (severityLevels.get(value) ?? "unknown")
+    : "unknown";
 }
 
 function identity(
@@ -173,7 +176,11 @@ export function normalizeSemgrepFindings(
   if (document["format"] === guardianSelectionFormat) {
     if (target !== "local")
       throw new Error("Import Guardian selections into the local workbench.");
-    return normalizeGuardianSelection(document, options.sourceRepositoryUrl);
+    return normalizeGuardianSelection(
+      document,
+      options.sourceRepositoryUrl,
+      options.sourceRepositories,
+    );
   }
   if (isSemgrepPlatformFormat(document["format"])) {
     return normalizeSemgrepPlatformFindings(

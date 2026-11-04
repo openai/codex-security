@@ -412,6 +412,10 @@ await security.run(repository, {
 });
 ```
 
+For `runComponentScans()`, subscribe to `onScanEvent` and select events with
+`type === "lifecycle"` to correlate each snapshot with its `componentId`. Deep
+component scans also emit `deep-progress` events with independent review counts.
+
 Group observations by `scanId`. A completed scan with
 `hasReportableFindings: false` finished with zero reportable findings.
 The field is `null` until that outcome is known. Saved scan history retains
@@ -703,6 +707,13 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+For a saved Checkmarx One CLI JSON or CxSAST XML report, use
+`readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
+To prepare a local import, pass `provider: "checkmarx"` and the verified
+`sourceRepositoryUrl` to `prepareLocalExternalImport`. Keep each batch of normalized
+Checkmarx findings scoped to one scan and its repository.
+[Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+
 Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
 [capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
@@ -727,6 +738,21 @@ When a parsed selection has no publishable findings, preparation throws
 exclusions and scanner diagnostics. A clean empty report needs no upload;
 failed scans and excluded records need attention. Previously imported findings
 remain open.
+
+To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
+report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
+for an already parsed report. Supply the scanned directory relative to the checkout
+(`.` for the whole checkout) unless the report's remote target and Git metadata establish it.
+
+```ts
+import { readTrivyFindings } from "@openai/codex-security";
+
+const { findings, excluded, report } = await readTrivyFindings(
+  "trivy.json.gz",
+  "local",
+  ".",
+);
+```
 
 For CLI examples and supported input formats, see the
 [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).

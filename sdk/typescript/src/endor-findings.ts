@@ -1,7 +1,7 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { asRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
@@ -18,12 +18,21 @@ import {
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
-export function endorRepositoryUrls(sourceData: unknown): string[] {
-  return isRecord(sourceData)
-    ? sarifRunRepositories(sourceData["runContext"], "Endor").map(
-        (ref) => ref.url,
-      )
-    : [];
+export function endorRepositoryUrls(
+  sourceData: unknown,
+  retainedUrlsOnly = false,
+): string[] {
+  const run = asRecord(sourceData)?.["runContext"];
+  if (run == null) return [];
+  if (retainedUrlsOnly) {
+    // Historical projections can retain opaque run metadata alongside explicit URLs.
+    const entries = asRecord(run)?.["versionControlProvenance"];
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((entry) => asRecord(entry)?.["repositoryUri"])
+      .filter((url) => typeof url === "string");
+  }
+  return sarifRunRepositories(run, "Endor").map((ref) => ref.url);
 }
 
 function positiveCount(value: unknown): boolean {

@@ -17,6 +17,7 @@ import {
 } from "../src/snyk-findings.js";
 import {
   semgrepJson,
+  semgrepPercentPathReports,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
@@ -4185,6 +4186,63 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   return { f, input, project, map, prepare, loseResponse };
 }
 
+test("Checkmarx publishes a native SAST finding only to its declared Cloud repository", async () => {
+  const row = {
+    type: "sast",
+    similarityId: "17",
+    severity: "MEDIUM",
+    data: { resultHash: "c97c", queryName: "Example_Query" },
+  };
+  const f = await fixture({ scanID: "scan-a", totalCount: 1, results: [row] });
+  const selected = {
+    ...options,
+    provider: "checkmarx" as const,
+    sourceRepositoryUrl: f.state.repositoryUrl,
+  };
+  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const first = await prepare();
+  expect(first.preview.requests[0]).toMatchObject({
+    source: { provider: "checkmarx", source_key: selected.sourceKey },
+    items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
+  });
+  const sibling = sdkRow("sdk-id");
+  sibling.evidence.source_scan_id = "scan-b";
+  await expect(
+    prepareNormalizedExternalPublication(
+      sdkSelection([...first.preview.findings, sibling]),
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow(/same product, project and scan/i);
+  const replayWithReport = (change: Record<string, unknown>) =>
+    prepareNormalizedExternalPublication(
+      { ...first.preview, report: { ...first.preview.report, ...change } },
+      selected,
+      f.deps,
+    );
+  await expect(
+    replayWithReport({
+      sourceRepositoryUrl: "https://github.com/example/other",
+    }),
+  ).rejects.toThrow(/does not match the selected Cloud repository/i);
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(0);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  await f.loseResponse(first);
+  await expect(replayWithReport({ scanId: "different-scan" })).rejects.toThrow(
+    /does not match the retained report/i,
+  );
+  f.state.repositoryUrl = "https://github.com/example/other";
+  await expect(prepare()).rejects.toThrow(/does not match/i);
+  expect(f.posts).toHaveLength(1);
+  f.state.repositoryUrl = selected.sourceRepositoryUrl;
+  const replay = await prepare();
+  expect(replay.preview.resumed).toBe(true);
+  expect((await replay.publish()).verified).toBe(1);
+  expect(f.posts[1]).toBe(f.posts[0]!);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);
@@ -4427,7 +4485,60 @@ const savedDependabotData = {
   sourceRepositoryUrl: "https://github.com/example/different",
 };
 
+const checkmarxFormat = { format: "cxsast-xml" };
+const exampleRepository = "https://github.com/example/project";
+const otherRepository = "https://github.com/example/other";
+const savedEndorData = (repositoryUri: string) => ({
+  ...checkmarxFormat,
+  runContext: { versionControlProvenance: ["opaque", { repositoryUri }] },
+});
+const endorCheckpoint = {
+  requiredProvider: "checkmarx",
+  selected: { ...options, provider: "endor" as const },
+};
+
+const wizBranchAsset = {
+  nativeType: "github#repositoryBranch",
+  cloudProviderURL: exampleRepository + "/tree/main",
+};
+
 test.each([
+  {
+    data: { ...checkmarxFormat, vulnerableAsset: wizBranchAsset },
+    selected: options,
+    requiredProvider: "checkmarx",
+    filename:
+      "44c97129ef37ba88ccf7d6a1c43c3ef4c051080c0e746145b1f37dc6216f0181.pending.json",
+    digest: "7c90e7bf4a7d9c64c7cbbc15fdcdf6a3ff0e14f50cda77c9b523d834cf337dd7",
+  },
+  {
+    ...endorCheckpoint,
+    data: savedEndorData(exampleRepository),
+    filename:
+      "4d59df5533b5d0acbbcc2e28884e597a52d8b55e354eb15539d6cfba37c79011.pending.json",
+    digest: "d19b090ff4cd18329b37e74e674394deb2670c1d0dfc7bc088c02edcbb088cad",
+  },
+  {
+    ...endorCheckpoint,
+    data: {
+      ...savedEndorData(exampleRepository),
+      sourceRepositoryUrl: exampleRepository,
+    },
+    filename:
+      "624c404a8fcf0e8241c30d9b1a434d78aaa2c1e87d211465e0698821ab1c509f.pending.json",
+    digest: "f77bce9f03733812b5fda88ae988193b54462baf78be95ba6b4de49658b103d9",
+  },
+  {
+    ...endorCheckpoint,
+    data: {
+      ...savedEndorData(otherRepository),
+      sourceRepositoryUrl: exampleRepository,
+    },
+    conflictingUrl: otherRepository,
+    filename:
+      "70e7f4be8d0d9eb0306f18ea1a2b256641bee797b3626a8dfc2920d0a15abcd2.pending.json",
+    digest: "8fedf62999d4c5f510706db4647ad3d847e8e5f6f5f3d75eb365da193c16ea1a",
+  },
   {
     data: { format: "snyk-rest-issues/v2", issueJson: "{}" },
     requiredProvider: "snyk",
@@ -4478,7 +4589,8 @@ test.each([
   },
 ])(
   "checks a saved $selected.provider request from before $requiredProvider checks",
-  async ({ selected, data, requiredProvider, filename, digest }) => {
+  async (saved) => {
+    const { selected, data, requiredProvider, filename, digest } = saved;
     const f = await fixture();
     const environment: NodeJS.ProcessEnv = { ...f.environment };
     // These persisted keys came from the default deployment.
@@ -4541,6 +4653,13 @@ test.each([
       { mode: 0o600 },
     );
 
+    if ("conflictingUrl" in saved && saved.conflictingUrl) {
+      await expect(prepare()).rejects.toThrow(
+        `belongs to "${saved.conflictingUrl}"`,
+      );
+      expect(f.posts).toHaveLength(0);
+      return;
+    }
     if (alert) {
       // The original publisher selected the alert's repository. Changing the
       // catalog to match the projection must not permit replay to another repo.
@@ -4551,6 +4670,13 @@ test.each([
       );
       expect(f.posts).toHaveLength(0);
       return;
+    }
+    if (requiredProvider === "checkmarx") {
+      const original = f.state.repositoryUrl;
+      f.state.repositoryUrl += "-other";
+      await expect(prepare()).rejects.toThrow(`belongs to "${original}"`);
+      expect(f.posts).toHaveLength(0);
+      f.state.repositoryUrl = original;
     }
     if (selected.provider === "snyk") {
       const other = "https://github.com/example/other";
@@ -4603,6 +4729,94 @@ test.each(["wiz", "inspector"] as const)(
     expect(f.posts[1]).toBe(f.posts[0]);
   },
 );
+
+const projectedId = "checkmarx-one:" + "a".repeat(64);
+
+function sdkRow(id: string, source_data?: Record<string, unknown>) {
+  const row = normalized(id);
+  return {
+    ...row,
+    evidence: validateExternalEvidence({ ...row.evidence, source_data }),
+  };
+}
+
+function sdkSelection(
+  findings: ExternalFindings["findings"],
+  report?: ExternalFindings["report"],
+): ExternalFindings {
+  return { read: findings.length, excluded: [], findings, report };
+}
+
+test.each(["row", "report", "Snyk SARIF"] as const)(
+  "keeps the projected Checkmarx repository from the %s across retries",
+  async (scope) => {
+    const f = await fixture();
+    const sourceRepositoryUrl = f.state.repositoryUrl;
+    const snyk = scope === "Snyk SARIF";
+    const selected = snyk ? { ...options, provider: "snyk" as const } : options;
+    const report = scope === "report" ? { sourceRepositoryUrl } : undefined;
+    const input = snyk
+      ? (await snykRepositoryEvidence("SARIF", sourceRepositoryUrl)).normalized
+      : sdkSelection(
+          [
+            sdkRow(
+              projectedId,
+              scope === "row" ? { sourceRepositoryUrl } : undefined,
+            ),
+          ],
+          report,
+        );
+    input.findings[0]!.source_finding_id = projectedId;
+    const prepare = (selection: ExternalFindings = input) =>
+      prepareNormalizedExternalPublication(selection, selected, f.deps);
+    f.state.repositoryUrl = otherRepository;
+    if (report)
+      expect(
+        (await prepare(sdkSelection([sdkRow("opaque-sdk-id")], report))).preview
+          .requests,
+      ).toHaveLength(1);
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    await f.loseResponse(await prepare());
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
+
+test("Checkmarx projections under Wiz bind retained row URLs and native repository branch assets", async () => {
+  const f = await fixture();
+  const sourceRepositoryUrl = f.state.repositoryUrl;
+  f.state.repositoryUrl = otherRepository;
+  const report = { sourceRepositoryUrl: otherRepository };
+  const prepare = (
+    findings: ExternalFindings["findings"],
+    metadata?: typeof report,
+  ) =>
+    prepareNormalizedExternalPublication(
+      sdkSelection(findings, metadata),
+      options,
+      f.deps,
+    );
+  const branch = { vulnerableAsset: wizBranchAsset };
+  const mismatch = `belongs to "${sourceRepositoryUrl}"`;
+  const projected = sdkRow(projectedId, branch);
+  await expect(prepare([projected], report)).rejects.toThrow(mismatch);
+  await expect(prepare([projected])).rejects.toThrow(mismatch);
+  for (const data of [branch, { sourceRepositoryUrl }]) {
+    const sibling = sdkRow("wiz-finding", data);
+    expect((await prepare([sibling], report)).preview.requests).toHaveLength(1);
+    await expect(
+      prepare([sdkRow(projectedId), sibling], report),
+    ).rejects.toThrow(mismatch);
+  }
+  expect(f.posts).toHaveLength(0);
+});
 
 test("Black Duck Cloud replay preserves package occurrence and rejects a different destination", async () => {
   const row = {
@@ -9444,23 +9658,7 @@ test("OpenGrep CLI Cloud preview forwards source provenance without uploading", 
 });
 
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
-  const paths = [
-    "src/my file.ts",
-    "src/my%20file.ts",
-    "src/100%.ts",
-    "src/100%25.ts",
-  ];
-  const json: any = semgrepJson();
-  const sarif: any = semgrepSarif();
-  delete json.results[0].extra.fingerprint;
-  delete sarif.runs[0].results[0].fingerprints;
-  json.results = paths.map((path) => ({ ...json.results[0], path }));
-  const run = sarif.runs[0];
-  run.results = paths.map((path) => {
-    const result = structuredClone(run.results[0]);
-    result.locations[0].physicalLocation.artifactLocation.uri = path;
-    return result;
-  });
+  const { paths, json, sarif } = semgrepPercentPathReports();
   const f = await fixture(json);
   const settings = {
     ...options,
@@ -10650,6 +10848,142 @@ test.each([
   },
 );
 
+function privateInboxContext(context_version = "generation-a") {
+  return Response.json({
+    object: "security.finding_import_context",
+    context_version,
+    can_read: true,
+    can_upload: true,
+    can_create_import_jobs: true,
+    formats: ["security.findings.v1"],
+    limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
+  });
+}
+
+test.each([
+  {
+    data: checkmarxFormat,
+    report: { sourceRepositoryUrl: exampleRepository, scanId: "123" },
+    key: "0b6db48e67edf53d39403c9fd1897c34a179edf5b6cce9bffabc9f52f8757f33",
+    sha256: "8b0e177506af75c363184d3627fed74325acfcada7e3ee8e9d81041c5db5b2d1",
+  },
+  {
+    data: { vulnerableAsset: wizBranchAsset },
+    report: checkmarxFormat,
+    key: "7400c077334e75f2b1ca49f05eb5cc4f431b62a9f2063734f42a03d60500ea5e",
+    sha256: "bf944f1fec0d2f97675f35dc8db1bee753807879fa6077e2bd8c5169889ce7ae",
+  },
+  {
+    data: { sourceRepositoryUrl: exampleRepository },
+    report: checkmarxFormat,
+    key: "0c9c5eef708bb27f19dcaebb67832cc6dcd43bfbf9dee0f0d4c4d2da9145ffa8",
+    sha256: "2ae1422cd86875a7be2d73f2dc8f6833e494668f6e4be9982c403d336557ef9f",
+  },
+])(
+  "only a verified private Wiz checkpoint replays pre-Checkmarx evidence ($data)",
+  async ({ data, report, key, sha256 }) => {
+    const f = await fixture();
+    const selection = sdkSelection(
+      [sdkRow(normalized().source_finding_id, data)],
+      report,
+    );
+    const source = {
+      provider: options.provider,
+      source_key: options.sourceKey,
+    };
+    const repository = { id: options.repository, repo_connector_id: "github" };
+    const checkpoint = {
+      format: "security.findings.v1",
+      apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+      accountId: "synthetic-account",
+      contextVersion: "generation-a",
+      source,
+      repository,
+      sha256,
+      uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
+      jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
+      fileId: "aifile_" + "a".repeat(32),
+    };
+    const directory = join(f.root, "state", "external-finding-publications");
+    const path = join(directory, key + ".private-import.json");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
+    let contextVersion = checkpoint.contextVersion;
+    const requests: unknown[] = [];
+    const prepare = () =>
+      prepareNormalizedExternalPublication(selection, options, {
+        environment: {
+          ...f.environment,
+          CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+          CODEX_SECURITY_CLOUD_WEB_URL: undefined,
+        },
+        fetch: async (url, init) => {
+          const pathname = new URL(url).pathname;
+          if (pathname.endsWith("/repositories"))
+            return f.deps.fetch(url, init);
+          if (pathname.endsWith("/finding-imports/context"))
+            return privateInboxContext(contextVersion);
+          expect(pathname).toEndWith("/finding-imports/jobs");
+          expect(init.method).toBe("POST");
+          const job = JSON.parse(String(init.body));
+          requests.push(job);
+          return Response.json({
+            ...job,
+            object: "security.finding_import_job",
+            id: "import_" + "b".repeat(32),
+            status: "completed",
+            counts: {
+              total: 1,
+              discovered: 1,
+              created: 1,
+              updated: 0,
+              unchanged: 0,
+              error: 0,
+              unprocessed: 0,
+            },
+            poll_after_seconds: null,
+            error: null,
+          });
+        },
+      });
+    contextVersion = "different-inbox";
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    contextVersion = checkpoint.contextVersion;
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = exampleRepository;
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
+    expect((await resumed.publish()).counts.created).toBe(1);
+    expect(requests).toEqual([
+      {
+        request_id: checkpoint.jobRequestId,
+        context_version: checkpoint.contextVersion,
+        source,
+        input: {
+          type: "file",
+          file_id: checkpoint.fileId,
+          format: checkpoint.format,
+        },
+        default_targets: [
+          {
+            type: "repository",
+            repo_id: repository.id,
+            repo_connector_id: repository.repo_connector_id,
+          },
+        ],
+      },
+    ]);
+    await rm(path);
+    await expect(resumed.publish()).rejects.toThrow(
+      "requires the checkmarx provider",
+    );
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    expect(requests).toHaveLength(1);
+  },
+);
+
 test("a private preview recognizes a later repository checkpoint under its historical filename", async () => {
   const f = await fixture();
   const privatePreview = await prepareNormalizedExternalPublication(
@@ -10666,15 +11000,7 @@ test("a private preview recognizes a later repository checkpoint under its histo
           });
         }
         expect(new URL(url).pathname).toEndWith("/finding-imports/context");
-        return Response.json({
-          object: "security.finding_import_context",
-          context_version: "generation-a",
-          can_read: true,
-          can_upload: true,
-          can_create_import_jobs: true,
-          formats: ["security.findings.v1"],
-          limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
-        });
+        return privateInboxContext();
       },
     },
   );
