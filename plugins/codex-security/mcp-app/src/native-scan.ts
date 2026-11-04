@@ -493,6 +493,15 @@ export async function prepareNativeScan(
       inheritedPermissions,
       ambientExecution,
       resolveCodexCommand: resolveCommand,
+      onDeepMergeCommitted: (event) =>
+        console.error(
+          JSON.stringify({
+            component: "codex_security_deep_scan",
+            event: "dedup_committed",
+            count: event.sourceScanIds.length,
+            ...event,
+          }),
+        ),
       acquireScanExecution: (state, directory, plugin) =>
         waitForScanExecution(state, directory, plugin, signal),
     },

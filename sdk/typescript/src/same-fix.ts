@@ -45,6 +45,29 @@ Identify the faulty operation or missing check and the smallest change that fixe
 Apply each fix alone. If a claimed defect in the other report survives, quote the phrase that claims it and name a concrete input or operation that still fails. Put these counterexamples in survivingPaths. Different examples, callers, or consequences of one faulty operation are compatible when correcting that operation resolves both. Do not infer an additional requirement from a hypothetical attack that neither report claims. Return same only when the two complete corrections are equivalent and the evidence supports the decision. Keep uncertain pairs separate.`;
 
 type Pair = { id: number; left: number; right: number };
+// Older archives may retain only a reference or a partial original report.
+const originalReport = z.looseObject({
+  ruleId: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  remediation: z.string(),
+  severity: z.object({ level: z.string() }),
+  confidence: z.object({ level: z.string() }),
+  provenance: z.object({ source: z.string() }),
+  taxonomy: z.object({ cwe: z.array(z.string()) }),
+  locations: z
+    .array(
+      z.looseObject({
+        path: z.string(),
+        startLine: z.number(),
+        role: z.string().optional(),
+      }),
+    )
+    .min(1),
+  codeEvidence: z
+    .array(z.looseObject({ path: z.string(), code: z.string() }))
+    .optional(),
+});
 function claim({
   title,
   summary,
@@ -55,7 +78,8 @@ function claim({
   identity,
   attackPath,
   validation,
-}: Record<string, unknown>) {
+  taxonomy,
+}: z.infer<typeof originalReport>) {
   return {
     title,
     summary,
@@ -66,30 +90,34 @@ function claim({
     identity,
     attackPath,
     validation,
+    taxonomy,
   };
 }
 
+type Claim = ReturnType<typeof claim>;
+
+function hasAdditionalControl(a: Claim, b: Claim) {
+  return (
+    b.taxonomy.cwe.length > 0 &&
+    a.taxonomy.cwe.some((cwe) => !b.taxonomy.cwe.includes(cwe)) &&
+    a.locations.some(
+      ({ role, path }) =>
+        (role === "control" || role === "root_control") &&
+        !b.locations.some((other) => other.path === path) &&
+        !b.codeEvidence?.some((evidence) => evidence.path === path),
+    )
+  );
+}
+
+// Generate only the combinations still needed to establish a common repair.
 async function confirmSources(
   pairs: Pair[],
-  originals: Map<number, Record<string, unknown>[]>,
+  claimsFor: (id: number) => Claim[],
   compare: CompareReports,
 ) {
-  const cases = pairs.flatMap((pair) =>
-    originals
-      .get(pair.right)!
-      .flatMap((a) =>
-        originals
-          .get(pair.left)!
-          .map((b) => ({ pair, A: claim(a), B: claim(b) })),
-      ),
-  );
   const rejected = new Set<number>();
-  // Grade small independent pairs. A grouped report can carry many original claims.
-  for (let start = 0; start < cases.length; start += 4) {
-    const batch = cases
-      .slice(start, start + 4)
-      .filter(({ pair }) => !rejected.has(pair.id));
-    if (!batch.length) continue;
+  const batch: { pair: Pair; A: Claim; B: Claim }[] = [];
+  async function grade() {
     const rows = batch.map(({ A, B }, id) => ({ id, A, B }));
     const { sources } = confirmations.parse(
       await compare(
@@ -102,12 +130,29 @@ async function confirmSources(
       const rows = decisions.get(id);
       if (
         rows?.length !== 1 ||
-        rows[0]!.same !== true ||
+        !rows[0]!.same ||
         rows[0]!.survivingPaths.length
       )
         rejected.add(pair.id);
     }
+    batch.length = 0;
   }
+  nextPair: for (const pair of pairs) {
+    for (const A of claimsFor(pair.right)) {
+      for (const B of claimsFor(pair.left)) {
+        if (hasAdditionalControl(A, B) || hasAdditionalControl(B, A)) {
+          rejected.add(pair.id);
+          continue nextPair;
+        }
+        batch.push({ pair, A, B });
+        if (batch.length === 4) {
+          await grade();
+          if (rejected.has(pair.id)) continue nextPair;
+        }
+      }
+    }
+  }
+  if (batch.length) await grade();
   return pairs.filter(({ id }) => !rejected.has(id));
 }
 
@@ -115,23 +160,36 @@ async function confirmSources(
 export async function checkSameFix(
   groups: SourceGroup[],
   compare: CompareReports,
+  onReviewError: (error: unknown) => void,
 ) {
   const evidence = groups.map(({ finding }) =>
     (finding.codeEvidence ?? []).map(({ path, code }) => ({ path, code })),
   );
-  const pairs: Pair[] = [];
-  for (const [right, sources] of evidence.entries()) {
-    for (let left = 0; left < right; left++) {
-      if (sources.some((a) => evidence[left]!.some((b) => a.path === b.path)))
-        pairs.push({ id: pairs.length, left, right });
+  const claims = new Map<number, Claim[]>();
+  function claimsFor(id: number) {
+    let rows = claims.get(id);
+    if (!rows) {
+      const unique = new Map<string, Claim>();
+      for (const source of groups[id]!.originals) {
+        const report = originalReport.safeParse(source);
+        if (!report.success) {
+          unique.clear();
+          break;
+        }
+        const row = claim(report.data);
+        unique.set(JSON.stringify(row), row);
+      }
+      rows = [...unique.values()];
+      claims.set(id, rows);
     }
+    return rows;
   }
   const matches = new Map<number, Set<number>>();
-  if (pairs.length) {
+  async function review(pairs: Pair[]) {
     const reports = [
       ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
     ].map((id) => {
-      const { finding, originals } = groups[id]!;
+      const { finding } = groups[id]!;
       const { title, summary, rootCause, remediation } = finding;
       return {
         id,
@@ -143,7 +201,7 @@ export async function checkSameFix(
           locations: groups[id]!.finding.locations,
           evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
         },
-        attached: originals.map(claim),
+        attached: claimsFor(id),
       };
     });
     const result = reviews.parse(
@@ -164,7 +222,7 @@ export async function checkSameFix(
     }
     for (const { left, right } of await confirmSources(
       proposed,
-      new Map(groups.map((group, id) => [id, group.originals])),
+      claimsFor,
       compare,
     )) {
       const earlier = matches.get(right) ?? new Set<number>();
@@ -172,5 +230,29 @@ export async function checkSameFix(
       matches.set(right, earlier);
     }
   }
+  // Pair IDs span all chunks, so stale or repeated verdicts cannot authorize a merge.
+  const batch: Pair[] = [];
+  let id = 0;
+  async function flush() {
+    try {
+      await review(batch);
+    } catch (error) {
+      onReviewError(error);
+    }
+    batch.length = 0;
+  }
+  for (const [right, excerpts] of evidence.entries()) {
+    if (!claimsFor(right).length) continue;
+    for (let left = 0; left < right; left++) {
+      if (
+        !claimsFor(left).length ||
+        !excerpts.some((a) => evidence[left]!.some((b) => a.path === b.path))
+      )
+        continue;
+      batch.push({ id: id++, left, right });
+      if (batch.length === 16) await flush();
+    }
+  }
+  if (batch.length) await flush();
   return matches;
 }

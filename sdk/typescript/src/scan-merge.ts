@@ -28,6 +28,7 @@ export interface ScanMergeResult {
   aggregate: ScanAggregate;
   /** Each novel issue belongs to the earliest input that discovered it. */
   newFindingScanIds: string[];
+  newFindingCount: number;
 }
 
 const mergeSchema = z
@@ -46,7 +47,9 @@ const mergeSchema = z
 export type ScanMergeGroups = z.infer<typeof mergeSchema>;
 
 function refs(finding: SemanticFinding): string[] {
-  const ids = finding.provenance.sourceFindingIds;
+  const ids =
+    finding.provenance.sourceFindingIds ??
+    finding.provenance.sourceFindings?.map(({ id }) => id);
   if (!ids?.length)
     throw new Error("Saved merge finding has no source references.");
   return ids;
@@ -58,14 +61,13 @@ function scanMergeSources(
 ) {
   const sources = new Map<
     string,
-    { original: JsonObject; canonical: SemanticFinding; input?: number }
+    { original?: JsonObject; canonical: SemanticFinding; input?: number }
   >();
   for (const finding of previous?.findings ?? []) {
     for (const source of finding.provenance.sourceFindings ?? [])
       sources.set(source.id, { original: source.finding, canonical: finding });
     for (const id of refs(finding))
-      if (!sources.has(id))
-        throw new Error(`Saved merge source ${id} is unavailable.`);
+      if (!sources.has(id)) sources.set(id, { canonical: finding });
   }
   for (const [inputIndex, input] of inputs.entries()) {
     for (const [index, finding] of input.draft.findings.entries()) {
@@ -129,10 +131,12 @@ export function validateScanMerge(
     retained[owner]!.push(finding);
   }
   const novelInputs = new Set<number>();
+  let newFindingCount = 0;
   const findings = merged.groups.map((group, index) => {
     const selected = sources.get(group.canonicalSourceFindingId)!.canonical;
     const prior = retained[index]!;
     if (!prior.length) {
+      newFindingCount++;
       const earliest = group.sourceFindingIds.reduce(
         (earliest, id) =>
           Math.min(earliest, sources.get(id)!.input ?? inputs.length),
@@ -163,10 +167,10 @@ export function validateScanMerge(
       ...finding.provenance,
       sourceFindingIds: group.sourceFindingIds,
       canonicalSourceFindingId: group.canonicalSourceFindingId,
-      sourceFindings: group.sourceFindingIds.map((id) => ({
-        id,
-        finding: sources.get(id)!.original,
-      })),
+      sourceFindings: group.sourceFindingIds.flatMap((id) => {
+        const original = sources.get(id)!.original;
+        return original ? [{ id, finding: original }] : [];
+      }),
     };
     if (history.length) finding.provenance["previousFindings"] = history;
     return finding;
@@ -218,6 +222,7 @@ export function validateScanMerge(
         : {}),
       ...(threatModel ? { threatModel: structuredClone(threatModel) } : {}),
     }),
+    newFindingCount,
     newFindingScanIds: inputs
       .filter((_, index) => novelInputs.has(index))
       .map((input) => input.scanId),
@@ -235,7 +240,7 @@ export async function confirmScanMerge(
 ): Promise<ScanMergeResult> {
   const sources = scanMergeSources(inputs, previous);
   const revised: ScanMergeGroups["groups"] = [];
-  let limitation: string | undefined;
+  const limitations = new Set<string>();
   let split = false;
   for (const finding of proposed.aggregate.findings) {
     const ids = refs(finding);
@@ -243,7 +248,11 @@ export async function confirmScanMerge(
     const members = [...new Set(ids.map((id) => sources.get(id)!.canonical))];
     const entries = members.map((member) => {
       const sourceIds = refs(member);
-      const originals = sourceIds.map((id) => sources.get(id)!.original);
+      const archived = sourceIds.flatMap((id) => {
+        const original = sources.get(id)!.original;
+        return original ? [original] : [];
+      });
+      const originals = archived.length === sourceIds.length ? archived : [];
       const incoming = sources.get(sourceIds[0]!)!.input !== undefined;
       const observations = originals.map((source) => {
         const report = { ...source };
@@ -281,12 +290,12 @@ export async function confirmScanMerge(
         entries.some((_, left) => left < right && !exactMatch(left, right)),
       )
     ) {
-      try {
-        matches = await checkSameFix(entries, compare);
-      } catch (error) {
+      matches = await checkSameFix(entries, compare, (error) => {
         onComparisonError(error);
-        limitation = `Deep Scan could not check disputed duplicates: ${error instanceof Error ? error.message : String(error)}`;
-      }
+        limitations.add(
+          `Deep Scan could not check disputed duplicates: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }
     const kept: number[][] = [];
     for (let right = 0; right < entries.length; right++) {
@@ -321,11 +330,11 @@ export async function confirmScanMerge(
     inputs,
     previous,
   );
-  if (limitation) {
+  if (limitations.size) {
     const scope = result.aggregate.scope ?? {};
     result.aggregate.scope = {
       ...scope,
-      limitations: [...new Set([...(scope.limitations ?? []), limitation])],
+      limitations: [...new Set([...(scope.limitations ?? []), ...limitations])],
     };
   }
   return result;
@@ -390,7 +399,7 @@ export function scanMergeModelInputs(
     } = finding.provenance;
     return {
       ...finding,
-      provenance,
+      provenance: { ...provenance, sourceFindingIds: refs(finding) },
       retainedDetails: { previousFindings, originalCandidates },
     };
   };

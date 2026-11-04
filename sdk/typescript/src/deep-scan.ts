@@ -91,6 +91,12 @@ export interface DeepScanComposition {
   ): Promise<unknown>;
   onRetry?(message: string): void;
   onCleanupError?(error: unknown): void;
+  onMergeCommitted?(event: {
+    scanId: string;
+    sourceScanIds: string[];
+    newFindings: number;
+    retainedFindings: number;
+  }): void;
   writer: ScanArtifactRestorer & {
     remove(relativePath: string): Promise<void>;
   };
@@ -518,13 +524,20 @@ export async function runDeepScans(
       }
     }
     executionSignal.throwIfAborted();
+    const sourceScanIds = pending.map((result) => result.scanId);
     acceptMerge(
       state,
       merged,
-      pending.map((result) => result.scanId),
+      sourceScanIds,
       combineScanCoverage([...coverage.values()]),
     );
     await save();
+    input.onMergeCommitted?.({
+      scanId,
+      sourceScanIds,
+      newFindings: merged.newFindingCount,
+      retainedFindings: merged.aggregate.findings.length,
+    });
     for (const result of pending) completed.delete(result.scanId);
   };
   const runPass = async (

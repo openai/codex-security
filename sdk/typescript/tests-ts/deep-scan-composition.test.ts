@@ -563,6 +563,8 @@ describe("ordinary scan composition", () => {
     "counts clean passes after a novel finding in the same batch (repeated finding: %p)",
     async (repeated) => {
       const h = await harness({ workers: 3, stopAfterNoNew: 2 });
+      const commits: unknown[] = [];
+      h.input.onMergeCommitted = (event) => commits.push(event);
       h.setRun(async (options) =>
         result(
           options.resumeScanId!,
@@ -575,6 +577,14 @@ describe("ordinary scan composition", () => {
       const state = await runDeepScans(h.input);
       expect(h.calls).toHaveLength(3);
       expect(h.mergeInputs).toEqual([3]);
+      expect(commits).toEqual([
+        {
+          scanId: h.input.scanId,
+          sourceScanIds: state.mergedScanIds,
+          newFindings: 1,
+          retainedFindings: 1,
+        },
+      ]);
       expect(state.noNewStreak).toBe(2);
       expect(state.terminalReason).toBe("saturated");
       expect(state.aggregate!.findings).toHaveLength(1);

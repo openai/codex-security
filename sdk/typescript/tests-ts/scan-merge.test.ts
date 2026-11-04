@@ -587,3 +587,65 @@ test.each(["exact", "changed severity", "changed provenance"] as const)(
     );
   },
 );
+
+test.each([
+  "missing archive",
+  "partial archive",
+  "archive without ID list",
+] as const)(
+  "retains historical source membership and keeps unsupported comparisons separate (%s)",
+  async (kind) => {
+    const original = finding("saved", { codeEvidence });
+    const saved = merge(
+      submission(["first:0"]),
+      [child("first", [original])],
+      null,
+    ).aggregate;
+    const provenance = saved.findings[0]!.provenance;
+    if (kind === "missing archive") delete provenance.sourceFindings;
+    if (kind === "partial archive")
+      provenance.sourceFindings![0]!.finding = { title: original.title };
+    if (kind === "archive without ID list") delete provenance.sourceFindingIds;
+    const inputs = [
+      child("next", [
+        finding("next", { title: "Different report", codeEvidence }),
+      ]),
+    ];
+    const raw = submission(["first:0", "next:0"]);
+    let calls = 0;
+    const checked = await confirmScanMerge(
+      merge(raw, inputs, saved),
+      inputs,
+      saved,
+      async () => {
+        calls++;
+        return { reviews: [] };
+      },
+      (error) => {
+        throw error;
+      },
+    );
+    expect(calls).toBe(kind === "archive without ID list" ? 1 : 0);
+    expect(checked.aggregate.findings).toHaveLength(2);
+    const archived = checked.aggregate.findings[0]!.provenance;
+    expect(archived.sourceFindingIds).toEqual(["first:0"]);
+    expect(archived.sourceFindings).toEqual(provenance.sourceFindings ?? []);
+    const visible = structuredClone(saved.findings[0]!);
+    const repeat = [child("next", [visible])];
+    const repeated = await confirmScanMerge(
+      merge(raw, repeat, saved),
+      repeat,
+      saved,
+      async () => {
+        throw new Error("An exact visible repeat required review");
+      },
+      (error) => {
+        throw error;
+      },
+    );
+    expect(repeated.aggregate.findings).toHaveLength(1);
+    expect(repeated.aggregate.findings[0]!.provenance.sourceFindingIds).toEqual(
+      ["first:0", "next:0"],
+    );
+  },
+);
