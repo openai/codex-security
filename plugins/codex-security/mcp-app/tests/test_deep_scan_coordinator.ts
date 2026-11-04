@@ -31,6 +31,7 @@ import path from "node:path";
 import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
   AsyncLock,
