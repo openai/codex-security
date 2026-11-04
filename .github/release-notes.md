@@ -17,6 +17,7 @@
 - honor bounded Retry-After on hosted scanner reads ([#2086](https://github.com/openai/codex-security/pull/2086))
 - handle disconnected child stdin on macOS ([#2275](https://github.com/openai/codex-security/pull/2275))
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
+- simplify scanner imports and clarify Cloud receipts ([#2271](https://github.com/openai/codex-security/pull/2271))
 
 <!-- release-section: highlights:end -->
 

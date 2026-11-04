@@ -1,8 +1,8 @@
 # Import Semgrep findings
 
-Import native Code CLI or CI JSON to retain severities and available snippets.
-Self-contained Semgrep SARIF 2.1.0 is also supported. Either format can be gzipped.
-For selected findings from the Semgrep Platform API, use the
+Use native Semgrep Code CLI or CI JSON to keep severity and available snippets.
+You can also import self-contained Semgrep SARIF 2.1.0. Either format can be
+gzipped. For selected SAST findings from the Platform API, use the
 [local SDK example](#import-selected-semgrep-platform-sast-findings-with-the-sdk).
 
 ## Quick start
@@ -10,18 +10,31 @@ For selected findings from the Semgrep Platform API, use the
 In Codex, [import selected Guardian findings](#import-selected-guardian-findings) with your existing Semgrep sign-in.
 For a whole project and ref, use the [Web API collector](#collect-a-platform-project-and-branch).
 
-[Enable external imports](README.md#preview-a-report). From the scanned checkout root,
-preview a saved SAST report using the repository's credential-free HTTP(S) URL
-and a stable key for the organization, project and branch. If you need a report,
-[capture one with Semgrep](#ci-artifacts).
+[Enable external imports](README.md#preview-a-report). From the scanned checkout
+root, choose a saved report or run Semgrep in the same shell.
 
-For an existing report, set its path in the same shell.
+**Saved report.** Set the path to your Code report. For a `semgrep ci`
+artifact, check that the job scanned only Code. The policy and baseline
+determine which matches the report contains. Exit 1 can mean the job found
+blocking matches and produced a valid report.
 
 ```sh
 semgrep_report=../reports/semgrep.json
 ```
 
-Preview the selected report.
+**Run Semgrep.** Supply your SAST rules and write the JSON to a private
+directory outside the checkout. [Semgrep CLI reference](https://docs.semgrep.dev/cli-reference)
+
+```sh
+semgrep_report=
+report_dir=$(mktemp -d) &&
+  semgrep scan --config /path/to/sast-rules.yaml --json-output "$report_dir/semgrep.json" . &&
+  semgrep_report="$report_dir/semgrep.json"
+```
+
+**Preview the report.** Replace the example URL with the checkout's
+credential-free HTTP(S) URL. Use a stable source key for the organization,
+project and branch.
 
 ```sh
 codex-security publish findings "$semgrep_report" --to local --repository . \
@@ -29,12 +42,9 @@ codex-security publish findings "$semgrep_report" --to local --repository . \
   --source-key example/project/main --dry-run --format json
 ```
 
-## Import and verify
-
-Check the declared source URL against the checkout's Git remote. With an empty
-or wholly excluded report, the preview alone does not establish a repository match.
-[Save or publish and verify](README.md#save-or-publish-and-verify) using the
-same source URL and key. Cloud uses the `semgrep` provider.
+Check the findings, exclusions and source URL. If the preview has no accepted
+findings, verify the URL against the checkout's Git remote yourself. Keep the
+same URL and key when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
 
 ## Import selected Guardian findings
 
@@ -292,58 +302,39 @@ to store the native finding as JSON text. Its local ID and source finding ID sta
 the same, and its version increases once. Replaying the same evidence again
 reports it as unchanged.
 
-## Reference
-
-### CI artifacts
-
-Use a saved artifact from a Code-only `semgrep ci` job. Policy and baseline
-determine which matches it contains. Exit 1 can indicate blocking findings
-even when the report is valid. Check the job's product selection and exit status.
-
-To create a local report, run Semgrep from the repository root with your
-SAST rules. Write to a private directory outside the checkout. After a
-successful scan, use that file in the preview above. [Semgrep CLI reference](https://docs.semgrep.dev/cli-reference)
-
-```sh
-semgrep_report=
-report_dir=$(mktemp -d) &&
-  semgrep scan --config /path/to/sast-rules.yaml --json-output "$report_dir/semgrep.json" . &&
-  semgrep_report="$report_dir/semgrep.json"
-```
-
-### Evidence and identity
+## Evidence and identity
 
 Native JSON retains the result, rule, CWE IDs, range, snippets and ignored
-state when supplied. SARIF retains the selected rule and result, including
-traces and fixes. SARIF `error` imports as high even if the original severity
-was critical. Check Cloud exclusions for deeply nested traces.
+state when present. SARIF retains the selected rule and result, including
+traces and fixes. SARIF `error` imports as high even if Semgrep assigned
+critical severity. Check Cloud exclusions for deeply nested traces.
 [Semgrep output fields](https://docs.semgrep.dev/semgrep-appsec-platform/json-and-sarif)
 
-The match ID uses JSON `extra.fingerprint` or SARIF `matchBasedId/v1`.
-Reimporting the same fingerprint under the same source key and repository
-updates its location. If the fingerprint is absent or says `requires login`,
-the ID uses rule, literal path and range. Moving the match then creates a new
-record. [Imported evidence and identity](schema-guide.md)
+The match ID comes from JSON `extra.fingerprint` or SARIF `matchBasedId/v1`.
+Under the same source key and repository, the fingerprint lets you update a
+match when it moves. If the fingerprint is missing or says `requires login`,
+the ID comes from the rule, literal path and range. Moving that match
+creates a new record. [Imported evidence and identity](schema-guide.md)
 
-For CLI/CI JSON and SARIF, use SAST-only rules. Identifiable Supply Chain and Secrets results are
-excluded, but SARIF can omit the product metadata. Scan errors or unsuccessful
-SARIF invocations stop import. Direct artifact URIs and native `%SRCROOT%`
-paths can supply locations. Indexed artifacts or unresolved bases remain in
-raw evidence and require a fingerprint for identity. Use the original report
-for run-wide inventories and timing.
+For CLI/CI JSON and SARIF, use SAST-only rules. The reader excludes results
+it recognizes as Supply Chain or Secrets, but SARIF can omit product metadata.
+Scan errors or an unsuccessful SARIF invocation stop the import. Direct artifact URIs and native
+`%SRCROOT%` paths can supply locations. Indexed artifacts and unresolved bases
+stay in the raw evidence and need a fingerprint for identity. Keep the original
+report for run-wide inventories and timing.
 
-SDK callers pass `sourceRepositoryUrl` to the native or SARIF normalizer.
-When using `prepareNormalizedLocalImport` directly, pass the original SARIF
+If you call the JSON or SARIF normalizer from the SDK, pass `sourceRepositoryUrl`.
+When calling `prepareNormalizedLocalImport` directly, pass the original SARIF
 repository references in the third argument's `sourceRepositories`. Use
 `{ url, platform: "github" }` for a verified custom GitHub host.
 
-### Import selected Semgrep Platform SAST findings with the SDK
+## Import selected Semgrep Platform SAST findings with the SDK
 
-Request `issue_type=sast` and save the original project lookup and findings
-pages as response text. Pass each findings page separately. The SDK checks
-every row on pages that contain a selected ID for conflicting product evidence.
-When a page contains only fields shared by several products, the original
-request filter identifies the product.
+**Collect the selection.** Request `issue_type=sast` and save the original
+project lookup and each findings page as response text. On any page with a
+selected ID, the SDK checks every row for conflicting product information.
+When rows contain only fields shared across products, the request filter
+establishes that the findings are SAST.
 
 Use the IDs from the original Web API results for this SDK import. The SDK
 accepts saved responses from an authorized operator. Fetching new Web API
@@ -351,23 +342,22 @@ responses requires read access. For selections made in Codex, use the
 [Guardian workflow](#import-selected-guardian-findings).
 [Findings Web API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings)
 
-Use the full ref from the findings, such as `refs/heads/main` or
-`refs/tags/v1`. Supply the credential-free HTTP(S) repository URL you verified
-for the checkout. The native `project.url` and any selected
-`finding.repository.url` must match it exactly.
+**Check the project and ref.** Use the full ref from the findings, such as
+`refs/heads/main` or `refs/tags/v1`. Verify the checkout's credential-free
+HTTP(S) URL. The native `project.url` must match it exactly. Check the
+repository fields on each selected finding.
 
-- An exact finding URL is sufficient when `repository.id` is absent, even if
-  the display names differ. If several projects share the URL and ref, choose
-  the finding IDs from the intended project.
-- Any `repository.id` supplied must match `project.id`. When the finding has
-  no URL, it must include both the matching project ID and a `repository.name`
-  equal to the decoded, namespace-qualified path in the supplied URL, such as
-  `example/project`.
+- If a finding has a `repository.url`, it must match the verified URL exactly.
+  That URL is enough when the ID is absent, even if display names differ.
+  If several projects share the URL and ref, choose IDs from the intended project.
+- If a finding supplies `repository.id`, it must match `project.id`. A finding
+  without a URL also needs the matching ID and a `repository.name` equal to
+  the decoded, namespace-qualified URL path, such as `example/project`.
 
-[Enable external imports](README.md#preview-a-report). In a Node.js project
-you control outside the scanned checkout, install `@openai/codex-security`
-and save this script as `preview-semgrep.mjs`. Set the deployment, ref,
-repository URL, source key and finding IDs for your selection. Pass the IDs as
+**Preview the selection.** [Enable external imports](README.md#preview-a-report).
+In a Node.js project you control outside the scanned checkout, install
+`@openai/codex-security` and save this script as `preview-semgrep.mjs`.
+Set the deployment, ref, repository URL, source key and finding IDs. Use
 positive decimal strings without leading zeros to preserve 64-bit IDs.
 
 ```js
@@ -401,25 +391,24 @@ const prepared = await prepareNormalizedLocalImport(
 console.log(JSON.stringify(prepared.preview, null, 2));
 ```
 
-Run the script from your SDK project. Pass the checkout, project response and
-each saved findings page as absolute paths.
+From your SDK project, pass the checkout, project response and each findings
+page as absolute paths.
 
 ```sh
 node preview-semgrep.mjs /path/to/checkout /path/to/reports/semgrep-project.json \
   /path/to/reports/semgrep-findings-1.json
 ```
 
-Review the repository, findings and exclusions. To save the selection, append
-`await prepared.import()` to a copy of the script in your SDK project and run
-that copy with the same inputs.
-[Read back the local records](README.md#save-or-publish-and-verify) using the
-checkout path from the preview.
-Keep the same source key on replay. Each occurrence is identified by deployment,
-project ID, SAST product, full ref and native finding ID.
+Check the repository, findings and exclusions. To save the selection, append
+`await prepared.import()` to a copy of the script and run the copy with the
+same inputs. [Read back the local records](README.md#verify-the-import).
 
-The stored evidence includes the selected finding and the project's ID, name
-and URL. Larger positive integer IDs are retained without rounding. Equivalent
-numeric spellings (`2` and `2.0`) and key order do not change the stored record.
-Preview excludes findings that lack both a native rule name and a message.
+Each occurrence uses the deployment, project ID, SAST product, full ref and
+native finding ID. Reuse the same source key for later imports. The stored
+evidence includes the selected finding and the project's ID, name and URL.
+The SDK preserves large positive IDs exactly. Key order and equivalent numeric
+spellings (such as `2` and `2.0`) leave the stored record unchanged.
+
+The preview excludes findings that lack both a native rule name and a message.
 Only repository-relative files become locations. URI-like and directory-only
 paths stay in the native evidence.
