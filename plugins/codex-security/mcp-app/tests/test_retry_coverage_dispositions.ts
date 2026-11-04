@@ -74,7 +74,7 @@ for (const resume of [false, true]) {
             provenance: { source: "local_plugin", candidateId },
           }));
         const { scanDir } = await publishCoverageFixture(root, "partial", {
-          stopBeforeDraft: true,
+          outcome: "no parent",
           resume,
           otherWorkerCandidateIds: cases.map((row) => row.candidateId),
           retryCoverage: resolveOnRetry
