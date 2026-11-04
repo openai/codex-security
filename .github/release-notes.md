@@ -35,6 +35,8 @@
 - clarify pre-commit hook scope and upgrades ([#1536](https://github.com/openai/codex-security/pull/1536))
 - pass severity record efforts through to the host ([#1842](https://github.com/openai/codex-security/pull/1842))
 - ignore DOCX tab stop definitions when extracting text ([#2284](https://github.com/openai/codex-security/pull/2284))
+- audit bundled MCP and triage eval dependencies ([#2328](https://github.com/openai/codex-security/pull/2328))
+- give Promptfoo version updates their own PRs ([#2329](https://github.com/openai/codex-security/pull/2329))
 
 <!-- release-section: highlights:end -->
 
