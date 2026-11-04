@@ -182,6 +182,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           environment: current.environment,
           nativeProfile: current.nativeProfile,
+          hasProviderEnvKey: current.hasProviderEnvKey,
           profileMcpServerNames: current.profileMcpServerNames,
           preflightProviderOverrides: current.preflightProviderOverrides,
           ...this.modelSettings.runtimeSettings,
@@ -894,6 +895,7 @@ export async function workerRuntimeSettings(
     native_profile: nativeProfile,
     model_providers: legacyProviders,
   } = isRecord(snapshot) ? snapshot : {};
+  settings.config = workerRuntimeConfiguration(config, snapshot);
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
   }
@@ -921,7 +923,7 @@ export async function workerRuntimeSettings(
       );
     }
     if (isRecord(nativeProfileConfig.model_providers)) {
-      const providerId = workerConfig.model_provider ?? selected.model_provider;
+      const providerId = settings.config.model_provider;
       const provider =
         typeof providerId === "string"
           ? nativeProfileConfig.model_providers[providerId]
@@ -962,7 +964,6 @@ export async function workerRuntimeSettings(
     settings.cyberAccessProgram =
       security.cyber_access_program as CyberAccessProgram;
   }
-  settings.config = workerRuntimeConfiguration(config, snapshot);
   settings.features = workerRuntimeSettingsFromConfig({
     features: settings.config.features,
   }).features;
