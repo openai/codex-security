@@ -570,12 +570,7 @@ for (const claimed of [false, true]) {
       },
       clock: { now: () => deadline, sleep: async () => {} },
       onComplete: async (draft, signal, publication) => {
-        await writeDraft(
-          draft,
-          runWorkbench,
-          signal,
-          publication,
-        );
+        await writeDraft(draft, runWorkbench, signal, publication);
         await assertInterleavedProgressRetained(fixture);
       },
     });
