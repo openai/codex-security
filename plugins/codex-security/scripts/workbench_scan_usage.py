@@ -33,6 +33,8 @@ STATE_DATABASE_TIMEOUT_SECONDS = 1.0
 
 @dataclass(frozen=True)
 class RolloutSession:
+    """Associate a thread and its optional parent with the path of the rollout used for usage accounting."""
+
     thread_id: str
     parent_thread_id: str | None
     path: Path
@@ -40,6 +42,8 @@ class RolloutSession:
 
 @dataclass
 class RolloutUsage:
+    """Collect token counts, their update time, warnings, and account rate-limit observations for a rollout."""
+
     tokens: dict[str, int]
     warnings: set[str]
     tokens_updated_at: datetime | None
@@ -92,7 +96,12 @@ def collect_scan_usage(
     completed_at: str | None = None,
     completed_turn_id: str | None = None,
 ) -> dict[str, Any]:
-    """Count attributable receipts and flag observable gaps inside the scan window."""
+    """Count attributable session receipts during the scan window and report missing coverage.
+
+    The optional thread and completion arguments identify the finishing turn when
+    the scan record alone is insufficient. Return an unavailable usage record when
+    the window, Codex state, or relevant threads cannot be established.
+    """
 
     roots = _scan_root_thread_ids(connection, scan, thread_id)
     parent_ids = set(_scan_root_thread_ids(connection, scan, thread_id, include_workers=False))

@@ -1,3 +1,5 @@
+"""Exercise deep scan registration, coordinator claims, iteration ordering, and terminal state transitions."""
+
 from __future__ import annotations
 
 import hashlib
@@ -191,6 +193,8 @@ def write_canonical_artifacts(scan_dir: Path) -> dict[str, Path]:
 
 @dataclass(frozen=True)
 class DeepScan:
+    """Keep a test scan ID, state directory, and Codex home together when issuing worker and coordinator commands."""
+
     state_dir: Path
     codex_home: Path
     id: str

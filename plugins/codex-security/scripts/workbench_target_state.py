@@ -15,11 +15,13 @@ from windows_paths import extended_path, portable_path
 
 
 def stable_target_id(target: Path) -> str:
+    """Hash the supplied path spelling into the workbench ID for a local workspace."""
     digest = hashlib.sha256(f"local-workspace\0{target}".encode()).hexdigest()
     return f"target_sha256_{digest}"
 
 
 def backfill_security_targets(connection: sqlite3.Connection) -> None:
+    """Fill missing target IDs on scans and workspaces in the caller’s transaction."""
     rows = connection.execute(
         """
         SELECT target_path FROM workspaces WHERE target_path IS NOT NULL
@@ -43,6 +45,7 @@ def backfill_security_targets(connection: sqlite3.Connection) -> None:
 def ensure_security_target(
     connection: sqlite3.Connection, target_path: str, *, preferred_target_id: str | None = None
 ) -> str:
+    """Return the ID already associated with the path or insert a deterministic ID for it."""
     target = portable_path(Path(target_path))
     target_path = str(target)
     extended_target_path = str(extended_path(target))

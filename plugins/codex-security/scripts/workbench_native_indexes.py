@@ -21,6 +21,7 @@ def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Return a page of indexed findings after applying the requested filters, with nextOffset for continuation."""
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
     findings = (
@@ -204,6 +205,7 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
+    """Return tracked targets with scan summaries, finding counts, and current checkout availability."""
     by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
         f"""
