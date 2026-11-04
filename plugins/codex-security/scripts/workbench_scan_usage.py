@@ -114,7 +114,7 @@ def collect_scan_usage(
             roots,
             warnings,
             worker_directories=worker_directories,
-            scan_directory=Path(scan["scan_dir"]),
+            scan_directory=Path(scan["scan_dir"]) if worker_directories else None,
             started_at=started_at,
             completed_at=stopped_at,
         )
