@@ -31,17 +31,23 @@ export interface Result {
 }
 
 const explicitSecretTerms =
-  /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
-const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?(?:exposure|disclosure)s?`;
+  /secrets?|credentials?|passwords?|tokens?|(?:api|private) ?keys?|hard ?cod(?:e[ds]?|ing)?/i;
+const secretTerms = `${explicitSecretTerms.source}|sensitive ?(?:data|information) ?(?:exposure|disclosure)s?`;
 const explicitSecretCategory = new RegExp(
   String.raw`\b(?:${explicitSecretTerms.source})\b`,
   "i",
 );
 const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
-const responseCategory =
-  /^(?:sensitive information in response|insertion of sensitive information into sent data)$/i;
-const negatedSecretCategory = new RegExp(
-  String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
+const runtimeCategoryCwes = new Map([
+  ["sensitive information in response", "CWE-201"],
+  ["insertion of sensitive information into sent data", "CWE-201"],
+  ["insufficiently protected credentials", "CWE-522"],
+]);
+const disclosureTerms =
+  /(?:(?:sensitive )?(?:data|information) )?(?:(?:disclos|expos)(?:ures?|ed)|leak(?:s|ed|age)?)/;
+const negatableTerms = `${secretTerms}|${disclosureTerms.source}`;
+const negatedCategory = new RegExp(
+  String.raw`^(?:(?:not(?: ?an?)?|non|no|without|den(?:y|ied)) ?(?:${negatableTerms})\b|(?:${negatableTerms}) ?free\b)`,
   "i",
 );
 const supportingLocation = (location: SourceLocation) =>
@@ -95,11 +101,12 @@ function matches(
   codes = finding.taxonomy?.cwe ?? [],
 ) {
   const category = (finding.taxonomy?.category ?? "")
-    .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .trim();
+    .replace(/[-_\s]+/g, " ")
+    .trim()
+    .toLowerCase();
   if (
-    negatedSecretCategory.test(category) ||
+    negatedCategory.test(category) ||
     !finding.locations?.some((location) => matchesLocation(location, expected))
   )
     return false;
@@ -115,8 +122,8 @@ function matches(
   )
     return true;
   if (expected.category === "sensitive-data-exposure") {
-    if (responseCategory.test(category.replaceAll("-", " ")))
-      return cwes.includes("CWE-201");
+    const exact = runtimeCategoryCwes.get(category);
+    if (exact) return cwes.includes(exact);
     // The endpoint returns a value loaded at runtime. Source storage is a different defect.
     return (
       (/disclos|expos|leak|authenticat|authoriz|access[- ]control/i.test(
@@ -124,7 +131,7 @@ function matches(
       ) ||
         (explicitSecretCategory.test(category) &&
           /\bresponses?\b/i.test(category))) &&
-      !/hard[- ]?cod|in[- ]source|cleartext[- ]storage/i.test(category) &&
+      !/hard ?cod|^(?:credential|secret|password|token)s? in source|cleartext storage/i.test(category) &&
       cwes.some((cwe) => expected.cwes.includes(cwe))
     );
   }
