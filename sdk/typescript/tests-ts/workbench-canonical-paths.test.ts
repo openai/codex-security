@@ -85,7 +85,7 @@ const caseSensitiveWindowsHistoryProbe = [
   "identities = {entry['target_path']: entry['repository_identity'] for entry in targets}",
   "def inspect(database, target_id, path, stored, **kwargs):",
   "    identity = identities.get(path)",
-  "    repository = target_state.GitRepositoryIdentity(identity, WindowsPath(path).name, 'synthetic', 1, 2, 3) if identity else None",
+  "    repository = target_state.GitRepositoryIdentity(identity, WindowsPath(path).name, 'synthetic', 1, 2, 3, 3) if identity else None",
   "    return target_state.RepositoryTargetState(target_id, path, stored, resolved_path=str(WindowsPath(path)), repository=repository, ownership_matches=True, strict_owner_matches=True)",
   "target_state._inspect_repository_target = inspect",
   "target_state.repository_origin = lambda path: ('example.test', 'synthetic/repository')",

@@ -91,7 +91,7 @@ def add_target(name, stored, live=None, relative=".", birth=1_000_000_000):
     paths[name] = path
     metadata[path] = SimpleNamespace(st_mode=stat.S_IFDIR, st_dev=7, st_ino=100 + len(paths))
     details[path] = state.GitRepositoryIdentity(
-        live or stored or "repository-current", relative, str(root / "common"), 11, 22, birth
+        live or stored or "repository-current", relative, str(root / "common"), 11, 22, birth, birth
     )
     if state.supports_repository_identity(connection):
         connection.execute(

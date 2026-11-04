@@ -27,7 +27,7 @@ if scenario == "identities":
     connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
 refused = set()
 def inspect(database, target_id, path, stored, **kwargs):
-    repository = state.GitRepositoryIdentity(stored, ".", "synthetic", 1, 2, 3) if stored else None
+    repository = state.GitRepositoryIdentity(stored, ".", "synthetic", 1, 2, 3, 3) if stored else None
     return state.RepositoryTargetState(
         target_id, path, stored, resolved_path=path, repository=repository,
         ownership_matches=target_id not in refused, strict_owner_matches=True,
