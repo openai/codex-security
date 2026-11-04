@@ -1662,7 +1662,7 @@ def register_cli_scan(
         **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
-        "phase": scan["phase"],
+        **({"phase": scan["phase"]} if mode == "standard" else {}),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
