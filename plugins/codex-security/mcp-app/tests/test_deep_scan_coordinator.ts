@@ -38,10 +38,8 @@ import {
 } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
-  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
-  DeepScanNonRetryableError,
   AsyncLock,
   classifyCodexWorkerError,
   codexWorkerTurnError,
