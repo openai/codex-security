@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 
 def enrich(sbom, components):
-    """Extend an SPDX document with installed npm packages and the native files they contain.
+    """Add installed npm packages, bundled tokenizer libraries, and native files to an SPDX document.
 
     Args:
         sbom (dict): apko's single-image SPDX document, updated in place.
@@ -48,6 +48,15 @@ def enrich(sbom, components):
             "checksums": [{"algorithm": "SHA512", "checksumValue": checksum}],
             "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
                               "referenceLocator": purl}],
+        })
+
+    for i, item in enumerate(components.get("bundled_tokenizer", [])):
+        add(npm_ids[PurePosixPath("node_modules/@openai/codex-security")], {
+            "SPDXID": f"SPDXRef-tokenizer-{i}", "name": item["name"], "versionInfo": item["version"],
+            "downloadLocation": "NOASSERTION", "licenseDeclared": item["licenses"][0]["license"]["id"],
+            "filesAnalyzed": False, "sourceInfo": "Bundled in the SDK embedding tokenizer.",
+            "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
+                              "referenceLocator": item["purl"]}],
         })
 
     for i, item in enumerate(components["bundled_native"]):
