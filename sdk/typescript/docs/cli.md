@@ -249,6 +249,15 @@ recipe retains the endpoint and deployment, and reads the credential again for
 each run. Azure deployment names do not identify a price. Scans report token
 usage and reject `--max-cost` for this provider. [Azure Responses API guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses)
 
+### Hugging Face compatibility
+
+The bundled Codex 0.166.0 scanner sends its scan-completion tool inside a
+`namespace` and can request `web_search`. Hugging Face's published Responses
+implementation accepts `function` and remote `mcp` tool declarations. A named
+Hugging Face scan provider is deferred until the scanner and router can exchange
+the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
+and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469a9f59ad16e2eb3a0d6f1c4de637a7b/src/schemas.ts#L219-L232).
+
 ### Amazon Bedrock
 
 Use AWS credentials and a region with access to the exact Bedrock model ID:
@@ -2339,9 +2348,11 @@ or the [Bedrock workflow](https://github.com/openai/codex-security/blob/main/exa
 
 ### Local pre-commit checks
 
-`install-hook` checks staged and unstaged changes, blocking the commit on scan
-failure or findings at/above its threshold (`high` by default). Use required CI
-for enforcement; local hooks are optional.
+The generated hook runs a `--working-tree` scan and blocks the commit on scan
+failure or findings at or above its threshold (`high` by default). It uses the
+checkout's normal index for staged and unstaged changes, so it can include changes
+outside a partial commit and miss content staged only in a separate index.
+Use required CI for enforcement because local hooks are optional.
 
 Install the CLI outside the target repository and run that copy directly. `npx`
 can select a repository-local package. Before installation, inspect:
@@ -2359,11 +2370,12 @@ codex-security install-hook /path/to/repository
 ```
 
 To migrate an existing generated hook, verify it is a regular file used only by
-this repository and contains only the generated command. Preserve its severity.
-The installer can update older `npx` hooks when the severity matches. New hooks
-record absolute Node/CLI paths. If those change, back up and remove the verified
-generated hook, then reinstall with the same threshold. Restore the backup if
-installation fails. The installer respects `core.hooksPath`.
+this repository and contains only the generated commands. Rerun `install-hook`
+with `--fail-on-severity` set to its original threshold. It recognizes the legacy
+`npx` hook and supported earlier templates with matching absolute Node and CLI
+paths. If it refuses to overwrite the verified hook, back it up, remove it and
+reinstall with the same threshold. Restore the backup if installation fails. The installer
+respects `core.hooksPath`.
 
 ## Import SonarQube Cloud issues
 
