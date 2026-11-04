@@ -179,6 +179,41 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
     locations: [],
     source_data: { finding: sca.structuredContent.findings[0] },
   });
+  await using wrongProvider = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "wiz", sourceKey: "test" },
+    { remote: "https://github.com/other/service" },
+  );
+  for (const input of [normalized, { ...normalized, report: undefined }]) {
+    await expect(wrongProvider.prepareNormalized(input)).rejects.toThrow(
+      /semgrep provider/,
+    );
+  }
+  const original = normalized.findings[0]!;
+  await using source = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const otherUrl = "https://github.com/other/service";
+  source.git("remote", "add", "upstream", otherUrl);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      report: { ...normalized.report, repositoryUrl: otherUrl },
+    }),
+  ).rejects.toThrow(/Guardian repository/);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      findings: [
+        {
+          ...original,
+          source_finding_id: "semgrep-guardian:" + "0".repeat(64),
+        },
+      ],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   expect(normalized.findings[0]!.evidence.packages ?? []).toEqual([]);
   expect(normalized.findings[0]!.source_finding_id).not.toBe(
     normalizeSemgrepFindings(capture, {}, "local").findings[0]!

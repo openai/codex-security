@@ -98,6 +98,10 @@ codex-security publish findings /path/to/private/guardian.json --provider semgre
   --to local --repository /path/to/project --source-key example/project/topic --dry-run --format json
 ```
 
+For normalized SDK imports, select the `semgrep` provider and keep each generated
+Guardian ID with its original finding and collection scope. The repository URL
+in each finding must agree with the report's mapping.
+
 Guardian records retain the original MCP fields. The summary omits end lines,
 CWEs, package versions and fix versions. Guardian and Web API records keep
 separate identities even when their IDs look identical. To verify a pair,

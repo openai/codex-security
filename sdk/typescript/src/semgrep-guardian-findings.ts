@@ -2,6 +2,8 @@ import {
   repositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
+import { CodexSecurityError } from "./errors.js";
+import type { ExternalFinding } from "./external-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
@@ -20,6 +22,51 @@ import {
 } from "./semgrep-platform-findings.js";
 
 export const guardianSelectionFormat = "semgrep-guardian-selection/v1";
+
+export const guardianFindingId = /^semgrep-guardian:[0-9a-f]{64}$/u;
+
+function guardianId(scope: Record<string, unknown>, id: unknown) {
+  return stableId("semgrep-guardian", [
+    scope["deployment"],
+    scope["repository"],
+    scope["tool"],
+    scope["ref"],
+    id,
+  ]);
+}
+
+export function guardianImportRepository(value: unknown, provider: string) {
+  if (provider !== "semgrep")
+    throw new CodexSecurityError(
+      "Use the semgrep provider for Guardian findings.",
+    );
+  return declaredScannerRepositoryUrl(value, "Guardian", "local");
+}
+
+export function guardianFindingRepository(
+  { source_finding_id, evidence }: ExternalFinding,
+  provider: string,
+  reportUrl?: string,
+) {
+  const data = evidence.source_data ?? {};
+  const generated = guardianFindingId.test(source_finding_id);
+  if (data["format"] !== guardianSelectionFormat && !generated) return;
+  const url = guardianImportRepository(data["sourceRepositoryUrl"], provider);
+  if (generated) {
+    const row = record(data["finding"], "Original Guardian finding");
+    if (source_finding_id !== guardianId(data, row["id"]))
+      throw new CodexSecurityError(
+        "The normalized finding ID does not match the original Guardian finding.",
+      );
+  }
+  for (const claim of [reportUrl, evidence.details?.repository?.url]) {
+    if (claim && repositoryUrlKey(claim) !== repositoryUrlKey(url))
+      throw new CodexSecurityError(
+        "Guardian repository does not match the normalized finding or report.",
+      );
+  }
+  return url;
+}
 
 type GuardianTool =
   "get_semgrep_sast_findings" | "get_semgrep_supply_chain_findings";
@@ -222,14 +269,7 @@ export function normalizeGuardianSelection(
       );
     },
     // Guardian's string ID has not been verified against Web API occurrence IDs.
-    (finding) =>
-      stableId("semgrep-guardian", [
-        deployment,
-        repository,
-        tool,
-        ref,
-        finding["id"],
-      ]),
+    (finding) => guardianId(scope, finding["id"]),
     "local",
     { report: { format: guardianSelectionFormat, repositoryUrl: url } },
   );

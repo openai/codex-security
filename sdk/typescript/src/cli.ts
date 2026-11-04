@@ -234,6 +234,7 @@ import {
 } from "./github-advisories.js";
 import {
   collectSnykIssues,
+  snykRestApiVersion,
   SNYK_REST_ISSUES_FORMAT,
 } from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
@@ -4239,7 +4240,7 @@ export async function main(
       output: z
         .object({
           format: z.literal(SNYK_REST_ISSUES_FORMAT),
-          apiVersion: z.string(),
+          apiVersion: z.literal(snykRestApiVersion),
           apiOrigin: z.string(),
           organizationId: z.string(),
           projectId: z.string(),
