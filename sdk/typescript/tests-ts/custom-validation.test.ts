@@ -212,21 +212,6 @@ async function* responseEvents(
   }
 }
 
-function abortAfterEvidenceOpen(path: string, controller: AbortController) {
-  const native = scanReadBinding();
-  const openRoot = native.openScanReadRoot;
-  return spyOn(native, "openScanReadRoot").mockImplementation((...args) => {
-    const root = openRoot(...args);
-    const openFile = root.openFile.bind(root);
-    spyOn(root, "openFile").mockImplementation((relativePath) => {
-      const file = openFile(relativePath);
-      if (relativePath === path) queueMicrotask(() => controller.abort());
-      return file;
-    });
-    return root;
-  });
-}
-
 describe("custom validation", () => {
   test.each(["scan-manifest.json", "findings.json", "coverage.json"])(
     "rejects %s replaced by a directory before opening the provisional document",
@@ -739,9 +724,6 @@ describe("custom validation", () => {
     "diff",
     "empty",
     "incomplete",
-    "malformed record before abort",
-    "missing evidence before abort",
-    "abort after opening evidence",
     "dismissed",
     "late-progress",
     "live-progress",
@@ -751,18 +733,6 @@ describe("custom validation", () => {
   test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
-      const missingEvidence = scenario === "missing evidence before abort";
-      const checkEvidence =
-        missingEvidence || scenario === "abort after opening evidence";
-      const evidencePath = "artifacts/custom-validation/proof.txt";
-      const lateAbort =
-        checkEvidence || scenario === "malformed record before abort"
-          ? new AbortController()
-          : undefined;
-      using _reader =
-        checkEvidence && lateAbort
-          ? abortAfterEvidenceOpen(evidencePath, lateAbort)
-          : undefined;
       const diff = scenario === "diff";
       const maxTimeMinutes = scenario === "standard" || diff ? 5 : undefined;
       const count = scenario === "empty" ? 0 : 1;
@@ -1033,17 +1003,6 @@ describe("custom validation", () => {
                       "artifacts",
                     );
                     expect(turnOptions.outputSchema).toBeDefined();
-                    if (lateAbort && !checkEvidence) {
-                      const controller = lateAbort;
-                      async function* events(): AsyncGenerator<ThreadEvent> {
-                        try {
-                          JSON.parse("NOT JSON");
-                        } finally {
-                          controller.abort();
-                        }
-                      }
-                      return { events: events() };
-                    }
                     if (scenario === "dismissed") {
                       expect(prompt).toContain("untrusted reviewer feedback");
                       expect(prompt).toContain("reason still applies");
@@ -1059,16 +1018,6 @@ describe("custom validation", () => {
                     const output = result(
                       scenario === "dismissed" ? "suppressed" : "reportable",
                     );
-                    if (checkEvidence) {
-                      output.validations[0]!.validation.artifact_paths = [
-                        evidencePath,
-                      ];
-                      if (!missingEvidence)
-                        await writeFile(
-                          join(scanDir, evidencePath),
-                          "Synthetic proof.",
-                        );
-                    }
                     output.validations[0]!.validation.counterevidence_or_proof_gap =
                       "Synthetic counterevidence from validation.";
                     output.validations[0]!.validation.remaining_uncertainty =
@@ -1176,7 +1125,6 @@ describe("custom validation", () => {
       try {
         const pending = client.run(repository, {
           severityRubric,
-          signal: lateAbort?.signal,
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
@@ -1209,41 +1157,6 @@ describe("custom validation", () => {
             : {}),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
-        if (checkEvidence) {
-          await expect(pending).rejects.toThrow();
-          expect(lateAbort?.signal.aborted).toBe(true);
-          const recovery = workbench([
-            "recover-scan-results",
-            "--scan-id",
-            scanId,
-          ]);
-          if (missingEvidence) {
-            expect((await recovery)["scan"]).toMatchObject({
-              scanId,
-              progress: { status: "failed" },
-              canceledAt: null,
-              failureMessage: expect.stringContaining(
-                "Custom validation evidence: expected a file inside the scan directory. missing file",
-              ),
-            });
-          } else {
-            await expect(recovery).rejects.toThrow(
-              "Canceled scans cannot recover terminal results.",
-            );
-          }
-          return;
-        }
-        if (lateAbort) {
-          await expect(pending).rejects.toMatchObject({
-            cause: { cause: expect.any(SyntaxError) },
-          });
-          const saved = await workbench(["get-scan", "--scan-id", scanId]);
-          expect(saved["scan"]).toMatchObject({
-            canceledAt: null,
-            progress: { status: "failed" },
-          });
-          return;
-        }
         if (scenario === "unfinished-source") {
           await expect(pending).rejects.toThrow(
             "The latest saved scan draft is incomplete",

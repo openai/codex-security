@@ -3784,93 +3784,37 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  const otherScanBudget = new ScanCostLimitExceededError(
-    0.001,
-    estimateScanCost("gpt-5.6-sol", { input_tokens: 1_000, output_tokens: 0 })!,
-    "other-scan",
-  );
-  const nativeAbort = new DOMException("subprocess interrupted", "AbortError");
-  const decoderError = new Error("Failed to parse item: NOT JSON", {
-    cause: new SyntaxError(),
-  });
-  test.each([
-    ["native abort", nativeAbort, undefined, true],
-    ["decoder failure", decoderError, undefined, false],
-    ["forwarded budget stop", otherScanBudget, otherScanBudget, true],
-    ["decoder failure on external stop", decoderError, otherScanBudget, false],
-    ["late caller abort", nativeAbort, undefined, false],
-    [
-      "caller deadline",
-      nativeAbort,
-      new DOMException("Scan timed out", "TimeoutError"),
-      true,
-    ],
-    [
-      "independent timeout during caller abort",
-      new DOMException("Request timed out", "TimeoutError"),
-      undefined,
-      false,
-    ],
-    ["older plugin", nativeAbort, undefined, false],
-    [
-      "unrelated abort",
-      Object.assign(new Error("subprocess aborted", { cause: decoderError }), {
-        name: "AbortError",
-      }),
-      undefined,
-      false,
-    ],
-  ] as const)(
-    "saves scan history for %s",
-    async (scenario, nativeError, reason, canceled) => {
-      const { root, repository, codexHome, scanDir } = await scanDirectories();
-      const runtime = preparedRuntime(codexHome);
-      if (scenario === "older plugin") {
-        const pluginRoot = await copyCredentialTestPlugin(root);
-        const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
-        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-        delete manifest.codexSecurity.registeredScanCancellation;
-        await writeFile(manifestPath, JSON.stringify(manifest));
-        runtime.plugin = {
-          ...runtime.plugin,
-          pluginRoot,
-          installedRoot: pluginRoot,
-        };
-      }
+  test.each([true, false])(
+    "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
+    async (failureFirst) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const late = scenario === "late caller abort";
+      const message = "Synthetic native turn failure";
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (!late) controller.abort(reason);
-        throw nativeError;
+        if (!failureFirst) controller.abort();
+        try {
+          yield { type: "turn.failed", error: { message } };
+        } finally {
+          // The reader closes a failed stream after observing its terminal event.
+          if (failureFirst) controller.abort();
+        }
       }
       let stopped: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        prepareRuntime: async () => runtime,
         createCodex: codexFactory(async () => ({ events: events() })),
-        runWorkbench: async (options, args, input) => {
-          if (args[0] === "get-scan" && !options.signal) controller.abort();
-          if (args[0] === "fail-scan") stopped = args;
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan")
+            stopped = args;
           return mockWorkbench(args, input);
         },
       });
-      const scan = client.run(repository, { signal: controller.signal });
-      const error = await scan.catch((error: unknown) => error);
-      expect(error).toBeInstanceOf(ScanInterruptedError);
-      const interrupted = error as ScanInterruptedError;
-      const cause = late ? controller.signal.reason : nativeError;
-      if (reason instanceof ScanCostLimitExceededError)
-        expect(interrupted).toBe(reason);
-      else expect(interrupted.cause).toBe(cause);
-      expect(stopped?.slice(1, 3)).toEqual(["--scan-id", "scan_example_001"]);
-      expect(stopped).toContainEqual(expect.stringMatching(/^--message=.+/));
-      if (
-        nativeError === decoderError ||
-        nativeError.name === "TimeoutError" ||
-        late
-      )
-        expect(stopped).toContain(`--message=${nativeError.message}`);
-      expect(stopped?.includes("--canceled")).toBe(canceled);
+      await expect(
+        client.run(repository, { signal: controller.signal }),
+      ).rejects.toThrow();
+      expect(controller.signal.aborted).toBe(true);
+      expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
+      if (failureFirst) expect(stopped).toContain(`--message=${message}`);
     },
   );
 
@@ -3922,6 +3866,7 @@ if __name__ == "__main__":
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
       const warnings: string[] = [];
+      let savedFailure: string | undefined;
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -3929,13 +3874,8 @@ if __name__ == "__main__":
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
-          if (args[0] === "fail-scan") {
-            expect(args).not.toContain("--canceled");
-            expect(args).toContainEqual(
-              expect.stringContaining(join(codexHome, "sessions")),
-            );
-          }
           commands.push(args[0]!);
+          if (args[0] === "fail-scan") savedFailure = args[3];
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -3949,6 +3889,8 @@ if __name__ == "__main__":
       if (enforceCostLimit) {
         await expect(scan).rejects.toThrow("interrupted");
         expect(commands).toContain("fail-scan");
+        expect(savedFailure).toContain("sessions");
+        expect(commands).not.toContain("cancel-scan");
       } else {
         await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
         expect(warnings).toContainEqual(
@@ -9965,7 +9907,9 @@ if __name__ == "__main__":
     | readonly ["boundary"]
     | readonly ["resolve"]
     | readonly ["begin"];
+  type ProgressPartition = "batch" | "staged" | "each";
   type ProgressScenario = {
+    partitions?: readonly ProgressPartition[];
     name: string;
     expected: ScanProgress;
     steps: readonly ProgressScenarioStep[];
@@ -9973,10 +9917,6 @@ if __name__ == "__main__":
   };
   type ScopedProgressScenario = ProgressScenario & {
     initialScope: number | null;
-    partitions?: readonly ("batch" | "each")[];
-  };
-  type SplitProgressScenario = ProgressScenario & {
-    partitions?: readonly boolean[];
   };
   function lastAnchorOrSave(steps: readonly ProgressScenarioStep[]): number {
     const anchor = steps.findLastIndex(
@@ -10051,16 +9991,14 @@ if __name__ == "__main__":
       initialScope = 8,
       workerFirst,
       stopBeforeResolution,
-      split,
-      partition = split ? "each" : "batch",
+      partition = "batch",
     }: {
       steps: readonly ProgressScenarioStep[];
       expected: ScanProgress;
       initialScope?: number | null;
       workerFirst: boolean;
       stopBeforeResolution?: boolean;
-      split?: boolean;
-      partition?: "batch" | "staged" | "each";
+      partition?: ProgressPartition;
     },
     {
       resolutionIndex = -1,
@@ -10247,6 +10185,37 @@ if __name__ == "__main__":
     expect(updates).toEqual(settled);
   }
 
+  const progressScheduleTitle =
+    "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)";
+
+  function progressSchedules(
+    scenarios: readonly ProgressScenario[],
+    defaultPartitions: readonly ProgressPartition[] = ["batch", "each"],
+  ) {
+    return scenarios.flatMap((scenario) =>
+      [false, true].flatMap((workerFirst) =>
+        (scenario.partitions ?? defaultPartitions).flatMap((partition) =>
+          [false, true].map((stopBeforeResolution) => ({
+            ...scenario,
+            workerFirst,
+            partition,
+            stopBeforeResolution,
+          })),
+        ),
+      ),
+    );
+  }
+
+  function testProgressSchedules(
+    scenarios: readonly ProgressScenario[],
+    partitions?: readonly ProgressPartition[],
+  ) {
+    test.each(progressSchedules(scenarios, partitions))(
+      progressScheduleTitle,
+      (scenario) => runProgressScenario(scenario),
+    );
+  }
+
   describe("displayed receipt eligibility after inventory recovery", () => {
     const scenarios: ScopedProgressScenario[] = [];
     for (const mode of [
@@ -10317,24 +10286,7 @@ if __name__ == "__main__":
         ],
       });
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("recovered scope and phase authority", () => {
@@ -10474,24 +10426,7 @@ if __name__ == "__main__":
         });
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("admitted inventory across truncated live copies", () => {
@@ -10605,24 +10540,7 @@ if __name__ == "__main__":
         });
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("saved inventory receipts and live prefix proof", () => {
@@ -10768,23 +10686,7 @@ if __name__ == "__main__":
         ["live", "anchor", "done"],
       ],
     });
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (["batch", "each"] as const).flatMap((partition) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              partition,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("source eligibility and durable inventory proof", () => {
@@ -10902,31 +10804,15 @@ if __name__ == "__main__":
         );
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (["batch", "staged", "each"] as const).flatMap((partition) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              partition,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios, ["batch", "staged", "each"]);
   });
 
   function progressWithWorkerFollowup(
     name: string,
     state: ScanProgress,
     steps: readonly ProgressScenarioStep[],
-    partitions?: readonly boolean[],
-  ): SplitProgressScenario {
+    partitions?: readonly ProgressPartition[],
+  ): ProgressScenario {
     const next =
       state.filesCompleted < state.filesTotal
         ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
@@ -10962,28 +10848,8 @@ if __name__ == "__main__":
     };
   }
 
-  function testProgressSchedules(scenarios: readonly SplitProgressScenario[]) {
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? [false, true]).flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) => runProgressScenario(scenario),
-    );
-  }
-
   describe("review eligibility and ordered projections", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const mode of ["exact", "changed", "after inventory"] as const) {
       for (const eligible of [false, true]) {
         const initialTotal = eligible ? 7 : 6;
@@ -11062,7 +10928,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory authority before scope projection", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const persisted of ["late", "early", "absent"] as const) {
       for (const phase of ["reporting", "attack_path"] as const) {
         const scenario = progressWithWorkerFollowup(
@@ -11133,7 +10999,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory proof across completion intervals", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const total of [9, 10]) {
       for (const tail of ["same", "shrink", "none"] as const) {
         for (const exact of [false, true]) {
@@ -11242,7 +11108,7 @@ if __name__ == "__main__":
   });
 
   describe("bounded inventory marker evidence", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const command of ["changed", "exact"] as const) {
       const live = command === "changed" ? "live-changed" : "live";
       const scenario = progressWithWorkerFollowup(
@@ -11383,7 +11249,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory occurrence and cutoff revalidation", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const control of ["dropped", "delivered", "eligible"] as const) {
       const review = progress("validation", 3, control === "eligible" ? 8 : 10);
       const scenario = progressWithWorkerFollowup(
@@ -11436,7 +11302,7 @@ if __name__ == "__main__":
             : []),
           ["live", "anchor", "done"],
         ],
-        control === "single batch" ? [false] : undefined,
+        control === "single batch" ? ["batch"] : undefined,
       );
       scenarios.push(scenario);
     }
@@ -11850,26 +11716,11 @@ if __name__ == "__main__":
         ],
       },
     );
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          [false, true].flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) =>
-        runProgressScenario(scenario, {
-          resolutionIndex: lastLiveAnchor(scenario.steps),
-          pollReceipts: false,
-        }),
+    test.each(progressSchedules(scenarios))(progressScheduleTitle, (scenario) =>
+      runProgressScenario(scenario, {
+        resolutionIndex: lastLiveAnchor(scenario.steps),
+        pollReceipts: false,
+      }),
     );
   });
 
@@ -12001,26 +11852,11 @@ if __name__ == "__main__":
         };
       }),
     ];
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          [false, true].flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) =>
-        runProgressScenario(scenario, {
-          resolutionIndex: lastLiveAnchor(scenario.steps),
-          pollReceipts: false,
-        }),
+    test.each(progressSchedules(scenarios))(progressScheduleTitle, (scenario) =>
+      runProgressScenario(scenario, {
+        resolutionIndex: lastLiveAnchor(scenario.steps),
+        pollReceipts: false,
+      }),
     );
   });
 
@@ -15202,12 +15038,6 @@ if __name__ == "__main__":
             maxCostUsd: 0.004,
             cost: { estimatedUsd: 0.008 },
           });
-        if (scenario !== "completed")
-          expect(
-            commands
-              .find(([cmd]) => cmd === "fail-scan")
-              ?.includes("--canceled"),
-          ).toBe(scenario === "canceled");
         lateAnswer.resolve(0.016);
         await new Promise((resolve) => setImmediate(resolve));
         expect(requestCount).toBe(1);
@@ -15321,10 +15151,9 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  test.each(["completed", "failed", "unavailable", "final refresh"] as const)(
+  test.each(["completed", "failed", "unavailable"] as const)(
     "recovers exhausted deep-scan budget when completion is %s",
-    async (scenario) => {
-      const completion = scenario === "final refresh" ? "completed" : scenario;
+    async (completion) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
@@ -15347,29 +15176,15 @@ if __name__ == "__main__":
         finishedAt: "2026-01-01T00:01:00Z",
         hasReportableFindings: completion === "completed" ? true : null,
       };
-      const recordUsage = () =>
-        writeUsageSession(codexHome, "scan-thread", {
-          input_tokens: 1_250,
-          cached_input_tokens: 200,
-          output_tokens: 30,
-        });
-      const stop = ScanCostTracker.prototype.stop;
-      const finalRefresh =
-        scenario === "final refresh"
-          ? spyOn(ScanCostTracker.prototype, "stop").mockImplementationOnce(
-              async function (this: ScanCostTracker, usage) {
-                await recordUsage();
-                return stop.call(this, usage);
-              },
-            )
-          : undefined;
       const runStreamed = mock(
         async (_input: string, options: { signal: AbortSignal }) => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             yield { type: "thread.started", thread_id: "scan-thread" };
-            if (finalRefresh)
-              throw new Error("Stream closed before the final usage update.");
-            await recordUsage();
+            await writeUsageSession(codexHome, "scan-thread", {
+              input_tokens: 1_250,
+              cached_input_tokens: 200,
+              output_tokens: 30,
+            });
             await (options.signal.aborted
               ? undefined
               : once(options.signal, "abort"));
@@ -15503,7 +15318,6 @@ if __name__ == "__main__":
           completion === "completed" ? "completed" : "failed",
         ]);
       } finally {
-        finalRefresh?.mockRestore();
         clearTimeout(keepAlive);
         await client.close();
       }

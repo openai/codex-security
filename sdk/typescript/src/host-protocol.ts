@@ -1,9 +1,7 @@
 import { createInterface } from "node:readline";
 import { type Readable, Writable } from "node:stream";
 import { z } from "zod";
-import { HostProtocolError } from "./errors.js";
 
-const cancellationCode = -32800;
 const rpcId = z.union([z.string(), z.number().int()]);
 const envelope = z.strictObject({ jsonrpc: z.literal("2.0") });
 const request = envelope.extend({
@@ -143,12 +141,8 @@ export async function runHostProtocol(
       return;
     }
     terminalCode = 2;
-    const reason =
-      code === cancellationCode
-        ? new Error(message)
-        : new HostProtocolError(message);
-    controller.abort(reason);
-    pending?.reject(reason);
+    controller.abort(new Error(message));
+    pending?.reject(new Error(message));
     pending = undefined;
     // A peer that stopped reading cannot receive an error. Unblock both the
     // request write and completion instead of waiting for a write callback.
@@ -179,7 +173,7 @@ export async function runHostProtocol(
   const outputClosed = () => outputError(new Error("Host output is closed."));
   const interrupted = () => {
     if (terminalCode !== undefined) stopOutput(2);
-    else fail(cancellationCode, `${operation.label} canceled.`);
+    else fail(-32800, `${operation.label} canceled.`);
   };
   const canceled = () => {
     if (

@@ -37,9 +37,11 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
-import { workbenchCommand } from "./support/workbench-command.js";
+import { runWorkbench } from "../src/runtime.js";
+import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   createApiTestFixtures,
   removeTemporaryDirectory,
@@ -157,19 +159,6 @@ async function fixture(
       buildId: "fixture-build",
     },
   };
-}
-
-async function savedHostedScan(
-  input: HostedScanInput,
-  scanId: string,
-  command: "get-scan" | "recover-scan-results" = "get-scan",
-) {
-  const workbench = workbenchCommand(pythonExecutable()!, () => ({
-    PATH: process.env["PATH"],
-    SYSTEMROOT: process.env["SYSTEMROOT"],
-    CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-  }));
-  return (await workbench([command, "--scan-id", scanId]))["scan"];
 }
 
 async function writeDraft(
@@ -1078,26 +1067,21 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
 });
 
 test.each([
-  ["failed", undefined, false],
-  ["failed", "remote-session", false],
-  ["canceled", "remote-session", false],
-  ["acceptance_unknown", "remote-session", false],
-  ["failed", "remote-session", true],
-  ["acceptance_unknown", "remote-session", true],
+  ["failed", undefined],
+  ["failed", "remote-session"],
+  ["canceled", "remote-session"],
+  ["acceptance_unknown", "remote-session"],
 ] as const)(
-  "standalone SDK retains %s host identity %p and usage (caller abort: %p)",
-  async (status, sessionId, callerAborts) => {
+  "standalone SDK retains %s host identity %p and usage in its terminal receipt",
+  async (status, sessionId) => {
     const input = await fixture();
-    const controller = new AbortController();
     const usage = {
       authoritative_snapshot: { input_tokens: 123, output_tokens: 7 },
     };
     let execution: ScanExecutionResult | undefined;
     const terminal = await runHostedScan(input, {
-      signal: controller.signal,
       executor: {
         async run(request) {
-          if (callerAborts) controller.abort();
           execution = receipt(request, {
             status,
             sessionId,
@@ -1112,14 +1096,17 @@ test.each([
         },
       },
     });
-    expect(terminal.status).toBe(
-      callerAborts && status === "failed" ? "canceled" : status,
-    );
+    expect(terminal.status).toBe(status);
     expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
-    expect(await savedHostedScan(input, terminal.scanId!)).toMatchObject({
-      progress: { status: status === "canceled" ? "canceled" : "failed" },
-      failureMessage: "Recorded remote outcome",
+    expect(
+      readSavedScanLifecycle(
+        { CODEX_SECURITY_STATE_DIR: input.stateDirectory },
+        terminal.scanId!,
+      ),
+    ).toMatchObject({
+      scanId: terminal.scanId,
+      status: status === "canceled" ? "canceled" : "failed",
     });
   },
 );
@@ -1289,123 +1276,139 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
-test("cancellation after registration retains scan identity before executor dispatch", async () => {
-  const input = await fixture();
-  const controller = new AbortController();
-  const executor = noExecution();
-  const result = await runHostedScan(input, {
-    signal: controller.signal,
-    onEvent(event) {
-      if (
-        event.type === "progress" &&
-        event.progress.phase === "preflight" &&
-        event.progress.filesTotal > 0
-      )
-        controller.abort(new Error("Invalid JSON."));
-    },
-    executor,
-  });
-  expect(result.status).toBe("canceled");
-  expect(executor.run).not.toHaveBeenCalled();
-  expect(result.scanId).toBeString();
-  expect(result.execution).toBeUndefined();
-  expect(await savedHostedScan(input, result.scanId!)).toMatchObject({
-    scanId: result.scanId,
-    scanDir: result.outputDirectory,
-    progress: { status: "canceled" },
-  });
-});
+test.each([false, true])(
+  "stopping after registration retains scan identity before executor dispatch (timeout=%p)",
+  async (timedOut) => {
+    const input = await fixture();
+    const controller = new AbortController();
+    const executor = noExecution();
+    const result = await runHostedScan(input, {
+      signal: controller.signal,
+      onEvent(event) {
+        if (
+          event.type === "progress" &&
+          event.progress.phase === "preflight" &&
+          event.progress.filesTotal > 0
+        )
+          controller.abort(
+            timedOut
+              ? new DOMException("Host deadline exceeded", "TimeoutError")
+              : undefined,
+          );
+      },
+      executor,
+    });
+    const status = timedOut ? "failed" : "canceled";
+    expect(result.status).toBe(status);
+    expect(executor.run).not.toHaveBeenCalled();
+    expect(result.scanId).toBeString();
+    expect(result.execution).toBeUndefined();
+    const history = await runWorkbench(
+      {
+        python: pythonExecutable()!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          SYSTEMROOT: process.env["SYSTEMROOT"],
+          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+        },
+      },
+      ["list-scans", "--repository", input.repository],
+    );
+    expect(history["scans"]).toMatchObject([
+      {
+        scanId: result.scanId,
+        scanDir: result.outputDirectory,
+        progress: { status },
+        lifecycle: { status },
+      },
+    ]);
+  },
+);
 
-test("an awaited SDK scan saves the protocol fault that interrupted it", async () => {
-  const params = await fixture();
-  const input = new PassThrough();
-  const output = capture();
-  const executor = noExecution();
-  let scan: ReturnType<typeof runHostedScan>;
-  try {
-    const protocol = runHostProtocol(input, output.stream, {
-      label: "Scan",
-      requestMethod: "execution.run",
-      run(_params, _execute, signal) {
-        scan = runHostedScan(params, {
-          signal,
-          executor,
-          onEvent(event) {
-            if (
-              event.type === "progress" &&
-              event.progress.phase === "preflight" &&
-              event.progress.filesTotal > 0
-            )
-              input.write("invalid JSON\n");
-          },
-        });
-        return scan;
+test.each([
+  ["canceled", false, "canceled"],
+  ["failed", false, "canceled"],
+  ["acceptance_unknown", false, "acceptance_unknown"],
+  ["canceled", true, "failed"],
+] as const)(
+  "SDK cancellation retains the executor's %s outcome and usage (timeout=%p, scan=%s)",
+  async (executionStatus, timedOut, scanStatus) => {
+    const input = await fixture();
+    const controller = new AbortController();
+    input.severityRubric = { ...severityRubric };
+    const pending = runHostedScan(input, {
+      signal: controller.signal,
+      executor: {
+        async run(request, options) {
+          expect(request.severityRubric).toEqual(severityRubric);
+          Reflect.set(
+            request.severityRubric!,
+            "markdown",
+            "Edited by executor.",
+          );
+          controller.abort(
+            timedOut
+              ? new DOMException("Host deadline exceeded", "TimeoutError")
+              : undefined,
+          );
+          expect(options.signal.aborted).toBe(true);
+          await Promise.resolve();
+          return receipt(request, {
+            status: executionStatus,
+            error: { code: -32010, message: "Synthetic remote diagnostic" },
+            sessionId: "canceled-session",
+            usage: { input_tokens: 42 },
+          });
+        },
       },
     });
-    send(input, { id: "run", method: "run", params });
-    expect(await protocol).toBe(2);
-    expect(parseJsonLines(output.text()).at(-1)?.error).toMatchObject({
-      code: -32700,
-      message: "Invalid JSON.",
+    input.severityRubric.markdown = "Edited by caller.";
+    const result = await pending;
+    expect(result.status).toBe(scanStatus);
+    expect(
+      readSavedScanLifecycle(
+        { CODEX_SECURITY_STATE_DIR: input.stateDirectory },
+        result.scanId!,
+      ),
+    ).toMatchObject({
+      scanId: result.scanId,
+      status: scanStatus === "acceptance_unknown" ? "failed" : scanStatus,
     });
-    const result = await scan!;
-    expect(executor.run).not.toHaveBeenCalled();
-    expect(await savedHostedScan(params, result.scanId!)).toMatchObject({
-      failureMessage: "Invalid JSON.",
-      progress: { status: "failed" },
+    expect(result.severityRubric).toEqual(severityRubric);
+    expect(result.execution).toMatchObject({
+      status: executionStatus,
+      error: { code: -32010, message: "Synthetic remote diagnostic" },
+      sessionId: "canceled-session",
+      usage: { input_tokens: 42 },
     });
-  } finally {
-    input.destroy();
-  }
-});
+  },
+);
 
-test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
+test("a late cancel preserves a previously committed hosted failure", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  input.severityRubric = { ...severityRubric };
-  const pending = runHostedScan(input, {
+  const run = CodexSecurity.prototype.run;
+  using _cancel = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+    async function (this: CodexSecurity, ...args) {
+      try {
+        return await run.apply(this, args);
+      } finally {
+        controller.abort();
+      }
+    },
+  );
+  const result = await runHostedScan(input, {
     signal: controller.signal,
     executor: {
-      async run(request, options) {
-        expect(request.severityRubric).toEqual(severityRubric);
-        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
-        controller.abort();
-        expect(options.signal.aborted).toBe(true);
-        await Promise.resolve();
-        return receipt(request, {
-          status: "canceled",
-          sessionId: "canceled-session",
-          usage: { input_tokens: 42 },
-        });
-      },
+      run: async (request) =>
+        receipt(request, { status: "failed", message: "Recorded failure" }),
     },
   });
-  input.severityRubric.markdown = "Edited by caller.";
-  const result = await pending;
-  expect(result.status).toBe("canceled");
-  expect(result.severityRubric).toEqual(severityRubric);
-  expect(result.execution).toMatchObject({
-    status: "canceled",
-    sessionId: "canceled-session",
-    usage: { input_tokens: 42 },
-  });
-});
-
-test("a completed hosted draft remains recoverable after interrupted local finalization", async () => {
-  const input = await fixture();
-  const controller = new AbortController();
-  const result = await runHostedScan(input, {
-    signal: controller.signal,
-    executor: draftExecutor(() => controller.abort()),
-  });
   expect(result).toMatchObject({
-    status: "canceled",
-    execution: { status: "completed" },
-    artifacts: [],
+    status: "failed",
+    execution: { status: "failed", message: "Recorded failure" },
   });
-  expect(
-    await savedHostedScan(input, result.scanId!, "recover-scan-results"),
-  ).toMatchObject({ scanId: result.scanId, progress: { status: "failed" } });
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {

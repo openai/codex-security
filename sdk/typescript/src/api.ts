@@ -3,6 +3,8 @@ import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  explicitlyCanceled,
+  hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
   type ScanExecutor,
@@ -48,7 +50,6 @@ import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
-import { isAbortFromSignal } from "./contract-values.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
   VerificationModeSchema,
@@ -166,7 +167,6 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
-  HostProtocolError,
   ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
@@ -2013,11 +2013,11 @@ export class CodexSecurity {
     this.#requireOpen();
     if (options.mock) return await this.#runMock(repository, options);
     const costAbortController = new AbortController();
-    const signal = AbortSignal.any([
+    const callerSignal = AbortSignal.any([
       this.#abortController.signal,
-      costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const signal = AbortSignal.any([callerSignal, costAbortController.signal]);
     const budgetAbortController = new AbortController();
     const budgetSignal = AbortSignal.any([
       signal,
@@ -2038,6 +2038,7 @@ export class CodexSecurity {
       status: "pending" as "pending" | "running" | "complete",
     };
     let completionCost: ScanCost | null = null;
+    let nativeTurnFailure: string | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -3268,8 +3269,16 @@ export class CodexSecurity {
         modelProvider,
         workbenchValidated: true,
         model,
-        onTurnStatus: (status) => {
+        onTurnStatus: (status, message) => {
           scanTurnStatus = status;
+          // A later caller abort during iterator cleanup cannot undo a reported failure.
+          if (
+            status === "failed" &&
+            !directDeepScan &&
+            !this.#dependencies.hostedScan &&
+            !signal.aborted
+          )
+            nativeTurnFailure = message;
         },
         onThreadStarted: async (threadId) => {
           if (resumeThreadId !== undefined && threadId !== resumeThreadId) {
@@ -3657,32 +3666,21 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
-      // Capture the terminal cause before cleanup can deliver another abort.
-      let costStopped =
-        costAbortController.signal.aborted &&
-        Object.is(costAbortController.signal.reason, signal.reason);
-      // The hosted adapter returns its stream only after a completed executor receipt.
-      // Keep its saved draft eligible for recovery if the caller interrupts local finalization.
-      const hostedTurnCompleted =
-        this.#dependencies.hostedScan !== undefined && scanTurnStatus !== null;
-      const canceled =
-        !hostedTurnCompleted && wasScanCanceled(error, signal, costStopped);
+      // Capture who stopped the scan before cleanup can fire another signal.
+      const callerCancellation =
+        callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
+          ? callerSignal
+          : undefined;
+      const priorTurnFailure = callerCancellation
+        ? nativeTurnFailure
+        : undefined;
       let failure =
-        costStopped || signal.reason instanceof ScanCostLimitExceededError
+        signal.aborted && callerCancellation === undefined
           ? signal.reason
           : error;
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
-      // The last session refresh can be the first to observe an over-budget turn.
-      const finalBudget = costAbortController.signal.reason;
-      if (
-        finalBudget instanceof ScanCostLimitExceededError &&
-        finalBudget === signal.reason
-      ) {
-        costStopped = true;
-        failure = finalBudget;
-      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         snapshot?.cost &&
@@ -3699,8 +3697,7 @@ export class CodexSecurity {
         budgetRecovery !== null &&
         budgetRecovery.threadId !== null &&
         activeScan !== null &&
-        !this.#abortController.signal.aborted &&
-        options.signal?.aborted !== true
+        !callerSignal.aborted
       ) {
         try {
           const completion = await workbench(
@@ -3734,10 +3731,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            callerSignal,
             true,
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
@@ -3804,10 +3798,6 @@ export class CodexSecurity {
       // A failed attachment must not turn a resumable coordinator into a terminal failure.
       // Deep Scan orchestration persists its own terminal failures and cancellations.
       if (activeScan !== null && options.resumeScanId === undefined) {
-        const diagnostic =
-          !canceled && !costStopped && error instanceof ScanInterruptedError
-            ? (error.cause ?? error)
-            : failure;
         if (
           options.validationPrompt !== undefined &&
           customValidation.status !== "complete"
@@ -3815,19 +3805,23 @@ export class CodexSecurity {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
             status: "incomplete",
-            reason: errorMessage(diagnostic),
+            reason: errorMessage(failure),
           }).catch(() => undefined);
         }
         try {
-          const stopped = await recordStoppedScan(
+          await stopRegisteredScan(
             workbench,
             activeScan,
-            diagnostic,
-            canceled,
+            options,
+            this.#dependencies.hostedScan
+              ? hostedScanFailureStatus(failure, callerCancellation) ===
+                  "canceled"
+              : priorTurnFailure === undefined &&
+                  explicitlyCanceled(callerCancellation),
+            priorTurnFailure ?? failure,
             snapshot?.cost,
           );
           activeScan = null;
-          notifyScanLifecycle(options, stopped["scan"], true);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -4918,14 +4912,14 @@ export class CodexSecurity {
     } catch (error) {
       if (activeScan !== undefined) {
         try {
-          const stopped = await recordStoppedScan(
+          await stopRegisteredScan(
             workbench,
             activeScan,
+            options,
+            explicitlyCanceled(signal),
             error,
-            wasScanCanceled(error, signal),
           );
           activeScan = undefined;
-          notifyScanLifecycle(options, stopped["scan"], true);
         } catch {}
       }
       if (this.#closed) this.#requireOpen();
@@ -5182,10 +5176,7 @@ export class CodexSecurity {
   }
 
   #requireOpen(): void {
-    if (this.#closed)
-      throw new CodexSecurityError("CodexSecurity is closed.", {
-        cause: this.#abortController.signal.reason,
-      });
+    if (this.#closed) throw new CodexSecurityError("CodexSecurity is closed.");
   }
 }
 
@@ -5287,7 +5278,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onTurnStatus?: (status: "completed" | "failed") => void;
+  onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -5313,7 +5304,8 @@ export async function runScanEvents(
       onEvent: async (event) => {
         if (event.type === "turn.completed")
           options.onTurnStatus?.("completed");
-        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
+        if (event.type === "turn.failed")
+          options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -5371,7 +5363,12 @@ export async function runScanEvents(
     });
     const { status, threadId, finalResponse, lastStreamError } = turn;
     let { usage } = turn;
-    throwIfAborted(options.signal, options.scanDir);
+    if (options.signal.aborted) {
+      throw new ScanInterruptedError(
+        `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
+        options.scanDir,
+      );
+    }
     if (status !== "completed") {
       throw new IncompleteScanError(
         lastStreamError ??
@@ -5457,9 +5454,17 @@ export async function runScanEvents(
       options.pythonPath,
       options.protectedRoot,
     );
-    throwIfAborted(options.signal, options.scanDir);
+    if (options.signal.aborted) {
+      throw new ScanInterruptedError(
+        `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
+        options.scanDir,
+      );
+    }
     return result;
   } catch (error) {
+    if (options.signal.reason instanceof ScanCostLimitExceededError) {
+      throw options.signal.reason;
+    }
     if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
@@ -5884,7 +5889,7 @@ async function requireScanArtifacts(
     try {
       await requireScanFile(scanDir, name, name, signal);
     } catch (error) {
-      if (signal.aborted) throw error;
+      if (signal.aborted) throw signal.reason ?? error;
       let cause = error;
       while (cause instanceof Error && cause.cause !== undefined)
         cause = cause.cause;
@@ -6127,6 +6132,49 @@ function notifyScanLifecycle(
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
     notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+async function stopRegisteredScan(
+  workbench: typeof runWorkbench,
+  activeScan: { id: string; options: WorkbenchCommandOptions },
+  options: ScanOptions,
+  canceled: boolean,
+  error: unknown,
+  cost?: Readonly<ScanCost> | null,
+): Promise<void> {
+  const cleanupOptions = { ...activeScan.options, signal: undefined };
+  const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  if (canceled) {
+    try {
+      const stopped = await workbench(cleanupOptions, [
+        "cancel-scan",
+        "--scan-id",
+        activeScan.id,
+        ...costArgs,
+      ]);
+      // A workspace can already display a replacement when cancellation returns.
+      const results = stopped["results"];
+      if (isRecord(results) && results["scanId"] === activeScan.id)
+        notifyScanLifecycle(options, results, true);
+      else observeSettledScan(options, activeScan);
+      return;
+    } catch (cause) {
+      // Older external workbenches can only persist cost on a failed scan.
+      if (
+        !cost ||
+        !errorMessage(cause).includes("unrecognized arguments: --cost-json")
+      )
+        throw cause;
+    }
+  }
+  const failed = await workbench(cleanupOptions, [
+    "fail-scan",
+    "--scan-id",
+    activeScan.id,
+    `--message=${errorMessage(error)}`,
+    ...costArgs,
+  ]);
+  notifyScanLifecycle(options, failed["scan"], true);
 }
 
 function observeSettledScan(
@@ -6781,50 +6829,6 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; output directory: ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
-}
-
-async function recordStoppedScan(
-  workbench: typeof runWorkbench,
-  scan: { id: string; options: WorkbenchCommandOptions },
-  failure: unknown,
-  canceled: boolean,
-  cost?: Readonly<ScanCost> | null,
-) {
-  const markCanceled =
-    canceled &&
-    (
-      await pluginCapabilities(scan.options.pluginRoot).catch(() => undefined)
-    )?.["registeredScanCancellation"] === 1;
-  return await workbench({ ...scan.options, signal: undefined }, [
-    "fail-scan",
-    "--scan-id",
-    scan.id,
-    `--message=${errorMessage(failure)}`,
-    ...(cost ? ["--cost-json", JSON.stringify(cost)] : []),
-    ...(markCanceled ? ["--canceled"] : []),
-  ]);
-}
-
-function wasScanCanceled(
-  error: unknown,
-  signal: AbortSignal,
-  costStopped = false,
-): boolean {
-  // SDK operations can wrap a native failure or the caller's reason.
-  const seen = new Set<CodexSecurityError>();
-  while (
-    error instanceof CodexSecurityError &&
-    error.cause !== undefined &&
-    !Object.is(error, signal.reason)
-  ) {
-    if (seen.has(error)) return false;
-    seen.add(error);
-    error = error.cause;
-  }
-  if (error instanceof ScanExecutionError)
-    return error.result.status === "canceled";
-  if (costStopped || signal.reason instanceof HostProtocolError) return false;
-  return isAbortFromSignal(error, signal);
 }
 
 function throwIfPatchAborted(signal?: AbortSignal, repository = ""): void {

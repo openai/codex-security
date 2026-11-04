@@ -20,9 +20,6 @@ export class CodexSecurityError extends Error {
   }
 }
 
-/** A protocol fault that stops a hosted operation. */
-export class HostProtocolError extends Error {}
-
 export type DeduplicationReviewStage = "screening" | "pair-review";
 export type DeduplicationReviewFailureCategory =
   "validation" | "no-submission" | "model" | "transport" | "refusal";

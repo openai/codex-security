@@ -704,8 +704,7 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
     assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 
 
-@pytest.mark.parametrize("canceled", [False, True])
-def test_stopped_cli_scan_history_persists_measured_cost(tmp_path: Path, canceled: bool) -> None:
+def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     cost = {
         "model": "gpt-5.6-terra",
@@ -717,24 +716,16 @@ def test_stopped_cli_scan_history_persists_measured_cost(tmp_path: Path, cancele
     }
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
 
-    message = "Caller canceled." if canceled else "Scan stopped: cost limit exceeded."
-    stopped = fail_scan(
+    failed = fail_scan(
         state_dir,
         scan["scanId"],
-        message,
+        "Scan stopped: cost limit exceeded.",
         "--cost-json",
         json.dumps(cost),
-        *(["--canceled"] if canceled else []),
     )
 
-    assert stopped["scan"]["cost"] == cost
-    assert stopped["scan"]["progress"]["status"] == ("canceled" if canceled else "failed")
-    assert stopped["scan"]["failureMessage"] == message
-    replayed = fail_scan(
-        state_dir, scan["scanId"], "Late stop.", *([] if canceled else ["--canceled"])
-    )
-    assert replayed["scan"]["lifecycle"] == stopped["scan"]["lifecycle"]
-    assert replayed["scan"]["failureMessage"] == message
+    assert failed["scan"]["cost"] == cost
+    assert failed["scan"]["progress"]["status"] == "failed"
     assert run_workbench(state_dir, "list-scans")["scans"][0]["cost"] == cost
     assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 

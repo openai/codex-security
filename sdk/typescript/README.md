@@ -412,6 +412,10 @@ await security.run(repository, {
 });
 ```
 
+For `runComponentScans()`, subscribe to `onScanEvent` and select events with
+`type === "lifecycle"` to correlate each snapshot with its `componentId`. Deep
+component scans also emit `deep-progress` events with independent review counts.
+
 Group observations by `scanId`. A completed scan with
 `hasReportableFindings: false` finished with zero reportable findings.
 The field is `null` until that outcome is known. Saved scan history retains
@@ -421,12 +425,6 @@ and whether the scan used a mock. Offline imports appear in history with
 lifecycle mode `import`. Exclude imports and mock scans when counting executed
 scans. For older records, saved recipes identify known imports, mock scans,
 and the plugin version used at launch. Missing fields stay unknown.
-
-With the bundled plugin, a registered local `run()` scan records `canceled` when
-the client closes or the caller's signal aborts, including `AbortSignal.timeout()`.
-A hosted scan records cancellation before dispatch or when the executor confirms
-it. An independent runtime failure, a malformed event, or an offline import
-interrupted after registration records `failed`.
 
 If `run()` rejects before you receive a registration, record the error separately
 from saved scan outcomes. The caller may have missed the registration receipt.
@@ -709,6 +707,13 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+For a saved Checkmarx One CLI JSON or CxSAST XML report, use
+`readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
+To prepare a local import, pass `provider: "checkmarx"` and the verified
+`sourceRepositoryUrl` to `prepareLocalExternalImport`. Keep each batch of normalized
+Checkmarx findings scoped to one scan and its repository.
+[Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+
 Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
 [capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
@@ -727,6 +732,21 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 `preview` plus a separate `publish()` operation. Inspect the preview before
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
+
+To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
+report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
+for an already parsed report. Supply the scanned directory relative to the checkout
+(`.` for the whole checkout) unless the report's remote target and Git metadata establish it.
+
+```ts
+import { readTrivyFindings } from "@openai/codex-security";
+
+const { findings, excluded, report } = await readTrivyFindings(
+  "trivy.json.gz",
+  "local",
+  ".",
+);
+```
 
 For CLI examples and supported input formats, see the
 [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).

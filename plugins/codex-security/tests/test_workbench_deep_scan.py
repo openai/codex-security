@@ -2784,16 +2784,7 @@ def test_finish_preserves_legacy_succeeded_without_manifest_compatibility(
     assert "terminal state is immutable" in str(mismatched["stderr"])
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        ("cancel-scan", "--thread-id", "thread-deep-scan"),
-        ("fail-scan", "--message", "Caller canceled.", "--canceled"),
-    ],
-)
-def test_cancel_scan_cancels_coordinator_and_active_workers(
-    tmp_path: Path, command: tuple[str, ...]
-) -> None:
+def test_cancel_scan_cancels_coordinator_and_active_workers(tmp_path: Path) -> None:
     deep = start_empty_target_scan(tmp_path)
     worker_id = str(uuid.uuid4())
     prompt, artifact_dir, _ = worker_paths(deep.directory, "worker")
@@ -2803,7 +2794,9 @@ def test_cancel_scan_cancels_coordinator_and_active_workers(
         artifact_dir=artifact_dir,
     )
 
-    deep.command(*command)
+    cancel_scan(
+        deep.state_dir, deep.id, "thread-deep-scan", environment=deep_environment(deep.codex_home)
+    )
     canceled = deep.read("thread-deep-scan")
     assert canceled["status"] == "canceled"
     assert canceled["phase"] == "terminal"

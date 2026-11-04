@@ -2,7 +2,6 @@
 import { hash } from "node:crypto";
 import { isAbsolute, posix } from "node:path";
 import type { Finding } from "./models.js";
-import { isRecord } from "./record.js";
 import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 export class SealedContractError extends Error {
@@ -13,20 +12,6 @@ export class SealedContractError extends Error {
 }
 
 export class SealedContractSchemaError extends SealedContractError {}
-
-export function isAbortFromSignal(
-  error: unknown,
-  signal?: AbortSignal,
-): boolean {
-  if (!signal?.aborted) return false;
-  return (
-    Object.is(error, signal.reason) ||
-    (isRecord(error) &&
-      error["name"] === "AbortError" &&
-      (error["cause"] === undefined ||
-        Object.is(error["cause"], signal.reason)))
-  );
-}
 
 export const SEALED_DEFERRED_PATH_RULE = "invalidSealedDeferredPath";
 export const DEFERRED_PATH_LOCATION = /^\/deferred\/(\d+)\/paths\/(\d+)$/u;

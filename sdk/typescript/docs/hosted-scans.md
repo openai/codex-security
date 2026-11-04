@@ -139,12 +139,6 @@ identity, usage, message and structured error even if artifact finalization
 fails. Only validated artifacts receive hashes and sizes. Repeated invocations
 are separate scans; the host decides whether a new invocation is allowed.
 
-After `runHostedScan()` settles, the bundled plugin's history marks a registered
-scan as canceled if the caller stopped it before dispatch or the executor
-confirmed cancellation. If the executor completed and cancellation interrupted
-local finalization, history records a failed scan so its saved draft can be
-recovered. The `execution` receipt carries any diagnostic the executor supplied.
-
 Temporary runtime cleanup failures preserve the terminal receipt, including
 its execution outcome, session identity, usage, and validated artifacts. They
 are reported separately through `onEvent` as a failed message activity with
@@ -294,15 +288,20 @@ a canceled receipt with the requested checkout, scope, and rubric before startin
 the executor. Invalid request fields still return a JSON-RPC error.
 After dispatch the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
-before returning a canceled result. The host must continue reading notifications
-while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
+before returning a canceled result. For a registered scan, the durable lifecycle
+and final scan receipt record cancellation even if the executor reports failure.
+The `execution` field retains that failure, its diagnostics, and any usage.
+A caller deadline expiring after registration records a failed scan, including
+when the executor acknowledges the deadline with a canceled execution.
+If the executor reports `acceptance_unknown`, the local scan records `failed`
+and the host receives `acceptance_unknown` for reconciliation.
+
+The host must continue reading notifications while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
 blocked output terminate the transport even while a write callback is stuck.
 Input EOF before the terminal response fails the run; EOF while that response is
 flushing waits for the write callback. A selected successful result is not a
 successful delivery. Hosts own deadlines and independently cancel remote work
-and reconcile known execution identities after transport failure. The CLI can
-exit on a transport error before the SDK saves the terminal state, leaving a
-registered scan running in local history.
+and reconcile known execution identities after transport failure.
 
 Preparation failures include typed `error.data.reason` for missing, escaping,
 aliased or syntactically invalid paths and revision mismatch. Other failures

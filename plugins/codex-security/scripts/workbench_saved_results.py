@@ -1246,7 +1246,6 @@ def fail_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
-    canceled = getattr(args, "canceled", False)
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     cost_json = db.parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
@@ -1264,24 +1263,18 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             error_message="Scan failure is owned by another continuation.",
         )
         message = db.optional_text(args.message)
-        canceled_at = timestamp if canceled else None
-        if canceled and cost_json is None:
-            cost_json = scan["cost_json"]
         updated = connection.execute(
             """
             UPDATE scans
             SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?, canceled_at = ?
+                cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (message, timestamp, timestamp, cost_json, canceled_at, scan["id"]),
+            (message, timestamp, timestamp, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
-        if canceled:
-            db.deep_scan.cancel_from_parent_scan(connection, scan["id"], timestamp)
-        else:
-            db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
+        db.deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
         progress_updated = connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
             (timestamp, scan["id"]),
@@ -1300,6 +1293,7 @@ def cancel_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
+    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
@@ -1319,10 +1313,11 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?,
+                cost_json = COALESCE(?, cost_json)
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, scan["id"]),
+            (timestamp, timestamp, timestamp, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")
