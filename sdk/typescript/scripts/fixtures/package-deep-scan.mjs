@@ -531,7 +531,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId);
+  await assertExecutions(f, scanId, 2);
 }
 
 async function assertSavedState(f, scanId, owner) {
@@ -648,7 +648,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId) {
+async function assertExecutions(f, scanId, preflightsWithoutRetry = 3) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -663,8 +663,10 @@ async function assertExecutions(f, scanId) {
   assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
   assert.equal(
-    executions.filter((entry) => entry.phase === "preflight").length,
-    3 + incomplete,
+    executions.filter(
+      (entry) => entry.phase === "preflight" && entry.args.includes("--stdio"),
+    ).length,
+    preflightsWithoutRetry + incomplete,
   );
   for (const execution of workers) {
     assert.equal(execution.scanId, scanId);
