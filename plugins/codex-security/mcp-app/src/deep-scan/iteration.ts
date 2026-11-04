@@ -1,4 +1,6 @@
+import { findingCandidateKey } from "../artifact-candidates.js";
 import {
+  preserveFindingDetails,
   scanDraftInputSchema,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
@@ -315,6 +317,11 @@ export async function mergeBatch(
     JSON.stringify({ ...finding, provenance: undefined });
   const exact = originals.map(content);
   const copies = new Map<string, (typeof retained)[number]>();
+  const sourceIds = new Set(
+    retained.flatMap(
+      ({ finding }) => finding.provenance.sourceFindingIds ?? [],
+    ),
+  );
   for (const group of retained) {
     copies.set(exact[group.id]!, group);
     for (const source of group.finding.provenance.sourceFindings ?? [])
@@ -395,14 +402,33 @@ export async function mergeBatch(
         if (!copy && group.id < previous && !changed.has(group.target))
           changed.set(group.target, workerIndex);
       }
-      const sourceId = `${worker.id}:${index}`;
+      const baseId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
-      const { finding } = group;
-      (finding.provenance.sourceFindingIds ??= []).push(sourceId);
-      (finding.provenance.sourceFindings ??= []).push({
-        id: sourceId,
-        finding: structuredClone(source),
-      });
+      const provenance = group.finding.provenance;
+      const members = (provenance.sourceFindings ??= []);
+      // A resumed worker may update a report at the same position. Preserve its
+      // earlier evidence without assigning the same reference to two reports.
+      let sourceId = baseId;
+      let version = 1;
+      let existing = members.find((entry) => entry.id === sourceId);
+      while (
+        sourceIds.has(sourceId) &&
+        (!existing ||
+          content(existing.finding) !== exact[id] ||
+          findingCandidateKey(existing.finding) !== findingCandidateKey(source))
+      ) {
+        sourceId = `${baseId}@${++version}`;
+        existing = members.find((entry) => entry.id === sourceId);
+      }
+      const current = structuredClone(source);
+      if (existing) {
+        preserveFindingDetails(current, existing.finding);
+        existing.finding = current;
+      } else {
+        sourceIds.add(sourceId);
+        (provenance.sourceFindingIds ??= []).push(sourceId);
+        members.push({ id: sourceId, finding: current });
+      }
       id++;
     }
     addScanCoverage(aggregate, worker, scanDir);

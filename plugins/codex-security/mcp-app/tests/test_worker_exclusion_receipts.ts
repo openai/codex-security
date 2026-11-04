@@ -93,7 +93,7 @@ for (const { label, candidateId, receipt, disposition } of cases) {
       artifacts,
       resultPath,
       scanId,
-      { recoverCandidateReceipts: true },
+      { workerId: "worker-1" },
     );
     assert.equal(await readFile(resultPath, "utf8"), original);
     const attempts = path.join(path.dirname(root), "attempts");
