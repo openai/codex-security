@@ -172,7 +172,11 @@ export async function publishCoverageFixture(
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
   const workbenchAbort = new AbortController();
-  const runWorkbench = async (args: string[]) => {
+  const runWorkbench = async (
+    args: string[],
+    input?: string | Buffer,
+    selectFinalization = false,
+  ) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
     const command = [workbenchPath, ...args];
     if (interruptPublication && args[0] === "fail-scan") {
@@ -192,7 +196,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 `,
       );
     }
-    const { stdout } = await exec(process.env.PYTHON || "python3", command, {
+    if (selectFinalization) {
+      command.unshift(
+        "-c",
+        "import runpy, sys; script = sys.argv.pop(1); sys.path.insert(0, __import__('os').path.dirname(script)); runpy.run_path(script)['main'](select_finalization=True)",
+      );
+    }
+    const execution = exec(process.env.PYTHON || "python3", command, {
       signal: workbenchAbort.signal,
       env: {
         ...process.env,
@@ -200,7 +210,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       },
     });
-    return JSON.parse(stdout);
+    execution.child.stdin!.end(input);
+    return JSON.parse((await execution).stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
   let run = await store.begin({
