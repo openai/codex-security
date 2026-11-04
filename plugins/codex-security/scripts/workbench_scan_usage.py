@@ -599,7 +599,7 @@ def _read_rollout_usage(
     warnings = result.warnings
     previous = _empty_token_usage()
     previous_cache_writes_reported = True
-    prefix_missing_cache: set[str] | None = None
+    prefix_missing_cache: set[str] = set()
     ambiguous_legacy_cache = False
     boundary_reached = False
     legacy_usage = _empty_token_usage()
@@ -685,10 +685,9 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = _retain_cache_baseline(
-                            previous, inherited_usage, _cache_writes_reported(payload)
-                        )
-                        prefix_missing_cache = _unclassified_prefix(payload, previous)
+                        missing_cache = _missing_cache_fields(payload)
+                        previous = _retain_cache_baseline(previous, inherited_usage, missing_cache)
+                        prefix_missing_cache = _unclassified_prefix(missing_cache, previous)
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
@@ -831,9 +830,10 @@ def _read_rollout_usage(
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
             if reset:
-                prefix_missing_cache = None
-            cache_writes_reported = _cache_writes_reported(payload)
-            baseline = _retain_cache_baseline(previous, snapshot, cache_writes_reported)
+                prefix_missing_cache = set()
+            missing_cache = _missing_cache_fields(payload)
+            cache_writes_reported = "cacheWriteInputTokens" not in missing_cache
+            baseline = _retain_cache_baseline(previous, snapshot, missing_cache)
             if baseline is previous:
                 cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
             refines_classification = (
@@ -858,7 +858,7 @@ def _read_rollout_usage(
             if isinstance(current_turn_id, str):
                 measured_turns.add(current_turn_id)
             if timestamp < started_at:
-                prefix_missing_cache = _unclassified_prefix(payload, baseline)
+                prefix_missing_cache = _unclassified_prefix(missing_cache, baseline)
                 continue
             if completed_turn_id is not None and current_turn_id == completed_turn_id:
                 completed_turn_measured = True
@@ -882,15 +882,7 @@ def _read_rollout_usage(
                 if refines_classification and response_usage is None
                 else 0
             )
-            if (
-                prefix_missing_cache is not None
-                and refines_classification
-                and (
-                    delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
-                    > delta["inputTokens"]
-                    or any(delta[key] > 0 for key in prefix_missing_cache)
-                )
-            ):
+            if refines_classification and any(delta[key] > 0 for key in prefix_missing_cache):
                 # The newly classified tokens could have occurred before this scan.
                 ambiguous_legacy_cache = True
             for key in ("cacheWriteInputTokens", "cachedInputTokens"):
@@ -981,32 +973,32 @@ def valid_account_rate_limit(value: object) -> bool:
     return True
 
 
-def _unclassified_prefix(payload: Mapping[str, Any], baseline: dict[str, int]) -> set[str] | None:
-    if baseline["inputTokens"] == baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]:
-        return None
+def _missing_cache_fields(payload: Mapping[str, Any]) -> set[str]:
+    usage = payload["info"]["total_token_usage"]
     missing: set[str] = set()
-    if "cached_input_tokens" not in payload["info"]["total_token_usage"]:
+    if "cached_input_tokens" not in usage:
         missing.add("cachedInputTokens")
-    if not _cache_writes_reported(payload):
+    if "cache_write_input_tokens" not in usage and "cache_write_tokens" not in usage:
         missing.add("cacheWriteInputTokens")
     return missing
 
 
-def _cache_writes_reported(payload: Mapping[str, Any]) -> bool:
-    raw_usage = payload.get("info", {}).get("total_token_usage", {})
-    return "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
+def _unclassified_prefix(missing: set[str], baseline: dict[str, int]) -> set[str]:
+    if baseline["inputTokens"] == baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]:
+        return set()
+    return missing
 
 
 def _retain_cache_baseline(
-    previous: dict[str, int], snapshot: dict[str, int], reported: bool
+    previous: dict[str, int], snapshot: dict[str, int], missing: set[str]
 ) -> dict[str, int]:
     baseline = snapshot
     if (
-        not reported
+        missing
         and snapshot["inputTokens"] >= previous["inputTokens"]
         and snapshot["outputTokens"] >= previous["outputTokens"]
     ):
-        baseline = {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
+        baseline = {**snapshot, **{key: previous[key] for key in missing}}
     if (
         baseline["inputTokens"] == previous["inputTokens"]
         and baseline["outputTokens"] == previous["outputTokens"]

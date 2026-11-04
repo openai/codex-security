@@ -918,9 +918,11 @@ def test_completion_includes_cached_and_cache_write_tokens(
     )
 
 
-@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
 @pytest.mark.parametrize(
-    ("snapshots", "expected_input", "expected_writes"),
+    "cache_field", ["cached_input_tokens", "cache_write_input_tokens", "cache_write_tokens"]
+)
+@pytest.mark.parametrize(
+    ("snapshots", "expected_input", "expected_cache"),
     [
         ([(100, 50), (100, None), (100, 50)], 100, 50),
         ([(100, 80), (200, None), (200, 80)], 200, 80),
@@ -938,22 +940,23 @@ def test_completion_includes_cached_and_cache_write_tokens(
         "initial-omission",
     ],
 )
-def test_completion_retains_cache_write_baseline_across_omissions(
+def test_completion_retains_cache_baseline_across_omissions(
     tmp_path: Path,
-    cache_write_field: str,
+    cache_field: str,
     snapshots: list[tuple[int, int | None]],
     expected_input: int,
-    expected_writes: int,
+    expected_cache: int,
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     events = []
-    for input_tokens, writes in snapshots:
+    is_cache_read = cache_field == "cached_input_tokens"
+    for input_tokens, cache_tokens in snapshots:
         event = _token_event(counted, input_tokens, 0)
         reported = event["payload"]["info"]["total_token_usage"]
-        reported.pop("cache_write_input_tokens")
-        if writes is not None:
-            reported[cache_write_field] = writes
+        reported.pop("cached_input_tokens" if is_cache_read else "cache_write_input_tokens")
+        if cache_tokens is not None:
+            reported[cache_field] = cache_tokens
         events.append(event)
     parent = _rollout(tmp_path, "scan-parent", events)
     _state_graph(fixture.environment, {"scan-parent": parent}, [])
@@ -965,24 +968,37 @@ def test_completion_retains_cache_write_baseline_across_omissions(
         >= {
             "coverage": "complete",
             "source": "codex_rollout",
-            **_counts(expected_input, 0, 0, cache_write_input_tokens=expected_writes),
+            **_counts(
+                expected_input,
+                expected_cache if is_cache_read else 0,
+                0,
+                cache_write_input_tokens=0 if is_cache_read else expected_cache,
+            ),
             "threadCount": 1,
         }.items()
     )
 
 
 @pytest.mark.parametrize("category", ["cached_input_tokens", "cache_write_input_tokens"])
+@pytest.mark.parametrize("missing", [None, "refined", "other"])
 @pytest.mark.parametrize("new_input", [0, 1000])
-def test_late_cache_classification_excludes_ambiguous_parent_from_budget(
-    tmp_path: Path, category: str, new_input: int
+def test_late_cache_classification_only_excludes_ambiguous_categories(
+    tmp_path: Path, category: str, missing: str | None, new_input: int
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     prefix = _token_event(fixture.started_at - timedelta(seconds=1), 1000, 0)
     owned = _token_event(counted, 2000, 0)
-    for event in (prefix, owned):
-        del event["payload"]["info"]["total_token_usage"][category]
     refined = _token_event(counted, 2000 + new_input, 0)
+    if missing is not None:
+        other = (
+            "cache_write_input_tokens"
+            if category == "cached_input_tokens"
+            else "cached_input_tokens"
+        )
+        absent = category if missing == "refined" else other
+        for event in (prefix, owned, refined):
+            del event["payload"]["info"]["total_token_usage"][absent]
     refined["payload"]["info"]["total_token_usage"][category] = 1000
     _state_graph(
         fixture.environment,
@@ -995,10 +1011,11 @@ def test_late_cache_classification_excludes_ambiguous_parent_from_budget(
         [("scan-parent", "child")],
     )
     usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
-    assert usage["coverage"] == "partial"
-    assert usage["totalTokens"] == 35
-    assert usage["byRole"]["parent"]["threadCount"] == 0
-    assert usage["warnings"] == ["token_breakdown_unavailable"]
+    ambiguous = missing == "refined"
+    assert usage["coverage"] == ("partial" if ambiguous else "complete")
+    assert usage["totalTokens"] == (35 if ambiguous else 1035 + new_input)
+    assert usage["byRole"]["parent"]["threadCount"] == (0 if ambiguous else 1)
+    assert usage.get("warnings", []) == (["token_breakdown_unavailable"] if ambiguous else [])
 
 
 @pytest.mark.parametrize("previous_native", [False, True])
