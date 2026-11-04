@@ -400,13 +400,13 @@ export async function mergeBatch(
   const copies = new Map<string, (typeof retained)[number]>();
   const incomplete = new Set<number>();
   for (const group of retained) {
+    copies.set(exact[group.id]!, group);
     if (!hasCompleteSources(group.finding)) {
       incomplete.add(group.target);
       continue;
     }
     // A legacy checkpoint can include all originals without the separate ID array.
     group.finding.provenance.sourceFindingIds ??= sourceIds(group.finding);
-    copies.set(exact[group.id]!, group);
     for (const source of group.finding.provenance.sourceFindings ?? [])
       copies.set(content(source.finding), group);
   }
@@ -489,7 +489,9 @@ export async function mergeBatch(
       const sourceId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
       const { finding } = group;
-      (finding.provenance.sourceFindingIds ??= []).push(sourceId);
+      (finding.provenance.sourceFindingIds ??= sourceIds(finding)).push(
+        sourceId,
+      );
       (finding.provenance.sourceFindings ??= []).push({
         id: sourceId,
         finding: structuredClone(source),
