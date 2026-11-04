@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,6 +23,12 @@ test("runtime contains checkout skill and fixtures without calibration labels", 
         path.join(root, "evals/triage-finding/fixtures/repo/src/server.js"),
       ),
     );
+    const policyInstructions = execFileSync(
+      process.execPath,
+      ["plugins/codex-security/scripts/skill_runtime.mjs", "policy-resolve"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.match(policyInstructions, /--helper resolve-security-md/);
     for (const name of ["datasets", "tests", "artifacts"])
       assert.equal(
         fs.existsSync(path.join(root, "evals/triage-finding", name)),

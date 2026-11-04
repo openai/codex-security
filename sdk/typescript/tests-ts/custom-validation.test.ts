@@ -1282,15 +1282,15 @@ describe("custom validation", () => {
   test("renders only the discovery portion of the shipped workflows", async () => {
     const standard = await customDiscoveryPrompt(PLUGIN_ROOT, "security-scan");
     const diff = await customDiscoveryPrompt(PLUGIN_ROOT, "security-diff-scan");
-    expect(standard.match(/^1\. .+$/mu)?.[0]).toContain(
-      "make-hosted-repo-scope-input",
-    );
+    expect(standard.match(/^1\. .+$/mu)?.[0]).toContain("inventory command");
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
-    expect(standard).toContain("`complete: false` checkpoint");
-    expect(standard).toContain("retain the model in an early");
+    expect(standard).toContain("Save the first checkpoint");
+    expect(diff).toContain(
+      "<plugin_dir>/skills/security-diff-scan/references/compact-phases.md",
+    );
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");
@@ -1299,7 +1299,7 @@ describe("custom validation", () => {
     );
     expect(diff).toContain("Run `$finding-discovery`");
     expect(diff).toContain(
-      "Immediately save a `complete: false` semantic draft",
+      "Immediately checkpoint the model and empty findings",
     );
     expect(diff).toContain('"format": "markdown", "content": "<model text>"');
     expect(diff).not.toContain("run `$validation` once");

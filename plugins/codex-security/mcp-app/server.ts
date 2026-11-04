@@ -13,6 +13,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
+import {
+  readSkillRuntimeInstructions,
+  skillRuntimeTopics,
+} from "../scripts/skill_runtime.mjs";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
@@ -524,6 +528,30 @@ export function createCodexSecurityServer(): McpServer {
     deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+  server.registerTool(
+    "get_codex_security_skill_instructions",
+    {
+      title: "Read Codex Security workflow instructions",
+      description:
+        "Return the installed plugin's instructions for a workflow operation on this execution host. For scan setup, pass the desktop surface only when the client explicitly identifies itself as the Codex desktop app. This tool reads the applicable installed instructions.",
+      inputSchema: z.strictObject({
+        topic: z.enum(skillRuntimeTopics),
+        clientSurface: z.enum(["desktop", "headless"]).optional(),
+      }),
+      annotations: readingAnnotations,
+      _meta: modelActionMeta,
+    },
+    async ({ topic, clientSurface }) => ({
+      content: [
+        {
+          type: "text",
+          text: await readSkillRuntimeInstructions(PLUGIN_ROOT, topic, {
+            clientSurface,
+          }),
+        },
+      ],
+    }),
+  );
   const destructiveAnnotations = {
     ...writingAnnotations,
     destructiveHint: true,

@@ -1,0 +1,1 @@
+Stop before acquiring, previewing, or importing findings. Tell the user that external findings imports are disabled and ask them to enable `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the import command's environment. After they enable imports, request this topic again from that environment.

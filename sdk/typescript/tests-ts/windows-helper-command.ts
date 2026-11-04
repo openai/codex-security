@@ -1,11 +1,6 @@
-import {
-  copyFileSync,
-  cpSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readSkillRuntimeInstructions } from "../src/skill-runtime-instructions.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 
@@ -36,19 +31,16 @@ export function windowsHelperFixture(
     powershells,
     async run(
       powershell: string,
-      document: string,
+      topic: string,
       paths: Record<string, string>,
       input?: string,
       workingDirectory = root,
       pipelineInput?: string,
-      blockIndex = 0,
     ) {
-      const source = readFileSync(join(PLUGIN_ROOT, document), "utf8");
-      let command = [
-        ...source.matchAll(/```powershell\r?\n([\s\S]*?)\r?\n```/gu),
-      ][blockIndex]?.[1];
+      const source = await readSkillRuntimeInstructions(PLUGIN_ROOT, topic);
+      let command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
       if (command === undefined)
-        throw new Error(`No PowerShell command in ${document}`);
+        throw new Error(`No PowerShell command for ${topic}`);
       for (const [placeholder, path] of Object.entries(paths))
         command = command.replaceAll(placeholder, path.replaceAll("'", "''"));
       if (pipelineInput !== undefined)
@@ -107,7 +99,7 @@ export function windowsHelperFixture(
         diagnostics: JSON.stringify(
           {
             powershell,
-            document,
+            topic,
             workingDirectory,
             paths,
             environment,

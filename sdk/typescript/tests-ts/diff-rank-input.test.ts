@@ -311,7 +311,7 @@ for (const mode of ["revisions", "local-patch"] as const)
       for (const powershell of launcher.powershells) {
         const result = await launcher.run(
           powershell,
-          "skills/security-scan/references/scan-artifacts-and-ledger.md",
+          mode === "revisions" ? "diff-revisions" : "diff-local-patch",
           {
             "<plugin_dir>": launcher.plugin,
             "<repo_root>": repository,
@@ -333,8 +333,6 @@ for (const mode of ["revisions", "local-patch"] as const)
           },
           undefined,
           root,
-          undefined,
-          mode === "revisions" ? 1 : 2,
         );
         expect(result.status, result.diagnostics).toBe(0);
         expect(result.stdout, result.diagnostics).not.toContain(

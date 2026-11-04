@@ -17298,16 +17298,6 @@ if __name__ == "__main__":
     expect(prompt).toContain(
       `Use ${pythonCommand} as <python_command> for plugin Python helper scripts (.py files)`,
     );
-    const policyReference = await readFile(
-      join(PLUGIN_ROOT, "references", "security-guidance.md"),
-      "utf8",
-    );
-    const policyCommand = policyReference
-      .split("\n")
-      .find((line) => line.includes("--helper resolve-security-md"));
-    expect(policyCommand).toMatch(
-      /^<plugin_dir>\/scripts\/launch_codex_security_mcp --helper resolve-security-md /,
-    );
     const helper = shellEnvironmentReference(
       "CODEX_SECURITY_PLUGIN_ROOT",
       "/scripts/launch_codex_security_mcp",
@@ -17650,6 +17640,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

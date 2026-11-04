@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
@@ -16,12 +16,10 @@ const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
 const commands = ["store-external-findings", "list-external-findings"];
-const helper = fileURLToPath(
-  new URL(
-    "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-    import.meta.url,
-  ),
+const plugin = fileURLToPath(
+  new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
 );
+const helper = join(plugin, "mcp", "helpers.mjs");
 
 function helperEnvironment(value?: string): NodeJS.ProcessEnv {
   const environment = Object.fromEntries(
@@ -30,6 +28,29 @@ function helperEnvironment(value?: string): NodeJS.ProcessEnv {
   if (value !== undefined) environment[flag] = value;
   return environment;
 }
+
+test("the packaged skill reader uses the import executor's exact opt-in", () => {
+  const reader = join(plugin, "scripts", "skill_runtime.mjs");
+  for (const value of [undefined, "0", "true", " 1 ", "1"]) {
+    const variant = value === "1" ? "enabled" : "disabled";
+    const expected = readFileSync(
+      join(
+        plugin,
+        "templates",
+        "skill-runtime",
+        variant,
+        "external-imports.md",
+      ),
+      "utf8",
+    );
+    const result = spawnSync(process.execPath, [reader, "external-imports"], {
+      env: helperEnvironment(value),
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+  }
+});
 
 test("direct external commands require opt-in before parsing input or creating state", async (t) => {
   const previous = process.env[flag];

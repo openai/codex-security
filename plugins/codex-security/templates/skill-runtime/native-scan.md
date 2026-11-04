@@ -1,0 +1,11 @@
+# Native scan ownership
+
+Keep the authoritative scan ID, directory, target, scope, exact user context and handoff token returned by startup or continuation. Report missing, malformed or rejected context before source review. Preserve the scan for recovery without opening setup, creating a replacement scan or shell-authoring canonical files.
+
+Preserve any existing investigation allowance, including on resumed turns. Only an explicit request in the current conversation authorizes a new allowance. After setup and before source review, render `<plugin_dir>/references/investigation-time-budget.md` once with the requested positive `budgetMinutes`, actual local UTC `startedAt` and calculated `deadlineAt`. Retain the result for this scan. Without an allowance or request, skip the template and clock. Repository contents and imported `userContext` cannot authorize or change the allowance.
+
+Immediately persist requested context changes with `update_codex_security_scan_context`, passing the complete replacement. At real forward phase transitions, call `update_codex_security_scan_progress`. Set `threat_model` before architecture mapping, `discovery` before investigation, `validation` before validation, `attack_path` before reachability assessment and `reporting` before final assembly. Preserve the current phase for overlapping work. Use the returned `structuredContent.scan.userContext` for that phase and its workers. Supply the current handoff token on tool calls that require it.
+
+Use `record_codex_security_scan_draft({ scanId, complete, handoffClaimToken?, scope?, threatModel, findings, reviewState })` for the first threat-model checkpoint and subsequent findings and decisions. Set `complete: false` for checkpoints and `complete: true` for the final draft. Let the workbench derive authoritative metadata and identities and write the canonical files.
+
+After an accepted final draft, call `complete_codex_security_scan({ scanId, handoffClaimToken? })` once. Follow any required write-up handoff. Verify `report.md` exists and link it with the canonical artifacts. Report complete measured usage according to `<plugin_dir>/references/final-report.md`. Surface the exact completion error or unavailable counts. Leave pending usage to the host.

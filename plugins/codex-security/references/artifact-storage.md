@@ -4,7 +4,7 @@ Apply this policy to plugin-managed scans and standalone artifact-producing skil
 
 ## Scan ownership
 
-For a full scan, obtain the authoritative `scanId` before creating artifacts. Standard uses `start_codex_security_standard_scan`; a headless Diff without a scan uses `start_codex_security_prompt_only_scan` with its exact target, `mode: "diff"`, `scope: "."` and `diffTarget`. Deep uses its existing coordinator. Preserve an existing scan and handoff token. If the required MCP is unavailable or the selected baseline is unsupported, report the blocker; do not fall back to shell-authored canonical files. These rules take precedence over older terminal file-authoring fallbacks.
+For a full scan, obtain the authoritative `scanId` and directory using the selected scan runtime instructions before creating artifacts. Preserve the existing scan and handoff token. Report an unavailable required tool or unsupported baseline without creating a replacement scan or substituting another writer.
 
 Keep structured outputs on their existing tools: inventories, candidate discovery, validation, attack paths, semantic drafts, checkpoints and completion. Canonical results and recovery checkpoints are persistent even while a scan is running. Never use the supplemental file tool to replace them or generate `report.md`.
 

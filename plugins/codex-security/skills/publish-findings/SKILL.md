@@ -1,11 +1,11 @@
 ---
 name: publish-findings
-description: Requires explicit opt-in with CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Preview and import scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud.
+description: Preview and import external scanner findings, including issues selected in the SonarQube plugin, into the local workbench or Codex Security Cloud. Requires explicit opt-in.
 ---
 
 # Publish external findings
 
-Before acquiring or importing findings, check for `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment. If it is unset or has another value, stop and ask the user to enable imports.
+Before any evidence acquisition, preview, or import, obtain and follow the `external-imports` instructions from the environment that will run `codex-security`. Use `get_codex_security_skill_instructions({ topic: "external-imports" })` when the tool shares that command environment. Otherwise run `node "<plugin_root>/scripts/skill_runtime.mjs" external-imports` in the import command's environment. Proceed only after this check confirms that imports are enabled.
 
 Use `codex-security import sonar` for [live SonarQube Cloud issues](#sonarqube-cloud-issues) or a capture saved by that command. Use `codex-security publish findings` for native scanner exports, including Sonar `/api/issues/search` pages with `--provider sonar`. Select the requested destination. The CLI owns source mapping, persistence, and Cloud authentication and retries. Do not implement another store or uploader or put credentials in command arguments.
 

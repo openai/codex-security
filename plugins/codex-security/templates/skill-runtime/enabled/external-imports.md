@@ -1,0 +1,1 @@
+External findings imports are enabled for this command environment. Proceed with the requested source and destination using the publish-findings workflow, including its preview and approval before writing.

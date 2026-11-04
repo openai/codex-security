@@ -203,6 +203,7 @@ import {
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import { standaloneValidationPrompt } from "./standalone-validation-prompt.js";
+import { readSkillRuntimeInstructions } from "./skill-runtime-instructions.js";
 import {
   prepareKnowledgeBase,
   readKnowledgeBaseSnapshot,
@@ -9210,7 +9211,8 @@ async function runSkill(
       ),
       "Assess the immutable patch artifact described by this JSON object:",
       JSON.stringify(options.patchArtifact),
-      `For the skill's platform-specific validation command, <plugin-root> is this literal path (JSON string): ${JSON.stringify(plugin)}. Validate the JSON assessment as required by the skill.`,
+      `Use the following validation instructions. The literal <plugin-root> path is this JSON string: ${JSON.stringify(plugin)}.`,
+      await readSkillRuntimeInstructions(plugin, "patch-risk-validation"),
       "Wrap only the concise Markdown report between these exact marker lines:",
       PATCH_RISK_SUMMARY_START,
       PATCH_RISK_SUMMARY_END,

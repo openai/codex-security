@@ -832,7 +832,7 @@ describe("patch risk assessment contract", () => {
             if (input === "missing") await rm(file);
             const result = await launcher.run(
               powershell,
-              "skills/assess-patch-risk/references/windows-validation.md",
+              "patch-risk-validation",
               {
                 "<plugin-root>": argument(launcher.plugin),
                 "<assessment.json>":

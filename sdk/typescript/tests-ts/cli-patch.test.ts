@@ -1561,10 +1561,9 @@ describe("scan and patch workflow", () => {
                 "<!-- codex-security:patch-risk-summary:end -->",
               );
               expect(output.appServer?.prompt).toContain(
-                "--helper validate-patch-risk-assessment <assessment.json>",
-              );
-              expect(output.appServer?.prompt).toContain(
-                "references/windows-validation.md",
+                process.platform === "win32"
+                  ? 'launch_codex_security_mcp.cmd" --helper validate-patch-risk-assessment'
+                  : "launch_codex_security_mcp' --helper validate-patch-risk-assessment",
               );
               const artifact = JSON.parse(
                 output

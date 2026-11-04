@@ -1,0 +1,7 @@
+# Native Deep scan ownership
+
+Resolve the authorized target and scope. For a scoped directory, use that directory as `targetPath` and `scope: "."`. Continue a supplied `scanId` through `get_codex_security_scan_context` with its handoff token when present. Use the saved configuration, identity, scope and mode. Immediately persist requested context additions, edits or clearances through `update_codex_security_scan_context` using the complete replacement and current handoff token. Leave phase transitions to the running coordinator.
+
+For a new target, call `inspect_codex_security_setup({ targetPath, scope: ".", mode: "deep", projectConfigPath? })`. Show the effective settings and their sources. Pass a project file only when the user selected it. Inspect `otherRunningDeepScans` once on new native launches. When another Deep scan is active, show its target, phase and human-friendly start time and explain the additional CPU, memory and token use. Offer **Cancel (Recommended)** and **Continue** using the host's question UI or chat. Wait for an explicit choice. A dismissed dialog leaves the choice pending. Cancel only the new scan when requested.
+
+Call `start_codex_security_deep_scan` with the existing scan ID and claim token or with the new target, scope, exact user context and selected project file. The coordinator owns worker setup, progress and completion. Use the returned `completion` and link the generated `report.md` and canonical artifacts. Report measured usage per `<plugin_dir>/references/final-report.md`.
