@@ -242,10 +242,11 @@ export type {
   LocalExternalImportResult,
   PreparedLocalExternalImport,
 } from "./external-findings-local.js";
-export type {
-  ExternalFinding,
-  ExternalFindings,
-  ExternalSourceRepository,
+export {
+  NoPublishableFindingsError,
+  type ExternalFinding,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
   ExternalFindingEvidence,

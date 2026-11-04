@@ -3284,6 +3284,19 @@ export async function cleanupSdkDirectory(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
 }
 
+// A child can finish or reject a request before the parent finishes writing it.
+export function isDisconnectedChildStdin(
+  error: NodeJS.ErrnoException,
+): boolean {
+  return [
+    "EPIPE",
+    "ECONNRESET",
+    "ENOTCONN",
+    "EOF",
+    "ERR_STREAM_DESTROYED",
+  ].includes(error.code ?? "");
+}
+
 export async function runCodexCommand(
   command: CodexCommand,
   args: readonly string[],
@@ -3332,16 +3345,7 @@ export async function runCodexCommand(
       processError = error;
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-      if (
-        ![
-          "EPIPE",
-          "ECONNRESET",
-          "ENOTCONN",
-          "EOF",
-          "ERR_STREAM_DESTROYED",
-        ].includes(error.code ?? "")
-      )
-        processError = error;
+      if (!isDisconnectedChildStdin(error)) processError = error;
     });
     child.once("close", (exitCode) =>
       processError === undefined

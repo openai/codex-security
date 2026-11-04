@@ -133,10 +133,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
-    const scopeInput = JSON.stringify({
-      paths: includePaths,
-      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
-    });
     const includePathsFile =
       !discovery || includePaths === undefined
         ? undefined
@@ -167,7 +163,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv).catch((error: unknown) => {
+          // A failed read produced no snapshot. Let the next worker retry it.
+          this.runtimeSettings = undefined;
+          throw error;
+        }));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -205,7 +205,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
-        await writePrivateFile(includePathsFile, scopeInput);
+        await writePrivateFile(
+          includePathsFile,
+          JSON.stringify({
+            paths: includePaths,
+            filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+          }),
+        );
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
@@ -285,6 +291,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
+              tools: {
+                experimental_request_user_input: { enabled: false },
+                update_plan: { enabled: false },
+              },
               features: {
                 ...(isRecord(runtimeSettings.config.features) &&
                   runtimeSettings.config.features),
@@ -293,6 +303,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                 shell_tool: false,
                 view_image: false,
                 image_generation: false,
+                goals: false,
+                request_permissions_tool: false,
                 computer_use: false,
                 unified_exec: false,
                 code_mode: false,

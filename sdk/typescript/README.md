@@ -734,6 +734,12 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+When a parsed selection has no publishable findings, preparation throws
+`NoPublishableFindingsError`. Inspect its `selection` for the read count,
+exclusions and scanner diagnostics. A clean empty report needs no upload;
+failed scans and excluded records need attention. Previously imported findings
+remain open.
+
 To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
 report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
 for an already parsed report. Supply the scanned directory relative to the checkout
@@ -758,7 +764,9 @@ options)` accepts already normalized evidence, and
 `listLocalExternalFindings({ repository })` reads the stored records. Imports
 remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
-records remain stored, and unknown evidence fields are not inferred.
+records remain stored, and unknown evidence fields are not inferred. A local
+SDK import with only excluded records returns the exclusions and zero write
+counts. The CLI exits 2 for that result so automation can detect it.
 
 File imports forward repository references from the reader automatically. With
 `prepareNormalizedLocalImport()`, supply additional known references in the

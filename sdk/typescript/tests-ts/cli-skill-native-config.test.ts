@@ -745,7 +745,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
         };
         try {
           const { baseUrl } = await response();
-          await writeCodexConfig(join(sharedHome, "config.toml"), {
+          const workerConfig = {
             model_catalog_json: modelCatalog,
             openai_base_url: baseUrl,
             mcp_servers: {
@@ -755,7 +755,8 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             features: { plugins: false },
             analytics: { enabled: false },
             otel: { environment: "synthetic-shared", exporter: "none" },
-          });
+          };
+          await writeCodexConfig(join(sharedHome, "config.toml"), workerConfig);
           // The first worker initializes the executor's per-scan snapshot.
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
@@ -776,6 +777,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             );
           expect(await worker("compare")).toMatchObject({
             ...baseline,
+            tools: [],
             resumed: false,
           });
           const features =
@@ -800,8 +802,16 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             resumed: true,
             threadId,
           });
+          await writeCodexConfig(join(sharedHome, "config.toml"), {
+            ...workerConfig,
+            mcp_servers: {
+              "codex-security": { url: `${baseUrl}/mcp`, enabled: false },
+              "fixture.catalog": { command: process.execPath, enabled: false },
+            },
+          });
           expect(await worker("compare")).toMatchObject({
             ...baseline,
+            tools: [],
             resumed: false,
           });
         } finally {

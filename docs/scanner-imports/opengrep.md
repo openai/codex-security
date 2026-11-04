@@ -36,7 +36,7 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 ```
 
 Check the findings, exclusions and `report.errors`, even if the findings list
-is empty. Cloud requires at least one supported finding. Keep `--provider opengrep`
+is empty. A zero-result report with scanner errors fails the import. Keep `--provider opengrep`
 when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence

@@ -179,8 +179,16 @@ export class DeepScanWorkerRunner {
       );
     }
 
-    // Once SQLite accepts the scan, leave its result available for recovery.
-    this.options.log({
+    // A validation success can still race with cancellation or a lease change.
+    // Report worker success only once SQLite accepts the result.
+    this.log({
+      event: "worker_succeeded",
+      scanId: run.scanId,
+      workerId,
+      kind: "discovery",
+      attempt: persisted.attempt,
+    });
+    this.log({
       event: "discovery_accepted",
       scanId: run.scanId,
       workerId,
@@ -403,13 +411,6 @@ export class DeepScanWorkerRunner {
           outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        this.log({
-          event: "worker_succeeded",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
-          attempt,
-        });
         outcome = "succeeded";
         return {
           status: "succeeded",
@@ -498,6 +499,7 @@ export class DeepScanWorkerRunner {
           kind: "discovery",
           attempt,
           count: delayMs,
+          reason: deepScanErrorMessage(normalized),
         });
         try {
           await this.options.clock.sleep(delayMs, signal);
