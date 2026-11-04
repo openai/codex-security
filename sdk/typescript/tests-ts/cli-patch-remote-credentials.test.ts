@@ -201,3 +201,58 @@ test.each([
     expect(modelCalls).toBe(stage === "patch branch" ? 1 : 0);
   },
 );
+
+test.each(["local", "included checkout", "operator"])(
+  "checks the origin of HTTP transport configuration from %s",
+  async (source) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const remote = "https://github.example.test/example/repository.git";
+    git("remote", "set-url", "origin", remote);
+    const external = await fixtures.create("patch-http-config-");
+    const global = join(external, "global.gitconfig");
+    const included = join(directory, "transport.gitconfig");
+    const environment = { GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1" };
+    if (source === "local") {
+      git("config", "http.sslVerify", "false");
+    } else {
+      const config = source === "operator" ? global : included;
+      git(
+        "config",
+        "--file",
+        config,
+        "http.https://github.example.test/.curloptResolve",
+        "github.example.test:443:127.0.0.1",
+      );
+      if (source === "included checkout")
+        git("config", "--file", global, "include.path", included);
+    }
+    let attempted = false;
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") return "[]";
+          if (args.includes("ls-remote")) {
+            attempted = true;
+            throw new Error("Fixture transport reached");
+          }
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
+        },
+      },
+      { localHosting: false },
+    );
+    expect(attempted).toBe(source === "operator");
+    expect(outcome.stderr).toContain(
+      source === "operator"
+        ? "Fixture transport reached"
+        : "checkout-selected HTTP",
+    );
+  },
+);
