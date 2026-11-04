@@ -658,13 +658,17 @@ export async function retainRecordedReceiptOwnership(
   context: ArtifactContext,
   input: JsonObject,
 ): Promise<void> {
-  if (await hasScanDraftCheckpoint(context, input)) return;
   const coverage = input.reviewState ?? input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
-  for (const surface of coverage.surfaces) {
-    if (isObject(surface) && isObject(surface.provenance))
-      delete surface.provenance.scanReceiptRefs;
-  }
+  const owners = coverage.surfaces.flatMap((surface) =>
+    isObject(surface) &&
+    isObject(surface.provenance) &&
+    "scanReceiptRefs" in surface.provenance
+      ? [surface.provenance]
+      : [],
+  );
+  if (!owners.length || (await hasScanDraftCheckpoint(context, input))) return;
+  for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
 function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
