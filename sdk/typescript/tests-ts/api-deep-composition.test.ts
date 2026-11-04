@@ -1518,12 +1518,17 @@ test("budget exhaustion seals accepted findings without a reducer session", asyn
   const h = await fixture();
   const passCost = estimateScanCost("gpt-6-astra", usage)!;
   await using client = h.makeClient();
+  const lifecycle: string[] = [];
   const result = await client.run(h.repository, {
     ...h.options,
+    onLifecycle: (scan) => {
+      if (scan.mode === "deep") lifecycle.push(scan.status);
+    },
     workers: 1,
     maxDiscoveryRuns: 3,
     maxCostUsd: passCost.estimatedUsd * 1.5,
   });
+  expect(lifecycle).toEqual(["running", "completed"]);
   expect(h.launches).toHaveLength(2);
   expect(
     h.launches.every(
@@ -1884,14 +1889,19 @@ test.each(["standard", "deep"])(
     using _failure = unavailableFinalCost(h, mode);
     const passCost = estimateScanCost("gpt-6-astra", usage)!;
     await using client = h.makeClient();
+    const lifecycle: string[] = [];
     await expect(
       client.run(h.repository, {
         ...h.options,
+        onLifecycle: (scan) => {
+          if (scan.mode === "deep") lifecycle.push(scan.status);
+        },
         workers: mode === "standard" ? 1 : 2,
         maxDiscoveryRuns: 3,
         maxCostUsd: passCost.estimatedUsd * (mode === "standard" ? 1.5 : 2.5),
       }),
     ).rejects.toBeInstanceOf(ScanCostTrackingError);
+    expect(lifecycle).toEqual(["running", "failed"]);
     expect(h.launches).toHaveLength(mode === "standard" ? 2 : 3);
     expect(h.commands).not.toContain("complete-budget-exhausted-scan");
     const checkpoint = JSON.parse(

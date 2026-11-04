@@ -522,11 +522,6 @@
     "darwin": 8.9,
     "win32": 11.2
   },
-  "deep-scan-worker-recovery.test.ts": {
-    "linux": 0.4,
-    "darwin": 0.5,
-    "win32": 0.6
-  },
   "deep-scan-workbench.test.ts": {
     "linux": 21,
     "darwin": 25.1,
