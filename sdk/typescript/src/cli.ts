@@ -6692,9 +6692,7 @@ export async function main(
             if (exitCode !== 0 || files.length === 0) {
               throw new PatchCommandError(
                 exitCode === 0 ? "NO_PATCH_APPLIED" : "PATCH_FAILED",
-                exitCode === 1 && files.length > 0
-                  ? "Source changes are available in your working tree. Review the blocked findings for the remaining actions."
-                  : `Patch did not complete successfully; ${files.length} files changed. Review the patch results before retrying.`,
+                `Review the patch results for next steps. Files changed in the working tree: ${files.length}.`,
               );
             }
             errorOutput.write(

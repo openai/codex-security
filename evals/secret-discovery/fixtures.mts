@@ -98,7 +98,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
   };
   if (externalTokenScanner) {
     files["SECURITY.md"] =
-      "Our existing scanner handles known-format provider API tokens checked into source. Omit standalone reports for those token literals.\n";
+      "Skip standalone findings for known-format API keys and tokens.\n";
   }
   const positive = (
     id: string,
@@ -188,6 +188,39 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
         .map((line) => line.slice(22)),
     ],
   };
+}
+
+export function sourceEvidence(
+  fixture: ReturnType<typeof createFixture>,
+  path: string,
+  startLine: number,
+  endLine = startLine,
+) {
+  const source = fixture.files[path]
+    .split("\n")
+    .slice(startLine - 1, endLine)
+    .join("\n");
+  return {
+    id: `${path}:${startLine}`,
+    label: "Source context",
+    path,
+    startLine,
+    code: source,
+    explanation: "Source-backed credential declaration.",
+  };
+}
+
+export function expectedFindings(source: ReturnType<typeof createFixture>) {
+  return source.positives.map((expected) => ({
+    title: "Embedded credential",
+    taxonomy: { category: expected.category, cwe: [expected.cwes[0]] },
+    locations: [
+      { path: expected.path, startLine: expected.line, role: "root_control" },
+    ],
+    codeEvidence: [
+      sourceEvidence(source, expected.path, expected.line, expected.endLine),
+    ],
+  }));
 }
 
 /** Stage source only. Gold labels and secret-value lookup stay in the harness. */

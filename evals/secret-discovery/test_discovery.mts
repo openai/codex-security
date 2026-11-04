@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { parse } from "../../sdk/typescript/node_modules/smol-toml/dist/index.js";
-import { createFixture } from "./fixtures.mts";
+import {
+  createFixture,
+  expectedFindings,
+  sourceEvidence,
+} from "./fixtures.mts";
 import type {
   CodeEvidence,
   SourceLocation,
@@ -21,26 +25,6 @@ import {
   threadSettings,
 } from "./harness.mts";
 import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mts";
-
-function sourceEvidence(
-  fixture: ReturnType<typeof createFixture>,
-  path: string,
-  startLine: number,
-  endLine = startLine,
-) {
-  const source = fixture.files[path]
-    .split("\n")
-    .slice(startLine - 1, endLine)
-    .join("\n");
-  return {
-    id: `${path}:${startLine}`,
-    label: "Source context",
-    path,
-    startLine,
-    code: source,
-    explanation: "Source-backed credential declaration.",
-  };
-}
 
 interface TestFinding extends Finding {
   title?: string;
@@ -62,16 +46,7 @@ const fixture = createFixture();
 
 function retainedResult(source = fixture): TestResult {
   return {
-    findings: source.positives.map((expected) => ({
-      title: "Embedded credential",
-      taxonomy: { category: expected.category, cwe: [expected.cwes[0]] },
-      locations: [
-        { path: expected.path, startLine: expected.line, role: "root_control" },
-      ],
-      codeEvidence: [
-        sourceEvidence(source, expected.path, expected.line, expected.endLine),
-      ],
-    })),
+    findings: expectedFindings(source),
     coverage: {
       surfaces: [],
       explicitExclusions: [],
