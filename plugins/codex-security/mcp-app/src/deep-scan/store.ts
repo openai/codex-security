@@ -1,4 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
+import { readDeepScanProjectConfig } from "./project-config.js";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -7,13 +8,12 @@ import { parseDeepScan, parseWorker } from "./response.js";
 
 export { parseDeepScan };
 import {
-  boundedDeepScanErrorMessage,
+  deepScanErrorMessage,
   DeepScanNonRetryableError,
   DeepScanOwnershipChangedError,
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
   DeepScanRunState,
@@ -66,7 +66,7 @@ class DeepScanPersistenceError extends Error {
     const operation = args[0] ?? "unknown";
     const scanId = argumentValue(args, "--scan-id");
     const workerId = argumentValue(args, "--worker-id");
-    const diagnostic = boundedDeepScanErrorMessage(error);
+    const diagnostic = deepScanErrorMessage(error);
     super(
       `Deep Scan persistence operation ${operation} failed after ${attempts} attempts` +
         `${scanId ? ` for scan ${scanId}` : ""}` +
@@ -110,8 +110,7 @@ class DeepScanPersistenceError extends Error {
 
 const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
   "upsert-deep-scan-worker",
-  "claim-deep-scan-dedup",
-  "commit-deep-scan-dedup",
+  "record-deep-scan-iteration",
   "finish-deep-scan",
   "record-deep-scan-publication-failure",
 ]);
@@ -133,29 +132,54 @@ export class WorkbenchDeepScanStore {
     targetPath?: string;
     scope?: string;
     userContext?: string;
+    projectConfigPath?: string;
     handoffClaimToken?: string;
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
     threadId: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
-    const result = await this.enqueueWrite(
+    const args = {
+      threadId: input.threadId,
+      scanId: input.scanId || undefined,
+      targetPath: input.targetPath || undefined,
+      projectConfigPath: input.projectConfigPath,
+      scope: input.scope || undefined,
+      userContextStdin: Boolean(userContext),
+      claimToken: input.handoffClaimToken || undefined,
+      model: input.model || undefined,
+      reasoningEffort: input.reasoningEffort || undefined,
+      serviceTier: input.serviceTier,
+      scanRoot: input.scanRoot,
+      availableParallelism: availableParallelism(),
+      workflowVersion: WORKFLOW_VERSION,
+    };
+    let result = await this.enqueueWrite(
       workbenchArgs("begin-deep-scan", {
-        threadId: input.threadId,
-        scanId: input.scanId || undefined,
-        targetPath: input.targetPath || undefined,
-        scope: input.scope || undefined,
-        userContextStdin: Boolean(userContext),
-        claimToken: input.handoffClaimToken || undefined,
-        model: input.model || undefined,
-        reasoningEffort: input.reasoningEffort || undefined,
-        scanRoot: input.scanRoot,
-        availableParallelism: availableParallelism(),
-        workflowVersion: WORKFLOW_VERSION,
+        ...args,
+        joinOnly: input.projectConfigPath !== undefined,
       }),
       userContext,
     );
+    if (
+      input.projectConfigPath !== undefined &&
+      typeof result.newScanTarget === "string"
+    ) {
+      const project = await readDeepScanProjectConfig(
+        input.projectConfigPath,
+        result.newScanTarget,
+      );
+      result = await this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", {
+          ...args,
+          targetPath: result.newScanTarget,
+          deepScanProjectJson: JSON.stringify(project),
+        }),
+        userContext,
+      );
+    }
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {
@@ -273,35 +297,24 @@ export class WorkbenchDeepScanStore {
     return parseWorker(result, update.id);
   }
 
-  async claimDedup(input: {
-    id: string;
+  async recordIteration(input: {
     scanId: string;
+    id: string;
     workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
-  }): Promise<void> {
-    await this.enqueueWrite(
-      workbenchArgs("claim-deep-scan-dedup", {
-        scanId: input.scanId,
-        workerId: input.id,
-        promptPath: input.promptPath,
-        artifactDir: input.artifactDir,
-        coordinatorGeneration: this.coordinatorGeneration(input.scanId),
-        inputWorkerId: input.workerIds,
-      }),
-    );
-  }
-
-  async commitDedup(commit: DedupCommit): Promise<DeepScanRunState> {
+    resultPath: string;
+    noNewStreak: number;
+    consecutiveErrors: number;
+  }): Promise<DeepScanRunState> {
     return parseDeepScan(
       await this.enqueueWrite(
-        workbenchArgs("commit-deep-scan-dedup", {
-          scanId: commit.scanId,
-          workerId: commit.id,
-          coordinatorGeneration: this.coordinatorGeneration(commit.scanId),
-          resultManifestPath: commit.resultManifestPath,
-          candidateLedgerPath: commit.candidateLedgerPath || undefined,
-          newFindingsCount: commit.newFindings,
+        workbenchArgs("record-deep-scan-iteration", {
+          scanId: input.scanId,
+          workerId: input.id,
+          inputWorkerId: input.workerIds,
+          resultManifestPath: input.resultPath,
+          noNewStreak: input.noNewStreak,
+          consecutiveErrors: input.consecutiveErrors,
+          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         }),
       ),
     );
@@ -478,7 +491,7 @@ export class WorkbenchDeepScanStore {
               signal: failure.signal,
               killed: failure.killed,
               timeoutMs: failure.timeoutMs,
-              error: boundedDeepScanErrorMessage(error),
+              error: deepScanErrorMessage(error),
             }),
           );
           throw failure;

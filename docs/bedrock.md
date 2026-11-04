@@ -59,7 +59,7 @@ reaches installed users when a Codex Security release bundles the corrected
 Codex dependency; a successful inference alone does not verify all model metadata.
 
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
-`reasoning.summary`. This setting reaches Deep Scan discovery and reducer workers,
+`reasoning.summary`. This setting reaches Deep Scan discovery workers,
 including resumes. To request summaries from a model that supports them, add
 `--codex 'model_reasoning_summary="auto"'` to the scan command. This explicit
 override takes precedence over the default and does not change reasoning effort.
@@ -131,7 +131,7 @@ qa_root="$(mktemp -d)"
 mkdir "$qa_root/repository" "$qa_root/codex-home"
 export CODEX_HOME="$qa_root/codex-home"
 export CODEX_SECURITY_STATE_DIR="$qa_root/state"
-unset OPENAI_API_KEY CODEX_API_KEY OPENROUTER_API_KEY FIREWORKS_API_KEY CHEAPER_INFERENCE_API_KEY OPPER_API_KEY
+unset OPENAI_API_KEY CODEX_API_KEY OPENROUTER_API_KEY FIREWORKS_API_KEY CHEAPER_INFERENCE_API_KEY
 unset CODEX_CLI_PATH CODEX_SECURITY_PROJECT_CONFIG
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BEARER_TOKEN_BEDROCK
 export AWS_PROFILE="security-scan"
@@ -208,7 +208,7 @@ is a separate path and does not establish crash recovery:
 ```
 
 Resume reads the saved model, provider, reasoning settings, and original output
-directory. Confirm discovery and reducer workers, including resumed workers, use
+directory. Confirm discovery workers, including resumed workers, use
 those settings and AWS authentication. Check the final stop reason and reported
 limitations. If no resumable scan is available, record this check as not run.
 

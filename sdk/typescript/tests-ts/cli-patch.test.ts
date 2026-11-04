@@ -1564,9 +1564,7 @@ describe("scan and patch workflow", () => {
                 "--helper validate-patch-risk-assessment <assessment.json>",
               );
               expect(output.appServer?.prompt).toContain(
-                process.platform === "win32"
-                  ? "launch_codex_security_mcp.cmd"
-                  : "launch_codex_security_mcp",
+                "references/windows-validation.md",
               );
               const artifact = JSON.parse(
                 output
@@ -2051,11 +2049,9 @@ describe("scan and patch workflow", () => {
         ...expected,
       ]);
       if (argv[1] === "--patch") {
-        expect(outcome.stderr).not.toContain(
-          "Review and patch these findings?",
-        );
+        expect(outcome.stderr).not.toContain("Open findings for review?");
       } else {
-        expect(outcome.stderr).toContain("Review and patch these findings?");
+        expect(outcome.stderr).toContain("Open findings for review?");
       }
     }
   });
@@ -2088,7 +2084,7 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr.indexOf("FINDINGS")).toBeLessThan(
-        outcome.stderr.indexOf("Review and patch these findings? (y/N)"),
+        outcome.stderr.indexOf("Open findings for review? (y/N)"),
       );
       expect(opened).toBe(review);
       expect(patched).toBe(review);
@@ -2116,7 +2112,7 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr).toContain(`FINDINGS  ${severities.length}`);
-      expect(outcome.stderr).not.toContain("Review and patch these findings?");
+      expect(outcome.stderr).not.toContain("Open findings for review?");
       expect(confirmPatchReview).not.toHaveBeenCalled();
       expect(patchEditor).not.toHaveBeenCalled();
     }

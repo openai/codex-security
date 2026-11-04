@@ -1,3 +1,4 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import { isRecord } from "./record.js";
@@ -9,9 +10,10 @@ import {
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunResults,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
@@ -31,10 +33,13 @@ export function endorRepositoryUrls(sourceData: unknown): string[] {
 }
 
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
-export function normalizeEndorFindings(input: unknown): ExternalFindings {
+export function normalizeEndorFindings(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
-    return normalizeEndorSarif(root);
+    return normalizeEndorSarif(root, target);
   const list =
     root?.["list"] === undefined ? null : record(root["list"], "Endor list");
   if (list) {
@@ -56,7 +61,7 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
       : [input];
   return normalizeRecords(
     values,
-    (value, id) => {
+    (value) => {
       const finding = record(value, "Endor finding");
       const meta = record(finding["meta"], "Endor meta");
       const spec = record(finding["spec"], "Endor spec");
@@ -134,9 +139,8 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
         : [];
       const context = record(finding["context"] ?? {}, "Endor context");
       const updated = text(meta["update_time"]);
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence({
+      return validateExternalEvidence(
+        {
           title: requiredText(meta["name"], "Endor finding title"),
           description:
             [
@@ -163,19 +167,24 @@ export function normalizeEndorFindings(input: unknown): ExternalFindings {
           packages,
           locations,
           source_data: structuredClone(finding),
-        }),
-      };
+        },
+        target,
+      );
     },
     (value) =>
       requiredText(
         record(value, "Endor finding")["uuid"],
         "Endor finding uuid",
       ),
+    target,
   );
 }
 
 /** Endor's documented SARIF producer uses properties.finding-uuid, not its rule name. */
-export function normalizeEndorSarif(input: unknown): ExternalFindings {
+export function normalizeEndorSarif(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindings {
   const document = record(input, "Endor SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Endor SARIF 2.1.0.");
@@ -189,33 +198,11 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
     )
       throw new Error("Use a self-contained Endor SARIF report.");
-    const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
-      record(r, "Endor rule"),
-    );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    for (const [index, rule] of rules.entries()) {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    }
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Endor results").map((result) => ({
-      result,
-      rulesById,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
-    }));
+    return sarifRunResults(document, run, tool, driver, "Endor");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, ...context }, id) => {
+    ({ result: value, context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -223,29 +210,13 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
       );
       requiredText(properties["project-uuid"], "Endor project-uuid");
       const ruleId = requiredText(result["ruleId"], "Endor ruleId");
-      const selectedRule = rulesById.get(ruleId);
+      const selectedRule = context.rulesById.get(ruleId);
       if (!selectedRule)
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
         );
-      const { rule, index: ruleIndex } = selectedRule;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Endor ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const reference = record(result["rule"], "Endor rule reference");
-        if (
-          reference["toolComponent"] !== undefined ||
-          (reference["id"] !== undefined && reference["id"] !== ruleId) ||
-          (reference["index"] !== undefined &&
-            reference["index"] !== ruleIndex) ||
-          (reference["guid"] !== undefined &&
-            reference["guid"] !== rule["guid"])
-        )
-          throw new Error("Inconsistent or external Endor rule reference.");
-      }
+      const { rule } = selectedRule;
+      validateSarifRuleReference(result, ruleId, selectedRule, "Endor");
       const message = record(result["message"], "Endor message");
       const short = record(
         rule["shortDescription"] ?? {},
@@ -298,9 +269,8 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
           },
         ];
       });
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence({
+      return validateExternalEvidence(
+        {
           title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
           url: text(properties["finding-url"]),
           description: [
@@ -317,21 +287,10 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
               locations.map((location) => [JSON.stringify(location), location]),
             ).values(),
           ],
-          source_data: structuredClone({
-            ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
-              result,
-              rule,
-              context.documentContext,
-              context.driverContext,
-              context.toolContext,
-            ),
-            rule,
-            result,
-          }),
-        }),
-      };
+          source_data: context.sourceData(result, rule),
+        },
+        target,
+      );
     },
     ({ result }) =>
       requiredText(
@@ -341,11 +300,13 @@ export function normalizeEndorSarif(input: unknown): ExternalFindings {
         )["finding-uuid"],
         "Endor finding-uuid",
       ),
+    target,
   );
 }
 
 export async function readEndorFindings(
   path: string,
+  target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  return normalizeEndorFindings(await readScannerJson(path));
+  return normalizeEndorFindings(await readScannerJson(path), target);
 }

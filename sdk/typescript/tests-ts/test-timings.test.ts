@@ -32,18 +32,26 @@ test("refreshes per-file medians while retaining other platforms and undiscovere
   ]);
 });
 
-test("handles XML-escaped and Windows file paths and zero-duration skipped cases", () => {
-  const updated = updateTestTimings({}, "win32", [
+test("updates executed Windows cases and retains estimates for skipped files", () => {
+  const previous = { "skipped.test.ts": { win32: 34.5 } };
+  const updated = updateTestTimings(previous, "win32", [
     report(String.raw`
       <testcase file="C:\checkout\tests-ts\names&amp;paths.test.ts" time="1.2" />
       <testcase file="tests-ts/names&amp;paths.test.ts" time="0.5" />
-      <testcase file="tests-ts/skipped.test.ts"><skipped /></testcase>
+      <testcase file="tests-ts/names&amp;paths.test.ts" time="8"><skipped /></testcase>
+      <testcase file="tests-ts/skipped.test.ts" time="0"><skipped /></testcase>
+      <testcase file="tests-ts/new-skipped.test.ts"><skipped /></testcase>
+      <testcase file="tests-ts/quick.test.ts" time="0" />
     `),
     report('<testcase file="tests-ts/names&amp;paths.test.ts" time="3.1" />'),
+    report(
+      '<testcase file="tests-ts/names&amp;paths.test.ts"><skipped /></testcase>',
+    ),
   ]);
   expect(updated).toEqual({
     "names&paths.test.ts": { win32: 2.4 },
-    "skipped.test.ts": { win32: 0.1 },
+    "quick.test.ts": { win32: 0.1 },
+    "skipped.test.ts": { win32: 34.5 },
   });
 });
 

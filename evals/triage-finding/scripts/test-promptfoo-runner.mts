@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import { stageSkillRuntime } from "./run-promptfoo.mts";
 
@@ -88,6 +89,43 @@ test("initializes native providers only in the Promptfoo child", async () => {
   }
 });
 
+async function interruptRunner(
+  t: TestContext,
+  child: ChildProcess,
+  interrupt: () => void,
+  exitCode: number,
+) {
+  t.after(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  let stderr = "";
+  child.stderr!.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const exited = once(child, "exit");
+  const outputEnded = once(child.stdout!, "end");
+  let output = "";
+  const ready = new Promise<{ root: string }>((resolve) => {
+    child.stdout!.on("data", (chunk) => {
+      output += chunk;
+      if (output.includes("\n")) resolve(JSON.parse(output.split("\n")[0]));
+    });
+  });
+  const { root } = await Promise.race([
+    ready,
+    exited.then(() => {
+      throw new Error(`runner exited early: ${stderr}`);
+    }),
+  ]);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.ok(fs.existsSync(root));
+  interrupt();
+  assert.deepEqual(await exited, [exitCode, null], stderr);
+  assert.equal(fs.existsSync(root), false);
+  await outputEnded;
+  return output;
+}
+
 test(
   "Windows console Ctrl+C lets the child save progress before runtime cleanup",
   { timeout: 15000 },
@@ -137,112 +175,64 @@ test(
       ["--experimental-strip-types", "--eval", driver],
       { stdio: ["ignore", "pipe", "pipe", "ipc"] },
     );
-    t.after(() => {
-      if (child.exitCode === null) child.kill("SIGKILL");
-    });
-    let stderr = "";
-    child.stderr!.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const exited = new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", resolve);
-    });
-    let output = "";
-    const ready = new Promise<{ root: string }>((resolve) => {
-      child.stdout!.on("data", (chunk) => {
-        output += chunk;
-        if (output.includes("\n")) resolve(JSON.parse(output.split("\n")[0]));
-      });
-    });
-    const { root } = await Promise.race([
-      ready,
-      exited.then(() => {
-        throw new Error(`runner exited early: ${stderr}`);
-      }),
-    ]);
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    assert.ok(fs.existsSync(root));
-    child.send("console-interrupt");
-    assert.equal(await exited, 130, stderr);
+    const output = await interruptRunner(
+      t,
+      child,
+      () => child.send("console-interrupt"),
+      130,
+    );
     assert.match(output, /saved:1:true/);
     assert.doesNotMatch(output, /forced:/);
-    assert.equal(fs.existsSync(root), false);
   },
 );
 
-for (const [signal, exitCode] of [
-  ["SIGINT", 130],
-  ["SIGTERM", 143],
+for (const [signal, exitCode, delivery] of [
+  ["SIGINT", 130, "pid"],
+  ["SIGINT", 130, "group"],
+  ["SIGTERM", 143, "pid"],
+  ["SIGTERM", 143, "group"],
 ] as const) {
-  for (const delivery of ["pid", "group"]) {
-    test(
-      `runner forwards ${signal} once (${delivery}) and removes its runtime after the child exits`,
-      { skip: process.platform === "win32", timeout: 15000 },
-      async (t) => {
-        const target = `
-        let received = 0;
-        process.on(${JSON.stringify(signal)}, () => {
-          received++;
-          if (received > 1) process.exit(99);
-          setTimeout(() => { console.log("graceful:" + received); process.exit(0); }, 150);
-        });
-        console.log(JSON.stringify({ root: process.env.TRIAGE_RUNTIME_ROOT }));
-        setInterval(() => {}, 1000);
-      `;
-        const driver = `
-      const cp = require('node:child_process');
-      const spawn = cp.spawn;
-      cp.spawn = (command, args, options) => spawn(process.execPath, ['--eval', args[0].endsWith("build_mcp_app.mjs") ? "" : ${JSON.stringify(target)}], options);
-      import(${JSON.stringify(new URL("./run-promptfoo.mts", import.meta.url).href)}).then(({ runPromptfoo }) => runPromptfoo([])).then(code => { process.exitCode = code; });
+  test(
+    `runner forwards ${signal} once (${delivery}) and removes its runtime after the child exits`,
+    { skip: process.platform === "win32", timeout: 15000 },
+    async (t) => {
+      const target = `
+      let received = 0;
+      process.on(${JSON.stringify(signal)}, () => {
+        received++;
+        if (received > 1) process.exit(99);
+        setTimeout(() => {
+          console.log("graceful:" + received + ":" + require("node:fs").existsSync(process.env.TRIAGE_RUNTIME_ROOT));
+          process.exit(0);
+        }, 150);
+      });
+      console.log(JSON.stringify({ root: process.env.TRIAGE_RUNTIME_ROOT }));
+      setInterval(() => {}, 1000);
     `;
-        const child = spawn(
-          process.execPath,
-          ["--experimental-strip-types", "--eval", driver],
-          {
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: true,
-          },
-        );
-        t.after(() => {
-          if (child.exitCode === null) child.kill("SIGKILL");
-        });
-        let stderr = "";
-        child.stderr.on("data", (chunk) => {
-          stderr += chunk;
-        });
-        const exited = new Promise<{
-          code: number | null;
-          signal: NodeJS.Signals | null;
-        }>((resolve, reject) => {
-          child.once("error", reject);
-          child.once("exit", (code, signal) => resolve({ code, signal }));
-        });
-        let text = "";
-        const ready = new Promise<{ root: string }>((resolve) => {
-          child.stdout.on("data", (chunk) => {
-            text += chunk;
-            if (text.includes("\n")) resolve(JSON.parse(text.split("\n")[0]));
-          });
-        });
-        const { root } = await Promise.race([
-          ready,
-          exited.then(() => {
-            throw new Error(`runner exited early: ${stderr}`);
-          }),
-        ]);
-        t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-        assert.ok(fs.existsSync(root));
-        if (delivery === "group") process.kill(-child.pid!, signal);
-        else child.kill(signal);
-        assert.deepEqual(
-          await exited,
-          { code: exitCode, signal: null },
-          stderr,
-        );
-        assert.match(text, /graceful:1/);
-        assert.equal(fs.existsSync(root), false);
-      },
-    );
-  }
+      const driver = `
+    const cp = require('node:child_process');
+    const spawn = cp.spawn;
+    cp.spawn = (command, args, options) => spawn(process.execPath, ['--eval', args[0].endsWith("build_mcp_app.mjs") ? "" : ${JSON.stringify(target)}], options);
+    import(${JSON.stringify(new URL("./run-promptfoo.mts", import.meta.url).href)}).then(({ runPromptfoo }) => runPromptfoo([])).then(code => { process.exitCode = code; });
+  `;
+      const child = spawn(
+        process.execPath,
+        ["--experimental-strip-types", "--eval", driver],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: true,
+        },
+      );
+      const output = await interruptRunner(
+        t,
+        child,
+        () => {
+          if (delivery === "group") process.kill(-child.pid!, signal);
+          else child.kill(signal);
+        },
+        exitCode,
+      );
+      assert.match(output, /graceful:1:true/);
+    },
+  );
 }

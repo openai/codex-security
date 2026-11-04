@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { z } from "zod";
+import { scanCodexHome } from "./api.js";
 import {
   ownerRepository,
   collectOwnerEvidence,
@@ -98,7 +99,10 @@ export async function suggestOwnersInternal(
     options.signal,
   );
   const configured = scanModelConfiguration(
-    await mergedCodexConfig(options.config ?? {}),
+    await mergedCodexConfig(
+      options.config ?? {},
+      scanCodexHome(options.environment ?? process.env),
+    ),
   );
   const model = options.model ?? configured.model;
   const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
@@ -230,15 +234,20 @@ export async function suggestOwnersFromScan(
       const hint = z
         .object({ email: text, commit: text, reason: text })
         .parse(value);
+      const supports = (item: OwnerEvidence) =>
+        item.kind === "blame"
+          ? item.blameCommit === hint.commit
+          : item.commit === hint.commit;
+      // Git keeps emails that differ only in case as separate identities.
       const identityIndex = context.identities.findIndex(
-        (identity) => identity.email.toLowerCase() === hint.email.toLowerCase(),
+        (identity, index) =>
+          identity.email.toLowerCase() === hint.email.toLowerCase() &&
+          context.evidence.some(
+            (item) => item.identityIndex === index && supports(item),
+          ),
       );
       const cited = context.evidence.filter(
-        (item) =>
-          item.identityIndex === identityIndex &&
-          (item.kind === "blame"
-            ? item.blameCommit === hint.commit
-            : item.commit === hint.commit),
+        (item) => item.identityIndex === identityIndex && supports(item),
       );
       if (identityIndex < 0 || cited.length === 0)
         throw new CodexSecurityError(

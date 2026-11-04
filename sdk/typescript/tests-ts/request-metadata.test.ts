@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "smol-toml";
@@ -21,7 +21,6 @@ test.each([
   ["cheaperinference", "cheaperinference"],
   ["openrouter", "openrouter"],
   ["fireworks", "fireworks"],
-  ["opper", "opper"],
   ["ollama", "ollama"],
   ["lmstudio", "lmstudio"],
   ["synthetic.private-provider", "custom"],
@@ -115,8 +114,10 @@ test("native table overrides preserve inherited literal metadata and opt-outs", 
   );
   const config = await readDeepScanRuntimeConfig({
     codexPath: resolveCodexCommand({}).command,
-    cwd: home,
-    configOverrides: [context.configOverride],
+    // Native descendants can hold their working directory open on Windows.
+    cwd: dirname(home),
+    // Marketplace sync can leave a Git process in CODEX_HOME during cleanup.
+    configOverrides: ["features.plugins=false", context.configOverride],
     env: {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],

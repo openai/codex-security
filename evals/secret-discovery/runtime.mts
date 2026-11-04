@@ -24,7 +24,7 @@ export { bundledCodexSdkEnvironment } from "../../sdk/typescript/src/codex-sdk-e
 /** Keep temporary source and the login link alive until cancelled work stops. */
 export async function withEvalState(
   createHome: (parent?: string) => Promise<string>,
-  ambientHome: string,
+  ambientHome: string | undefined,
   run: (state: {
     home: string;
     root: string;
@@ -47,11 +47,13 @@ export async function withEvalState(
     root = await realpath(await mkdtemp(join(tmpdir(), "source-audit-")));
     // Share saved login updates without importing the caller's configuration.
     let auth;
-    try {
-      const path = await realpath(join(ambientHome, "auth.json"));
-      if ((await stat(path)).isFile()) auth = path;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (ambientHome !== undefined) {
+      try {
+        const path = await realpath(join(ambientHome, "auth.json"));
+        if ((await stat(path)).isFile()) auth = path;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     // A hard link must stay on the saved login's filesystem, including symlinks.
     const allocatedHome = await createHome(auth ? dirname(auth) : undefined);

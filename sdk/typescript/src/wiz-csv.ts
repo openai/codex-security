@@ -1,7 +1,9 @@
+import type { ExternalImportTarget } from "./external-import-contract.js";
 import Papa from "papaparse";
+import { text } from "./scanner-import.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
-import type { VendorFinding } from "./wiz-findings.js";
+import type { ExternalFinding } from "./external-findings.js";
 
 const profile = "wiz-code-vulnerability-csv";
 const requiredHeaders = [
@@ -13,10 +15,6 @@ const requiredHeaders = [
   "CloudPlatform",
   "CloudProviderURL",
 ];
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
 
 /** Recognize the supported Wiz vulnerability CSV columns, retaining every cell. */
 export function readWizCsv(
@@ -87,7 +85,8 @@ export function wizCsvRepositoryUrl(
 export function wizCsvFinding(
   row: Record<string, unknown>,
   sourceFindingId: string,
-): VendorFinding {
+  target: ExternalImportTarget = "cloud",
+): ExternalFinding {
   repositoryUrl(row);
   const name = text(row["Name"]);
   const packageName = text(row["DetailedName"]);
@@ -106,31 +105,34 @@ export function wizCsvFinding(
     .toLowerCase();
   return {
     source_finding_id: sourceFindingId,
-    evidence: validateExternalEvidence({
-      title: [packageName, text(row["Version"]), name]
-        .filter(Boolean)
-        .join(" "),
-      description: text(row["Description"]),
-      severity,
-      url: text(row["WizURL"]),
-      advisory_ids: [name],
-      packages: [
-        {
-          name: packageName,
-          ecosystem: null,
-          installed_version: text(row["Version"]),
-          manifest_path: path,
-          fixed_versions: fixedVersion ? [fixedVersion] : [],
-        },
-      ],
-      locations: path ? [{ path }] : [],
-      // A tree URL does not distinguish a slash-containing ref from a directory.
-      branch: null,
-      code_revision: null,
-      source_scan_id: null,
-      source_updated_at: null,
-      image_digests: [],
-      source_data: { format: profile, row },
-    }),
+    evidence: validateExternalEvidence(
+      {
+        title: [packageName, text(row["Version"]), name]
+          .filter(Boolean)
+          .join(" "),
+        description: text(row["Description"]),
+        severity: severity === "none" ? "unknown" : severity,
+        url: text(row["WizURL"]),
+        advisory_ids: [name],
+        packages: [
+          {
+            name: packageName,
+            ecosystem: null,
+            installed_version: text(row["Version"]),
+            manifest_path: path,
+            fixed_versions: fixedVersion ? [fixedVersion] : [],
+          },
+        ],
+        locations: path ? [{ path }] : [],
+        // A tree URL does not distinguish a slash-containing ref from a directory.
+        branch: null,
+        code_revision: null,
+        source_scan_id: null,
+        source_updated_at: null,
+        image_digests: [],
+        source_data: { format: profile, row },
+      },
+      target,
+    ),
   };
 }
