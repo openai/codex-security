@@ -680,7 +680,7 @@ def merge_saved_results(
 
     workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
-        (*_iteration_order(reducer), int(reducer["attempt"] or 0))
+        (_iteration_order(reducer), int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
         else None
     )
@@ -693,7 +693,7 @@ def merge_saved_results(
         ):
             continue
         current_results.add(result_path)
-        candidate_key = (*_iteration_order(worker), attempt)
+        candidate_key = (_iteration_order(worker), attempt)
         if latest_reducer_key is None or candidate_key > latest_reducer_key:
             latest_reducer_key = candidate_key
             latest_reducer = result_path

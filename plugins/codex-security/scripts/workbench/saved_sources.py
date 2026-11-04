@@ -241,14 +241,18 @@ def _read_saved_result(
         return draft, _digest(draft), int(observed)
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(
-            draft.get("reviewState", draft.get("coverage", {} if kind == "dedup" else None)), dict
-        )
+    if _is_source_order_snapshot(relative):
+        return draft, _digest(draft), metadata.st_mtime_ns
+    if not isinstance(draft.get("findings"), list) or not isinstance(
+        draft.get("reviewState", draft.get("coverage", {} if kind == "dedup" else None)), dict
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
     digest = _digest(draft)
+    if kind == "dedup" and normalize_review:
+        # The host keeps grouping state in iteration checkpoints for resume only.
+        for finding in draft["findings"]:
+            if isinstance(finding, dict) and isinstance(finding.get("provenance"), dict):
+                finding["provenance"].pop("deepScanRepairGroups", None)
     if normalize_review and "coverage" in draft and "reviewState" not in draft:
         draft["reviewState"] = draft.pop("coverage")
     return draft, digest, metadata.st_mtime_ns
