@@ -247,10 +247,12 @@ runtime are not necessarily part of Bun's import graph.
 
 Mutation tests require Node 22.18+ or 24.11+ because Stryker 10 uses Babel 8.
 CI runs this tooling on Node 24.15.0. The SDK itself still supports Node 22.13+.
+The commands below install Stryker from the separate, frozen `sdk/mutation`
+lockfile and run it from the SDK directory.
 
 ```sh
 pnpm run test:mutation
-pnpm exec stryker run --mutate src/worker-progress.ts
+pnpm run test:mutation --mutate src/worker-progress.ts
 ```
 
 The initial Stryker trial covers progress parsing, safe error messages, and
