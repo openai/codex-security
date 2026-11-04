@@ -1,6 +1,16 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  encodeSnykV1File,
+  isSnykRestFormat,
+  parseSnykReport,
+  SNYK_REST_ISSUES_V1,
+} from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
@@ -211,6 +221,24 @@ export function snykRepositoryUrls(
         ? normalizeGitRepositoryUrl(repository, cloudRepositoryUrl)
         : repository,
     ];
+  }
+  const project = source["project"];
+  if (
+    isRecord(project) &&
+    typeof project["ok"] === "boolean" &&
+    text(project["packageManager"]) &&
+    isRecord(source["vulnerability"])
+  ) {
+    // A remote Snyk test puts its GitHub URL and optional ref in the same
+    // path field that local scans use for a directory or npm package name.
+    const repository = text(project["path"])?.split("#", 1)[0];
+    if (
+      repository &&
+      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+        repository,
+      )
+    )
+      return [repository];
   }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
@@ -493,13 +521,37 @@ export function normalizeSnykJson(
   );
 }
 
+/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
+export function readSnykReport(path: string): Promise<unknown> {
+  return readScannerJson(path, parseSnykReport);
+}
+
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+  references: readonly ExternalSourceRepository[] = [],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  return normalizeSnykFile(await readSnykReport(path), target, references);
+}
+
+/** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
+export async function normalizeSnykFile(
+  input: unknown,
+  target: ExternalImportTarget,
+  references: readonly ExternalSourceRepository[],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
+  if (isSnykRestFormat(document["format"])) {
+    const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
+    return normalizeSnykIssues(
+      document["format"] === SNYK_REST_ISSUES_V1
+        ? encodeSnykV1File(document)
+        : document,
+      target,
+      references,
+    );
+  }
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);
   if (document["version"] === "2.1.0")

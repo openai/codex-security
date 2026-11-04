@@ -5,7 +5,10 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { isRecord } from "./record.js";
+import { previousAdmission } from "./external-import-contract.js";
+import { rememberPreviousSelection } from "./reader-selection.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -28,6 +31,10 @@ export function requiredText(value: unknown, label: string): string {
   return result;
 }
 
+export function scannerSeverity(value: string | null | undefined) {
+  return SCAN_SEVERITIES.find((severity) => severity === value) ?? "unknown";
+}
+
 export function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((v): v is string => text(v) !== null)
@@ -43,6 +50,14 @@ export function relativePath(value: unknown): string | null {
     !/^[A-Za-z]:/.test(path) &&
     !path.split("/").includes("..")
     ? path
+    : null;
+}
+
+// Hosted findings do not identify the scanner operating system or its path separator.
+export function hostedRepositoryPath(value: unknown) {
+  const path = text(value);
+  return path && !path.includes("\\") && !path.includes("://")
+    ? relativePath(path)
     : null;
 }
 
@@ -87,6 +102,7 @@ export function parseJsonOrJsonl(contents: string): unknown {
 
 export async function readScannerJson(
   path: string | FileHandle,
+  parse: (json: string) => unknown = JSON.parse,
 ): Promise<unknown> {
   const bytes = await readScannerBytes(path);
   let decoded: string;
@@ -99,7 +115,7 @@ export async function readScannerJson(
     );
   }
   try {
-    return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
+    return parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,
@@ -224,8 +240,8 @@ export function indexSarifRules(
   return byId;
 }
 
-/** Keep the report and producer context shared by individual SARIF results. */
-export function sarifResultContext(
+/** Pair each result with its shared run context and original evidence. */
+export function sarifRunResults(
   document: Record<string, unknown>,
   run: Record<string, unknown>,
   tool: Record<string, unknown>,
@@ -240,14 +256,33 @@ export function sarifResultContext(
   const { results: _results, tool: _tool, ...runContext } = run;
   const { rules: _rules, ...driverContext } = driver;
   const { driver: _driver, ...toolContext } = tool;
-  return {
+  const selectRunContext = sarifRunContextSelector(runContext);
+  // JS callers may supply lazy metadata. Preserve each adapter's original traversal order.
+  const metadataInReadOrder =
+    producer === "Semgrep"
+      ? [driverContext, toolContext, documentContext]
+      : [documentContext, driverContext, toolContext];
+  const context = {
     rulesById,
-    selectRunContext: sarifRunContextSelector(runContext),
-    documentContext,
     runContext,
-    driverContext,
-    toolContext,
+    sourceData(
+      result: Record<string, unknown>,
+      rule?: Record<string, unknown>,
+    ) {
+      return structuredClone({
+        documentContext,
+        runContext: selectRunContext(result, rule, ...metadataInReadOrder),
+        driverContext,
+        toolContext,
+        ...(rule ? { rule } : {}),
+        result,
+      });
+    },
   };
+  return array(run["results"] ?? [], `${producer} results`).map((result) => ({
+    result,
+    context,
+  }));
 }
 
 /** The top-level index and nested descriptor must agree with the selected driver rule. */
@@ -284,18 +319,130 @@ export function validateSarifRuleReference(
     );
 }
 
+interface SizeChange {
+  index: number;
+  position: number;
+  id: string;
+  previous: ExternalFinding["evidence"] | null;
+}
+
+type SelectionFilter = (
+  selection: ExternalFindings,
+  removedIds?: Set<string>,
+) => void;
+
+/** Track older size decisions while a single reader constructs its result. */
+export function trackReaderSelection(result: ExternalFindings) {
+  const changes: SizeChange[] = [];
+  const uncertainIds = new Set<string>();
+
+  function append(
+    position: number,
+    id: string,
+    project: () => ExternalFinding["evidence"],
+  ) {
+    const index = result.findings.length;
+    let outcome: unknown;
+    try {
+      const evidence = project();
+      outcome = evidence;
+      result.findings.push({ source_finding_id: id, evidence });
+    } catch (error) {
+      outcome = error;
+      result.excluded.push({
+        position,
+        source_finding_id: id,
+        reason: errorMessage(error),
+      });
+    }
+    const previous =
+      outcome && typeof outcome === "object"
+        ? previousAdmission(outcome)
+        : undefined;
+    if (previous === "uncertain") uncertainIds.add(id);
+    else if (previous !== undefined)
+      changes.push({ index, position, id, previous });
+  }
+
+  function finish(filter?: SelectionFilter): ExternalFindings {
+    if (!changes.length && !uncertainIds.size) {
+      filter?.(result);
+      return result;
+    }
+    const findings: ExternalFinding[] = [];
+    const excluded: ExternalFindings["excluded"] = [];
+    const restoredPositions = new Set<number>();
+    let cursor = 0;
+    for (const { index, position, id, previous } of changes) {
+      while (cursor < index) findings.push(result.findings[cursor++]!);
+      if (previous) {
+        findings.push({ source_finding_id: id, evidence: previous });
+        restoredPositions.add(position);
+      } else {
+        cursor++;
+        excluded.push({
+          position,
+          source_finding_id: id,
+          reason: "Evidence exceeds the Cloud limit of 256 KiB.",
+        });
+      }
+    }
+    while (cursor < result.findings.length)
+      findings.push(result.findings[cursor++]!);
+    for (const row of result.excluded) {
+      if (!restoredPositions.has(row.position)) excluded.push(row);
+    }
+    excluded.sort((a, b) => a.position - b.position);
+    const previous = { ...result, findings, excluded };
+    // A removed sibling could have depended on an unproven row for its scope.
+    filter?.(previous, uncertainIds.size ? uncertainIds : undefined);
+    filter?.(result);
+    const sourceFindingIds = [
+      ...new Set([
+        ...previous.findings.map((row) => row.source_finding_id),
+        ...uncertainIds,
+      ]),
+    ];
+    if (uncertainIds.size) {
+      rememberPreviousSelection(result, {
+        sourceFindingIds,
+        uncertainFindingIds: [...uncertainIds],
+        knownFindings: structuredClone(
+          previous.findings.filter(
+            (row) => !uncertainIds.has(row.source_finding_id),
+          ),
+        ),
+      });
+    } else {
+      rememberPreviousSelection(result, {
+        sourceFindingIds,
+        snapshot: structuredClone(previous),
+      });
+    }
+    return result;
+  }
+
+  return { append, finish, uncertainIds };
+}
+
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
   projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
+  options: {
+    report?: ExternalFindings["report"];
+    filter?: SelectionFilter;
+  } = {},
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
+    ...(options.report === undefined ? {} : { report: options.report }),
   };
+  const selection = trackReaderSelection(result);
   const identified: { position: number; value: T; id: string }[] = [];
   const counts = new Map<string, number>();
   for (const [index, value] of records.entries()) {
@@ -331,19 +478,8 @@ export function normalizeRecords<T>(
       });
       continue;
     }
-    try {
-      result.findings.push({
-        source_finding_id: id,
-        evidence: projectEvidence(value, id),
-      });
-    } catch (error) {
-      result.excluded.push({
-        position,
-        source_finding_id: id,
-        reason: errorMessage(error),
-      });
-    }
+    selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  return result;
+  return selection.finish(options.filter);
 }

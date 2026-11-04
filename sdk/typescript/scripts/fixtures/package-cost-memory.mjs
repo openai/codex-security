@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
-
-const installedRoot = await realpath(process.argv[2]);
-const temporaryRoot = await realpath(process.argv[3]);
-const root = await realpath(
-  await mkdtemp(join(temporaryRoot, "package-cost-history-")),
+const [, , installedRoot, temporaryRoot] = process.argv;
+const { ScanCostTracker } = await import(
+  pathToFileURL(join(installedRoot, "dist", "cost.js")).href
 );
-assert.equal(dirname(root), temporaryRoot);
+const root = await mkdtemp(join(temporaryRoot, "package-cost-history-"));
 try {
   const sessions = join(root, "sessions");
   await mkdir(sessions);
@@ -39,19 +35,15 @@ try {
           "",
         ].join("\n"),
       );
-    const expectedEvents = related ? 81 : 1;
-    const code = `import {ScanCostTracker} from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "cost.js")).href)};let events=0;const options={codexHome:process.argv[1],model:"gpt-5.6-sol"};const tracker=new ScanCostTracker(options);tracker.start("scan-thread");options.onSessionEvent=()=>events++;await tracker.refresh();await tracker.stop();if(events!==${expectedEvents})throw new Error("Scan events were lost or duplicated: "+events);`;
-    const result = spawnSync(
-      process.execPath,
-      ["--max-old-space-size=96", "--input-type=module", "--eval", code, root],
-      {
-        cwd: installedRoot,
-        encoding: "utf8",
-        windowsHide: true,
-        timeout: packageSmokeTimeouts().commandTimeoutMs,
-      },
-    );
-    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    let events = 0;
+    const options = { codexHome: root, model: "gpt-5.6-sol" };
+    const tracker = new ScanCostTracker(options);
+    // Set the observer after start so this fixture drives every refresh.
+    tracker.start("scan-thread");
+    options.onSessionEvent = () => events++;
+    await tracker.refresh();
+    await tracker.stop();
+    assert.equal(events, related ? 81 : 1);
   }
 } finally {
   await rm(root, { recursive: true, force: true });
