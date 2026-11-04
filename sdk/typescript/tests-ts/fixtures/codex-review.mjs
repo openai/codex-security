@@ -17,6 +17,10 @@ const turnFailures = {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
   },
+  "rate-limit-turn": {
+    message: "Rate limit reached",
+    codexErrorInfo: "rateLimitExceeded",
+  },
   "server-error": {
     message: "Provider temporarily unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
@@ -166,6 +170,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     }
     if (scenario === "exit") process.exit(1);
+    if (scenario === "exit-diagnostic") {
+      process.stdout.end();
+      process.stderr.write(
+        "Permission profile synthetic_profile was rejected: café 🔒\n",
+        () => process.exit(7),
+      );
+      continue;
+    }
     if (scenario === "diagnostics") {
       process.stderr.write("Native diagnostic: Bearer synthetic-review-key\n");
       send({

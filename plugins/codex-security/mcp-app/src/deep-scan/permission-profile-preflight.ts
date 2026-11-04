@@ -1,11 +1,13 @@
 import type { JsonObject as JsonRecord } from "../types.js";
+import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { asRecord as record } from "../record.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
+import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profile.mjs";
 
 /** The stable profile id selected by the worker's raw config overrides. */
@@ -45,24 +47,216 @@ type PendingRequest = {
 
 type RuntimeConfigReadOptions = Pick<
   DeepScanPermissionProfilePreflightOptions,
-  "codexPath" | "cwd" | "configOverrides" | "env" | "signal" | "context"
+  "codexPath" | "cwd" | "configOverrides" | "env" | "signal"
 > & {
+  readonly context?: PreflightContext;
   readonly commandArgs?: readonly string[];
+  readonly configCwd?: string;
+  /** Full app-server invocation for callers that already constructed its arguments. */
+  readonly appServerArgs?: readonly string[];
   readonly providerConfigOverrides?: readonly string[];
 };
 
+type PreflightContext = "helper" | "parent-config";
+
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
-  options: RuntimeConfigReadOptions,
-): Promise<JsonRecord> {
+  options: RuntimeConfigReadOptions & {
+    readonly plugin?: { marketplacePath: string; pluginName: string };
+  },
+  inspect?: (
+    config: JsonRecord,
+    hasEmptyCatalog: (server: string) => Promise<boolean>,
+  ) => Promise<JsonRecord>,
+): Promise<JsonRecord | undefined> {
   return withPreflightClient(options, async (client) => {
     const response = await client.request("config/read", {
-      cwd: options.cwd,
+      cwd: options.configCwd ?? options.cwd,
       includeLayers: false,
     });
-    const config = record(response.config);
+    let config = record(response.config);
     if (!config) throw malformedPreflightError(options.context);
-    return config;
+    // Portable plugins expose their admitted server names through native discovery.
+    // Preserve native routing if the selected Codex cannot provide that metadata.
+    if (options.plugin) {
+      const detail = await client
+        .request("plugin/read", options.plugin)
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const plugin = record(detail?.plugin);
+      const summary = record(plugin?.summary);
+      const servers = plugin?.mcpServers;
+      if (
+        summary?.installed !== true ||
+        summary.enabled !== true ||
+        !Array.isArray(servers) ||
+        !servers.every((name) => typeof name === "string")
+      )
+        return undefined;
+      config = {
+        ...config,
+        mcp_servers: {
+          ...Object.fromEntries(servers.map((name) => [name, {}])),
+          ...record(config.mcp_servers),
+        },
+      };
+    }
+    if (!inspect) return config;
+    return inspect(config, async (serverName) => {
+      const result = await client
+        .request("mcpServerStatus/list", {
+          serverName,
+          detail: "toolsAndAuthOnly",
+        })
+        .catch(() => undefined);
+      options.signal.throwIfAborted();
+      const match = Array.isArray(result?.data)
+        ? result.data.map(record).find((entry) => entry?.name === serverName)
+        : undefined;
+      const tools = record(match?.tools);
+      // Native status applies tool filters before it returns the catalog.
+      return (
+        match?.toolsError === null &&
+        tools !== undefined &&
+        Object.keys(tools).length === 0
+      );
+    });
+  });
+}
+
+/** Read native origins and ordered layers without starting a thread. */
+export async function readDeepScanRuntimeConfigWithOrigins(
+  options: RuntimeConfigReadOptions,
+): Promise<JsonRecord> {
+  return withPreflightClient(options, (client) =>
+    client.request("config/read", { cwd: options.cwd, includeLayers: true }),
+  );
+}
+
+export interface DeepScanParentTurn {
+  readonly threadId: string;
+  readonly turnId: string;
+}
+
+/** Read the program of the exact parent turn that invoked the plugin. */
+export async function readDeepScanParentCyberAccessProgram(
+  options: RuntimeConfigReadOptions & {
+    readonly parentTurn: DeepScanParentTurn;
+  },
+): Promise<CyberAccessProgram | undefined> {
+  return withPreflightClient(options, async (client) => {
+    let response: JsonRecord;
+    try {
+      response = await client.request("thread/read", {
+        threadId: options.parentTurn.threadId,
+        includeTurns: false,
+      });
+    } catch (error) {
+      const nativeError = record(
+        error instanceof Error ? error.cause : undefined,
+      );
+      // Ephemeral parent threads have no persisted rollout for this separate client.
+      if (
+        nativeError?.code === -32600 &&
+        nativeError.message ===
+          `thread not loaded: ${options.parentTurn.threadId}`
+      )
+        return undefined;
+      throw error;
+    }
+    const thread = record(response.thread);
+    if (
+      thread?.id !== options.parentTurn.threadId ||
+      typeof thread.path !== "string"
+    )
+      return undefined;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type !== "turn_context") continue;
+        const context = record(entry.payload);
+        if (context?.turn_id !== options.parentTurn.turnId) continue;
+        const program = context.cyber_access_program;
+        return typeof program === "string"
+          ? (program as CyberAccessProgram)
+          : undefined;
+      }
+      return undefined;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+  });
+}
+
+/** Persist the owning session and obtain native permissions without a model turn. */
+export async function prepareCliDeepScanSession(
+  options: RuntimeConfigReadOptions & {
+    prompt: string;
+  },
+): Promise<{
+  threadId: string;
+  model: string;
+  reasoningEffort?: string;
+  permissionProfile: unknown;
+}> {
+  return withPreflightClient(options, async (client) => {
+    const response = await client.request("thread/start", {
+      cwd: options.cwd,
+      threadSource: "security_scan",
+      ephemeral: false,
+    });
+    const thread = record(response.thread);
+    if (
+      typeof thread?.id !== "string" ||
+      typeof thread.path !== "string" ||
+      typeof response.model !== "string"
+    ) {
+      throw new Error("Codex did not return the owning Deep Scan session.");
+    }
+    // Native history persistence records the effective turn context, including
+    // managed filesystem denials. No turn/start or model request is needed.
+    await client.request("thread/inject_items", {
+      threadId: thread.id,
+      items: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: options.prompt }],
+        },
+      ],
+    });
+    let permissionProfile: unknown;
+    const input = createReadStream(thread.path, { encoding: "utf8" });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = record(JSON.parse(line));
+        if (entry?.type === "turn_context") {
+          permissionProfile = record(entry.payload)?.permission_profile;
+        }
+      }
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+    if (permissionProfile === undefined) {
+      throw new Error(
+        "Codex did not persist the Deep Scan session's effective permissions.",
+      );
+    }
+    return {
+      threadId: thread.id,
+      model: response.model,
+      ...(typeof response.reasoningEffort === "string"
+        ? { reasoningEffort: response.reasoningEffort }
+        : {}),
+      permissionProfile,
+    };
   });
 }
 
@@ -81,7 +275,7 @@ export async function readDeepScanRuntimeConfig(
  */
 export async function preflightDeepScanWorkerPermissionProfile(
   options: DeepScanPermissionProfilePreflightOptions,
-): Promise<{ useOpenAiApiKey: boolean }> {
+): Promise<{ useOpenAiApiKey: boolean; mcpServerNames: string[] }> {
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
@@ -104,11 +298,13 @@ export async function preflightDeepScanWorkerPermissionProfile(
       catalogEntry,
       requirementsResponse,
     );
+    const config = record(configResponse.config);
+    const mcpServerNames = Object.keys(record(config?.mcp_servers) ?? {});
     if (
       !options.allowOpenAiApiKeyFallback ||
-      record(configResponse.config)?.forced_login_method === "chatgpt"
+      config?.forced_login_method === "chatgpt"
     ) {
-      return { useOpenAiApiKey: false };
+      return { useOpenAiApiKey: false, mcpServerNames };
     }
     // Reuse Codex's selected credential store, including keyring, instead of
     // interpreting auth.json here. Custom provider auth is loaded privately by exec.
@@ -116,6 +312,7 @@ export async function preflightDeepScanWorkerPermissionProfile(
       refreshToken: false,
     });
     return {
+      mcpServerNames,
       useOpenAiApiKey:
         account.requiresOpenaiAuth === true && account.account === null,
     };
@@ -126,7 +323,8 @@ async function withPreflightClient<T>(
   options: RuntimeConfigReadOptions,
   operation: (client: AppServerPreflightClient) => Promise<T>,
 ): Promise<T> {
-  if (options.signal.aborted) throw abortError(options.signal.reason);
+  if (options.signal.aborted)
+    throw abortError(options.signal.reason, options.context);
   const client = new AppServerPreflightClient(options);
   try {
     await client.initialize();
@@ -158,17 +356,30 @@ class AppServerPreflightClient {
   private closed = false;
   private childClosed = false;
   private readonly removeAbortListener: () => void;
+  private readonly onStdioError = (error: Error): void => {
+    const failure = codexExecutableStdioError(
+      this.options.codexPath,
+      this.options.context,
+    );
+    failure.message += "\n" + error.message;
+    this.fail(failure);
+  };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
-    const args: string[] = [...(options.commandArgs ?? [])];
-    for (const override of options.configOverrides) {
-      args.push("--config", override);
+    const args: string[] = [
+      ...(options.appServerArgs ?? options.commandArgs ?? []),
+    ];
+    if (options.appServerArgs === undefined) {
+      for (const override of options.configOverrides) {
+        args.push("--config", override);
+      }
+      // App-server loads credential-free metadata; exec reads private provider profiles.
+      for (const override of options.providerConfigOverrides ?? []) {
+        args.push("--config", override);
+      }
+      args.push("app-server", "--stdio");
+      if (options.configCwd !== undefined) args.push("--cd", options.configCwd);
     }
-    // App-server loads credential-free metadata; exec reads private provider profiles.
-    for (const override of options.providerConfigOverrides ?? []) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--stdio");
 
     this.child = spawn(executablePathForSpawn(options.codexPath), args, {
       cwd: options.cwd,
@@ -188,16 +399,8 @@ class AppServerPreflightClient {
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    const onStdioError = (error: Error) => {
-      const failure = codexExecutableStdioError(
-        options.codexPath,
-        options.context,
-      );
-      failure.message += "\n" + error.message;
-      this.fail(failure);
-    };
-    this.stdoutLines.on("error", onStdioError);
-    this.child.stdin.on("error", onStdioError);
+    this.stdoutLines.on("error", this.onStdioError);
+    this.child.stdin.on("error", this.onStdioError);
     this.child.on("error", (error) => {
       this.fail(
         codexExecutableStartError(options.codexPath, error, options.context),
@@ -217,7 +420,7 @@ class AppServerPreflightClient {
     });
 
     const onAbort = () => {
-      this.fail(abortError(options.signal.reason));
+      this.fail(abortError(options.signal.reason, options.context));
       this.stopChild();
     };
     options.signal.addEventListener("abort", onAbort, { once: true });
@@ -341,14 +544,7 @@ class AppServerPreflightClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) {
-        const failure = codexExecutableStdioError(
-          this.options.codexPath,
-          this.options.context,
-        );
-        failure.message += "\n" + error.message;
-        this.fail(failure);
-      }
+      if (error) this.onStdioError(error);
     });
   }
 
@@ -530,21 +726,28 @@ function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
   );
 }
 
-function malformedPreflightError(context?: "helper"): Error {
+function failedOperation(context?: PreflightContext): string {
+  return context === "parent-config"
+    ? "Could not read the Deep Scan parent configuration"
+    : `${subject(context)} cannot safely verify its read-only worker permission profile`;
+}
+
+function malformedPreflightError(context?: PreflightContext): Error {
   return new Error(
-    `${subject(context)} cannot safely verify its read-only worker permission profile with this Codex configuration. ${subject(context)} did not run.`,
+    context === "parent-config"
+      ? `${failedOperation(context)}. Codex returned an invalid app-server response.`
+      : `${failedOperation(context)} with this Codex configuration. ${subject(context)} did not run.`,
   );
 }
 
 function unsupportedCodexApiError(
   codexPath: string,
   api: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): DeepScanNonRetryableError {
   return new DeepScanNonRetryableError(
-    subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
-      "the selected Codex executable " +
+    failedOperation(context) +
+      " because the selected Codex executable " +
       JSON.stringify(codexPath) +
       " does not support the required " +
       JSON.stringify(api) +
@@ -561,7 +764,7 @@ function jsonRpcPreflightError(
   codexPath: string,
   method: string,
   value: unknown,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   const error = record(value);
   const code =
@@ -575,9 +778,8 @@ function jsonRpcPreflightError(
     return failure;
   }
   return new Error(
-    subject(context) +
-      " cannot safely verify its read-only worker permission profile because " +
-      "the selected Codex executable " +
+    failedOperation(context) +
+      " because the selected Codex executable " +
       JSON.stringify(codexPath) +
       " returned an error for " +
       JSON.stringify(method) +
@@ -586,13 +788,14 @@ function jsonRpcPreflightError(
       subject(context) +
       " did not run." +
       (typeof error?.message === "string" ? "\n" + error.message : ""),
+    { cause: value },
   );
 }
 
 function codexExecutableStartError(
   codexPath: string,
   error: Error,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   const value = "code" in error ? error.code : undefined;
   const code =
@@ -616,22 +819,24 @@ function codexExecutableExitError(
   codexPath: string,
   code: number | null,
   signal: NodeJS.Signals | null,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
+  const operation =
+    context === "parent-config"
+      ? "the configuration read"
+      : "permission-profile verification";
   const detail =
     code !== null
-      ? "exited before permission-profile verification completed with code " +
-        code
+      ? `exited before ${operation} completed with code ${code}`
       : signal !== null
-        ? "was terminated before permission-profile verification completed by signal " +
-          signal
-        : "exited before permission-profile verification completed";
+        ? `was terminated before ${operation} completed by signal ${signal}`
+        : `exited before ${operation} completed`;
   return new Error(codexExecutableFailureMessage(codexPath, detail, context));
 }
 
 function codexExecutableStdioError(
   codexPath: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): Error {
   return new Error(
     codexExecutableFailureMessage(
@@ -645,8 +850,10 @@ function codexExecutableStdioError(
 function codexExecutableFailureMessage(
   codexPath: string,
   detail: string,
-  context?: "helper",
+  context?: PreflightContext,
 ): string {
+  if (context === "parent-config")
+    return `${failedOperation(context)}. Codex executable ${JSON.stringify(codexPath)} ${detail}.`;
   return (
     subject(context) +
     " cannot safely verify its read-only worker permission profile because " +
@@ -684,7 +891,7 @@ export function deepScanPermissionProfileFallbackError(
   );
 }
 
-function subject(context?: "helper"): string {
+function subject(context?: PreflightContext): string {
   return context === "helper" ? "Read-only Codex helper" : "Deep Scan";
 }
 
@@ -692,10 +899,12 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function abortError(reason: unknown): Error {
+function abortError(reason: unknown, context?: PreflightContext): Error {
   if (reason instanceof Error) return reason;
   return new DOMException(
-    "Deep Scan worker permission profile preflight aborted.",
+    context === "parent-config"
+      ? "Deep Scan parent configuration read aborted."
+      : "Deep Scan worker permission profile preflight aborted.",
     "AbortError",
   );
 }

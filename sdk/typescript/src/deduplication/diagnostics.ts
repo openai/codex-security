@@ -1,3 +1,4 @@
+import { notify } from "../value.js";
 import type { DeduplicationReviewStage } from "../errors.js";
 
 /** Best-effort diagnostics; never written to the dedupe result's JSON stream. */
@@ -22,11 +23,7 @@ export function emitDiagnostic(
   observer: DeduplicationDiagnosticObserver | undefined,
   diagnostic: Omit<DeduplicationDiagnostic, "timestamp">,
 ): void {
-  try {
-    void Promise.resolve(
-      observer?.({ timestamp: new Date().toISOString(), ...diagnostic }),
-    ).catch(() => {});
-  } catch {
-    // Optional diagnostics must not interrupt a review or discard its result.
-  }
+  notify(() =>
+    observer?.({ timestamp: new Date().toISOString(), ...diagnostic }),
+  );
 }
