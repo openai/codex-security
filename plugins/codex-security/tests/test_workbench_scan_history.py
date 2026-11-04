@@ -1199,21 +1199,24 @@ def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Pa
     assert sorted(item["status"] for item in compared["findings"]) == ["new", "not_observed"]
 
 
+@pytest.mark.parametrize("include_inputs", [False, True])
 def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_semantic_matching(
-    tmp_path: Path,
+    tmp_path: Path, include_inputs: bool,
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "extract.py").write_text("original\n")
     root = tmp_path / "results"
+    flags = ("--include-matching-inputs",) if include_inputs else ()
     original = create_cli_scan(state_dir, root, repository)
     (repository / "extract.py").write_text("changed\n")
     changed = create_cli_scan(
         state_dir, root, repository, mode="deep", identity_anchor="renamed-archive-entry-write"
     )
-    compared = compare_scan_pair(state_dir, original, changed, "--include-matching-inputs")
-    assert "crossModeOccurrenceIds" not in compared["matchingInputs"]
+    compared = compare_scan_pair(state_dir, original, changed, *flags)
+    if include_inputs:
+        assert "crossModeOccurrenceIds" not in compared["matchingInputs"]
     assert compared["summary"]["new"] == 1
     assert compared["summary"]["not_observed"] == 1
 
@@ -1224,8 +1227,9 @@ def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_seman
         identity_anchor="sibling-archive-entry-write",
         extra_anchors=("second-sibling-archive-entry-write",),
     )
-    ambiguous = compare_scan_pair(state_dir, changed, siblings, "--include-matching-inputs")
-    assert "crossModeOccurrenceIds" not in ambiguous["matchingInputs"]
+    ambiguous = compare_scan_pair(state_dir, changed, siblings, *flags)
+    if include_inputs:
+        assert "crossModeOccurrenceIds" not in ambiguous["matchingInputs"]
     assert ambiguous["summary"]["new"] == 2
     assert ambiguous["summary"]["not_observed"] == 1
 
@@ -1565,35 +1569,6 @@ def test_scan_comparison_keeps_different_instances_at_the_same_location_separate
         "reopened": 0,
         "unknown": 0,
     }
-
-
-def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_semantic_matching(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    (repository / "extract.py").write_text("original\n")
-    root = tmp_path / "results"
-    original = create_cli_scan(state_dir, root, repository)
-    (repository / "extract.py").write_text("changed\n")
-    changed = create_cli_scan(
-        state_dir, root, repository, identity_anchor="renamed-archive-entry-write"
-    )
-    compared = compare_scan_pair(state_dir, original, changed)
-    assert compared["summary"]["new"] == 1
-    assert compared["summary"]["not_observed"] == 1
-
-    siblings = create_cli_scan(
-        state_dir,
-        root,
-        repository,
-        identity_anchor="sibling-archive-entry-write",
-        extra_anchors=("second-sibling-archive-entry-write",),
-    )
-    ambiguous = compare_scan_pair(state_dir, changed, siblings)
-    assert ambiguous["summary"]["new"] == 2
-    assert ambiguous["summary"]["not_observed"] == 1
 
 
 def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
