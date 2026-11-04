@@ -2283,7 +2283,7 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
-  async #readSessions(): Promise<void> {
+  async #readSessions(retrySkipped = false): Promise<void> {
     if (this.#threadId === null) return;
     const observeUsage = this.#options.onUsageObservation !== undefined;
     const repository =
@@ -2320,17 +2320,29 @@ export class ScanCostTracker {
       this.#deniedOpens.set(...nextDenied);
     }
     // Retry one denied open per poll, all after recovery, and all at stop.
-    let retryDenied = this.#stopping || !observeHealthySessions;
+    let retryDenied = retrySkipped || this.#stopping || !observeHealthySessions;
     const skippedDenials = new Set<string>();
-    const read = async (...args: Parameters<typeof readSessionUsage>) => {
-      const path = args[0];
+    const read = async (
+      path: string,
+      session: SessionUsage,
+      repository?: string,
+      progressThread?: string,
+      throughOffset?: number | "file-size",
+    ) => {
       const denied = this.#deniedOpens.get(path);
       if (denied && !retryDenied && path !== nextDenied?.[0]) {
         skippedDenials.add(path);
         throw denied;
       }
       try {
-        const result = await readSessionUsage(...args);
+        const result = await readSessionUsage(
+          path,
+          session,
+          repository,
+          progressThread,
+          throughOffset,
+          denied !== undefined,
+        );
         if (result !== "unchanged") {
           this.#deniedOpens.delete(path);
           this.#reportedFailures.delete(path);
@@ -2585,17 +2597,16 @@ export class ScanCostTracker {
     }
     // Healthy sessions can report activity even when a read blocks the total.
     if (blocked) {
-      // A probe can recover during replay, after discovery skipped other paths.
-      // Retry them immediately unless this refresh must report a genuine error.
-      if (retryDenied && skippedDenials.size > 0) {
-        for (const path of skippedDenials) this.#deniedOpens.delete(path);
-        if (
-          failures.every(
-            ({ path }) => path !== undefined && skippedDenials.has(path),
-          )
+      // A probe can recover after discovery skipped earlier paths. Keep their
+      // denials until opened. The second pass tries every path and cannot recur.
+      if (
+        retryDenied &&
+        skippedDenials.size > 0 &&
+        failures.every(
+          ({ path }) => path !== undefined && skippedDenials.has(path),
         )
-          return this.#readSessions();
-      }
+      )
+        return this.#readSessions(true);
       reportSecondary(blocked);
       return rejectPrimary(blocked);
     }
@@ -3000,12 +3011,19 @@ async function readSessionUsage(
   repository?: string,
   progressThread?: string,
   throughOffset?: number | "file-size",
+  probeDeniedEmpty = false,
 ): Promise<"read" | "unchanged" | "missing"> {
   if (session.unreadable) return "unchanged";
   let file;
   try {
     const size = (await stat(path)).size;
-    if (size === session.offset) return "unchanged";
+    // An unidentified history can be truncated before its denied open recovers.
+    // Stat alone cannot distinguish an accessible empty file from a denied one.
+    if (
+      size === session.offset &&
+      !(probeDeniedEmpty && size === 0 && session.threadId === null)
+    )
+      return "unchanged";
     if (throughOffset === "file-size") throughOffset = size;
     file = await open(path, "r");
   } catch (error) {

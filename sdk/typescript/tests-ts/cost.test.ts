@@ -3446,6 +3446,54 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test("recovers live cost in one poll when denied logs become readable and empty", async () => {
+    const { home, parent, usage } = await workerSessionFixture();
+    const logs = ["a.jsonl", "b.jsonl"].map((name) =>
+      join(dirname(parent), name),
+    );
+    for (const path of logs) await writeFile(path, "{}\n");
+    const costs: number[] = [];
+    const { tracker } = manualCostTracker(home, {
+      onWorkerEvent: () => {},
+      onCost: (cost) => costs.push(cost.inputTokens),
+    });
+    const denied = new Set(logs);
+    const opens: string[] = [];
+    try {
+      using _ordering = orderedLogDirectory(dirname(parent));
+      using _opening = failLogReads((path) => {
+        if (!logs.includes(path)) return;
+        opens.push(path);
+        if (denied.has(path)) return logFailure("EACCES", "open", path);
+      });
+      const blocked = () =>
+        expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
+      await blocked();
+      expect(opens).toEqual(logs);
+      for (const path of logs) await writeFile(path, "");
+      opens.length = 0;
+      for (let poll = 0; poll < 3; poll++) await blocked();
+      expect(opens).toEqual([logs[0], logs[1], logs[0]]);
+      // The rotating probe reaches B after the traversal already skipped A.
+      denied.delete(logs[1]!);
+      opens.length = 0;
+      await expect(tracker.refresh()).rejects.toMatchObject({ path: logs[0] });
+      expect(opens).toEqual([logs[1], logs[0]]);
+      expect(costs).toEqual([]);
+      denied.clear();
+      opens.length = 0;
+      const total = 2 * usage.input_tokens;
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(total);
+      expect(costs).toEqual([total]);
+      expect(opens).toEqual([logs[0]]);
+      opens.length = 0;
+      await tracker.refresh();
+      expect(opens).toEqual([]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test.each(["EMFILE", "ENFILE"])(
     "probes one more changed log under %s pressure and resumes after recovery",
     async (code) => {
