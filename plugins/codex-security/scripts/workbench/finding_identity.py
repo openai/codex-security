@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import copy
-import re
-import unicodedata
 from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
 from finalize_scan_contract import _finding_strength, _has_identity_text, finding_candidate_id
-from workbench.retained_records import _ensure_finding_identity, _finding_identity, raw_scope
+from workbench.retained_records import (
+    _ensure_finding_identity,
+    _finding_content,
+    _finding_identity,
+    _identity_candidate,
+    _semantic_identifier,
+    _semantic_identity_key,
+    raw_scope,
+    same_raw_value,
+)
 from workbench.saved_sources import _digest, _encoded
-
-
-def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
-    """Return substantive finding content without generated identity or provenance."""
-    return {
-        key: value
-        for key, value in finding.items()
-        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
-    }
 
 
 def _legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
@@ -99,30 +97,6 @@ def _finding_locations(
         ),
         key=_encoded,
     )
-
-
-def _identity_candidate(finding: dict[str, Any]) -> str | None:
-    return next(
-        (
-            value
-            for section in (finding.get("extensions"), finding.get("provenance"))
-            if isinstance(section, dict) and _has_identity_text(value := section.get("candidateId"))
-        ),
-        None,
-    )
-
-
-def _semantic_identifier(value: str, fallback: str) -> str:
-    normalized = re.sub(r"[\u0300-\u036f]", "", unicodedata.normalize("NFKD", value))
-    identifier = re.sub(r"[^a-z0-9._/-]+", "-", normalized.lower())
-    return re.sub(r"^[^a-z0-9]+|-+$", "", identifier) or fallback
-
-
-def _semantic_identity_key(finding: dict[str, Any], identity: Any = None) -> bytes:
-    identity = finding.get("identity") if identity is None else identity
-    if isinstance(identity, dict):
-        identity = {key: identity.get(key) for key in ("anchor", "instance")}
-    return _encoded([finding.get("ruleId"), identity])
 
 
 def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
@@ -207,23 +181,6 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
                     break
                 suffix += 1
         used.add(key)
-
-
-def same_raw_value(left: Any, right: Any) -> bool:
-    if isinstance(left, dict):
-        return (
-            isinstance(right, dict)
-            and left.keys() == right.keys()
-            and all(same_raw_value(value, right[key]) for key, value in left.items())
-        )
-    if isinstance(left, list):
-        return (
-            isinstance(right, list)
-            and len(left) == len(right)
-            and all(same_raw_value(a, b) for a, b in zip(left, right, strict=True))
-        )
-    # JSON numbers compare by value, but booleans are a distinct scalar type.
-    return isinstance(left, bool) == isinstance(right, bool) and left == right
 
 
 def bind_saved_candidate_identities(

@@ -11,9 +11,6 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 const { createCodexSecurityArtifactWriterServer } = await importSource(
   path.join(import.meta.dirname, "../artifact-writer-main.ts"),
 );
-const { readDeepReductionSources } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
-);
 
 async function worker(root: string, label: string) {
   const output = path.join(
@@ -46,19 +43,10 @@ async function worker(root: string, label: string) {
         arguments: workerDraft([finding(id, `src/${id}.ts`)]),
       }),
     async findings() {
-      const sources = await readDeepReductionSources({
-        root: reducerRoot,
-        repoRoot: root,
-        scanId,
-        layout: "reducer",
-        deepReducer: {
-          scanRoot: root,
-          claimedWorkers: [
-            { id: label, resultPath: path.join(output, "result.json") },
-          ],
-        },
-      });
-      return sources.discoveries[0].result.findings
+      const result = JSON.parse(
+        await fs.readFile(path.join(output, "result.json"), "utf8"),
+      );
+      return result.findings
         .map((row: { identity: { anchor: string } }) => row.identity.anchor)
         .sort();
     },
