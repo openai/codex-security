@@ -5994,7 +5994,11 @@ export function scanAuthentication(
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
     : undefined;
   const selectedKey = providerEnvKey ?? provider?.env_key;
-  if (auth === "chatgpt" && selectedKey === undefined) {
+  if (auth === "chatgpt" && provider === undefined) {
+    if (selectedKey !== undefined)
+      throw new ConfigurationError(
+        `ChatGPT authentication cannot use the ${modelProvider} provider's required ${selectedKey} environment key. Use '--auth api-key' or choose a provider configured for ChatGPT.`,
+      );
     return { method: "stored_credentials", verified: false };
   }
   const key = environmentApiKeyEntry(environment, modelProvider, selectedKey);
@@ -6208,16 +6212,16 @@ function environmentApiKeyEntry(
   modelProvider?: unknown,
   providerEnvKey?: string,
 ): { source: string; value: string } | null {
-  const lookup =
-    providerEnvKey === undefined || isExternalModelProvider(modelProvider)
-      ? environmentValue
-      : environmentEntry;
+  if (providerEnvKey !== undefined && !isExternalModelProvider(modelProvider)) {
+    const value = environmentEntry(environment, providerEnvKey);
+    return value?.trim() ? { source: providerEnvKey, value } : null;
+  }
   const keys =
     providerEnvKey === undefined
       ? ["OPENAI_API_KEY", "CODEX_API_KEY"]
       : [providerEnvKey];
   for (const requested of keys) {
-    const value = lookup(environment, requested)?.trim();
+    const value = environmentValue(environment, requested)?.trim();
     if (value) return { source: requested, value };
   }
   return null;

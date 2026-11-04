@@ -288,6 +288,11 @@ describe("semantic scan comparison", () => {
         if (withProfile) {
           await planComponents(repository, options);
           await expect(
+            planComponents(repository, { ...options, auth: "chatgpt" }),
+          ).rejects.toThrow(
+            "ChatGPT authentication cannot use the gateway provider's required SYNTHETIC_GATEWAY_TOKEN",
+          );
+          await expect(
             planComponents(repository, {
               ...options,
               config: { codexOverrides: gateway("CODEX_API_KEY") },

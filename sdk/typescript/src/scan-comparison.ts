@@ -611,9 +611,7 @@ async function startReadOnlyCodexThread(
   )["features"] as JsonObject | undefined;
   const modelProvider = scanModelProvider(providerConfig);
   const nativeKey =
-    !commandAuth &&
-    options.auth !== "chatgpt" &&
-    !isExternalModelProvider(modelProvider)
+    !commandAuth && !isExternalModelProvider(modelProvider)
       ? scanProviderEnvKey(providerConfig)
       : undefined;
   const environment = await comparisonEnvironment(
@@ -623,6 +621,7 @@ async function startReadOnlyCodexThread(
     undefined,
     providerConfig,
     nativeKey,
+    options.auth,
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
@@ -1191,6 +1190,7 @@ export async function comparisonEnvironment(
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
   nativeKey?: string,
+  auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1207,22 +1207,9 @@ export async function comparisonEnvironment(
   }
   if (nativeKey !== undefined && config !== undefined) {
     const provider = scanModelProvider(config);
-    scanAuthentication(
-      environment,
-      "api-key",
-      provider,
-      false,
-      false,
-      nativeKey,
-    );
+    scanAuthentication(environment, auth, provider, false, false, nativeKey);
     return definedEnvironment(
-      selectedScanEnvironment(
-        environment,
-        "api-key",
-        provider,
-        nativeKey,
-        config,
-      ),
+      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
     );
   }
   if (

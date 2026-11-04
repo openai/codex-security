@@ -664,6 +664,7 @@ test.each([
 
 const fileProviderKeyCases = [
   ["gateway", "custom only", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "account-named primary", "OPENAI_API_KEY"],
   ["gateway", "declared external header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "declared Codex account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
@@ -909,6 +910,21 @@ for (const mode of ["standard", "deep"] as const) {
           verified: false,
         });
         expect(preflight.modelProvider).toBe(providerId);
+        if (
+          providerId === "gateway" &&
+          (_selection === "custom only" ||
+            _selection === "account-named primary")
+        ) {
+          const request = { mode, auth: "chatgpt" as const };
+          const guidance = `ChatGPT authentication cannot use the gateway provider's required ${providerKey}`;
+          await expect(client.preflight(repository, request)).rejects.toThrow(
+            guidance,
+          );
+          await expect(client.run(repository, request)).rejects.toThrow(
+            guidance,
+          );
+          expect(launched).toBe(false);
+        }
         if (_selection === "missing custom primary") {
           await expect(
             client.preflight(repository, { mode, auth: "api-key" }),
@@ -1245,6 +1261,7 @@ test.each([
               env_key: providerKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
+                ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
                 "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
               },
             },
@@ -1276,7 +1293,10 @@ test.each([
             async runStreamed() {
               expect(options.apiKey).toBeUndefined();
               expect(options.env!["OPENAI_API_KEY"]).toBeUndefined();
-              expect(options.env![providerKey]).toBe("synthetic-custom-key");
+              const selectedKey = external
+                ? "synthetic-custom-key"
+                : providerEnvironment[providerKey];
+              expect(options.env![providerKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,
                 repository,
@@ -1303,7 +1323,7 @@ test.each([
                   ...(process.platform === "win32"
                     ? { [headerKey]: " synthetic-child-header " }
                     : {}),
-                  [providerKey]: "synthetic-custom-key",
+                  [providerKey]: selectedKey,
                 },
               });
               for (const text of [

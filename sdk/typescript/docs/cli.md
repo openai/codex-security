@@ -253,7 +253,9 @@ env_key = "OPPER_API_KEY"
 
 Set `OPPER_API_KEY` in your environment and run
 `codex-security scan . --codex 'profile="opper"'`. Choose a model with tool
-calling and streaming. Opper's gateway requires cached web search to be disabled.
+calling and streaming. This profile uses `--auth auto` (the default) or
+`--auth api-key`. For `--auth chatgpt`, select a provider configured for ChatGPT.
+Opper's gateway requires cached web search to be disabled.
 See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
 
 ### Amazon Bedrock
