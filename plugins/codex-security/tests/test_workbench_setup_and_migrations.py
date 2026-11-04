@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -105,7 +107,8 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
-    (63, "persist scan log completion boundaries"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
 ]
 
 
@@ -1145,7 +1148,7 @@ def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
 
 
 def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
-    connection, apply_migrations = create_historical_database(63)
+    connection, apply_migrations = create_historical_database(64)
     insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
     for case in ("running", "complete", "failed", "canceled"):
         insert_legacy_scan(

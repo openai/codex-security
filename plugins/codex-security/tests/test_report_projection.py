@@ -1,3 +1,5 @@
+"""Check how structured scan records and legacy evidence become readable Markdown reports."""
+
 from __future__ import annotations
 
 import copy

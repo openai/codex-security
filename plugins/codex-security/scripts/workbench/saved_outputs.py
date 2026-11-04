@@ -26,6 +26,11 @@ _PUBLISHED_OUTPUTS = (
 def _snapshot_published_outputs(
     scan_dir: Path, relative_paths: tuple[str, ...] = _PUBLISHED_OUTPUTS
 ) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    """Capture each artifact's bytes and stat metadata before publication.
+
+    A None entry records an absent artifact. An unsafe optional threatmodel.md is
+    omitted so rollback leaves it alone. Other unreadable existing outputs raise ContractError.
+    """
     snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in relative_paths:
         descriptor = -1
@@ -56,6 +61,10 @@ def _restore_published_outputs(
     snapshots: dict[str, tuple[bytes, os.stat_result] | None],
     created_paths: set[str] | None = None,
 ) -> None:
+    """Restore the captured bytes and timestamps after a publication failure.
+
+    Remove outputs that were originally absent and paths journaled as newly created by the caller.
+    """
     for relative, snapshot in snapshots.items():
         if snapshot is None:
             path = scan_dir / relative
