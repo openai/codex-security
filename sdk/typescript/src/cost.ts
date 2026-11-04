@@ -2392,7 +2392,6 @@ export class ScanCostTracker {
       }
       this.#attribution = attribution;
     }
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     const homes = new Set([this.#options.codexHome]);
     if (this.#options.scanDirectory !== undefined) {
       const home = await recordedScanCodexHome(
@@ -2401,43 +2400,40 @@ export class ScanCostTracker {
       );
       if (home !== undefined) homes.add(home);
     }
-    // Recovery restores workers to their recorded home; the SDK parent can
-    // continue in the current home. Apply the same scan membership to both.
-    const directories = new Set<string>();
-    for (const home of homes) {
-      for (const source of ["sessions", "archived_sessions"]) {
-        let directory: string;
-        try {
-          directory = await realpath(join(home, source));
-        } catch (error) {
-          if (isMissingFile(error)) continue;
-          throw error;
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
+    const unreadable = new Map<SessionUsage, unknown>();
+    let blocked: [SessionUsage, unknown] | undefined;
+    try {
+      for await (const path of scanSessionFiles(homes)) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage(observeUsage);
+          this.#sessions.set(path, session);
         }
-        if (directories.has(directory)) continue;
-        directories.add(directory);
-        for await (const path of sessionFiles(
-          directory,
-          typeof zlib.createZstdDecompress === "function",
-        )) {
-          let session = this.#sessions.get(path);
-          if (session === undefined) {
-            session = createSessionUsage(observeUsage);
-            this.#sessions.set(path, session);
+        try {
+          await readSessionUsage(
+            path,
+            session,
+            repository,
+            this.#attribution,
+            progressThread,
+          );
+        } catch (error) {
+          if (session.threadId === null) {
+            if (!observeHealthySessions || !isDeniedLogRead(error)) throw error;
+            blocked ??= [session, error];
           }
-          try {
-            await readSessionUsage(
-              path,
-              session,
-              repository,
-              this.#attribution,
-              progressThread,
-            );
-          } catch (error) {
-            if (session.threadId === null) throw error;
-            unreadable.push({ session, error });
-          }
+          unreadable.set(session, error);
         }
       }
+    } catch (error) {
+      // Traversal stopped. Preserve the read error that already blocked this poll.
+      if (!blocked) throw error;
     }
 
     const included = this.#attribution
@@ -2483,9 +2479,13 @@ export class ScanCostTracker {
       }
       changed = included.size !== previousSize;
     }
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
+    blocked ??= unreadable
+      .entries()
+      .find(
+        ([session]) =>
+          session.threadId !== null && included.has(session.threadId),
+      );
+    if (blocked && !observeHealthySessions) throw blocked[1];
 
     let incomplete = false;
     const usages = new Map(
@@ -2504,35 +2504,46 @@ export class ScanCostTracker {
     const usageSessions = new Map<string, SessionUsage>();
     for (const [path, session] of this.#sessions) {
       const threadId = session.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
+      if (
+        threadId === null ||
+        !included.has(threadId) ||
+        unreadable.has(session)
+      )
+        continue;
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
-        // Replay event history through the already-read snapshot without
-        // replacing its authoritative progress, usage, or partial-line decoder.
-        const replay: SessionUsage = createSessionUsage(false);
-        replay.events = [];
-        await readSessionUsage(
-          path,
-          replay,
-          undefined,
-          this.#attribution,
-          undefined,
-          session.offset,
-        );
-        if (replay.offset === session.offset) {
-          session.events = replay.events;
-          // At stop there is no next poll to read usage appended during replay.
-          if (this.#timer === null)
-            await readSessionUsage(
-              path,
-              session,
-              repository,
-              this.#attribution,
-              progressThread,
-              "file-size",
-            );
+        try {
+          // Replay event history through the already-read snapshot without
+          // replacing its authoritative progress, usage, or partial-line decoder.
+          const replay: SessionUsage = createSessionUsage(false);
+          replay.events = [];
+          await readSessionUsage(
+            path,
+            replay,
+            undefined,
+            this.#attribution,
+            undefined,
+            session.offset,
+          );
+          if (replay.offset === session.offset) {
+            session.events = replay.events;
+            // At stop there is no next poll to read usage appended during replay.
+            if (this.#timer === null)
+              await readSessionUsage(
+                path,
+                session,
+                repository,
+                this.#attribution,
+                progressThread,
+                "file-size",
+              );
+          }
+        } catch (error) {
+          if (!observeHealthySessions) throw error;
+          blocked ??= [session, error];
+          continue;
         }
       }
       let worker: number | undefined;
@@ -2685,6 +2696,8 @@ export class ScanCostTracker {
       if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
         incomplete = true;
     }
+    // Healthy sessions can report activity even when a read blocks the total.
+    if (blocked) throw blocked[1];
     let usage: ScanTokenUsage | null = null;
     let missingUsage = false;
     for (const value of usages.values()) {
@@ -3163,6 +3176,30 @@ export class ScanCostTracker {
     if (signature === this.#lastUsage) return;
     this.#lastUsage = signature;
     this.#options.onUsage?.(usage);
+  }
+}
+
+// Recovery can resume workers in a recorded home while their parent uses the current home.
+async function* scanSessionFiles(
+  homes: ReadonlySet<string>,
+): AsyncGenerator<string> {
+  const directories = new Set<string>();
+  for (const home of homes) {
+    for (const source of ["sessions", "archived_sessions"]) {
+      let directory: string;
+      try {
+        directory = await realpath(join(home, source));
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        throw error;
+      }
+      if (directories.has(directory)) continue;
+      directories.add(directory);
+      yield* sessionFiles(
+        directory,
+        typeof zlib.createZstdDecompress === "function",
+      );
+    }
   }
 }
 
@@ -4213,6 +4250,14 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isDeniedLogRead(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
