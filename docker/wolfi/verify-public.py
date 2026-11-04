@@ -7,6 +7,7 @@ import json
 import re
 import tarfile
 from pathlib import Path
+from urllib.parse import quote
 
 WOLFI = "https://packages.wolfi.dev/os"
 REGISTRY = "https://registry.npmjs.org/"
@@ -123,6 +124,32 @@ def inventory_npm(manifests, packages, sources):
     return npm
 
 
+def inventory_tokenizer(manifests, bom):
+    scanner = manifests[SCANNER]
+    if bom is None:
+        # Older releases installed the pinned tokenizer as an ordinary npm dependency.
+        pin = scanner["dependencies"].get("js-tiktoken")
+        installed = next((manifests[p] for p in (SCANNER + "/node_modules/js-tiktoken", "node_modules/js-tiktoken")
+                          if p in manifests), {})
+        check(pin and installed.get("name") == "js-tiktoken" and installed.get("version") == pin,
+              "Missing tokenizer BOM or verified legacy SDK dependency")
+        return []
+
+    document = json.loads(bom)
+    items = document["components"]
+    check(document.get("bomFormat") == "CycloneDX" and len(items) == 2 and
+          {item["name"] for item in items} == {"js-tiktoken", "base64-js"}, "Incomplete tokenizer BOM")
+    for item in items:
+        name, version = item["name"], item["version"]
+        check(item.get("type") == "library" and isinstance(version, str) and
+              re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version) and
+              item.get("purl") == f"pkg:npm/{name}@{quote(version, safe='')}" and
+              item.get("licenses") == [{"license": {"id": "MIT"}}], f"Invalid tokenizer BOM component: {name}")
+        if name == "js-tiktoken":
+            check(version == scanner["devDependencies"]["js-tiktoken"], "Tokenizer BOM differs from SDK build pin")
+    return items
+
+
 def verify(archive, lock):
     with tarfile.open(archive) as tar:
         manifest, = json.load(tar.extractfile("manifest.json"))
@@ -175,11 +202,8 @@ def verify(archive, lock):
         "public_upstream_packages":len(apks)-local, "local_scanner_packages":local,
         "keyring_sha256":{k:"sha256:"+v for k,v in key_hashes.items()},
         "signed_build_manifest":"SHA256SUMS", "manifest_signature":"SHA256SUMS.sig"}
-    # Older scanner releases install js-tiktoken as a separate npm package.
-    if TOKENIZER_BOM in raw:
-        tokenizer = json.loads(raw[TOKENIZER_BOM])["components"]
-        for item in tokenizer:
-            check_license(item["name"], item["licenses"][0]["license"]["id"])
+    tokenizer = inventory_tokenizer(manifests, raw.get(TOKENIZER_BOM))
+    if tokenizer:
         components["bundled_tokenizer"] = tokenizer
     return {"verification.json": verification, "public-components.json": components}
 

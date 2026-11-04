@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { valid } from "semver";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -22,22 +23,28 @@ for (const path of Object.keys(bundle.metafile.inputs)) {
   if (dependency) roots.add(dependency[1]);
 }
 const components = [];
+const required = new Set(["base64-js", "js-tiktoken"]);
 for (const directory of [...roots].sort()) {
   const { name, version, license } = JSON.parse(
     await readFile(join(directory, "package.json"), "utf8"),
   );
-  if (!["base64-js", "js-tiktoken"].includes(name) || license !== "MIT") {
+  if (!required.delete(name) || !valid(version) || license !== "MIT") {
     throw new Error(
-      `Review the tokenizer's bundled license notice for ${name}@${version} (${license}).`,
+      `Review the tokenizer's bundled component ${name}@${version} (${license}).`,
     );
   }
   components.push({
     type: "library",
     name,
     version,
-    purl: `pkg:npm/${name.replace("@", "%40")}@${version}`,
+    purl: `pkg:npm/${name}@${encodeURIComponent(version)}`,
     licenses: [{ license: { id: license } }],
   });
+}
+if (required.size) {
+  throw new Error(
+    `Missing tokenizer bundle inputs: ${[...required].join(", ")}.`,
+  );
 }
 await writeFile(
   output + ".cdx.json",
