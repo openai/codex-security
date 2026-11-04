@@ -30,12 +30,12 @@ const execFileAsync = promisify(execFile);
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id: string, reason = "Review completed.") => ({ id, reason });
 
-async function snapshotFiles(directory: string): Promise<[string, string][]> {
-  const files: [string, string][] = [];
+async function snapshotFiles(directory: string): Promise<[string, Buffer][]> {
+  const files: [string, Buffer][] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const filename = path.join(directory, entry.name);
     if (entry.isDirectory()) files.push(...(await snapshotFiles(filename)));
-    else files.push([filename, await readFile(filename, "utf8")]);
+    else files.push([filename, await readFile(filename)]);
   }
   return files.sort(([left], [right]) => left.localeCompare(right));
 }
