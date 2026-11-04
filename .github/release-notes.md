@@ -68,6 +68,8 @@
 - align worker artifact validation with publication ([#2315](https://github.com/openai/codex-security/pull/2315))
 - bound remote error bodies and retain HTTP failure context ([#2320](https://github.com/openai/codex-security/pull/2320))
 - checkpoint accepted reviews before honoring stop conditions ([#2318](https://github.com/openai/codex-security/pull/2318))
+- keep the viewport anchored during worker updates ([#2298](https://github.com/openai/codex-security/pull/2298))
+- attribute comparison sessions to usage and logs ([#2299](https://github.com/openai/codex-security/pull/2299))
 
 <!-- release-section: highlights:end -->
 

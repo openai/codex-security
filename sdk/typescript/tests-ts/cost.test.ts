@@ -3391,6 +3391,15 @@ describe("live scan cost tracking", () => {
       );
       await writeSession(
         home,
+        "finding-comparison",
+        { input_tokens: 40, output_tokens: 4 },
+        {
+          cwd: join(artifacts, "deep_discovery"),
+          timestamp: "2026-07-26T12:03:00Z",
+        },
+      );
+      await writeSession(
+        home,
         "deep-worker-child",
         { input_tokens: 50, output_tokens: 1 },
         { parent: "deep-worker", parentField },
@@ -3449,11 +3458,11 @@ describe("live scan cost tracking", () => {
       tracker.start("scan-thread");
 
       expect((await tracker.stop()).usage).toMatchObject({
-        input_tokens: 1_425,
-        output_tokens: 14,
+        input_tokens: 1_465,
+        output_tokens: 18,
       });
       expect(workers).toEqual(
-        [1, 2, 3].map((worker) => ({ kind: "observed", worker })),
+        [1, 2, 3, 4].map((worker) => ({ kind: "observed", worker })),
       );
       const labels = new Map(
         events.map(({ threadId, worker }) => [threadId, worker]),
@@ -3463,13 +3472,14 @@ describe("live scan cost tracking", () => {
           "scan-thread",
           "deep-worker",
           "deep-reducer",
+          "finding-comparison",
           "deep-worker-child",
         ]),
       );
       expect(labels.get("scan-thread")).toBeUndefined();
       expect(
         [...labels.values()].filter((worker) => worker !== undefined).sort(),
-      ).toEqual([1, 2, 3]);
+      ).toEqual([1, 2, 3, 4]);
       const logs = await readScanLogs({
         scanId: "scan-example",
         threadId: "scan-thread",
