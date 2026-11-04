@@ -36,10 +36,7 @@ import {
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
-import type {
-  DeepScanLogEvent,
-  DeepScanRunState,
-} from "./src/deep-scan/types.js";
+import type { DeepScanRunState } from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
@@ -2340,21 +2337,20 @@ function deepScanTerminalResult(
 ) {
   if (run.status === "succeeded") {
     if (!run.manifestPath) return undefined;
-    const completedReviews = run.persistedWorkers?.filter(
-      (worker) => worker.kind === "discovery" && worker.status === "succeeded",
-    ).length;
-    const reviewSummary =
-      completedReviews === 0 && run.terminalReason === "capped"
-        ? "The discovery deadline elapsed before any Standard review completed. Report this coverage limitation."
-        : "The completed Standard reviews performed validation and attack-path analysis.";
+    const outcome =
+      run.terminalReason === "capped" && run.completionSequence === 0
+        ? "The discovery deadline expired before any Standard scan completed. Report the coverage limitation."
+        : "Report the retained findings from completed Standard scans.";
     const instructions = run.sdkOwnsCompletion
-      ? `Deep Scan ${run.scanId} prepared its scan artifacts under ${run.scanDir}. ${reviewSummary} End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
-      : `Deep Scan ${run.scanId} completed. The coordinator sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. ${reviewSummary} Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Report the results and link the generated report.`;
+      ? `Deep Scan ${run.scanId} stopped. ${outcome} End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
+      : `Deep Scan ${run.scanId} completed. ${outcome} The coordinator sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,
         scanDir: run.scanDir,
         manifestPath: run.manifestPath,
+        completedAudits: run.completionSequence,
+        terminalReason: run.terminalReason,
         ...(completion === undefined
           ? {}
           : { completion, reportPath: resolve(run.scanDir, "report.md") }),
@@ -2382,7 +2378,20 @@ function deepScanTerminalResult(
   return undefined;
 }
 
-function logDeepScanEvent(event: DeepScanLogEvent): void {
+function logDeepScanEvent(event: {
+  event: string;
+  scanId: string;
+  workerId?: string;
+  kind?: string;
+  attempt?: number;
+  count?: number;
+  completed?: number;
+  newFindings?: number;
+  pass?: number;
+  reason?: string;
+  threadId?: string;
+  total?: number;
+}): void {
   console.error(
     JSON.stringify({ component: "codex_security_deep_scan", ...event }),
   );

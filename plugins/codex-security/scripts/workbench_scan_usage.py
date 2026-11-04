@@ -269,9 +269,7 @@ def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row
 def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
     if scan["mode"] != "deep":
         return set()
-    # Comparison turns run here before the coordinator commits an iteration.
-    directories = {str(Path(scan["scan_dir"]) / "artifacts" / "deep_discovery")}
-    directories.update(
+    return {
         row["artifact_dir"]
         if row["kind"] == "discovery"
         else str(Path(scan["scan_dir"]) / "artifacts")
@@ -280,8 +278,7 @@ def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) 
             "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",
             (scan["id"],),
         )
-    )
-    return directories
+    }
 
 
 def _codex_state_database() -> Path | None:

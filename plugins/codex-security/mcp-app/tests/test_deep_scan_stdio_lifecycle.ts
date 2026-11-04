@@ -1024,6 +1024,8 @@ service_tier = "ultrafast"
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
+        completedAudits: 2,
+        terminalReason: "saturated",
         manifestPath,
         reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
@@ -1232,7 +1234,7 @@ service_tier = "ultrafast"
       assertNoError(expired);
       assert.match(
         expired.result.structuredContent.instructions,
-        /deadline elapsed before any Standard review completed/,
+        /deadline expired before any Standard scan completed/,
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,

@@ -79,8 +79,8 @@ node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-securit
 ## Desktop and conversational Deep Scans
 
 When the Codex host supplies the launching turn’s speed, Deep Scan uses it for
-discovery workers, including resumed workers, and finding comparisons. Selecting Default
-overrides a faster tier in the worker’s Codex config. On hosts that omit the
+Standard scan workers, resumed workers, and finding comparisons. Selecting
+Default overrides a faster tier in the worker’s Codex config. On hosts that omit the
 turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
 at Default on those hosts, leave `service_tier = "default"` in the worker’s
 config for the duration of the scan, including any resumes. Other scans that

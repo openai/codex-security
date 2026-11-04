@@ -56,10 +56,7 @@ export function isScanArtifactDirectory(
   const artifacts = join(scanDirectory, "artifacts");
   if (relative(artifacts, workingDirectory) === "") return true;
 
-  const deepRoot = join(artifacts, "deep_discovery");
-  if (relative(deepRoot, workingDirectory) === "") return true;
-
-  const workers = join(deepRoot, "workers");
+  const workers = join(artifacts, "deep_discovery", "workers");
   const directory = relative(workers, workingDirectory);
   const components = directory.split(sep);
   return (
