@@ -24,8 +24,15 @@
     "darwin": 0.2,
     "win32": 1.7
   },
+  "api-deep-composition-resume.test.ts": {
+    "linux": 773.1,
+    "darwin": 373.7,
+    "win32": 1830
+  },
   "api-deep-composition.test.ts": {
-    "linux": 997
+    "linux": 640.3,
+    "darwin": 322.6,
+    "win32": 1580
   },
   "api-deep-scan-advisory-routing.test.ts": {
     "linux": 0.1,
