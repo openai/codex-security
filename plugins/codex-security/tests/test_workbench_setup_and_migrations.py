@@ -103,9 +103,11 @@ EXPECTED_MIGRATIONS = [
     (58, "record the final Deep Scan reviewed surface count"),
     (59, "retain the launching Deep Scan service tier"),
     (60, "record classification rubric provenance"),
-    (61, "preserve finding decision append chronology"),
-    (62, "bind new finding decisions to admitted scans"),
-    (63, "record first scan result admission order"),
+    (61, "record scan launch attribution"),
+    (62, "project scan lifecycle snapshots"),
+    (63, "preserve finding decision append chronology"),
+    (64, "bind new finding decisions to admitted scans"),
+    (65, "record first scan result admission order"),
 ]
 
 
@@ -1106,23 +1108,93 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
-def test_scan_model_migration_preserves_existing_scans() -> None:
+@pytest.mark.parametrize("complete", [False, True])
+def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
     insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
-    insert_legacy_scan(connection, timestamp)
+    status = "complete" if complete else "running"
+    finished_at = "2026-07-01T01:00:00Z" if complete else None
+    insert_legacy_scan(connection, timestamp, status=status, completed_at=finished_at)
     connection.commit()
 
     apply_migrations(connection)
 
-    scan = connection.execute(
-        "SELECT status, model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
-        ("legacy-scan",),
-    ).fetchone()
-    assert scan["status"] == "running"
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", ("legacy-scan",)).fetchone()
+    assert scan["status"] == status
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+    assert scan["launch_surface"] is None
+    assert scan["launch_package_version"] is None
+    assert scan["launch_plugin_version"] is None
+    assert scan["launch_kind"] is None
+    (snapshot,) = connection.execute(
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?", ("legacy-scan",)
+    ).fetchone()
+    assert json.loads(snapshot) == {
+        "scanId": "legacy-scan",
+        "mode": "standard",
+        "startedAt": timestamp,
+        "status": "completed" if complete else "running",
+        "finishedAt": finished_at,
+        "hasReportableFindings": None,
+        "surface": None,
+        "packageVersion": None,
+        "pluginVersion": None,
+        "mock": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("recipe", "kind", "mode", "is_mock", "plugin_version", "registered_version"),
+    (
+        ('{"mock":true,"pluginVersion":"0.4.0"}', "mock", "standard", True, "0.4.0", None),
+        ('{"import":{},"pluginVersion":"0.5.0"}', "import", "import", False, "0.5.0", None),
+        ('{"mode":"standard","pluginVersion":"0.6.0"}', None, "standard", None, "0.6.0", None),
+        ('{"pluginVersion":"0.6.0"}', None, "standard", None, "0.7.0", "0.7.0"),
+        ('{"pluginVersion":"  "}', None, "standard", None, None, None),
+        ('{"pluginVersion":42}', None, "standard", None, None, None),
+        ('{"mode":"standard"}', None, "standard", None, None, None),
+        ('{"pluginVersion":', None, "standard", None, None, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "write_after_upgrade", [False, True], ids=["before-upgrade", "after-upgrade"]
+)
+def test_scan_lifecycle_migration_recognizes_saved_recipes(
+    recipe: str,
+    kind: str | None,
+    mode: str,
+    is_mock: bool | None,
+    plugin_version: str | None,
+    registered_version: str | None,
+    write_after_upgrade: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(62 if registered_version else 61)
+    if write_after_upgrade:
+        apply_migrations(connection)
+
+    timestamp = "2026-07-01T00:00:00Z"
+    with connection:
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        attribution = {"launch_plugin_version": registered_version} if registered_version else {}
+        insert_legacy_scan(connection, timestamp, **attribution)
+        connection.execute("UPDATE scans SET recipe_json = ? WHERE id = ?", (recipe, "legacy-scan"))
+
+    if not write_after_upgrade:
+        apply_migrations(connection)
+
+    stored_kind, snapshot = connection.execute(
+        "SELECT launch_kind, snapshot FROM scans JOIN scan_lifecycles ON scan_id = id"
+    ).fetchone()
+    assert stored_kind == kind
+    lifecycle = json.loads(snapshot)
+    assert lifecycle["mode"] == mode
+    assert lifecycle["mock"] is is_mock
+    assert lifecycle["surface"] is None
+    assert lifecycle["packageVersion"] is None
+    assert lifecycle["pluginVersion"] == plugin_version
 
 
 @pytest.mark.parametrize(
@@ -2037,6 +2109,10 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
+        # Recreate the historical schema before removing its recipe column.
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         rename_migration(connection, 22, "dynamic scan execution profiles")
@@ -2712,7 +2788,8 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
 
 @pytest.mark.parametrize(
     ("installed_version", "migration_count"),
-    [(version, count) for version in [42, 43, 48, 50, 53, 54] for count in (1, 2)] + [(54, 3)],
+    [(version, count) for version in [42, 43, 48, 50, 53, 54, 61] for count in (1, 2)]
+    + [(54, 3), (61, 3)],
 )
 def test_decision_history_upgrade_preserves_published_sequences(
     installed_version: int, migration_count: int
@@ -2725,9 +2802,9 @@ def test_decision_history_upgrade_preserves_published_sequences(
         if version < installed_version
     ]
     historical.extend(
-        (version - (61 - installed_version), name, sql)
+        (version - (63 - installed_version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
-        if 61 <= version < 61 + migration_count
+        if 63 <= version < 63 + migration_count
     )
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row

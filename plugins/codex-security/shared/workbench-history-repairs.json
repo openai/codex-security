@@ -8,9 +8,27 @@
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
     "FROM schema_migrations JOIN history USING (name)",
-    "WHERE (destination = 61 AND version IN (42, 43, 48, 50, 53, 54))",
-    "    OR (destination = 62 AND version IN (43, 44, 49, 51, 54, 55))",
-    "    OR (destination = 63 AND version = 56);"
+    "WHERE (destination = 63 AND version IN (42, 43, 48, 50, 53, 54, 61))",
+    "    OR (destination = 64 AND version IN (43, 44, 49, 51, 54, 55, 62))",
+    "    OR (destination = 65 AND version IN (56, 63)) ORDER BY version DESC;"
+  ],
+  [
+    "-- A released reader can add its columns while a finding history preview still owns the version.",
+    "WITH released(version, table_name, column_name) AS (",
+    "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
+    "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
+    "        (58, 'deep_scan_runs', 'terminal_reviewed_surface_count'),",
+    "        (59, 'deep_scan_runs', 'service_tier'),",
+    "        (61, 'scans', 'launch_surface')",
+    ")",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (' ||",
+    "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
+    "FROM released JOIN json_each(:history) AS history",
+    "    ON json_extract(history.value, '$.version') = released.version",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'preserve finding decision append chronology')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
   ],
   [
     "WITH input AS (SELECT :history AS history)",

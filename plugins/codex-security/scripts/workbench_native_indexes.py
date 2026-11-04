@@ -866,6 +866,7 @@ def list_repositories(
         LEFT JOIN scans ON scans.target_id = targets.id
             AND scans.id IN (SELECT scan_id FROM scan_progress)
         LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        LEFT JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
         WHERE (scans.id IS NULL OR (1 = 1 {current_owner_only}))
         ORDER BY scans.rowid DESC, targets.id
         """,

@@ -491,6 +491,26 @@
   },
   {
     "version": 61,
+    "name": "record scan launch attribution",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN launch_surface TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_package_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_plugin_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_kind TEXT CHECK (launch_kind IN ('scan', 'mock', 'import'));"
+    ]
+  },
+  {
+    "version": 62,
+    "name": "project scan lifecycle snapshots",
+    "statements": [
+      "CREATE TRIGGER classify_legacy_scan_recipe\nAFTER UPDATE OF recipe_json ON scans\nWHEN OLD.recipe_json IS NULL AND (NEW.launch_kind IS NULL OR NEW.launch_plugin_version IS NULL)\n     AND json_valid(NEW.recipe_json)\nBEGIN\n    UPDATE scans SET\n        launch_kind = COALESCE(launch_kind, CASE\n            WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import'\n            WHEN json_type(recipe_json, '$.mock') = 'true' THEN 'mock' END),\n        launch_plugin_version = COALESCE(launch_plugin_version, CASE\n            WHEN json_type(recipe_json, '$.pluginVersion') = 'text'\n                AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\n            THEN json_extract(recipe_json, '$.pluginVersion') END)\n    WHERE id = NEW.id;\nEND;",
+      "UPDATE scans\nSET launch_kind = CASE WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import' ELSE 'mock' END\nWHERE launch_kind IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.import') = 'object' OR json_type(recipe_json, '$.mock') = 'true'\nEND;",
+      "UPDATE scans SET launch_plugin_version = json_extract(recipe_json, '$.pluginVersion')\nWHERE launch_plugin_version IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.pluginVersion') = 'text'\n        AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\nEND;",
+      "CREATE VIEW scan_lifecycles AS\nSELECT scans.id AS scan_id, json_object(\n    'scanId', scans.id,\n    'mode', CASE WHEN launch_kind = 'import' THEN 'import' ELSE scans.mode END,\n    'startedAt', scans.started_at,\n    'status', CASE WHEN canceled_at IS NOT NULL THEN 'canceled'\n                   WHEN scans.status = 'complete' THEN 'completed' ELSE scans.status END,\n    'finishedAt', COALESCE(canceled_at, completed_at),\n    'hasReportableFindings', json(CASE\n        WHEN scans.status = 'complete' AND canceled_at IS NULL\n        THEN (SELECT CASE WHEN reportable_findings_count > 0 THEN 'true' ELSE 'false' END\n              FROM scan_progress WHERE scan_id = scans.id) END),\n    'surface', launch_surface,\n    'packageVersion', launch_package_version,\n    'pluginVersion', launch_plugin_version,\n    'mock', json(CASE WHEN launch_kind = 'mock' THEN 'true'\n                      WHEN launch_kind IS NOT NULL THEN 'false' END)\n) AS snapshot\nFROM scans;"
+    ]
+  },
+  {
+    "version": 63,
     "name": "preserve finding decision append chronology",
     "statements": [
       "ALTER TABLE finding_decisions\n        ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0;",
@@ -498,14 +518,14 @@
     ]
   },
   {
-    "version": 62,
+    "version": 64,
     "name": "bind new finding decisions to admitted scans",
     "statements": [
       "ALTER TABLE finding_decisions\n        ADD COLUMN scan_sequence INTEGER;"
     ]
   },
   {
-    "version": 63,
+    "version": 65,
     "name": "record first scan result admission order",
     "statements": [
       "CREATE TABLE scan_admissions (\n    sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL UNIQUE REFERENCES scans(id) ON DELETE CASCADE\n);",

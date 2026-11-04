@@ -15980,6 +15980,25 @@ if __name__ == "__main__":
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
+      const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+      const registration = {
+        scanId: "scan_example_001",
+        mode: "deep",
+        startedAt: "2026-01-01T00:00:00Z",
+        status: "running",
+        finishedAt: null,
+        hasReportableFindings: null,
+        surface: "sdk",
+        packageVersion: VERSION,
+        pluginVersion: "1.0.0",
+        mock: false,
+      };
+      const terminal = {
+        ...registration,
+        status: completion === "completed" ? "completed" : "failed",
+        finishedAt: "2026-01-01T00:01:00Z",
+        hasReportableFindings: completion === "completed" ? true : null,
+      };
       const runStreamed = mock(
         async (_input: string, options: { signal: AbortSignal }) => {
           async function* events(): AsyncGenerator<ThreadEvent> {
@@ -16005,6 +16024,14 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            expect(JSON.parse(input!)).toMatchObject({
+              surface: "sdk",
+              packageVersion: VERSION,
+            });
+            return { ...mockWorkbench(args, input), lifecycle: registration };
+          }
+          if (args[0] === "fail-scan") return { scan: { lifecycle: terminal } };
           if (args[0] !== "complete-budget-exhausted-scan") {
             return mockWorkbench(args, input);
           }
@@ -16045,6 +16072,7 @@ if __name__ == "__main__":
                     },
                   }
                 : {}),
+              lifecycle: terminal,
               warnings: [
                 args
                   .find((value) => value.startsWith("--message="))!
@@ -16061,6 +16089,7 @@ if __name__ == "__main__":
           mode: "deep",
           maxCostUsd: 0.004,
           postScanPrompt: "Do not spend another model turn.",
+          onLifecycle,
           onWarning: (warning) => warnings.push(warning),
           signal: AbortSignal.timeout(5_000),
         });
@@ -16107,6 +16136,10 @@ if __name__ == "__main__":
         expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
           true,
         );
+        expect(onLifecycle.mock.calls.map(([scan]) => scan.status)).toEqual([
+          "running",
+          completion === "completed" ? "completed" : "failed",
+        ]);
       } finally {
         clearTimeout(keepAlive);
         await client.close();
