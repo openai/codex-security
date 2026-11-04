@@ -68,6 +68,7 @@ async function resolvePatchProfile(
   const administration = join(repository, ".git");
   let readOnlyPaths: readonly string[] = [administration];
   let modelOnlyReadOnlyPaths: readonly string[] = [];
+  let externalCachePaths: readonly string[] = [];
   let controls: Awaited<ReturnType<typeof capturePatchGitControls>>;
   const storage =
     optionalStorage === "inside"
@@ -125,6 +126,7 @@ async function resolvePatchProfile(
     );
     readOnlyPaths = controls!.readOnlyPaths;
     modelOnlyReadOnlyPaths = controls!.modelOnlyReadOnlyPaths;
+    externalCachePaths = controls!.externalCachePaths;
     if (
       optionalStorage === "administration" ||
       optionalStorage === "selected" ||
@@ -132,10 +134,13 @@ async function resolvePatchProfile(
     )
       expect(readOnlyPaths).toContain(await realpath(storage));
     else expect(readOnlyPaths).not.toContain(await realpath(storage));
-    expect(modelOnlyReadOnlyPaths).toEqual([
-      join(await realpath(storage), "objects"),
-      join(await realpath(storage), "tmp"),
-    ]);
+    const canonicalStorage = await realpath(storage);
+    const children = ["objects", "tmp"].map((part) =>
+      join(canonicalStorage, part),
+    );
+    const outside = optionalStorage === "outside";
+    expect(modelOnlyReadOnlyPaths).toEqual(outside ? [] : children);
+    expect(externalCachePaths).toEqual(outside ? children : []);
     await controls!.validate();
   }
   const configBefore = await readFile(join(administration, "config"));
@@ -286,6 +291,7 @@ glob_scan_max_depth = 8
         name: "codex_security_patch",
         readOnlyPaths,
         modelOnlyReadOnlyPaths,
+        externalCachePaths,
       },
     });
     expect(reader.error, stderr).toBe(stopped);
@@ -363,7 +369,10 @@ glob_scan_max_depth = 8
     expect(profiles[name]!["filesystem"]).toEqual({
       ...snapshotFilesystem,
       ...Object.fromEntries(
-        modelOnlyReadOnlyPaths.map((path) => [path, { ".": "read" }]),
+        [
+          ...modelOnlyReadOnlyPaths,
+          ...(configured ? externalCachePaths : []),
+        ].map((path) => [path, { ".": "read" }]),
       ),
     });
     expect(await readFile(join(administration, "config"))).toEqual(
@@ -436,9 +445,13 @@ test("native patch profiles ignore inactive repository grants and remain isolate
   expect(second.filesystem).not.toHaveProperty(first.administration);
 }, 30_000);
 
-test("native patch profiles omit unavailable optional storage permissions", async () => {
-  await resolvePatchProfile(false, "outside");
-}, 30_000);
+test.each([false, true])(
+  "external cache restrictions follow the operator's writable roots: selected %p",
+  async (selected) => {
+    await resolvePatchProfile(selected, "outside");
+  },
+  30_000,
+);
 
 test.each(["administration", "direct-administration"] as const)(
   "storage keeps overlapping Git administration protected in snapshots: %s",
