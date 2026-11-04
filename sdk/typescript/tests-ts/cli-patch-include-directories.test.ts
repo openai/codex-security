@@ -220,3 +220,88 @@ for (const mode of [
     expect(await readFile(join(root, ".git", "config"))).toEqual(configuration);
   });
 }
+
+test.each([
+  ["local", false],
+  ["conditional local", false],
+  ["global through a checkout config", false],
+  ["global through a checkout link", false],
+  ["inside checkout", true],
+  ["global", true],
+] as const)("patch checks active Git includes: %s", async (source, allowed) => {
+  const repository = await fixtures.create("patch-include-repository-");
+  const operator = await fixtures.create("patch-include-operator-");
+  const global = join(operator, "global.gitconfig");
+  const target = join(
+    source === "inside checkout" ? repository : operator,
+    "included.config",
+  );
+  const git = repositoryGit(repository);
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  await writeFile(join(repository, "app.txt"), "before\n");
+  git("add", "app.txt");
+  git("commit", "-m", "Synthetic include baseline");
+  git("config", "--file", target, "synthetic.probe", "fixture-value");
+
+  if (source === "global through a checkout config") {
+    const intermediate = join(repository, "project.gitconfig");
+    git("config", "--file", intermediate, "include.path", target);
+    git("config", "--file", global, "include.path", intermediate);
+  } else if (source === "global through a checkout link") {
+    const alias = join(repository, "settings");
+    await symlink(
+      operator,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    git(
+      "config",
+      "--file",
+      global,
+      "include.path",
+      join(alias, "included.config"),
+    );
+  } else if (source === "global") {
+    git("config", "--file", global, "include.path", target);
+  } else {
+    git(
+      "config",
+      source === "conditional local"
+        ? "includeIf.onbranch:main.path"
+        : "include.path",
+      target,
+    );
+  }
+
+  const environment = { GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1" };
+  expect(
+    await runGitRepositoryCommand(
+      "git",
+      ["config", "--includes", "--get", "synthetic.probe"],
+      repository,
+      { environment },
+    ),
+  ).toBe("fixture-value");
+  let launches = 0;
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: repository,
+    environment,
+    onRepositoryCommand: (command, args, cwd, options) =>
+      runGitRepositoryCommand(command, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      }),
+    onCodex: async (_args, output) => {
+      launches++;
+      await writeFile(join(repository, "app.txt"), "after\n");
+      output?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(allowed ? 0 : 2);
+  expect(launches).toBe(allowed ? 1 : 0);
+  if (!allowed)
+    expect(outcome.stderr).toContain("outside the selected Git roots");
+});

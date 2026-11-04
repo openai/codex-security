@@ -177,7 +177,7 @@ process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
       );
     },
     // Native Windows snapshots repeat account and ACL setup for each Git command.
-    process.platform === "win32" && !externalSandbox ? 120_000 : 30_000,
+    process.platform === "win32" && !externalSandbox ? 240_000 : 30_000,
   );
 }
 
