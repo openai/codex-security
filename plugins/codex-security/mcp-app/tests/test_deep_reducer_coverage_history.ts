@@ -827,7 +827,7 @@ for (const workflowVersion of [
           workflowVersion,
           receiptRetry: true,
           streamRetry: true,
-          stopBeforeDraft,
+          outcome: stopBeforeDraft ? "no parent" : "completion",
         });
         const coverage = await readFixtureCoverage(scanDir);
         assert.equal(
