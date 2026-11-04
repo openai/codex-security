@@ -404,14 +404,14 @@ export async function preparePolicyOutputDirectory(
   );
 }
 
-async function requirePrivateDirectory(
+export async function requirePrivateDirectory(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   description: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-  },
+  } = {},
 ): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
@@ -1670,24 +1670,30 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
   const signal = options.signal;
+  // Explicitly selected external plugins retain their own workbench protocol.
+  const nativeLocalDedupe =
+    args[0] === "local-dedupe" &&
+    (await sameFile(options.pluginRoot, await bundledPluginRoot()));
   const run = async (
     arguments_: readonly string[],
     input?: string,
     archiveHandshake = false,
   ): Promise<string> => {
-    const native = [
-      "database-info",
-      "store-findings",
-      "list-stored-findings",
-      "store-external-findings",
-      "list-external-findings",
-      "find-potential-duplicates",
-      "store-dedupe-groups",
-      "list-dedupe-groups",
-      "dashboard",
-      "severity-classification",
-      "read-severity-classification",
-    ].includes(arguments_[0] ?? "");
+    const native =
+      nativeLocalDedupe ||
+      [
+        "database-info",
+        "store-findings",
+        "list-stored-findings",
+        "store-external-findings",
+        "list-external-findings",
+        "find-potential-duplicates",
+        "store-dedupe-groups",
+        "list-dedupe-groups",
+        "dashboard",
+        "severity-classification",
+        "read-severity-classification",
+      ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
         ? await resolveTrustedExecutable("node", options.environment, [
@@ -1713,12 +1719,8 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // Workbench text fields can contain NUL or exceed OS command-line limits.
-    const framedArguments = !native;
-    let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
-    if (framedArguments)
-      program =
-        WORKBENCH_ARGUMENTS_PROGRAM + (program ?? WORKBENCH_SCRIPT_PROGRAM);
+    // Validate one JSON document before framing its unchanged source as payload.
+    if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
     const result = await runCodexCommand(
       { command },
       native
@@ -1728,28 +1730,34 @@ export async function runWorkbench(
             "-X",
             "utf8",
             "-B",
-            ...(program === undefined ? [] : ["-c", program]),
+            "-c",
+            WORKBENCH_ARGUMENTS_PROGRAM +
+              (archiveHandshake
+                ? ARCHIVE_REGISTRATION_PROGRAM
+                : WORKBENCH_SCRIPT_PROGRAM),
             script,
-            ...(framedArguments ? [] : arguments_),
           ],
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
-      native
-        ? JSON.stringify(
-            arguments_[0] === "database-info"
-              ? stateDirectory
-              : {
-                  stateDirectory,
-                  payload: input === undefined ? undefined : JSON.parse(input),
-                },
-          )
-        : input,
+      nativeLocalDedupe
+        ? `{"stateDirectory":${JSON.stringify(stateDirectory)},"payload":${input ?? "null"}}`
+        : native
+          ? JSON.stringify(
+              arguments_[0] === "database-info"
+                ? stateDirectory
+                : {
+                    stateDirectory,
+                    payload:
+                      input === undefined ? undefined : JSON.parse(input),
+                  },
+            )
+          : input,
       signal,
       archiveHandshake,
-      // Match native argv's UTF-8 encoding for the private argument frame.
-      framedArguments
-        ? `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`
-        : undefined,
+      // Frame Python arguments on stdin to preserve NUL and long diagnostics.
+      native
+        ? undefined
+        : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
     );
     if (!result.success) {
       throw new Error(
@@ -2191,8 +2199,7 @@ export async function validatePreparedOutputDir(
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
   validateLocation?.(canonical);
-  const entries = await readdir(canonical);
-  if (!allowNonempty && entries.length !== 0) {
+  if (!allowNonempty && (await readdir(canonical)).length !== 0) {
     throw new OutputDirectoryError(
       `Scan output directory must be empty: ${path}`,
     );
@@ -3311,9 +3318,13 @@ export async function runCodexCommand(
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (
-        !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
-          error.code ?? "",
-        )
+        ![
+          "EPIPE",
+          "ECONNRESET",
+          "ENOTCONN",
+          "EOF",
+          "ERR_STREAM_DESTROYED",
+        ].includes(error.code ?? "")
       )
         processError = error;
     });
@@ -3323,17 +3334,21 @@ export async function runCodexCommand(
         : reject(processError),
     );
   });
-  const releaseCanceledPipes = () => {
+  let forceTermination: ReturnType<typeof setTimeout> | undefined;
+  const settleCanceledChild = () => {
     if (!commandSignal?.aborted) return;
-    if (child.exitCode === null && child.signalCode === null) return;
+    if (child.exitCode === null && child.signalCode === null) {
+      // spawn already sent SIGTERM. Give the command time to exit cleanly.
+      forceTermination ??= setTimeout(() => child.kill("SIGKILL"), 1_000);
+      return;
+    }
     child.stdin.destroy();
     child.stdout.destroy();
     child.stderr.destroy();
   };
-  commandSignal?.addEventListener("abort", releaseCanceledPipes, {
-    once: true,
-  });
-  child.once("exit", releaseCanceledPipes);
+  commandSignal?.addEventListener("abort", settleCanceledChild, { once: true });
+  child.once("exit", settleCanceledChild);
+  if (commandSignal?.aborted) settleCanceledChild();
   if (archiveHandshake) {
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
@@ -3345,8 +3360,9 @@ export async function runCodexCommand(
     return await completion;
   } finally {
     if (archiveHandshake) signal?.removeEventListener("abort", abort);
-    commandSignal?.removeEventListener("abort", releaseCanceledPipes);
-    child.removeListener("exit", releaseCanceledPipes);
+    clearTimeout(forceTermination);
+    commandSignal?.removeEventListener("abort", settleCanceledChild);
+    child.removeListener("exit", settleCanceledChild);
   }
 }
 

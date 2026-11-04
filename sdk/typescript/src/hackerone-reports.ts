@@ -177,14 +177,13 @@ export async function exportHackerOneReports(options: {
   const staging = join(parent, `.hackerone-${randomUUID()}`);
   if (process.platform === "win32")
     await createWindowsOutputDirectory(staging, false);
-  else {
-    await mkdir(staging, { mode: 0o700 });
-    if ((process.umask() & 0o700) !== 0) await chmod(staging, 0o700);
-  }
+  else await mkdir(staging, { mode: 0o700 });
   const temp = join(staging, "reports.json");
   let createdFile = false;
   let warning: string | undefined;
   try {
+    if (process.platform !== "win32" && (process.umask() & 0o700) !== 0)
+      await chmod(staging, 0o700);
     // Check the staging directory and its ancestors before it receives any report bytes.
     await requireSecureCredentialHome(staging);
     const file = await open(temp, "wx", 0o600);
