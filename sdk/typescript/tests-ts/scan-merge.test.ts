@@ -58,23 +58,33 @@ function submission(...groups: string[][]): ScanMergeGroups {
 }
 
 test("copies the selected finding and retains every exact source without rewriting", () => {
-  const low = child("low", [finding("first", { severity: { level: "low" } })]);
-  const high = child("high", [
+  const higherSeverity = finding("first", { severity: { level: "critical" } });
+  const high = child("high", [higherSeverity]);
+  const low = child("low", [
     finding("second", {
-      severity: { level: "high" },
+      severity: { level: "low" },
       remediation: "Use the corrected configuration.",
     }),
   ]);
-  const raw = submission(["high:0", "low:0"]);
+  const raw = submission(["low:0", "high:0"]);
   const before = structuredClone({ low, high, raw });
-  const result = merge(raw, [low, high], null);
-  expect(result.newFindingScanIds).toEqual(["low"]);
-  const accepted = result.aggregate.findings[0]!;
-  expect(accepted.severity).toEqual(high.draft.findings[0]!.severity);
-  expect(accepted.remediation).toBe(high.draft.findings[0]!.remediation);
+  const result = merge(raw, [high, low], null);
+  expect(result.newFindingScanIds).toEqual(["high"]);
+  const repeat = child("repeat", [higherSeverity]);
+  const repeated = merge(
+    submission(["low:0", "high:0", "repeat:0"]),
+    [repeat],
+    result.aggregate,
+  );
+  expect(repeated.newFindingScanIds).toEqual([]);
+  expect(repeated.aggregate.findings).toHaveLength(1);
+  const accepted = repeated.aggregate.findings[0]!;
+  expect(accepted.severity).toEqual(low.draft.findings[0]!.severity);
+  expect(accepted.remediation).toBe(low.draft.findings[0]!.remediation);
   expect(accepted.provenance.sourceFindings).toEqual([
-    { id: "high:0", finding: high.sourceFindings[0]! },
     { id: "low:0", finding: low.sourceFindings[0]! },
+    { id: "high:0", finding: high.sourceFindings[0]! },
+    { id: "repeat:0", finding: repeat.sourceFindings[0]! },
   ]);
   accepted.locations[0]!.startLine = 99;
   accepted.provenance.sourceFindings![0]!.finding["summary"] = "changed";
