@@ -3642,6 +3642,7 @@ export class CodexSecurity {
                 {
                   surface: this.#surface,
                   singleTurn: options.maxCostUsd !== undefined,
+                  nativeProviderEnvironment: session.nativeProviderEnvironment,
                 },
               ),
             ...inferenceOptions,

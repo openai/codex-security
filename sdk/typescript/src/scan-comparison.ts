@@ -260,7 +260,11 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -517,7 +521,9 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<{
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
@@ -699,6 +705,15 @@ async function startReadOnlyCodexThread(
       );
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
+    }
+    if (
+      nativeKey !== undefined &&
+      runtimeOptions.nativeProviderEnvironment !== undefined
+    ) {
+      codexOptions.env = {
+        ...runtimeOptions.nativeProviderEnvironment,
+        ...environment,
+      };
     }
     const codex =
       profile === undefined
