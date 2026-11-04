@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 def state_dir(*, canonical: bool = True) -> Path:
+    """Return the workbench state path, resolving symlinks unless canonical is false."""
     configured = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if configured:
         path = Path(configured).expanduser()
@@ -19,6 +20,7 @@ def state_dir(*, canonical: bool = True) -> Path:
 
 
 def resolve_scan_root(scan_root: str | None) -> Path:
+    """Resolve an explicit scan output root, defaulting to the scans directory under workbench state."""
     return Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
 
 

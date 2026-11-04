@@ -135,6 +135,7 @@ def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
 
 
 def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, Any]]) -> bool:
+    """Select deep-report formatting for repository scans in deep mode and scoped scans with deep-child metadata."""
     if coverage.get("mode") == "deep_repository":
         return True
     if coverage.get("mode") != "scoped_path":
@@ -242,6 +243,7 @@ def _bullet_section(heading: str, items: list[str]) -> list[str]:
 
 
 def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
+    """Yield evidence objects with nonblank code in their original order."""
     for items in catalogs:
         if isinstance(items, list):
             yield from (
@@ -254,6 +256,7 @@ def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
 
 
 def embedded_code_evidence(section: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Collect code evidence from both supported field spellings."""
     return code_evidence_rows(section.get("codeEvidence"), section.get("code_evidence"))
 
 
@@ -282,6 +285,7 @@ def _section_code_evidence(
 
 
 def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
+    """Return the first recorded root-cause field name and its merged detail, or (None, None) if absent."""
     keys = [key for key in ("rootCause", "root_cause") if key in value]
     if not keys:
         return None, None
@@ -743,6 +747,16 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
 def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
+    """Render findings and review coverage as a Markdown report ending in a newline.
+
+    Args:
+        manifest: Scan metadata, target, and scope.
+        findings_document: Canonical findings for the scan.
+        coverage: Review coverage for older manifests. Newer scans supply review state inline.
+
+    Raises:
+        ReportProjectionError: Reportable findings share a writeup path.
+    """
     scan = manifest["scan"]
     if "review" in scan and "coverageRef" not in scan:
         from review_state import review_state
@@ -1009,6 +1023,7 @@ def generate_report_markdown(
     findings: dict[str, Any],
     coverage: dict[str, Any],
 ) -> bytes:
+    """Return the Markdown report for the scan as UTF-8 bytes ready to write."""
     return build_report_markdown(manifest, findings, coverage).encode("utf-8")
 
 

@@ -1,3 +1,5 @@
+"""Reconcile saved parent and worker results across stops, reopened findings, and publication retries."""
+
 from __future__ import annotations
 
 import copy

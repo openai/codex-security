@@ -1,3 +1,5 @@
+"""Replay deadline completion across crashes while preserving pending work and prior rejection decisions."""
+
 from __future__ import annotations
 
 import copy

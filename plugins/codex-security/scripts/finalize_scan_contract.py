@@ -858,6 +858,11 @@ def stage_scan_local_bytes(
     owner_read_write: bool = False,
     replace_existing: bool = False,
 ) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    """Stage payload under the scan directory and yield a callback that publishes it.
+
+    Call the callback inside the context to get file metadata and a platform-specific
+    change-time token. Leaving without publishing discards the staged write.
+    """
     scan_dir, relative_path = _scan_local_write_path(scan_dir, relative_path, external_name)
     if not _descriptor_relative_writes_available():
         if not _is_windows():
@@ -2854,6 +2859,7 @@ def _read_sealed_scan(
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
+    """Build SARIF for a sealed scan, using the optional source directory to resolve locations."""
     if source_root is not None:
         try:
             source_root = source_root.resolve(strict=True)
@@ -2966,6 +2972,7 @@ def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
 
 
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
+    """Encode findings in input order as UTF-8 CSV using the columns selected by coverage and findings."""
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     deep_scan = report_projection.uses_deep_presentation(coverage, findings["findings"])
@@ -3009,6 +3016,11 @@ def build_findings_export(
     schema_dir: Path | None = None,
     avit_template: Path | None = None,
 ) -> bytes:
+    """Return bytes for the requested export of a sealed scan.
+
+    JSON preserves the sealed findings bytes. SARIF can use source_root to resolve
+    locations. ServiceNow AVIT requires an application template.
+    """
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
     if export_format == "sarif":
@@ -3132,6 +3144,8 @@ def _write_sarif_projection_if_possible(
 
 
 class PreparedScanFinalization(NamedTuple):
+    """Validated in-memory scan documents, rendered report bytes, and warnings awaiting publication."""
+
     scan_dir: Path
     schema_dir: Path
     manifest: dict[str, Any]
@@ -3143,6 +3157,7 @@ class PreparedScanFinalization(NamedTuple):
 
 
 def manifest_is_sealed(scan: dict[str, Any]) -> bool:
+    """Return whether the manifest records a seal time or sealed artifacts."""
     return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
 
 

@@ -170,6 +170,7 @@ def database_path() -> Path:
 
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
+    """Hold the cross-process lock for a scan ID until the context exits."""
     lock_dir = state_dir() / "completion-locks"
     create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
@@ -233,6 +234,20 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(*, deferred: bool = False) -> sqlite3.Connection:
+    """Open the workbench SQLite database and bring its schema up to date.
+
+    Args:
+        deferred (bool): Let the first migration attempt defer its write lock.
+            Retries after lock contention use an immediate transaction.
+
+    Returns:
+        sqlite3.Connection: A caller-owned connection with named rows, foreign
+            keys enabled, and write-ahead logging.
+
+    Raises:
+        sqlite3.OperationalError: Opening or configuring the database fails, or
+            lock contention persists after retries.
+    """
     path = database_path()
     guidance = (
         f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
@@ -284,11 +299,13 @@ def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
 
 
 def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    """Return requested paths paired with whether the stored recipe identified each one as a file."""
     files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
     return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
+    """Return the target identity, scope requirements, and diff target recorded for this scan."""
     target = Path(scan["target_path"])
     target_contract = {
         "allowedKinds": expected_target_kinds(scan),
@@ -321,6 +338,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
 
 
 def expected_coverage_mode(scan: sqlite3.Row) -> str:
+    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
     if scan["mode"] == "diff":
         mode = {
             "commit": "commit",
@@ -342,6 +360,7 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
 def workbench_completion_binding(
     scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_version = loaded_plugin_version()
@@ -379,6 +398,7 @@ def workbench_completion_binding(
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
+    """Raise SystemExit if the supplied manifest does not match the registered scan, target, or scope."""
     manifest_scan = manifest.get("scan")
     if not isinstance(manifest_scan, dict):
         raise SystemExit("scan-manifest.json scan must be an object.")
@@ -466,6 +486,10 @@ def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
 
 
 def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
+
+    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
+    """
     try:
         return str(uuid.UUID(scan_id))
     except ValueError:
@@ -937,6 +961,7 @@ def _start_prompt_driven_scan(
 
 
 def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
+    """Return the SHA-256 of the scan-local file contents, prefixed with sha256:."""
     digest = hashlib.sha256()
     with open_scan_local_file(scan_dir, relative_path) as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -945,6 +970,7 @@ def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
 
 
 def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
+    """Return the canonical manifest digest or raise SystemExit if the published bytes differ."""
     canonical = (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
     expected = f"sha256:{hashlib.sha256(canonical).hexdigest()}"
     actual = scan_local_file_digest(scan_dir, ARTIFACTS["manifest"])
@@ -954,6 +980,7 @@ def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
 
 
 def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
+    """Raise SystemExit if the saved manifest differs from the digest recorded when the scan was sealed."""
     expected = scan["seal_manifest_digest"]
     if expected is None:
         return
@@ -964,6 +991,7 @@ def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
 def pin_legacy_manifest_digest(
     connection: sqlite3.Connection, scan_id: str, manifest_digest: str
 ) -> None:
+    """Record a previously missing digest in a write transaction, rejecting a conflict with an existing digest."""
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = require_scan(connection, scan_id)
@@ -1039,6 +1067,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
 def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
+    """Complete a running CLI Deep Scan using the measured cost and saved results after its budget is exhausted."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = parse_scan_cost(args.cost_json)
     if cost_json is None:
@@ -1438,6 +1467,12 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    """Register a CLI scan and its selected target before execution begins.
+
+    Record the launch recipe and target identity with the new scan. When reusing
+    an output directory, coordinate archiving with registration so previous results
+    can still be located. Return the scan ID, contract, and target metadata.
+    """
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
@@ -2530,6 +2565,11 @@ def scan_result(
     *,
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble the workbench view of a saved scan, backfilling older finding details as needed.
+
+    An occurrence ID selects one finding from that scan. An occurrence belonging
+    to a different scan raises SystemExit.
+    """
     backfill_legacy_finding_details(connection, scan)
     scan = scan_history.scan_with_progress(connection, scan["id"])
     artifact_rows = connection.execute(

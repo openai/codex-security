@@ -1,3 +1,5 @@
+"""Reconcile worker coverage with parent findings, deferred tasks, and their supporting receipts on replay."""
+
 from __future__ import annotations
 
 import copy

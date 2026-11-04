@@ -37,6 +37,7 @@ def _is_structured_model(model: dict[str, Any]) -> bool:
 
 
 def _markdown_content(model: dict[str, Any]) -> str | None:
+    """Return nonblank authored content for a Markdown model, otherwise None."""
     content = model.get("content")
     if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
         return content
@@ -44,7 +45,11 @@ def _markdown_content(model: dict[str, Any]) -> str | None:
 
 
 def threat_model_body(model: dict[str, Any]) -> str:
-    """Keep authored Markdown intact, including summaries from older scans."""
+    """Return the authored Markdown body verbatim or render a legacy summary and its sections.
+
+    Raises:
+        ValueError: Required content is absent or the saved model has invalid metadata or sections.
+    """
     content = _markdown_content(model)
     if content is not None:
         # The structured schema permits legacy metadata as extension fields.
@@ -114,7 +119,12 @@ def _scope_lines(scope: Any, label: str, text: Callable[[Any, str], str]) -> lis
 
 
 def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None = None) -> bytes:
-    """Render a portable document with authored content and recorded provenance."""
+    """Return the saved threat model as UTF-8 Markdown, including its provenance footer.
+
+    Args:
+        model (dict): Authored Markdown or a legacy structured model from a scan.
+        provenance (dict | None): Optional saved scan identifiers, scope, and provisional status.
+    """
     body = threat_model_body(model)
     if _markdown_content(model) is None:
         body = "# Threat Model\n\n" + body
@@ -144,6 +154,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
 
 
 def main() -> int:
+    """Render a JSON payload from stdin to UTF-8 Markdown on stdout and return zero on success."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-json-stdin", action="store_true", required=True)
     parser.parse_args()

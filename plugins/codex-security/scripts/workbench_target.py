@@ -44,6 +44,11 @@ def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision:
 
 
 def diff_snapshot_digest(scan: sqlite3.Row, manifest: dict[str, Any] | None) -> str | None:
+    """Return the content identity used for a stored diff, or None when unavailable.
+
+    Working-tree scans use their recorded content digest. Commit and range scans
+    reuse the sealed manifest value during recovery or derive a digest from both revisions.
+    """
     if scan["diff_target_kind"] == "working_tree":
         return scan["diff_content_digest"]
     if scan["diff_target_kind"] in {"commit", "range"}:
@@ -67,6 +72,7 @@ def git_output(
     work_tree: Path | None = None,
     offline: bool = False,
 ) -> str | None:
+    """Return decoded Git stdout with one trailing newline removed, or None on failure or empty output."""
     completed = git_command(
         target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
     )
@@ -275,6 +281,12 @@ def git_command(
     environment_overrides: dict[str, str] | None = None,
     offline: bool = False,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    """Run Git against target and return the completed process with its exit status.
+
+    Pass git_dir and work_tree together to select an explicit checkout. Set
+    offline to disable transports and lazy fetches. The text flag selects
+    decoded or binary output, and stdout_file can redirect it to a file.
+    """
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
     environment = os.environ.copy()
@@ -569,6 +581,7 @@ def _update_digest_field_from_git(
 
 
 def worktree_content_digest(target: Path) -> str:
+    """Return the worktree digest for the selected path after checking the state of its submodules."""
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
     return worktree_content_digest_for_context(repository, pathspec)
@@ -582,6 +595,7 @@ def remediation_checkout_snapshot(
         "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
     ),
 ) -> tuple[str, str | None]:
+    """Return the current revision and content digest after verifying the recorded checkout identity and required revision."""
     target = require_scan_target_identity(scan)
     revision = git_revision(target)
     required_revision = expected_revision or scan["target_revision"]
@@ -1311,6 +1325,7 @@ def require_remediation_target(value: str) -> Path:
 
 
 def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+    """Return the recorded checkout path or raise SystemExit if it no longer identifies the original directory."""
     target = require_remediation_target(scan["target_path"])
     expected_inode = scan["target_inode"]
     if expected_inode is None:

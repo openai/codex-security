@@ -1,3 +1,5 @@
+"""Test which saved parent and worker checkpoints may supply findings after publication or a stop."""
+
 from __future__ import annotations
 
 import copy

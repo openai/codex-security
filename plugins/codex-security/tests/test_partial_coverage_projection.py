@@ -1,3 +1,5 @@
+"""Preserve source-specific receipts, surface links, and pending work when projecting partial coverage."""
+
 from __future__ import annotations
 
 import copy

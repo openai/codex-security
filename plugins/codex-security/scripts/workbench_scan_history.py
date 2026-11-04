@@ -43,6 +43,7 @@ def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) ->
 
 
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
+    """Return the public launch recipe with its scan and parent IDs, raising SystemExit if the recipe was never saved."""
     if scan["recipe_json"] is None:
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
@@ -55,6 +56,7 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
 def preserve_sealed_completion(
     binding: dict[str, Any], manifest: dict[str, Any] | None
 ) -> dict[str, Any]:
+    """Copy the original timestamps and producer version from a sealed manifest into binding, then return it."""
     manifest_scan = manifest.get("scan") if manifest is not None else None
     if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
         # Keep the original producer; finalization still validates schema, seal and owner.
@@ -147,6 +149,7 @@ def cli_scan_resume(
 def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
+    """Return the coverage mode and path filters for history after verifying the sealed scan data."""
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
     coverage_ref = "coverage.json"
     try:
@@ -598,6 +601,7 @@ def compare_scans(
     include_matching_inputs: bool = False,
     require_matches: bool = False,
 ) -> dict[str, Any]:
+    """Compare completed scans of the same repository, returning finding groups and any inputs needed for matching."""
     before = require_scan(connection, args.before_scan_id)
     after = require_scan(connection, args.after_scan_id)
     if before["id"] == after["id"]:
@@ -1274,6 +1278,7 @@ def scan_covers_path(
     path: str | None,
     coverage: dict[str, Any],
 ) -> bool:
+    """Check whether a completed scan of this target included the path after applying all recorded exclusions."""
     if scan["status"] != "complete" or scan["target_id"] != target_id:
         return False
     if not isinstance(path, str) or not path:

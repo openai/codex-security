@@ -250,7 +250,7 @@ def prepare_saved_coverage_projection(
 
 
 class SavedCoverageProjection:
-    """Keep worker source links stable while legacy and accepted rows converge."""
+    """Track which worker supplied a coverage row so reconstructed links can resolve to the retained surface."""
 
     def __init__(self, project_worker_coverage, legacy_surface_links, projection_origins):
         self.project_worker_coverage = project_worker_coverage

@@ -1,3 +1,5 @@
+"""Compute scan usage from session events and receipts, accounting for legacy duplicates and partial turns."""
+
 from __future__ import annotations
 
 import json
@@ -33,6 +35,8 @@ def scan_usage(workbench_api):
 
 @dataclass(frozen=True)
 class ScanFixture:
+    """Hold the CLI environment, scan identity, and launch time for replaying rollout events in usage tests."""
+
     state_dir: Path
     target: Path
     scan_id: str
@@ -45,6 +49,7 @@ class ScanFixture:
     def write_parent_rollout(
         self, events: list[dict[str, Any]], *, originator: str | None = None
     ) -> Path:
+        """Write a parent rollout, register it in the fixture state graph, and return its path."""
         rollout = _rollout(self.target.parent, "scan-parent", events, originator=originator)
         _state_graph(self.environment, {"scan-parent": rollout}, [])
         return rollout

@@ -1,3 +1,5 @@
+"""Check how final deep scan reports preserve remediation, selected paths, and worker evidence."""
+
 from __future__ import annotations
 
 import copy
@@ -19,7 +21,10 @@ from workbench_test_support import (
 
 
 class PublicationScan(SimpleNamespace):
+    """Drive publication and recovery against one test scan and its persisted worker records."""
+
     def add_worker(self, connection=None, *, status="succeeded") -> Path:
+        """Register a discovery worker and return the path where the test can write its result manifest."""
         worker_id = str(uuid.uuid4())
         output = self.scan_dir / "workers" / worker_id
         output.mkdir(parents=True)

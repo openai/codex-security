@@ -115,7 +115,13 @@ def merge_saved_results(
     current_contract: bool = False,
     recovery_snapshot_error: _CheckpointSnapshotError | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    """Read only bound parent/worker files; return an unsealed loss-preserving union."""
+    """Reconcile the bound parent and worker checkpoints into an unsealed scan draft.
+
+    Return the manifest, findings document, and coverage document, or None when there
+    is no saved input or the sealed parent already reflects the selected checkpoints.
+    Frozen digests and heads identify the inputs selected when the scan stopped.
+    Recovery appends diagnostics to the caller's warnings list.
+    """
     initial_warnings = set(warnings)
     if frozen_source_digests is None:
         checkpoint_heads = {}
