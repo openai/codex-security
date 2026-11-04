@@ -3,10 +3,7 @@ import { dirname, join, posix, relative, sep } from "node:path";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
-import {
-  coverageReceiptComponents,
-  validateRetainedCoverage,
-} from "../coverage-publication.js";
+import { validateRetainedCoverage } from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
   scanDraftInputSchema,
@@ -91,23 +88,46 @@ export async function validateDiscoveryArtifacts(
 }
 
 async function validateDiscoveryCoverage(
+  workersRoot: string,
   context: ArtifactContext,
   result: ScanDraftInput,
 ): Promise<void> {
   validateRetainedCoverage(result.reviewState);
+  // Check the worker's own task IDs before qualifying active and closed tasks.
+  const closures = result.reviewState.resolvedDeferred ?? [];
+  if (closures.length) {
+    const active = new Set(
+      result.reviewState.deferred.flatMap((row) => [row.id, row.candidateId]),
+    );
+    const closed = new Set<string>();
+    for (const { id } of closures) {
+      if (active.has(id))
+        throw new Error(
+          `Standard scan worker deferred work is still active: ${id}`,
+        );
+      if (closed.has(id))
+        throw new Error(
+          `Standard scan worker repeats resolved deferred id: ${id}`,
+        );
+      closed.add(id);
+    }
+  }
   const receiptPaths = new Map<string, string>();
   for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
-      const components = coverageReceiptComponents(ref);
-      const normalized = components.join("/");
+      const location = workerCoverageReceiptLocation(context, row, ref);
+      const normalized = relative(
+        workersRoot,
+        join(location.context.root, ...location.components),
+      );
       const key = normalized.toLowerCase();
       const previous = receiptPaths.get(key);
-      if (previous !== undefined && previous !== normalized)
+      if (previous === normalized) continue;
+      if (previous !== undefined)
         throw new Error(
           `Standard scan worker coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
         );
       receiptPaths.set(key, normalized);
-      const location = workerCoverageReceiptLocation(context, row, ref);
       await artifactSourcePath(
         location.context,
         location.components,
@@ -155,7 +175,7 @@ export async function readDiscoveryAuditDraft(
     parsePersistedScanDraft,
   );
   if (result.complete !== false)
-    await validateDiscoveryCoverage(context, result);
+    await validateDiscoveryCoverage(artifacts.workersRoot, context, result);
   return result;
 }
 
@@ -209,7 +229,7 @@ export function scanCoverage(
     if (!surfaceIds.has(surface.id)) surfaceIds.set(surface.id, id);
     const shared = asRecord(surface.provenance)?.scanReceiptRefs as
       string[] | undefined;
-    const scanRefs = new Set(shared?.map((ref) => posix.normalize(ref)));
+    const scanRefs = new Set(shared);
     return {
       ...project(surface),
       id,
@@ -218,7 +238,7 @@ export function scanCoverage(
           const ref = posix.normalize(receipt);
           return ref.startsWith(archivePrefix) ||
             ref.startsWith(`${artifactPrefix}/`) ||
-            scanRefs.has(ref)
+            scanRefs.has(receipt)
             ? ref
             : `${artifactPrefix}/${ref}`;
         },
@@ -280,8 +300,9 @@ export function addScanCoverage(
     const rows = coverage[field];
     if (!Array.isArray(rows)) continue;
     const retained = previous[field];
-    if (Array.isArray(retained)) retained.push(...rows);
-    else Object.assign(previous, { [field]: rows });
+    if (Array.isArray(retained)) {
+      for (const row of rows) retained.push(row);
+    } else Object.assign(previous, { [field]: rows });
   }
 }
 
