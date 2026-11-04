@@ -1706,7 +1706,10 @@ export async function runCodexSkillCommand(
         }
       }
       if (authentication.method === "api_key" && providerEnvKey !== undefined) {
-        const providerKey = environmentEntry(processEnvironment, providerEnvKey);
+        const providerKey = environmentEntry(
+          processEnvironment,
+          providerEnvKey,
+        );
         if (providerKey !== undefined) {
           selected = { ...selected, [providerEnvKey]: providerKey };
         }

@@ -120,7 +120,10 @@ test("retained coverage accepts repository paths and validates closure text", as
   validateRetainedCoverage(coverage);
   assert.throws(
     () =>
-      validateRetainedCoverage({ ...coverage, deferred: [{ paths: ["K:notes"] }] }),
+      validateRetainedCoverage({
+        ...coverage,
+        deferred: [{ paths: ["K:notes"] }],
+      }),
     /repository-relative POSIX path/,
   );
   assert.throws(

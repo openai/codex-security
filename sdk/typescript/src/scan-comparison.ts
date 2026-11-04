@@ -812,7 +812,12 @@ async function startReadOnlyCodexThread(
       ...sdkConfig,
       mcp_servers: preparedFactory
         ? disabledMcpConfiguration(config, [])
-        : await disabledMcpServers(command!, config, helperEnvironment!, options),
+        : await disabledMcpServers(
+            command!,
+            config,
+            helperEnvironment!,
+            options,
+          ),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
