@@ -40,7 +40,9 @@ def backfill_security_targets(connection: sqlite3.Connection) -> None:
         )
 
 
-def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> str:
+def ensure_security_target(
+    connection: sqlite3.Connection, target_path: str, *, preferred_target_id: str | None = None
+) -> str:
     target = portable_path(Path(target_path))
     target_path = str(target)
     extended_target_path = str(extended_path(target))
@@ -52,7 +54,11 @@ def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> 
         current = next((row for row in existing if row["current_path"] == target_path), existing[0])
         target_id = str(current["id"])
         if len(existing) > 1:
-            return target_id
+            # Keep sealed IDs. A rerun can reuse its parent's matching legacy record.
+            return next(
+                (str(row["id"]) for row in existing if row["id"] == preferred_target_id),
+                target_id,
+            )
         if current["current_path"] != target_path:
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             connection.execute(
@@ -60,10 +66,9 @@ def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> 
                 "WHERE id = ?",
                 (target_path, target.name, timestamp, target_id),
             )
-        if extended_target_path != target_path:
-            for table in ("workspaces", "scans"):
+            for table, condition in (("workspaces", ""), ("scans", " AND status = 'running'")):
                 connection.execute(
-                    f"UPDATE {table} SET target_path = ? WHERE target_id = ? AND target_path = ?",
+                    f"UPDATE {table} SET target_path = ? WHERE target_id = ? AND target_path = ?{condition}",
                     (target_path, target_id, extended_target_path),
                 )
         return target_id
@@ -80,9 +85,5 @@ def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> 
     return target_id
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

@@ -5,36 +5,50 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
-from windows_paths import extended_path, portable_path
+from windows_paths import extended_path, portable_path, portable_relative_path
+from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, user_text
+from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
-    segment = "".join(
-        character if character.isalnum() or character in "._-" else "-" for character in value
-    )
-    return segment.strip("-") or "scan"
+    segment = re.sub(r"[^\w.-]", "-", value)
+    if segment != value:
+        segment = segment.strip("-")
+    return segment or "scan"
 
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def loaded_plugin_version() -> str:
+    manifest = read_json_object(
+        Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+    )
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
+    return version
 
 
 def scan_target_identity(
@@ -87,14 +101,18 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     return target
 
 
+@contextmanager
 def archive_scan(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     scan_dir: Path,
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
-) -> None:
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> Iterator[Path | None]:
     portable_scan_dir = portable_path(scan_dir)
+    scan_dir_spellings = (str(portable_scan_dir), str(extended_path(portable_scan_dir)))
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -107,50 +125,153 @@ def archive_scan(
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
-    previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir IN (?, ?)",
-        (str(portable_scan_dir), str(extended_path(portable_scan_dir))),
-    ).fetchone()
-    if previous_scan is None:
-        return
-    if not args.archive_existing:
-        raise SystemExit(
-            "The scan artifact directory belongs to an existing scan. "
-            "Use --archive-existing to preserve that scan and start a new one."
-        )
-    if previous_scan["status"] == "running":
-        raise SystemExit("Cannot archive the output of a running scan.")
-    artifacts = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
-        (previous_scan["id"],),
+    owners = connection.execute(
+        "SELECT id, status FROM scans WHERE scan_dir IN (?, ?)", scan_dir_spellings
     ).fetchall()
-    if archived_scan_dir is None:
-        if artifacts:
+    if len(owners) > 1:
+        raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
+    previous_scan = owners[0] if owners else None
+    if previous_scan is not None:
+        if not args.archive_existing:
             raise SystemExit(
-                "The archived scan directory is required to preserve existing scan artifacts."
+                "The scan artifact directory belongs to an existing scan. "
+                "Use --archive-existing to preserve that scan and start a new one."
             )
-        archived_scan_dir = Path(
-            tempfile.mkdtemp(
-                prefix=f"{scan_dir.name}.previous-", dir=extended_path(scan_dir.parent)
-            )
-        ).resolve()
-    connection.execute(
-        "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(portable_path(archived_scan_dir)), timestamp, previous_scan["id"]),
-    )
-    for artifact in artifacts:
-        try:
-            relative_path = portable_path(Path(artifact["path"])).relative_to(portable_scan_dir)
-        except ValueError:
-            continue
+        if previous_scan["status"] == "running":
+            raise SystemExit("Cannot archive the output of a running scan.")
+    has_contents = next(scan_dir.iterdir(), None) is not None
+    if has_contents and (not args.archive_existing or archived_scan_dir is not None):
+        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    if previous_scan is None and not (args.archive_existing and has_contents):
+        yield archived_scan_dir
+        return
+    has_artifacts = (
         connection.execute(
-            "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
-            (
-                str(portable_path(archived_scan_dir / relative_path)),
-                previous_scan["id"],
-                artifact["kind"],
-            ),
-        )
+            "SELECT 1 FROM scan_artifacts WHERE scan_id = ? LIMIT 1", (previous_scan["id"],)
+        ).fetchone()
+        if previous_scan is not None
+        else None
+    )
+    moved = False
+    try:
+        if archived_scan_dir is None:
+            configured_state = state_dir(canonical=False)
+            protected_directories = [
+                *(path.resolve() for path in (configured_state, *configured_state.parents)),
+                *(
+                    Path(row[2]).resolve().parent
+                    for row in connection.execute("PRAGMA database_list")
+                    if row[2]
+                ),
+            ]
+            if any(
+                portable_path(path).is_relative_to(portable_scan_dir)
+                for path in protected_directories
+            ):
+                raise SystemExit(
+                    "Cannot archive output containing the workbench state or active database."
+                )
+            if has_artifacts and not has_contents:
+                raise SystemExit(
+                    "The archived scan directory is required to preserve existing scan artifacts."
+                )
+            if before_archive is not None:
+                before_archive()
+            archived_scan_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f"{scan_dir.name}.previous-", dir=extended_path(scan_dir.parent)
+                )
+            ).resolve()
+            archived_scan_dir.rmdir()
+            scan_dir.rename(archived_scan_dir)
+            moved = True
+            if os.name == "nt":
+                from windows_scan_local_files import create_directory_with_same_dacl
+
+                create_directory_with_same_dacl(scan_dir, archived_scan_dir)
+            else:
+                scan_dir.mkdir(mode=0o700)
+                scan_dir.chmod(0o700)
+        if previous_scan is not None:
+            archive_dir = portable_path(archived_scan_dir)
+            old_sarif = portable_scan_dir / "exports" / "results.sarif"
+            connection.execute(
+                "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
+                (str(archive_dir), timestamp, previous_scan["id"]),
+            )
+            connection.execute(
+                """UPDATE finding_workflows SET scan_dir = ?,
+                    results_json = CASE WHEN json_extract(results_json, '$.scan.sarifPath') IN (?, ?)
+                        THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
+                    WHERE scan_id = ? AND scan_dir IN (?, ?)""",
+                (
+                    str(archive_dir),
+                    str(old_sarif),
+                    str(extended_path(old_sarif)),
+                    str(archive_dir / "exports" / "results.sarif"),
+                    previous_scan["id"],
+                    *scan_dir_spellings,
+                ),
+            )
+
+            def archive_path(value: str | None) -> str | None:
+                if value is None or not portable_path(Path(value)).is_relative_to(
+                    portable_scan_dir
+                ):
+                    return value
+                return str(archive_dir / portable_relative_path(Path(value), scan_dir))
+
+            connection.create_function("archive_path", 1, archive_path)
+            try:
+                for table, columns in (
+                    ("scan_artifacts", ("path",)),
+                    ("deep_scan_workers", ("prompt_path", "artifact_dir", "result_manifest_path")),
+                    (
+                        "deep_scan_runs",
+                        (
+                            "manifest_path",
+                            "canonical_inventory_path",
+                            "canonical_finding_report_path",
+                            "canonical_candidates_path",
+                            "dedupe_report_path",
+                            "seed_research_path",
+                            "work_ledger_path",
+                            "raw_candidates_path",
+                            "coverage_ledger_path",
+                            "findings_dir",
+                        ),
+                    ),
+                ):
+                    assignments = ", ".join(
+                        f"{column} = archive_path({column})" for column in columns
+                    )
+                    connection.execute(
+                        f"UPDATE {table} SET {assignments} WHERE scan_id = ?",
+                        (previous_scan["id"],),
+                    )
+            finally:
+                connection.create_function("archive_path", 1, None)
+        # The caller commits registration before leaving this context. Older SDKs
+        # supplied an already-moved directory; only restore moves we own.
+        yield archived_scan_dir
+    except BaseException:
+        if moved:
+            if not connection.in_transaction:
+                current_owner = connection.execute(
+                    "SELECT id FROM scans WHERE scan_dir IN (?, ?)", scan_dir_spellings
+                ).fetchone()
+                if current_owner is not None and (
+                    previous_scan is None or current_owner["id"] != previous_scan["id"]
+                ):
+                    # A post-commit interrupt must not undo the saved archive location.
+                    raise
+            try:
+                scan_dir.rmdir()
+            except FileNotFoundError:
+                # Registration may fail before recreating the empty output directory.
+                pass
+            archived_scan_dir.rename(scan_dir)
+        raise
 
 
 def insert_running_scan(
@@ -162,18 +283,27 @@ def insert_running_scan(
     scope: str,
     diff_target: dict[str, str] | None,
     target_identity: tuple[str, str | None, int | str, int | str],
+    source_scopes: dict[str, Any],
     target_root: Path,
     target_summary: str | None,
-    scope_file_count: int,
+    scope_file_count: int | None,
     timestamp: str,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    surface: str | None = "plugin",
+    package_version: str | None = None,
+    launch_kind: str = "scan",
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
-    user_context = user_text(workspace["user_context"])
+    user_context = optional_text(workspace["user_context"])
+    try:
+        plugin_version = loaded_plugin_version()
+    except SystemExit:
+        # Missing version attribution must not prevent scan registration.
+        plugin_version = None
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -185,12 +315,13 @@ def insert_running_scan(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, scope, mode, user_context,
+            target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?)
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            launch_surface, launch_package_version, launch_plugin_version, launch_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'running', 'preflight', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -198,14 +329,12 @@ def insert_running_scan(
             workspace["target_id"],
             workspace["target_path"],
             *target_identity,
+            json.dumps(source_scopes, allow_nan=False, separators=(",", ":"), sort_keys=True),
             scope,
             workspace["default_mode"],
             user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
-            diff_target["kind"] if diff_target else None,
-            diff_target["baseRevision"] if diff_target else None,
-            diff_target["headRevision"] if diff_target else None,
-            diff_target.get("contentDigest") if diff_target else None,
+            *scan_diff_identity(diff_target or None),
             target_summary,
             str(portable_path(scan_dir)),
             optional_text(model, maximum=200),
@@ -214,6 +343,10 @@ def insert_running_scan(
             timestamp,
             timestamp,
             timestamp,
+            surface,
+            package_version,
+            plugin_version,
+            launch_kind,
         ),
     )
     connection.execute(
@@ -241,9 +374,5 @@ def insert_running_scan(
     return scan_id
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

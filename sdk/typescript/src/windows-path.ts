@@ -1,3 +1,4 @@
+/* Generated from plugin windows-path.ts. Run `pnpm generate:models`. */
 import { parse } from "node:path";
 
 const UNSAFE_COMPONENT = /[<>:"|?*\u0000-\u001f]|[ .]$/u;
@@ -13,9 +14,8 @@ export function isWindowsUnsafePathComponent(value: string): boolean {
 }
 
 export function windowsUnsafePathComponent(path: string): string | undefined {
-  const root = parse(path).root;
   return path
-    .slice(root.length)
+    .slice(parse(path).root.length)
     .split(/[\\/]/u)
     .find(isWindowsUnsafePathComponent);
 }

@@ -4,12 +4,15 @@ Windows does not implement Python's descriptor-relative ``dir_fd`` APIs or
 ``O_NOFOLLOW``.  This module provides the three operations needed by the scan
 finalizer without falling back to check-then-use path validation.
 
-The implementation opens every directory with ``FILE_FLAG_OPEN_REPARSE_POINT``
-and rejects all reparse points, including junctions.  Directory handles remain
-open without ``FILE_SHARE_DELETE`` for the full operation, which prevents an
+Scan-local reads, writes, and deletes open every directory with
+``FILE_FLAG_OPEN_REPARSE_POINT`` and reject all reparse points, including junctions.
+Directory handles remain open without ``FILE_SHARE_DELETE`` for the full
+operation, which prevents an
 already-validated ancestor from being renamed or replaced during a read,
 write, or delete.  Writes rename the exact temporary-file handle into place so
 an attacker cannot substitute another file at the temporary name.
+
+The snapshot helper copies junction metadata without opening the link target.
 
 Importing this module and comparing streams work on every platform. Filesystem
 operations raise ``WindowsScanLocalFileError`` outside Windows.
@@ -20,26 +23,25 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ctypes
+import ctypes.wintypes as wintypes
 import errno
 import importlib
 import ntpath
 import os
 import secrets
-import sys
-from collections.abc import Iterator
-from ctypes import wintypes
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
-
-# Some plugin hosts launch Python with safe-path isolation enabled.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from windows_paths import filesystem_path
 
 _msvcrt = importlib.import_module("msvcrt") if os.name == "nt" else None
 
 
 class WindowsScanLocalFileError(OSError):
     """Raised when a scan-local operation cannot be completed securely."""
+
+
+class WindowsScanLocalPathError(WindowsScanLocalFileError):
+    """Raised when a scan-local path fails an integrity check."""
 
 
 # CreateFile access and sharing flags.
@@ -73,7 +75,10 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
+_ERROR_INSUFFICIENT_BUFFER = 122
 _ERROR_ALREADY_EXISTS = 183
+_ERROR_DIRECTORY = 267
+_DACL_SECURITY_INFORMATION = 0x00000004
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -95,10 +100,28 @@ _RESERVED_DEVICE_NAMES = {
 }
 
 
+class _FileBasicInfo(ctypes.Structure):
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", wintypes.DWORD),
+    ]
+
+
 class _FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [
         ("FileAttributes", wintypes.DWORD),
         ("ReparseTag", wintypes.DWORD),
+    ]
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [
+        ("nLength", wintypes.DWORD),
+        ("lpSecurityDescriptor", wintypes.LPVOID),
+        ("bInheritHandle", wintypes.BOOL),
     ]
 
 
@@ -145,6 +168,17 @@ class _OwnedHandle:
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    _GetFileSecurityW = _advapi32.GetFileSecurityW
+    _GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _GetFileSecurityW.restype = wintypes.BOOL
 
     _CreateFileW = _kernel32.CreateFileW
     _CreateFileW.argtypes = [
@@ -157,6 +191,10 @@ if os.name == "nt":
         wintypes.HANDLE,
     ]
     _CreateFileW.restype = wintypes.HANDLE
+
+    _ReOpenFile = _kernel32.ReOpenFile
+    _ReOpenFile.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+    _ReOpenFile.restype = wintypes.HANDLE
 
     _CreateDirectoryW = _kernel32.CreateDirectoryW
     _CreateDirectoryW.argtypes = [wintypes.LPCWSTR, wintypes.LPVOID]
@@ -207,6 +245,19 @@ if os.name == "nt":
     ]
     _WriteFile.restype = wintypes.BOOL
 
+    _DeviceIoControl = _kernel32.DeviceIoControl
+    _DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _DeviceIoControl.restype = wintypes.BOOL
+
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _FlushFileBuffers.restype = wintypes.BOOL
@@ -229,8 +280,8 @@ def _raise_last_error(operation: str, path: Path | None = None) -> None:
     raise WindowsScanLocalFileError(error, f"{operation}{target}: {detail}", str(path or ""))
 
 
-def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalFileError:
-    return WindowsScanLocalFileError(errno.EINVAL, reason, str(path))
+def _invalid_path(path: Path | str, reason: str) -> WindowsScanLocalPathError:
+    return WindowsScanLocalPathError(errno.EINVAL, reason, str(path))
 
 
 def _validated_parts(relative_path: str) -> tuple[str, ...]:
@@ -314,6 +365,34 @@ def _create_file(
     return _OwnedHandle(int(handle))
 
 
+def copy_directory_junction(source: Path, destination: Path) -> None:
+    """Copy raw junction data to an empty directory without opening the link target."""
+    # MAXIMUM_REPARSE_DATA_BUFFER_SIZE, including the reparse data header.
+    data = ctypes.create_string_buffer(16 * 1024)
+    size = wintypes.DWORD()
+    for path, write in ((source, False), (destination, True)):
+        handle = _create_file(
+            path,
+            access=_GENERIC_WRITE if write else _FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        assert handle is not None
+        with handle:
+            if not _DeviceIoControl(
+                handle.value,
+                0x000900A4 if write else 0x000900A8,  # FSCTL_SET/GET_REPARSE_POINT.
+                data if write else None,
+                size.value if write else 0,
+                None if write else data,
+                0 if write else len(data),
+                ctypes.byref(size),
+                None,
+            ):
+                _raise_last_error("Copy directory junction", path)
+
+
 def _attributes(handle: int) -> _FileAttributeTagInfo:
     info = _FileAttributeTagInfo()
     if not _GetFileInformationByHandleEx(
@@ -364,26 +443,41 @@ def _verify_regular_file(handle: int, expected_path: Path) -> None:
 
 
 def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
-    absolute = filesystem_path(Path(scan_dir).absolute())
+    absolute = Path(scan_dir).absolute()
     try:
         expected = absolute.lstat()
         canonical = absolute.resolve(strict=True)
     except OSError as exc:
+        if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+            raise
         raise _invalid_path(scan_dir, "expected an existing scan directory") from exc
     if _normalized_windows_path(absolute) != _normalized_windows_path(canonical):
         raise _invalid_path(scan_dir, "scan directory must be canonical and non-reparse")
     return canonical, (expected.st_dev, expected.st_ino)
 
 
-def _open_directory(path: Path, *, missing_ok: bool = False) -> _OwnedHandle | None:
-    handle = _create_file(
-        path,
-        access=_FILE_READ_ATTRIBUTES,
-        share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        disposition=_OPEN_EXISTING,
-        flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        missing_ok=missing_ok,
-    )
+def _open_directory(
+    path: Path,
+    *,
+    missing_ok: bool = False,
+    missing_is_path_error: bool = True,
+    movable: bool = False,
+) -> _OwnedHandle | None:
+    try:
+        handle = _create_file(
+            path,
+            access=_FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE | (_FILE_SHARE_DELETE if movable else 0),
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            missing_ok=missing_ok,
+        )
+    except WindowsScanLocalFileError as exc:
+        if exc.errno != _ERROR_DIRECTORY and not (
+            missing_is_path_error and exc.errno in _MISSING_ERRORS
+        ):
+            raise
+        raise _invalid_path(path, f"could not open scan-local directory: {exc}") from exc
     if handle is not None:
         try:
             assert handle.value is not None
@@ -402,12 +496,34 @@ def _create_directory(path: Path) -> None:
         _raise_last_error("CreateDirectoryW", path)
 
 
+def create_directory_with_same_dacl(path: Path, source: Path) -> None:
+    """Create an archive replacement with the original directory's DACL."""
+    _require_windows()
+    source_path = _extended_path(source)
+    size = wintypes.DWORD()
+    _GetFileSecurityW(source_path, _DACL_SECURITY_INFORMATION, None, 0, ctypes.byref(size))
+    if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+        _raise_last_error("GetFileSecurityW", source)
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not _GetFileSecurityW(
+        source_path, _DACL_SECURITY_INFORMATION, descriptor, size.value, ctypes.byref(size)
+    ):
+        _raise_last_error("GetFileSecurityW", source)
+    attributes = _SecurityAttributes(
+        ctypes.sizeof(_SecurityAttributes), ctypes.cast(descriptor, wintypes.LPVOID), False
+    )
+    # Supply the descriptor at creation, without an inherited-access window.
+    if not _CreateDirectoryW(_extended_path(path), ctypes.byref(attributes)):
+        _raise_last_error("CreateDirectoryW", path)
+
+
 @contextlib.contextmanager
 def _locked_parent(
     scan_dir: Path,
     relative_path: str,
     *,
     create: bool,
+    missing_is_path_error: bool = True,
     expected_root_identity: tuple[int, int] | None = None,
 ) -> Iterator[tuple[Path, str]]:
     """Hold non-deletable handles for every directory in the absolute target path."""
@@ -426,7 +542,14 @@ def _locked_parent(
             directory_handle = _open_directory(directory_path)
             assert directory_handle is not None
             handles.append(directory_handle)
-        current_root = root_path.lstat()
+        try:
+            current_root = root_path.lstat()
+        except OSError as exc:
+            if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                raise
+            raise _invalid_path(
+                scan_dir, f"scan directory changed while it was being opened: {exc}"
+            ) from exc
         current_root_identity = (current_root.st_dev, current_root.st_ino)
         if current_root_identity != observed_root_identity or (
             expected_root_identity is not None and current_root_identity != expected_root_identity
@@ -435,7 +558,9 @@ def _locked_parent(
         current_path = root_path
         for component in parts[:-1]:
             current_path /= component
-            child_handle = _open_directory(current_path, missing_ok=create)
+            child_handle = _open_directory(
+                current_path, missing_ok=create, missing_is_path_error=missing_is_path_error
+            )
             if child_handle is None:
                 _create_directory(current_path)
                 child_handle = _open_directory(current_path)
@@ -458,8 +583,17 @@ def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
     """Open a verified regular file and return an owned binary read descriptor."""
 
+    return open_read_fd_with_path(scan_dir, relative_path, context)[0]
+
+
+def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> tuple[int, str]:
+    """Return the descriptor and its filename while the verified parents are held."""
+
     try:
-        with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
+        with _locked_parent(scan_dir, relative_path, create=False, missing_is_path_error=False) as (
+            parent_path,
+            leaf_name,
+        ):
             path = parent_path / leaf_name
             handle = _create_file(
                 path,
@@ -470,23 +604,35 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
                 flags=_FILE_FLAG_OPEN_REPARSE_POINT,
             )
             assert handle is not None and handle.value is not None
-            try:
+            with handle:
                 _verify_regular_file(handle.value, path)
+                filename = Path(_final_path(handle.value)).name
+                resolved_path = PurePosixPath(relative_path).with_name(filename).as_posix()
                 raw_handle = handle.detach()
                 try:
                     assert _msvcrt is not None
-                    return _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                    return descriptor, resolved_path
                 except BaseException:
                     _close_handle(raw_handle)
                     raise
-            finally:
-                handle.close()
     except WindowsScanLocalFileError as exc:
         raise WindowsScanLocalFileError(
             exc.errno,
             f"{context}: {exc.strerror}",
             exc.filename,
         ) from exc
+
+
+def file_change_time(descriptor: int) -> int:
+    """Return the filesystem change time. Python's Windows st_ctime is creation time."""
+    assert _msvcrt is not None
+    info = _FileBasicInfo()
+    if not _GetFileInformationByHandleEx(
+        _msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        _raise_last_error("GetFileInformationByHandleEx(FileBasicInfo)")
+    return info.ChangeTime
 
 
 def stream_matches_payload(stream: BinaryIO, payload: bytes) -> bool:
@@ -515,7 +661,7 @@ def _write_all(handle: int, payload: bytes) -> None:
         _raise_last_error("FlushFileBuffers")
 
 
-def _rename_handle(handle: int, destination_path: Path) -> None:
+def _rename_handle(handle: int, destination_path: Path, replace_existing: bool) -> None:
     encoded_name = _extended_path(destination_path).encode("utf-16-le")
     file_name_offset = _FileRenameInfo.FileName.offset
     buffer_size = max(
@@ -524,7 +670,7 @@ def _rename_handle(handle: int, destination_path: Path) -> None:
     )
     buffer = ctypes.create_string_buffer(buffer_size)
     info = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
-    info.FlagsOrReplaceIfExists = 1
+    info.FlagsOrReplaceIfExists = int(replace_existing)
     # The fully qualified destination uses a null RootDirectory. Verified
     # directory handles remain open to prevent ancestor replacement.
     info.RootDirectory = None
@@ -536,6 +682,8 @@ def _rename_handle(handle: int, destination_path: Path) -> None:
         buffer,
         buffer_size,
     ):
+        if not replace_existing and ctypes.get_last_error() in _COLLISION_ERRORS:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination_path))
         _raise_last_error("SetFileInformationByHandle(FileRenameInfo)")
 
 
@@ -550,7 +698,7 @@ def _mark_handle_for_deletion(handle: int) -> None:
         _raise_last_error("SetFileInformationByHandle(FileDispositionInfo)")
 
 
-def _validate_existing_output(path: Path) -> None:
+def _validate_existing_output(path: Path) -> bool:
     handle = _create_file(
         path,
         access=_FILE_READ_ATTRIBUTES,
@@ -560,10 +708,11 @@ def _validate_existing_output(path: Path) -> None:
         missing_ok=True,
     )
     if handle is None:
-        return
+        return False
     with handle:
         assert handle.value is not None
         _verify_regular_file(handle.value, path)
+    return True
 
 
 def _existing_output_matches(path: Path, payload: bytes) -> bool:
@@ -606,63 +755,189 @@ def _existing_output_matches(path: Path, payload: bytes) -> bool:
             return False
 
 
+@contextlib.contextmanager
+def _written_temp(destination: Path, payload: bytes) -> Iterator[tuple[Path, _OwnedHandle]]:
+    for _ in range(16):
+        path = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            handle = _create_file(
+                path,
+                access=_GENERIC_WRITE | _DELETE | _FILE_READ_ATTRIBUTES,
+                share=0,
+                disposition=_CREATE_NEW,
+                flags=_FILE_ATTRIBUTE_NORMAL,
+            )
+        except WindowsScanLocalFileError as exc:
+            if exc.errno in _COLLISION_ERRORS:
+                continue
+            raise
+        assert handle is not None and handle.value is not None
+        with handle:
+            try:
+                _verify_regular_file(handle.value, path)
+                _write_all(handle.value, payload)
+                yield path, handle
+            except BaseException:
+                if handle.value is not None:
+                    with contextlib.suppress(OSError):
+                        _mark_handle_for_deletion(handle.value)
+                raise
+        return
+    raise WindowsScanLocalFileError(errno.EEXIST, "could not allocate a unique temp file")
+
+
+def _stage_metadata(
+    handle: _OwnedHandle, *, close_writer: bool = False
+) -> tuple[os.stat_result, int]:
+    # Windows can update LastWriteTime on last writer close. Observe the same
+    # file across that close, independently of whatever is now at the name.
+    assert handle.value is not None and _msvcrt is not None
+    raw = _ReOpenFile(
+        handle.value,
+        _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        0,
+    )
+    if raw is None or raw == _INVALID_HANDLE_VALUE:
+        _raise_last_error("ReOpenFile")
+    with _OwnedHandle(raw) as observer:
+        descriptor = _msvcrt.open_osfhandle(raw, os.O_RDONLY | os.O_BINARY)
+        observer.detach()
+        try:
+            if close_writer:
+                handle.close()
+            try:
+                return os.fstat(descriptor), file_change_time(descriptor)
+            except BaseException:
+                if close_writer:
+                    # The observer still identifies the staged file after the writer closed.
+                    cleanup = _ReOpenFile(
+                        raw, _DELETE, _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE, 0
+                    )
+                    if cleanup and cleanup != _INVALID_HANDLE_VALUE:
+                        with _OwnedHandle(cleanup), contextlib.suppress(OSError):
+                            _mark_handle_for_deletion(cleanup)
+                raise
+        finally:
+            os.close(descriptor)
+
+
+@contextlib.contextmanager
+def stage_write(
+    scan_dir: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+    replace_existing: bool = False,
+) -> Iterator[Callable[..., tuple[os.stat_result, int]]]:
+    """Flush a patch and keep only a movable handle to its root across admission."""
+    if expected_root_identity is None:
+        root = scan_dir.lstat()
+        expected_root_identity = (root.st_dev, root.st_ino)
+    with _locked_parent(
+        scan_dir, relative_path, create=True, expected_root_identity=expected_root_identity
+    ) as (parent, leaf):
+        destination = parent / leaf
+        if _validate_existing_output(destination) and not replace_existing:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination))
+        root_handle = _open_directory(scan_dir, movable=True)
+        assert root_handle is not None
+        try:
+            with _written_temp(destination, payload) as (temp, writer):
+                staged, change_time = _stage_metadata(writer, close_writer=True)
+        except BaseException:
+            root_handle.close()
+            raise
+
+    location = scan_dir
+    published = False
+
+    @contextlib.contextmanager
+    def open_stage() -> Iterator[tuple[_OwnedHandle, Path]]:
+        with _locked_parent(
+            location, relative_path, create=False, expected_root_identity=expected_root_identity
+        ) as (parent, leaf):
+            path = parent / temp.name
+            handle = _create_file(
+                path,
+                access=_DELETE | _FILE_READ_ATTRIBUTES,
+                share=0,
+                disposition=_OPEN_EXISTING,
+                flags=_FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+            )
+            assert handle is not None and handle.value is not None
+            with handle:
+                _verify_regular_file(handle.value, path)
+                current, changed = _stage_metadata(handle)
+                if not (
+                    os.path.samestat(staged, current)
+                    and staged.st_size == current.st_size
+                    and staged.st_mtime_ns == current.st_mtime_ns
+                    and change_time == changed
+                ):
+                    raise _invalid_path(path, "staged patch changed before publication")
+                yield handle, parent / leaf
+
+    def publish(directory: Path | None = None) -> tuple[os.stat_result, int]:
+        nonlocal location, published
+        if directory is not None:
+            location = directory
+        with open_stage() as (handle, destination):
+            assert handle.value is not None
+            _rename_handle(handle.value, destination, replace_existing)
+            published = True
+            _verify_regular_file(handle.value, destination)
+            return _stage_metadata(handle)
+
+    with root_handle:
+        try:
+            yield publish
+        finally:
+            if not published:
+                # A different workbench database may own the archive move.
+                assert root_handle.value is not None
+                with contextlib.suppress(OSError):
+                    location = Path(_final_path(root_handle.value))
+                    while True:
+                        try:
+                            with open_stage() as (handle, _):
+                                assert handle.value is not None
+                                _mark_handle_for_deletion(handle.value)
+                            break
+                        except OSError:
+                            # A move can land between locating the root and fixing its parents.
+                            moved_to = Path(_final_path(root_handle.value))
+                            if moved_to == location:
+                                break
+                            location = moved_to
+
+
 def atomic_write(
     scan_dir: Path,
     relative_path: str,
     payload: bytes,
     *,
     expected_root_identity: tuple[int, int] | None = None,
+    replace_existing: bool = True,
 ) -> None:
-    """Atomically replace a scan-local regular file with ``payload``."""
-
+    """Atomically publish ``payload`` to a scan-local regular file."""
     with _locked_parent(
-        scan_dir,
-        relative_path,
-        create=True,
-        expected_root_identity=expected_root_identity,
-    ) as (parent_path, leaf_name):
-        destination_path = parent_path / leaf_name
-        _validate_existing_output(destination_path)
-        if expected_root_identity is not None and _existing_output_matches(
-            destination_path, payload
+        scan_dir, relative_path, create=True, expected_root_identity=expected_root_identity
+    ) as (parent, leaf):
+        destination = parent / leaf
+        if _validate_existing_output(destination) and not replace_existing:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(destination))
+        if (
+            replace_existing
+            and expected_root_identity is not None
+            and _existing_output_matches(destination, payload)
         ):
             return
-
-        temp_handle: _OwnedHandle | None = None
-        temp_path: Path | None = None
-        for _ in range(16):
-            temp_path = parent_path / f".{leaf_name}.{secrets.token_hex(8)}.tmp"
-            try:
-                temp_handle = _create_file(
-                    temp_path,
-                    access=_GENERIC_WRITE | _DELETE | _FILE_READ_ATTRIBUTES,
-                    share=0,
-                    disposition=_CREATE_NEW,
-                    flags=_FILE_ATTRIBUTE_NORMAL,
-                )
-            except WindowsScanLocalFileError as exc:
-                if exc.errno in _COLLISION_ERRORS:
-                    continue
-                raise
-            break
-        if temp_handle is None or temp_path is None:
-            raise WindowsScanLocalFileError(errno.EEXIST, "could not allocate a unique temp file")
-
-        with temp_handle:
-            assert temp_handle.value is not None
-            try:
-                _verify_regular_file(temp_handle.value, temp_path)
-                _write_all(temp_handle.value, payload)
-                _rename_handle(temp_handle.value, destination_path)
-                _verify_regular_file(temp_handle.value, destination_path)
-            except BaseException:
-                # Deleting by handle removes the exact temp/output file and cannot
-                # be redirected through a swapped path or reparse point.
-                try:
-                    _mark_handle_for_deletion(temp_handle.value)
-                except OSError:
-                    pass
-                raise
+        with _written_temp(destination, payload) as (_, handle):
+            assert handle.value is not None
+            _rename_handle(handle.value, destination, replace_existing)
+            _verify_regular_file(handle.value, destination)
 
 
 def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
@@ -693,9 +968,5 @@ def unlink_if_exists(scan_dir: Path, relative_path: str) -> None:
             _mark_handle_for_deletion(handle.value)
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-
 if __name__ == "__main__":
-    main()
+    argparse.ArgumentParser(description=__doc__).parse_args()

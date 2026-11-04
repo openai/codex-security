@@ -1,72 +1,51 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { nodeCommand } from "./support/shell.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { git } from "./git-fixture.js";
+import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
+import { writeSource } from "./support/shell.js";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readReviewState } from "./support/review-state.js";
 
 type JsonObject = Record<string, unknown>;
 
-const temporaryRoots: string[] = [];
+const temporaryRoots = createTemporaryDirectoriesSync(true);
 
-afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryRoots.cleanup);
 
 function createRepository(): { root: string; repository: string } {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-diff-")),
-  );
-  temporaryRoots.push(root);
+  const root = temporaryRoots.create("codex-security-diff-");
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   return { root, repository };
 }
 
-function git(repository: string, ...args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.com",
-      ...args,
-    ],
-    { cwd: repository, encoding: "utf8" },
-  ).trim();
-}
-
-function writeSource(
-  repository: string,
-  path: string,
-  content: string | Buffer,
-): void {
-  const destination = join(repository, path);
-  mkdirSync(dirname(destination), { recursive: true });
-  writeFileSync(destination, content);
-}
-
-function python(script: string, ...args: string[]) {
+function pythonHelper(script: string, ...args: string[]) {
   const command =
     Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(command).not.toBeNull();
   return spawnSync(
     command!,
     ["-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+    { encoding: "utf8" },
+  );
+}
+
+function inventoryHelper(script: string, ...args: string[]) {
+  return spawnSync(
+    nodeCommand().command,
+    [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      ...(script === "generate-in-scope-files" ? [script] : []),
+      ...args,
+    ],
     { encoding: "utf8" },
   );
 }
@@ -81,62 +60,18 @@ function candidate(path: string): JsonObject {
 }
 
 async function startMcp(root: string) {
-  const child = spawn(
-    process.execPath,
-    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+  const { request, close } = await startMcpClient(
     {
+      command: nodeCommand().command,
+      args: [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
       env: {
         ...process.env,
         CODEX_SECURITY_SCAN_ROOT: join(root, "scans"),
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         PYTHONDONTWRITEBYTECODE: "1",
-      },
-      stdio: ["pipe", "pipe", "pipe"],
+      } as Record<string, string>,
     },
-  );
-  const messages = createInterface({ input: child.stdout })[
-    Symbol.asyncIterator
-  ]();
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  let nextId = 0;
-
-  async function request(
-    method: string,
-    params: JsonObject,
-  ): Promise<JsonObject> {
-    const id = ++nextId;
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-    child.stdin.write("\n");
-
-    while (true) {
-      const message = await messages.next();
-      if (message.done) {
-        throw new Error(`MCP server exited before replying: ${stderr}`);
-      }
-      const response = JSON.parse(message.value) as JsonObject;
-      if (response["id"] !== id) continue;
-      if (response["error"] !== undefined) {
-        throw new Error(JSON.stringify(response["error"]));
-      }
-      return response["result"] as JsonObject;
-    }
-  }
-
-  await request("initialize", {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "compact-diff-test", version: "1.0.0" },
-  });
-  child.stdin.write(
-    `${JSON.stringify({
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-      params: {},
-    })}\n`,
+    "compact-diff-test",
   );
 
   return {
@@ -154,12 +89,7 @@ async function startMcp(root: string) {
       expect(result["isError"], JSON.stringify(result)).not.toBe(true);
       return result["structuredContent"] as JsonObject;
     },
-    async close(): Promise<void> {
-      child.stdin.end();
-      await new Promise<void>((resolve) => {
-        child.once("close", () => resolve());
-      });
-    },
+    close,
   };
 }
 
@@ -178,8 +108,8 @@ describe("compact diff scan", () => {
     git(repository, "checkout", "--detach", base);
 
     const output = join(root, "rank-input.jsonl");
-    const result = python(
-      "generate_rank_input.py",
+    const result = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -216,15 +146,15 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", "value = 2\n");
     writeSource(repository, "src/new handler.py", "created = True\n");
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
-    writeSource(repository, "tests/ignored.py", "ignored = True\n");
+    writeSource(repository, "tests/example.py", "test_setup = True\n");
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
     writeSource(repository, "src/handler.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -242,6 +172,7 @@ describe("compact diff scan", () => {
       "src/guard.py",
       "src/handler.py",
       "src/new handler.py",
+      "tests/example.py",
     ]);
   });
 
@@ -276,15 +207,11 @@ describe("compact diff scan", () => {
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
 
-    const executable = Bun.which("python3") ?? Bun.which("python");
-    expect(executable).not.toBeNull();
     const result = spawnSync(
-      executable!,
+      nodeCommand().command,
       [
-        "-B",
-        "-c",
-        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
         "--repo",
         repository,
         "--scope",
@@ -318,8 +245,8 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -340,8 +267,8 @@ describe("compact diff scan", () => {
     ]);
 
     const reviewOutput = join(root, "rank-input.jsonl");
-    const review = python(
-      "generate_rank_input.py",
+    const review = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -378,23 +305,26 @@ describe("compact diff scan", () => {
         .map((entry) => JSON.stringify(entry))
         .join("\n") + "\n",
     );
-    const args = [
-      "--input",
-      input,
-      "--out",
-      output,
-      "--repo-root",
-      repository,
-      "--in-scope-files",
-      inventory,
-    ];
-
-    expect(python("normalize_candidates.py", ...args).status).toBe(2);
-    const accepted = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const normalize = (...options: string[]) =>
+      spawnSync(
+        process.execPath,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "normalize-candidates",
+          "--input",
+          input,
+          "--out",
+          output,
+          "--repo-root",
+          repository,
+          "--in-scope-files",
+          inventory,
+          ...options,
+        ],
+        { encoding: "utf8" },
+      );
+    expect(normalize().status).toBe(2);
+    const accepted = normalize("--allow-missing-in-scope");
     expect(accepted.status, accepted.stderr).toBe(0);
     const contents = readFileSync(output, "utf8");
     expect(contents).toContain("Résumé: missing guard");
@@ -408,48 +338,9 @@ describe("compact diff scan", () => {
     ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
-    const escaped = python(
-      "normalize_candidates.py",
-      ...args,
-      "--allow-missing-in-scope",
-    );
+    const escaped = normalize("--allow-missing-in-scope");
     expect(escaped.status).toBe(2);
     expect(escaped.stderr).toContain("in-scope file row 1");
-  });
-
-  test("streams maximum-size preflight checks through the MCP workbench", async () => {
-    const { root, repository } = createRepository();
-    writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
-    const client = await startMcp(root);
-    const owner = "preflight-stdin-owner";
-
-    try {
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        { mode: "standard", targetPath: repository, scope: "." },
-        owner,
-      );
-      const scanId = (started["scan"] as JsonObject)["scanId"] as string;
-      const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
-        capability: `windows_process_boundary_${index}`,
-        reason: "é".repeat(1_200),
-        severity: "warn",
-        status: "fail",
-      }));
-      expect(JSON.stringify(preflightChecks).length).toBeGreaterThan(
-        32 * 1_024,
-      );
-
-      await client.call(
-        "update_codex_security_scan_progress",
-        { scanId, phase: "preflight", preflightChecks },
-        owner,
-      );
-    } finally {
-      await client.close();
-    }
   });
 
   test("streams oversized option-like user context through the MCP workbench", async () => {
@@ -485,12 +376,18 @@ describe("compact diff scan", () => {
         userContext,
       );
 
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        selection,
-        "user-context-stdin-owner",
-      );
-      const scan = started["scan"] as JsonObject;
+      const started = await client.request("tools/call", {
+        name: "start_codex_security_prompt_only_scan",
+        arguments: selection,
+        _meta: { "openai/threadId": "user-context-stdin-owner" },
+      });
+      expect(started["isError"], JSON.stringify(started)).not.toBe(true);
+      const instructions = (started["content"] as { text: string }[])[0]?.text;
+      expect(instructions).toContain("complete_codex_security_scan");
+      expect(instructions).not.toContain("get_codex_security_completed_scan");
+      const scan = (started["structuredContent"] as JsonObject)[
+        "scan"
+      ] as JsonObject;
       expect(scan["userContext"]).toBe(userContext);
       const updated = await client.call(
         "update_codex_security_scan_context",
@@ -622,6 +519,7 @@ describe("compact diff scan", () => {
       };
       const markdownFact =
         "Selected input stays separate from private state (src/handler.py:1).";
+      const canonicalMarkdown = `# Canonical threat model\n\n## Assumptions\n\n${markdownFact}\n`;
       const savedModelPath = join(
         scanDir,
         "artifacts",
@@ -631,11 +529,11 @@ describe("compact diff scan", () => {
       mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
       writeFileSync(
         savedModelPath,
-        `# Saved threat model\n\n${markdownFact}\n`,
+        "# Saved threat model\n\nSuperseded supplemental model.\n",
       );
       const threatModel =
         format === "Markdown"
-          ? { summary: readFileSync(savedModelPath, "utf8") }
+          ? { format: "markdown" as const, content: canonicalMarkdown }
           : canonicalModel;
       const openQuestions = [
         {
@@ -669,13 +567,13 @@ describe("compact diff scan", () => {
           findings: [
             {
               ...finding,
-              root_cause: {
+              rootCause: {
+                summary: "An archive entry controls the output path.",
                 evidenceRefs: ["missing-root-cause-evidence"],
               },
             },
           ],
-          coverage: {
-            completeness: "complete",
+          reviewState: {
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -685,7 +583,7 @@ describe("compact diff scan", () => {
       });
       expect(invalidRootCauseReference["isError"]).toBe(true);
       expect(JSON.stringify(invalidRootCauseReference)).toContain(
-        "root_cause.evidenceRefs",
+        "rootCause.evidenceRefs",
       );
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -706,8 +604,7 @@ describe("compact diff scan", () => {
             },
           },
         ],
-        coverage: {
-          completeness: "complete",
+        reviewState: {
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -721,7 +618,7 @@ describe("compact diff scan", () => {
         ).findings.map((draftFinding) => draftFinding["identity"]),
       ).toEqual([
         { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -732,18 +629,6 @@ describe("compact diff scan", () => {
             extensions: {
               candidateId: "candidate-singleton",
               reportId: "DSS-144-A",
-            },
-          },
-          {
-            ...finding,
-            code_evidence: [
-              {
-                code: "value = 2",
-                id: "legacy-source",
-              },
-            ],
-            attackPath: {
-              dataflow: { evidence_refs: ["legacy-source"] },
             },
           },
           {
@@ -791,8 +676,7 @@ describe("compact diff scan", () => {
           },
         ],
         threatModel,
-        coverage: {
-          completeness: "complete",
+        reviewState: {
           surfaces: [
             {
               label: "Changed files",
@@ -805,12 +689,22 @@ describe("compact diff scan", () => {
           openQuestions,
         },
       });
+      const savedThreatModel = readFileSync(
+        join(scanDir, "threatmodel.md"),
+        "utf8",
+      );
+      expect(savedThreatModel).not.toContain("Superseded supplemental model.");
+      if (format === "Markdown")
+        expect(savedThreatModel.startsWith(canonicalMarkdown)).toBe(true);
+      else
+        for (const fact of Object.values(canonicalModel).flat())
+          expect(savedThreatModel).toContain(fact);
       const canonicalDraftIdentities = (
         JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
           findings: JsonObject[];
         }
       ).findings.map((draftFinding) => draftFinding["identity"]);
-      expect(canonicalDraftIdentities).toHaveLength(9);
+      expect(canonicalDraftIdentities).toHaveLength(8);
       await call("complete_codex_security_scan", {
         scanId,
         handoffClaimToken,
@@ -833,16 +727,14 @@ describe("compact diff scan", () => {
       expect(target["snapshotDigest"]).toBe(
         `codex-security-snapshot/v1:sha256:${digest}`,
       );
-      expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
-        "diff",
-      );
+      expect(completed).not.toHaveProperty("coverage");
+      expect(completed["review"]).toEqual({ excludedPaths: [] });
       const completedIdentities = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       ).map((completedFinding) => completedFinding["identity"]);
       expect(completedIdentities).toEqual(canonicalDraftIdentities);
       expect(completedIdentities).toEqual([
         { anchor: "candidate-singleton", instance: "dss-144-a" },
-        { anchor: "unsafe-archive-extraction" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
         { anchor: "candidate-cross-rule", instance: "second-report" },
@@ -852,29 +744,18 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
-      const legacyFinding = (
-        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
-      )[1];
-      expect(legacyFinding?.["code_evidence"]).toEqual([
-        { code: "value = 2", id: "legacy-source" },
-      ]);
-      expect(legacyFinding?.["attackPath"]).toEqual({
-        dataflow: { evidence_refs: ["legacy-source"] },
-      });
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
           "threatModel"
         ],
       ).toEqual(threatModel);
-      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
-        openQuestions,
-      );
+      const reviewState = await readReviewState(scanDir);
+      expect(reviewState).toMatchObject({ openQuestions });
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.threatModel).toEqual(threatModel);
-      expect(contract.coverage.openQuestions).toEqual(openQuestions);
-      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      expect(contract.review).toEqual({ excludedPaths: [] });
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
       const modelFacts =
         format === "Markdown"
@@ -883,9 +764,19 @@ describe("compact diff scan", () => {
       for (const fact of modelFacts) {
         expect(report).toContain(fact);
       }
-      expect(report).toContain(openQuestions[0]!.question);
-      expect(report).toContain(openQuestions[0]!.followUpPrompt);
-      expect(report).toContain(coverageNote);
+      expect(report).not.toContain("Superseded supplemental model.");
+      expect(report).not.toContain("# Saved threat model");
+      if (format === "Markdown") expect(report).toContain(canonicalMarkdown);
+      const completedThreatModel = readFileSync(
+        join(scanDir, "threatmodel.md"),
+        "utf8",
+      );
+      if (format === "Markdown")
+        expect(completedThreatModel.startsWith(canonicalMarkdown)).toBe(true);
+      else
+        for (const fact of modelFacts)
+          expect(completedThreatModel).toContain(fact);
+      expect(reviewState.surfaces[0]?.notes).toBe(coverageNote);
 
       const terminalDir = join(root, "terminal-scan");
       mkdirSync(terminalDir, { mode: 0o700 });
@@ -895,16 +786,16 @@ describe("compact diff scan", () => {
       ) as JsonObject;
       const terminalScan = terminalManifest["scan"] as JsonObject;
       terminalScan["threatModel"] = { summary: markdownModel };
+      terminalScan["reviewState"] = reviewState;
       delete terminalScan["sealedAt"];
       delete terminalScan["artifacts"];
       for (const [name, document] of [
         ["scan-manifest.json", terminalManifest],
         ["findings.json", completed["findings"]],
-        ["coverage.json", completed["coverage"]],
       ] as const) {
         writeFileSync(join(terminalDir, name), JSON.stringify(document));
       }
-      const finalized = python(
+      const finalized = pythonHelper(
         "finalize_scan_contract.py",
         "--scan-dir",
         terminalDir,
@@ -912,7 +803,7 @@ describe("compact diff scan", () => {
         repository,
       );
       expect(finalized.status, finalized.stderr).toBe(0);
-      const validated = python(
+      const validated = pythonHelper(
         "validate_scan_contract.py",
         "--scan-dir",
         terminalDir,
@@ -930,9 +821,11 @@ describe("compact diff scan", () => {
         "utf8",
       );
       expect(terminalReport).toContain(markdownFact);
-      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
-        report.match(/^#{1,2} .+$/gm),
-      );
+      expect(terminalReport).toContain("Existing threat model");
+      expect(terminalReport).not.toContain("\n# Existing threat model\n");
+      expect(
+        readFileSync(join(terminalDir, "threatmodel.md"), "utf8"),
+      ).toContain(markdownModel);
     } finally {
       await client.close();
     }

@@ -1,0 +1,2307 @@
+import { gitText, nodeCommand, runCommand } from "./support/shell.js";
+import { cpSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { check } from "prettier";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+
+type Change = {
+  title: string;
+  body?: string;
+  labels?: string[];
+  breaking?: boolean;
+  number?: number | null;
+  sha: string;
+  url: string;
+};
+type Section = {
+  generatedHash: string | null;
+  humanOwned: boolean;
+  reset?: boolean;
+};
+type Sections = Record<"highlights" | "upgrades", Section>;
+type History = {
+  baseVersion: string;
+  baseCommit: string;
+  mainSha: string;
+  packageText: string;
+  actionPackageText?: string | null;
+  actionLockText?: string | null;
+  exampleWorkflowText?: string | null;
+  changes: Change[];
+};
+type Plan = Omit<
+  History,
+  "packageText" | "actionPackageText" | "actionLockText" | "exampleWorkflowText"
+> & {
+  version: string;
+  branch: string;
+  title: string;
+  files: Record<string, string | null>;
+  humanOwned: string[];
+  generated: Record<"highlights" | "upgrades", string>;
+};
+type GitRepository = {
+  git: (...args: string[]) => string;
+  ensureCommit: (sha: string) => void;
+  readFile: (sha: string, path: string) => string | null;
+};
+type Body = Record<string, unknown>;
+type GitHubClient = {
+  repository: string;
+  owner: string;
+  repositoryUrl: string;
+  request: (method: string, path: string, body?: Body) => Promise<unknown>;
+  list: (path: string) => Promise<unknown[]>;
+  releaseReviewPage: (
+    number: number,
+    branch: string,
+    after: string | null,
+    openAfter: string | null,
+  ) => Promise<unknown>;
+};
+type Fetcher = (url: string, options: RequestInit) => Promise<Response>;
+type Pull = {
+  number: number;
+  title: string;
+  body: string;
+  state: "open" | "closed";
+  draft: boolean;
+  merged_at: string | null;
+  head: { ref: string; sha: string; repo: { full_name: string } };
+  base: { ref: string };
+  html_url: string;
+  labels: { name: string }[];
+};
+
+const script = new URL("../scripts/release-pr.mjs", import.meta.url);
+const {
+  packagePath,
+  actionPackagePath,
+  actionLockPath,
+  exampleWorkflowPath,
+  notesPath,
+  statePath,
+  isBreakingChange,
+  nextReleaseVersion,
+  createReleasePlan,
+  createGitRepository,
+  createGitHubClient,
+  readReleaseHistory,
+  reconcileReleasePullRequest,
+} = (await import(script.href)) as {
+  packagePath: string;
+  actionPackagePath: string;
+  actionLockPath: string;
+  exampleWorkflowPath: string;
+  notesPath: string;
+  statePath: string;
+  isBreakingChange: (change: Change) => boolean;
+  nextReleaseVersion: (version: string, changes: Change[]) => string;
+  createReleasePlan: (
+    history: History,
+    previous?: {
+      notes: string | null;
+      state: Pick<History, "baseVersion" | "baseCommit"> & {
+        sections: Sections;
+      };
+    } | null,
+  ) => Plan;
+  createGitRepository: (
+    directory: string,
+    env?: NodeJS.ProcessEnv,
+  ) => GitRepository;
+  createGitHubClient: (
+    repository: string,
+    token: string,
+    fetcher?: Fetcher,
+    sleep?: (milliseconds: number) => Promise<void>,
+  ) => GitHubClient;
+  readReleaseHistory: (
+    repo: GitRepository,
+    sha: string,
+    github: GitHubClient,
+  ) => Promise<History>;
+  reconcileReleasePullRequest: (options: {
+    repo: GitRepository;
+    github: GitHubClient;
+    dryRun?: boolean;
+    waitForHead?: (ms: number) => Promise<void>;
+  }) => Promise<{
+    action: string;
+    reason?: string;
+    headSha?: string;
+    pull?: number;
+    reviewRequested?: boolean;
+    plan: Plan;
+  }>;
+};
+import {
+  parseReviewedReleaseNotes,
+  composeReleaseNotes,
+} from "../scripts/release-automation.mjs";
+const template = readFileSync(
+  new URL("../../../.github/PULL_REQUEST_TEMPLATE.md", import.meta.url),
+  "utf8",
+);
+const workflow = readFileSync(
+  new URL("../../../.github/workflows/node-release-pr.yml", import.meta.url),
+  "utf8",
+);
+const directories = createTemporaryDirectoriesSync(true);
+afterEach(directories.cleanup);
+const templates = createTemporaryDirectoriesSync();
+afterAll(templates.cleanup);
+let baseRepository: string | undefined;
+
+function packageText(version = "0.1.23", dependencies = {}) {
+  return `${JSON.stringify({ name: "@openai/codex-security", version, dependencies }, null, 2)}\n`;
+}
+
+function actionFiles(dependencyVersion = "1.2.3") {
+  const manifest = {
+    name: "codex-security-action",
+    version: "0.1.23",
+    private: true,
+    dependencies: { example: dependencyVersion },
+  };
+  const lock = {
+    name: manifest.name,
+    version: manifest.version,
+    lockfileVersion: 3,
+    packages: {
+      "": manifest,
+      "node_modules/example": {
+        version: dependencyVersion,
+        resolved: `https://registry.npmjs.org/example/-/example-${dependencyVersion}.tgz`,
+        integrity: "sha512-c3ludGhldGlj",
+      },
+    },
+  };
+  return {
+    [actionPackagePath]: `${JSON.stringify(manifest, null, 2)}\n`,
+    [actionLockPath]: `${JSON.stringify(lock, null, 2)}\n`,
+  };
+}
+
+function exampleWorkflowText(version = "0.1.23") {
+  return [
+    "name: Code scan",
+    "jobs:",
+    "  scan:",
+    "    env:",
+    `      CODEX_SECURITY_VERSION: "${version}"  # Exact CLI release`,
+    '      OTHER_VERSION: "0.1.23"',
+    "    steps:",
+    '      - run: echo "$CODEX_SECURITY_VERSION"',
+    "",
+  ].join("\n");
+}
+
+function change(
+  title: string,
+  number = 1,
+  extra: Partial<Change> = {},
+): Change {
+  const result = {
+    title,
+    sha: String(number).padStart(40, "0"),
+    number,
+    url: `https://github.com/example/release-fixture/pull/${number}`,
+    ...extra,
+  };
+  return { ...result, breaking: isBreakingChange(result) };
+}
+
+function history(changes: Change[]): History {
+  return {
+    baseVersion: "0.1.23",
+    baseCommit: "a".repeat(40),
+    mainSha: "b".repeat(40),
+    packageText: packageText(),
+    changes,
+  };
+}
+
+function updatePlan(
+  previous: Plan,
+  changes: Change[],
+  notes: string | null = previous.files[notesPath] ?? null,
+) {
+  return createReleasePlan(history(changes), {
+    notes,
+    state: JSON.parse(previous.files[statePath]!),
+  });
+}
+
+function apiError(status: number) {
+  return Object.assign(new Error(`HTTP ${status}`), { status });
+}
+
+class Fixture {
+  private static initialPull?: ReturnType<typeof Fixture.createInitialPull>;
+
+  private static async createInitialPull() {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const directory = templates.create("initial release proposal ");
+    cpSync(fixture.directory, directory, { recursive: true });
+    const { pulls, commitPulls, comments, writes } = fixture.github;
+    return {
+      directory,
+      first,
+      state: { pulls, commitPulls, comments, writes },
+    };
+  }
+
+  static async withInitialPull() {
+    Fixture.initialPull ??= Fixture.createInitialPull().catch((error) => {
+      Fixture.initialPull = undefined;
+      throw error;
+    });
+    // Clone the GitHub state together: commitPulls and pulls refer to the same objects.
+    const { directory, first, state } = structuredClone(
+      await Fixture.initialPull,
+    );
+    const fixture = new Fixture(directory);
+    Object.assign(fixture.github, state);
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    return { fixture, first, pull };
+  }
+
+  readonly directory = directories.create("release pr test ");
+  readonly environment: NodeJS.ProcessEnv = {
+    PATH: process.env["PATH"],
+    SystemRoot: process.env["SystemRoot"],
+    ComSpec: process.env["ComSpec"],
+    PATHEXT: process.env["PATHEXT"],
+    HOME: this.directory,
+    USERPROFILE: this.directory,
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  readonly repo = createGitRepository(this.directory, this.environment);
+  readonly github = new FakeGitHub(this);
+  readonly git = this.repo.git;
+
+  constructor(repositoryTemplate = baseRepository) {
+    if (repositoryTemplate !== undefined) {
+      cpSync(repositoryTemplate, this.directory, { recursive: true });
+      return;
+    }
+    this.git("init", "--template=", "-b", "main");
+    this.git("config", "user.name", "Release Test");
+    this.git("config", "user.email", "release-test@example.invalid");
+    this.git("config", "commit.gpgsign", "false");
+    this.commit(
+      "main",
+      {
+        [packagePath]: packageText(),
+        [notesPath]:
+          "<!-- release-version: 0.1.23 -->\n\nPreviously reviewed release.\n",
+        ".github/PULL_REQUEST_TEMPLATE.md": template,
+        "sdk/typescript/src/example.ts": "export const initial = true;\n",
+      },
+      "release: bump to 0.1.23",
+    );
+    baseRepository = templates.create("release pr template ");
+    cpSync(this.directory, baseRepository, { recursive: true });
+  }
+
+  head(branch = "main") {
+    try {
+      return this.git("rev-parse", "--verify", `refs/heads/${branch}`).trim();
+    } catch {
+      return null;
+    }
+  }
+
+  tree(base: string | null, files: Record<string, string | null>) {
+    const entries = Object.entries(files);
+    if (base !== null && entries.length === 0)
+      return this.git("rev-parse", `${base}^{tree}`).trim();
+
+    this.git("read-tree", base ?? "--empty");
+    const edits: string[] = [];
+    for (const [path, content] of entries) {
+      if (content === null) {
+        edits.push(`./${path}`);
+      } else {
+        const blob = gitText(["hash-object", "-w", "--stdin"], {
+          cwd: this.directory,
+          env: this.environment,
+          input: content,
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+        edits.push("--cacheinfo", "100644", blob, path);
+      }
+    }
+    if (edits.length > 0) {
+      // --cacheinfo stages blobs; --force-remove applies to plain path arguments.
+      this.git("update-index", "--add", "--force-remove", ...edits);
+    }
+    return this.git("write-tree").trim();
+  }
+
+  commit(
+    branch: string,
+    files: Record<string, string | null>,
+    message: string,
+    from = this.head(branch),
+  ) {
+    const tree = this.tree(from, files);
+    const sha = this.git(
+      "commit-tree",
+      tree,
+      ...(from ? ["-p", from] : []),
+      "-m",
+      message,
+    ).trim();
+    this.git("update-ref", `refs/heads/${branch}`, sha);
+    return sha;
+  }
+
+  merge(
+    title: string,
+    files: Record<string, string | null> = {},
+    body = "",
+    labels: string[] = [],
+  ) {
+    const sha = this.commit("main", files, `${title}\n\n${body}`);
+    const pull = this.github.addPull(
+      `change/${this.github.pulls.length + 1}`,
+      title,
+      sha,
+    );
+    pull.state = "closed";
+    pull.merged_at = "2026-01-01T00:00:00Z";
+    pull.body = body;
+    pull.labels = labels.map((name) => ({ name }));
+    this.github.commitPulls.set(sha, [pull]);
+    return sha;
+  }
+
+  run(dryRun = false, waitForHead?: (ms: number) => Promise<void>) {
+    return reconcileReleasePullRequest({
+      repo: this.repo,
+      github: this.github,
+      dryRun,
+      ...(waitForHead && { waitForHead }),
+    });
+  }
+}
+
+class FakeGitHub {
+  readonly repository = "example/release-fixture";
+  readonly owner = "example";
+  readonly repositoryUrl = "https://github.com/example/release-fixture";
+  readonly pulls: Pull[] = [];
+  readonly commitPulls = new Map<string, Pull[]>();
+  readonly comments = new Map<number, { body: string }[]>();
+  readonly writes: { method: string; path: string; body: Body }[] = [];
+  releaseReviewPage: GitHubClient["releaseReviewPage"] = async () => {
+    throw new Error("Unexpected release head recovery");
+  };
+  beforeRefWrite: (() => void) | undefined;
+  afterCommit: (() => void) | undefined;
+  failPullCreation = false;
+
+  constructor(readonly fixture: Fixture) {}
+
+  addPull(branch: string, title: string, sha: string): Pull {
+    const number = this.pulls.length + 1;
+    const pull: Pull = {
+      number,
+      title,
+      body: "",
+      state: "open",
+      draft: false,
+      merged_at: null,
+      head: { ref: branch, sha, repo: { full_name: this.repository } },
+      base: { ref: "main" },
+      html_url: `${this.repositoryUrl}/pull/${number}`,
+      labels: [],
+    };
+    this.pulls.push(pull);
+    return pull;
+  }
+
+  async list(path: string) {
+    if (path.startsWith("commits/"))
+      return this.commitPulls.get(path.split("/")[1]!) ?? [];
+    if (path.startsWith("pulls?")) {
+      const query = new URLSearchParams(path.split("?")[1]);
+      const head = query.get("head")?.slice(`${this.owner}:`.length);
+      const base = query.get("base");
+      return this.pulls.filter(
+        (pull) =>
+          pull.state === query.get("state") &&
+          (!head || pull.head.ref === head) &&
+          (!base || pull.base.ref === base),
+      );
+    }
+    if (path.startsWith("issues/"))
+      return this.comments.get(Number(path.split("/")[1])) ?? [];
+    throw new Error(`Unexpected list: ${path}`);
+  }
+
+  async request(
+    method: string,
+    path: string,
+    body: Body = {},
+  ): Promise<unknown> {
+    if (method !== "GET") this.writes.push({ method, path, body });
+    if (method === "GET" && path.startsWith("git/ref/heads/")) {
+      const sha = this.fixture.head(path.slice("git/ref/heads/".length));
+      if (!sha) throw apiError(404);
+      return { object: { sha } };
+    }
+    if (path === "git/trees") {
+      const entries = body["tree"] as {
+        path: string;
+        content?: string;
+        sha?: null;
+      }[];
+      return {
+        sha: this.fixture.tree(
+          body["base_tree"] as string,
+          Object.fromEntries(
+            entries.map((entry) => [entry.path, entry.content ?? null]),
+          ),
+        ),
+      };
+    }
+    if (path === "git/commits") {
+      const parents = body["parents"] as string[];
+      const sha = this.fixture
+        .git(
+          "commit-tree",
+          body["tree"] as string,
+          ...parents.flatMap((parent) => ["-p", parent]),
+          "-m",
+          body["message"] as string,
+        )
+        .trim();
+      const callback = this.afterCommit;
+      this.afterCommit = undefined;
+      callback?.();
+      return { sha };
+    }
+    if (path === "git/refs" || path.startsWith("git/refs/heads/")) {
+      const callback = this.beforeRefWrite;
+      this.beforeRefWrite = undefined;
+      callback?.();
+      const branch =
+        path === "git/refs"
+          ? (body["ref"] as string).slice("refs/heads/".length)
+          : path.slice("git/refs/heads/".length);
+      const current = this.fixture.head(branch);
+      const next = body["sha"] as string;
+      if (method === "POST" && current) throw apiError(422);
+      if (current) {
+        expect(body["force"]).toBe(false);
+        try {
+          this.fixture.git("merge-base", "--is-ancestor", current, next);
+        } catch {
+          throw apiError(422);
+        }
+      }
+      this.fixture.git(
+        "update-ref",
+        `refs/heads/${branch}`,
+        next,
+        current ?? "0".repeat(40),
+      );
+      return { object: { sha: next } };
+    }
+    if (method === "POST" && path === "pulls") {
+      if (this.failPullCreation) throw apiError(500);
+      const branch = body["head"] as string;
+      const pull = this.addPull(
+        branch,
+        body["title"] as string,
+        this.fixture.head(branch)!,
+      );
+      pull.body = body["body"] as string;
+      pull.draft = body["draft"] as boolean;
+      return pull;
+    }
+    if (path.startsWith("pulls/")) {
+      const pull = this.pulls.find(
+        (candidate) => candidate.number === Number(path.split("/")[1]),
+      )!;
+      if (method === "PATCH") Object.assign(pull, body);
+      return {
+        ...pull,
+        head: {
+          ...pull.head,
+          sha: this.fixture.head(pull.head.ref) ?? pull.head.sha,
+        },
+      };
+    }
+    if (method === "POST" && path.startsWith("issues/")) {
+      const number = Number(path.split("/")[1]);
+      const comments = this.comments.get(number) ?? [];
+      comments.push({ body: body["body"] as string });
+      this.comments.set(number, comments);
+      return {};
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  }
+}
+
+// The REST listing still shows the original pull head after the fake ref moves.
+async function laggingPull(title: string) {
+  const { fixture, first, pull } = await Fixture.withInitialPull();
+  const main = fixture.merge(title);
+  const { github } = fixture;
+  const comments = github.comments.get(pull.number)!;
+  const original = github.request.bind(github);
+  github.request = async (method, path, body) => {
+    if (method === "GET" && path === `pulls/${pull.number}`)
+      return structuredClone(pull);
+    return original(method, path, body);
+  };
+  const page = () => {
+    const branch = fixture.head(first.plan.branch)!;
+    const last = { hasNextPage: false, endCursor: null as string | null };
+    return {
+      main: { target: { oid: main } },
+      branch: { target: { oid: branch } as { oid: string } | null },
+      open: {
+        nodes: github.pulls
+          .filter((p) => p.state === "open")
+          .map((p) => ({
+            number: p.number,
+            title: p.title,
+            baseRefName: p.base.ref,
+            headRefName: p.head.ref,
+            headRefOid: p.head.sha,
+            headRepository: { nameWithOwner: p.head.repo.full_name },
+          })),
+        pageInfo: last,
+      },
+      pullRequest: {
+        state: "OPEN",
+        baseRefName: pull.base.ref,
+        headRefName: pull.head.ref,
+        headRefOid: branch,
+        headRepository: { nameWithOwner: github.repository },
+        comments: {
+          nodes: comments.map(({ body }, i) => ({ id: String(i + 1), body })),
+          pageInfo: last,
+        },
+      },
+    };
+  };
+  return { fixture, first, pull, comments, page, original };
+}
+
+describe("GitHub request transport", () => {
+  function retryClient(fetcher: Fetcher) {
+    const delays: number[] = [];
+    const github = createGitHubClient(
+      "example/release-fixture",
+      "synthetic-release-token",
+      fetcher,
+      async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    );
+    return { github, delays };
+  }
+
+  test("retries the same read-only review query and rejects a partial error response", async () => {
+    const requests: unknown[] = [];
+    const repository = { pullRequest: null };
+    const { github, delays } = retryClient(async (url, options) => {
+      expect(url).toBe("https://api.github.com/graphql");
+      expect(options.method).toBe("POST");
+      const { query, variables } = JSON.parse(String(options.body));
+      expect(query).toMatch(/^\s*query\b/u);
+      requests.push(variables);
+      if (requests.length === 1) return new Response(null, { status: 503 });
+      return Response.json({
+        data: { repository },
+        ...(requests.length === 3 && {
+          errors: [{ message: "Review page unavailable" }],
+        }),
+      });
+    });
+    const variables = {
+      owner: "example",
+      name: "release-fixture",
+      number: 42,
+      ref: "refs/heads/release/next",
+      after: "page-2",
+      openAfter: "open-3",
+    };
+    expect(
+      await github.releaseReviewPage(42, "release/next", "page-2", "open-3"),
+    ).toEqual(repository);
+    await expect(
+      github.releaseReviewPage(42, "release/next", null, null),
+    ).rejects.toThrow("Review page unavailable");
+    expect(requests).toEqual([
+      variables,
+      variables,
+      { ...variables, after: null, openAfter: null },
+    ]);
+    expect(delays).toEqual([1000]);
+  });
+
+  const interruptedJsonResponse = (error: Error) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('[{"number":'));
+        },
+        pull(controller) {
+          controller.error(error);
+        },
+      }),
+      { status: 200 },
+    );
+
+  test.each([
+    "errored response body",
+    "transport failure",
+    "interrupted success body",
+  ])(
+    "recovers from %s without duplicating paginated results",
+    async (failure) => {
+      const pages: number[] = [];
+      const waiting = Promise.withResolvers<number>();
+      const resume = Promise.withResolvers<void>();
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async (url, options) => {
+          expect(options.method).toBe("GET");
+          const page = Number(new URL(url).searchParams.get("page"));
+          pages.push(page);
+          if (pages.length === 2) {
+            if (failure === "transport failure") {
+              throw new TypeError("fetch failed", {
+                cause: Object.assign(new Error("other side closed"), {
+                  code: "UND_ERR_SOCKET",
+                }),
+              });
+            }
+            if (failure === "interrupted success body") {
+              return interruptedJsonResponse(new TypeError("terminated"));
+            }
+            const body = new ReadableStream({
+              start(controller) {
+                controller.error(new Error("Synthetic response body failure"));
+              },
+            });
+            return new Response(body, { status: 500 });
+          }
+          return Response.json([{ number: page }], {
+            headers:
+              page === 1
+                ? {
+                    link: '<https://api.github.com/repos/example/release-fixture/pulls?per_page=1&page=2>; rel="next"',
+                  }
+                : {},
+          });
+        },
+        (milliseconds) => {
+          waiting.resolve(milliseconds);
+          return resume.promise;
+        },
+      );
+      const result = github.list("pulls?per_page=1");
+      expect(await Promise.race([waiting.promise, result])).toBe(1000);
+      expect(pages).toEqual([1, 2]);
+      resume.resolve();
+      expect(await result).toEqual([{ number: 1 }, { number: 2 }]);
+      expect(pages).toEqual([1, 2, 2]);
+    },
+  );
+
+  test("recovers an interrupted successful request body", async () => {
+    let requests = 0;
+    const { github, delays } = retryClient(async () => {
+      requests++;
+      return requests === 1
+        ? interruptedJsonResponse(new TypeError("terminated"))
+        : Response.json({ sha: "synthetic-main-sha" });
+    });
+    expect(await github.request("GET", "git/ref/heads/main")).toEqual({
+      sha: "synthetic-main-sha",
+    });
+    expect(requests).toBe(2);
+    expect(delays).toEqual([1000]);
+  });
+
+  test.each([false, true])(
+    "preserves a persistent transport error after bounded read retries (initial HTTP error: %j)",
+    async (initialHttpError) => {
+      let requests = 0;
+      const error = new TypeError("fetch failed", {
+        cause: Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      });
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (initialHttpError && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        throw error;
+      });
+      await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
+        error,
+      );
+      expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
+    },
+  );
+
+  test.each([false, true])(
+    "preserves an interrupted body error after bounded read retries (mixed failures: %j)",
+    async (mixedFailures) => {
+      let requests = 0;
+      const error = new TypeError("terminated", {
+        cause: Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      });
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (mixedFailures && requests === 1) {
+          return Response.json({ message: "Unavailable" }, { status: 503 });
+        }
+        if (mixedFailures && requests === 2) throw error;
+        return interruptedJsonResponse(error);
+      });
+      await expect(github.request("GET", "git/ref/heads/main")).rejects.toBe(
+        error,
+      );
+      expect(requests).toBe(3);
+      expect(delays).toEqual([1000, 2000]);
+    },
+  );
+
+  test.each([
+    ["POST", "fetch"],
+    ["PATCH", "fetch"],
+    ["DELETE", "fetch"],
+    ["POST", "body"],
+    ["PATCH", "body"],
+    ["DELETE", "body"],
+  ])(
+    "does not replay a %s request after a %s failure",
+    async (method, failure) => {
+      let requests = 0;
+      const error = new TypeError("fetch failed");
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        if (failure === "body") return interruptedJsonResponse(error);
+        throw error;
+      });
+      await expect(github.request(method, "pulls")).rejects.toBe(error);
+      expect(requests).toBe(1);
+      expect(delays).toEqual([]);
+    },
+  );
+
+  test.each(["request", "list"])(
+    "does not retry malformed JSON in a successful %s response",
+    async (operation) => {
+      let requests = 0;
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response("{", { status: 200 });
+      });
+      await expect(
+        operation === "request"
+          ? github.request("GET", "pulls")
+          : github.list("pulls"),
+      ).rejects.toBeInstanceOf(SyntaxError);
+      expect(requests).toBe(1);
+      expect(delays).toEqual([]);
+    },
+  );
+
+  test.each([
+    [null, [1000, 2000]],
+    ["1", [1000, 2000]],
+    ["120", []],
+    ["Fri, 01 Jan 2100 00:00:00 GMT", []],
+  ])(
+    "limits retries on HTTP 503 with Retry-After %j",
+    async (retryAfter, expectedDelays) => {
+      let requests = 0;
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return new Response(null, {
+          status: 503,
+          headers: retryAfter ? { "Retry-After": retryAfter } : {},
+        });
+      });
+      await expect(
+        github.request("GET", "git/ref/heads/main"),
+      ).rejects.toMatchObject({
+        status: 503,
+        message:
+          "GitHub GET git/ref/heads/main failed with HTTP 503." +
+          (retryAfter ? ` Retry-After: ${retryAfter}.` : ""),
+      });
+      expect(requests).toBe(expectedDelays.length + 1);
+      expect(delays).toEqual(expectedDelays);
+    },
+  );
+
+  test.each([
+    ["POST", 500],
+    ["PATCH", 503],
+    ["GET", 403],
+    ["GET", 404],
+    ["GET", 422],
+  ])(
+    "does not replay a %s request that fails with HTTP %i",
+    async (method, status) => {
+      let requests = 0;
+      const { github, delays } = retryClient(async () => {
+        requests++;
+        return Response.json({ message: "Failed request" }, { status });
+      });
+      await expect(github.request(method, "pulls")).rejects.toMatchObject({
+        status,
+      });
+      expect(requests).toBe(1);
+      expect(delays).toEqual([]);
+    },
+  );
+
+  test("publishes through a concurrent commit conflict", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    let conflicts = 0;
+    const github = createGitHubClient(
+      fixture.github.repository,
+      "synthetic-release-token",
+      async (url, options) => {
+        const endpoint = new URL(url);
+        expect(endpoint.origin).toBe("https://api.github.com");
+        expect(new Headers(options.headers).get("Authorization")).toBe(
+          "Bearer synthetic-release-token",
+        );
+        const path =
+          endpoint.pathname.slice(
+            `/repos/${fixture.github.repository}/`.length,
+          ) + endpoint.search;
+        const method = options.method!;
+        try {
+          const value =
+            method === "GET" &&
+            (path.startsWith("commits/") ||
+              path.startsWith("pulls?") ||
+              path.startsWith("issues/"))
+              ? await fixture.github.list(path)
+              : await fixture.github.request(
+                  method,
+                  path,
+                  options.body ? JSON.parse(String(options.body)) : undefined,
+                );
+          return Response.json(value, {
+            status: method === "POST" ? 201 : 200,
+          });
+        } catch (error) {
+          const status = (error as { status?: number }).status;
+          if (status === undefined) throw error;
+          if (status === 422) conflicts++;
+          return Response.json(
+            { message: "Synthetic GitHub failure" },
+            { status },
+          );
+        }
+      },
+    );
+    const run = (dryRun = false) =>
+      reconcileReleasePullRequest({ repo: fixture.repo, github, dryRun });
+    expect((await run(true)).action).toBe("would-create");
+    expect(fixture.github.writes).toHaveLength(0);
+    const first = await run();
+    fixture.merge("fix: later fix");
+    let humanSha = "";
+    fixture.github.beforeRefWrite = () => {
+      const notes = fixture.repo.readFile(
+        fixture.head(first.plan.branch)!,
+        notesPath,
+      )!;
+      humanSha = fixture.commit(
+        first.plan.branch,
+        {
+          [notesPath]: notes.replace(
+            "initial feature",
+            "Human-reviewed release note",
+          ),
+        },
+        "docs: review release notes",
+      );
+    };
+    const updated = await run();
+    expect(conflicts).toBe(1);
+    expect(updated.pull).toBe(first.pull);
+    expect(updated.plan.humanOwned).toEqual(["highlights"]);
+    expect(updated.plan.files[notesPath]).toContain(
+      "Human-reviewed release note",
+    );
+    expect(updated.reviewRequested).toBe(true);
+    fixture.git("merge-base", "--is-ancestor", humanSha, updated.headSha!);
+    expect(fixture.github.comments.get(updated.pull!)!.at(-1)!.body).toContain(
+      "later fix",
+    );
+  });
+
+  test.each([30, 100])(
+    "follows %i-item pages without losing the original query",
+    async (pageSize) => {
+      const pages: number[] = [];
+      const github = createGitHubClient(
+        "example/release-fixture",
+        "synthetic-release-token",
+        async (url, options) => {
+          const endpoint = new URL(url);
+          expect(options.method).toBe("GET");
+          expect(endpoint.searchParams.get("state")).toBe("open");
+          expect(endpoint.searchParams.get("per_page")).toBe(String(pageSize));
+          const page = Number(endpoint.searchParams.get("page"));
+          pages.push(page);
+          endpoint.searchParams.set("page", "2");
+          return Response.json(
+            page === 1
+              ? Array.from({ length: pageSize }, (_, index) => ({
+                  number: index + 1,
+                }))
+              : [{ number: pageSize + 1 }],
+            {
+              headers:
+                page === 1 ? { link: `<${endpoint.href}>; rel="next"` } : {},
+            },
+          );
+        },
+      );
+      const pulls = await github.list(`pulls?state=open&per_page=${pageSize}`);
+      expect(pulls).toHaveLength(pageSize + 1);
+      expect(pulls.at(-1)).toEqual({ number: pageSize + 1 });
+      expect(pages).toEqual([1, 2]);
+    },
+  );
+});
+
+describe("release workflow controls", () => {
+  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
+    permissions: Record<string, string>;
+    concurrency: { group: string; "cancel-in-progress": boolean };
+    jobs: Record<
+      string,
+      {
+        if: string;
+        permissions?: Record<string, string>;
+        concurrency?: { group: string; queue: string };
+        env: { RELEASE_PR_DRY_RUN: string };
+        steps: { id?: string; if?: string }[];
+      }
+    >;
+  };
+
+  test("manual release runs keep their place during a burst of main pushes", () => {
+    const slot = (event_name: string, run_id: number) =>
+      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+        String(
+          new Function("github", `return (${expression})`)({
+            event_name,
+            run_id,
+          }),
+        ),
+      );
+    const push = slot("push", 10);
+    expect(slot("push", 11)).toBe(push);
+    const slots = [
+      push,
+      slot("workflow_dispatch", 12),
+      slot("workflow_dispatch", 13),
+    ];
+    expect(new Set(slots).size).toBe(slots.length);
+    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
+    expect(jobs["reconcile"]?.concurrency).toEqual({
+      group: "node-release-pr",
+      queue: "max",
+    });
+    expect(jobs["preview"]?.concurrency).toEqual(
+      jobs["reconcile"]?.concurrency,
+    );
+  });
+
+  test.each([
+    { dryRun: "false", clientId: "", createsAppToken: false },
+    { dryRun: "false", clientId: "synthetic-app-id", createsAppToken: true },
+    { dryRun: "true", clientId: "", createsAppToken: false },
+    { dryRun: "true", clientId: "synthetic-app-id", createsAppToken: false },
+  ])(
+    "selects authentication for dry_run=$dryRun with client ID '$clientId'",
+    ({ dryRun, clientId, createsAppToken }) => {
+      const job = Object.values(jobs).find(
+        ({ env }) => env.RELEASE_PR_DRY_RUN === dryRun,
+      )!;
+      const appToken = job.steps.find((step) => step.id === "app-token");
+      const evaluate = new Function(
+        "vars",
+        `return (${appToken?.if ?? "false"});`,
+      );
+      expect(evaluate({ RELEASE_APP_CLIENT_ID: clientId })).toBe(
+        createsAppToken,
+      );
+      const access = dryRun === "true" ? "read" : "write";
+      expect(job.permissions ?? permissions).toEqual({
+        contents: access,
+        "pull-requests": access,
+      });
+    },
+  );
+
+  test.each([
+    { event: "push", enabled: undefined, dryRun: undefined, expected: true },
+    { event: "push", enabled: "false", dryRun: undefined, expected: true },
+    { event: "push", enabled: "true", dryRun: undefined, expected: false },
+    {
+      event: "workflow_dispatch",
+      enabled: undefined,
+      dryRun: true,
+      expected: true,
+    },
+    {
+      event: "workflow_dispatch",
+      enabled: undefined,
+      dryRun: false,
+      expected: false,
+    },
+    {
+      event: "workflow_dispatch",
+      enabled: "false",
+      dryRun: false,
+      expected: false,
+    },
+    {
+      event: "workflow_dispatch",
+      enabled: "true",
+      dryRun: true,
+      expected: true,
+    },
+    {
+      event: "workflow_dispatch",
+      enabled: "true",
+      dryRun: false,
+      expected: false,
+    },
+  ])(
+    "selects preview mode for $event with enabled=$enabled and dry_run=$dryRun",
+    ({ event, enabled, dryRun, expected }) => {
+      const selectedJobs = Object.values(jobs).filter((job) => {
+        const evaluate = new Function(
+          "github",
+          "inputs",
+          "vars",
+          `return (${job.if});`,
+        );
+        return evaluate(
+          {
+            event_name: event,
+            repository: "openai/codex-security",
+            ref: "refs/heads/main",
+          },
+          { dry_run: dryRun },
+          { RELEASE_PR_ENABLED: enabled },
+        );
+      });
+      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
+        String(expected),
+      ]);
+    },
+  );
+});
+
+describe("pre-1.0 release policy", () => {
+  test.each([
+    "fix: repair output",
+    "feat(sdk): add an option",
+    "chore(deps): update a dependency",
+    "docs: clarify setup",
+    "test: add coverage",
+  ])("uses a patch for %s", (title) => {
+    expect(nextReleaseVersion("0.1.23", [change(title)])).toBe("0.1.24");
+  });
+
+  test.each([
+    change("feat(sdk)!: remove an option"),
+    change("fix: correct behavior", 1, {
+      body: "Details.\n\nBREAKING CHANGE: old options were removed",
+    }),
+    change("chore: update behavior", 1, {
+      body: "BREAKING-CHANGE: configuration changed",
+    }),
+    change("fix: correct behavior", 1, {
+      labels: ["breaking-change", "skip-release-notes"],
+    }),
+  ])("uses a minor for a breaking change (%#): $title", (breaking) => {
+    expect(
+      nextReleaseVersion("0.1.23", [change("fix: first fix"), breaking]),
+    ).toBe("0.2.0");
+  });
+
+  test("generates formatted release notes", async () => {
+    for (const changes of [
+      [],
+      [change("fix: repair behavior")],
+      [change("fix!: change behavior")],
+    ]) {
+      const notes = createReleasePlan(history(changes)).files[notesPath]!;
+      expect(await check(notes, { parser: "markdown" })).toBe(true);
+    }
+  });
+
+  test("recomputes the whole cycle, including hidden changes, without incrementing on reruns", () => {
+    const changes = [
+      change("feat: an addition"),
+      change("fix!: incompatible behavior", 2, {
+        labels: ["skip-release-notes"],
+      }),
+    ];
+    const first = createReleasePlan(history(changes));
+    const next = updatePlan(first, [...changes, change("fix: another fix", 3)]);
+    expect(first.version).toBe("0.2.0");
+    expect(next.version).toBe("0.2.0");
+    expect(next.branch).toBe(first.branch);
+    expect(next.files[notesPath]).not.toContain("incompatible behavior");
+  });
+
+  test("leaves an empty cycle at the merged version and does not invent a 1.x policy", () => {
+    expect(nextReleaseVersion("0.1.23", [])).toBe("0.1.23");
+    expect(() =>
+      nextReleaseVersion("1.0.0", [change("feat: add behavior")]),
+    ).toThrow("policy");
+  });
+
+  test("excludes release preparation while preserving visible and breaking changes", () => {
+    const plan = createReleasePlan(
+      history([
+        change("chore(release): 0.1.24", 1),
+        change("release: prepare legacy release", 2),
+        change("test: extend coverage", 3),
+        change("chore(deps): update dependencies", 4),
+        change("docs(release): explain publishing", 5),
+        change("chore(release)!: require migration", 6),
+      ]),
+    );
+    expect(plan.version).toBe("0.2.0");
+    expect(plan.title).toBe("chore(release): 0.2.0");
+    expect(plan.generated.highlights).not.toContain("0.1.24");
+    expect(plan.generated.highlights).not.toContain("prepare legacy release");
+    expect(plan.generated.highlights).not.toContain("extend coverage");
+    expect(plan.generated.highlights).toContain("update dependencies");
+    expect(plan.generated.highlights).toContain("explain publishing");
+    expect(plan.generated.highlights).toContain("require migration");
+    expect(plan.generated.upgrades).toContain("require migration");
+  });
+
+  test.each([
+    { format: "compact", indent: undefined },
+    { format: "indented", indent: 2 },
+  ])(
+    "updates only the top-level package version with $format formatting",
+    ({ indent }) => {
+      const metadata = {
+        config: { version: 'legacy "1.2.3"' },
+        name: "@openai/codex-security",
+        version: "0.1.23",
+        dependencies: { example: "1.0.0" },
+      };
+      const text = `${JSON.stringify(metadata, null, indent)}\n`;
+      const plan = createReleasePlan({
+        ...history([change("fix: repair output")]),
+        packageText: text,
+      });
+      expect(JSON.parse(plan.files[packagePath]!)).toEqual({
+        ...metadata,
+        version: "0.1.24",
+      });
+      expect(plan.files[packagePath]).toBe(
+        text.replace('"0.1.23"', '"0.1.24"'),
+      );
+      const empty = createReleasePlan({ ...history([]), packageText: text });
+      expect(empty.files[packagePath]).toBe(text);
+    },
+  );
+
+  test("updates the checked-in example pin without changing the rest of the workflow", () => {
+    const source = readFileSync(
+      new URL(`../../../${exampleWorkflowPath}`, import.meta.url),
+      "utf8",
+    );
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source,
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(
+      source.replace(
+        /CODEX_SECURITY_VERSION: "[^"]+"/u,
+        'CODEX_SECURITY_VERSION: "0.1.24"',
+      ),
+    );
+    expect(plan.files[exampleWorkflowPath]).toContain(
+      'CODEX_SECURITY_VERSION: "0.1.24"',
+    );
+  });
+
+  test("preserves example quotes, CRLF, comments, and unrelated version literals", () => {
+    const source = (version: string) =>
+      exampleWorkflowText(version)
+        .replaceAll('"', "'")
+        .replaceAll("\n", "\r\n");
+    const plan = createReleasePlan({
+      ...history([change("fix: repair output")]),
+      exampleWorkflowText: source("0.1.23"),
+    });
+    expect(plan.files[exampleWorkflowPath]).toBe(source("0.1.24"));
+  });
+
+  test.each([
+    "name: No CLI pin\n",
+    'env:\n  CODEX_SECURITY_VERSION: "latest"\n',
+    exampleWorkflowText() + exampleWorkflowText(),
+  ])("rejects an example without one exact CLI pin (%#)", (source) => {
+    expect(() =>
+      createReleasePlan({
+        ...history([change("fix: repair output")]),
+        exampleWorkflowText: source,
+      }),
+    ).toThrow("Unable to update only the GitHub Actions example CLI version");
+  });
+});
+
+describe("human note ownership", () => {
+  test("keeps edited sections sticky while updating other sections and the header", () => {
+    const first = createReleasePlan(history([change("feat: initial feature")]));
+    const edited = first.files[notesPath]!.replace(
+      "initial feature",
+      "A reviewed explanation with [documentation](https://example.com/v0.1.24).",
+    );
+    const changes = [
+      change("feat: initial feature"),
+      change("fix!: new incompatible change", 2),
+    ];
+    const second = updatePlan(first, changes, edited);
+    const third = updatePlan(second, [
+      ...changes,
+      change("feat: later feature", 3),
+    ]);
+    expect(third.version).toBe("0.2.0");
+    expect(third.files[notesPath]).toContain("<!-- release-version: 0.2.0 -->");
+    expect(third.files[notesPath]).toContain("A reviewed explanation");
+    expect(third.files[notesPath]).toContain("https://example.com/v0.1.24");
+    expect(third.files[notesPath]).not.toContain("later feature");
+    expect(third.files[notesPath]).toContain("new incompatible change");
+    expect(third.humanOwned).toEqual(["highlights"]);
+    expect(third.generated.highlights).toContain("later feature");
+    const originalBlock = first.files[notesPath]!.match(
+      /<!-- release-section: highlights:start -->[\s\S]*?<!-- release-section: highlights:end -->/u,
+    )![0];
+    const restored = third.files[notesPath]!.replace(
+      /<!-- release-section: highlights:start -->[\s\S]*?<!-- release-section: highlights:end -->/u,
+      originalBlock,
+    );
+    const stillOwned = updatePlan(third, third.changes, restored);
+    expect(stillOwned.humanOwned).toEqual(["highlights"]);
+    expect(stillOwned.files[notesPath]).not.toContain("later feature");
+  });
+
+  test("preserves deletion, custom prose, and an explicit reset", () => {
+    const first = createReleasePlan(history([change("feat: initial feature")]));
+    const deleted = first.files[notesPath]!.replace(
+      /<!-- release-section: upgrades:start -->[\s\S]*?<!-- release-section: upgrades:end -->/u,
+      "A custom migration explanation.",
+    );
+    const second = updatePlan(
+      first,
+      [change("feat!: new interface", 2)],
+      deleted,
+    );
+    const third = updatePlan(second, [
+      change("feat!: new interface", 2),
+      change("fix: later fix", 3),
+    ]);
+    expect(third.files[notesPath]).toContain("A custom migration explanation.");
+    expect(third.files[notesPath]).not.toContain(
+      "release-section: upgrades:start",
+    );
+    expect(third.humanOwned).toEqual(["upgrades"]);
+    const state = JSON.parse(third.files[statePath]!);
+    state.sections.upgrades.reset = true;
+    const reset = createReleasePlan(history(third.changes), {
+      notes: third.files[notesPath]!,
+      state,
+    });
+    expect(reset.files[notesPath]).toContain("A custom migration explanation.");
+    expect(reset.files[notesPath]).toContain("release-section: upgrades:start");
+    expect(reset.humanOwned).toEqual([]);
+  });
+
+  test("does not recreate a deleted notes file or overwrite a section with edited markers", () => {
+    const first = createReleasePlan(history([change("fix: initial fix")]));
+    const deleted = updatePlan(first, [change("feat: new feature", 2)], null);
+    expect(deleted.files[notesPath]).toBeNull();
+    expect(
+      updatePlan(deleted, [change("fix!: breaking fix", 3)]).files[notesPath],
+    ).toBeNull();
+    const edited = first.files[notesPath]!.replace(
+      "release-section: highlights:start",
+      "edited section boundary",
+    );
+    const preserved = updatePlan(
+      first,
+      [change("feat: new feature", 2)],
+      edited,
+    );
+    expect(preserved.files[notesPath]).toContain("edited section boundary");
+    expect(preserved.files[notesPath]).toContain("initial fix");
+    expect(preserved.files[notesPath]).not.toContain("new feature");
+  });
+
+  test("preserves existing prose when a section loses its ownership metadata until explicitly reset", () => {
+    const first = createReleasePlan(history([change("feat: initial feature")]));
+    const notes = first.files[notesPath]!.replace(
+      "initial feature",
+      "Human-reviewed notes",
+    );
+    const state = JSON.parse(first.files[statePath]!);
+    delete state.sections.highlights;
+    const changes = [change("feat: later feature", 2)];
+    const preserved = createReleasePlan(history(changes), { notes, state });
+    expect(preserved.humanOwned).toEqual(["highlights"]);
+    expect(preserved.files[notesPath]).toContain("Human-reviewed notes");
+    expect(preserved.files[notesPath]).not.toContain("later feature");
+    const nextState = JSON.parse(preserved.files[statePath]!);
+    nextState.sections.highlights.reset = true;
+    const reset = createReleasePlan(history(changes), {
+      notes: preserved.files[notesPath] ?? null,
+      state: nextState,
+    });
+    expect(reset.humanOwned).toEqual([]);
+    expect(reset.files[notesPath]).toContain("later feature");
+  });
+
+  test("feeds the preserved canonical notes into the existing publisher", () => {
+    const first = createReleasePlan(history([change("feat: initial feature")]));
+    const edited = first.files[notesPath]!.replace(
+      "initial feature",
+      "Reviewed release behavior",
+    );
+    const updated = updatePlan(
+      first,
+      [change("fix!: breaking fix", 2)],
+      edited,
+    );
+    const summary = parseReviewedReleaseNotes(
+      updated.version,
+      updated.files[notesPath]!,
+    );
+    const published = composeReleaseNotes(
+      "Generated change inventory",
+      summary,
+    );
+    expect(published).toContain("Reviewed release behavior");
+    expect(published).toContain("Generated change inventory");
+    expect(published).not.toContain("release-version:");
+  });
+});
+
+test("previews a pending release from the maintainer CLI without writing to Git or GitHub", async () => {
+  const fixture = new Fixture();
+  const main = fixture.merge("feat: initial feature");
+  const refs = fixture.git("show-ref");
+  const preload = join(fixture.directory, "github-reads.mjs");
+  writeFileSync(
+    preload,
+    `
+    globalThis.fetch = async (url, { method }) => {
+      if (method !== "GET") throw new Error("Unexpected GitHub write: " + method);
+      const path = new URL(url).pathname;
+      if (path.endsWith("/git/ref/heads/main")) return Response.json({ object: { sha: ${JSON.stringify(main)} } });
+      if (path.includes("/git/ref/heads/")) return new Response(null, { status: 404 });
+      if (path.endsWith("/pulls")) return Response.json([]);
+      throw new Error("Unexpected GitHub read: " + path);
+    };
+  `,
+  );
+  const result = await runCommand(
+    nodeCommand().command,
+    ["--import", pathToFileURL(preload).href, fileURLToPath(script)],
+    {
+      env: {
+        ...fixture.environment,
+        GH_TOKEN: "synthetic-release-token",
+        GITHUB_REPOSITORY: fixture.github.repository,
+        GIT_DIR: join(fixture.directory, ".git"),
+        GIT_WORK_TREE: fixture.directory,
+        RELEASE_PR_DRY_RUN: "true",
+      },
+      timeout: 30_000,
+    },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    action: "would-create",
+    dryRun: true,
+    plan: { version: "0.1.24", title: "chore(release): 0.1.24" },
+  });
+  expect(fixture.git("show-ref")).toBe(refs);
+});
+
+describe("rolling release reconciliation", () => {
+  test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const beforeExample = await fixture.run();
+    expect(beforeExample.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(beforeExample.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+
+    for (const [title, name, version] of [
+      ["docs: add workflow example", "Code scan", "0.1.24"],
+      ["docs: clarify workflow name", "Weekly code scan", "0.1.24"],
+      ["feat!: change behavior", "Weekly code scan", "0.2.0"],
+    ] as const) {
+      const source = (pin: string) =>
+        exampleWorkflowText(pin).replace("Code scan", name);
+      fixture.merge(title, { [exampleWorkflowPath]: source("0.1.23") });
+      const result = await fixture.run();
+      expect(result.action).toBe("updated");
+      expect(result.pull).toBe(beforeExample.pull);
+      expect(result.plan.version).toBe(version);
+      expect(result.plan.files[exampleWorkflowPath]).toBe(source(version));
+      expect(fixture.repo.readFile(result.headSha!, exampleWorkflowPath)).toBe(
+        source(version),
+      );
+    }
+    const writes = fixture.github.writes.length;
+    expect((await fixture.run()).action).toBe("unchanged");
+    expect(fixture.github.writes).toHaveLength(writes);
+
+    fixture.merge("docs: remove workflow example", {
+      [exampleWorkflowPath]: null,
+    });
+    const removed = await fixture.run();
+    expect(removed.action).toBe("updated");
+    expect(removed.plan.files[exampleWorkflowPath]).toBeUndefined();
+    expect(
+      fixture.repo.readFile(removed.headSha!, exampleWorkflowPath),
+    ).toBeNull();
+  });
+
+  test("aligns Action metadata when introduced and refreshed without advancing the published runtime pin", async () => {
+    const fixture = new Fixture();
+    fixture.merge("fix: initial fix");
+    const beforeAction = await fixture.run();
+    expect(beforeAction.plan.files[actionPackagePath]).toBeUndefined();
+    expect(beforeAction.plan.files[actionLockPath]).toBeUndefined();
+
+    const runtimePath = "github-action/runtime/package.json";
+    const runtime = JSON.stringify({
+      dependencies: { "@openai/codex-security": "0.1.23" },
+    });
+    for (const [title, files, version] of [
+      ["feat: add Action", actionFiles(), "0.1.24"],
+      ["feat!: change behavior", actionFiles("0.1.23"), "0.2.0"],
+    ] as const) {
+      fixture.merge(title, { ...files, [runtimePath]: runtime });
+      const result = await fixture.run();
+      expect(result.action).toBe("updated");
+      expect(result.pull).toBe(beforeAction.pull);
+      expect(JSON.parse(result.plan.files[packagePath]!).version).toBe(version);
+      for (const [path, text] of Object.entries(files)) {
+        const expected = JSON.parse(text);
+        expected.version = version;
+        if (path === actionLockPath) expected.packages[""].version = version;
+        expect(JSON.parse(result.plan.files[path]!)).toEqual(expected);
+        expect(fixture.repo.readFile(result.headSha!, path)).toBe(
+          result.plan.files[path]!,
+        );
+      }
+      expect(result.plan.files[runtimePath]).toBeUndefined();
+      expect(fixture.repo.readFile(result.headSha!, runtimePath)).toBe(runtime);
+    }
+    expect((await fixture.run()).action).toBe("unchanged");
+  });
+
+  test("creates one ready PR, refreshes it, and reuses its branch", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature", {
+      "plugins/codex-security/skills/example/SKILL.md":
+        "Example plugin instructions.\n",
+    });
+    const first = await fixture.run();
+    expect(first.action).toBe("created");
+    expect(first.reviewRequested).toBe(true);
+    const pull = fixture.github.pulls.find(
+      (candidate) => candidate.number === first.pull,
+    )!;
+    expect(pull.draft).toBe(false);
+    expect(pull.title).toBe("chore(release): 0.1.24");
+    expect(
+      fixture.git("show", "-s", "--format=%s", first.headSha!).trim(),
+    ).toBe("chore(release): 0.1.24");
+    expect(pull.body).toContain("- [ ]");
+    pull.body += "\nMaintainer review and test results.\n";
+    const humanBody = pull.body;
+    fixture.merge("fix!: new interface", {
+      "sdk/typescript/src/example.ts": "export const next = true;\n",
+    });
+    const second = await fixture.run();
+    expect(second.action).toBe("updated");
+    expect(second.pull).toBe(first.pull);
+    expect(second.plan.version).toBe("0.2.0");
+    expect(pull.title).toBe("chore(release): 0.2.0");
+    expect(
+      fixture.git("show", "-s", "--format=%s", second.headSha!).trim(),
+    ).toBe("chore(release): 0.2.0");
+    expect(second.plan.branch).toBe(first.plan.branch);
+    expect(pull.body).toBe(humanBody);
+    expect(pull.draft).toBe(false);
+    expect(
+      fixture.repo.readFile(second.headSha!, "sdk/typescript/src/example.ts"),
+    ).toContain("next");
+    expect(
+      fixture.github.pulls.filter((candidate) => candidate.state === "open"),
+    ).toHaveLength(1);
+    expect(
+      fixture.github.writes
+        .filter(
+          (write) =>
+            write.path === `pulls/${pull.number}` && write.method === "PATCH",
+        )
+        .every((write) => Object.keys(write.body).join() === "title"),
+    ).toBe(true);
+    fixture.git("merge-base", "--is-ancestor", first.headSha!, second.headSha!);
+    const writes = fixture.github.writes.length;
+    expect((await fixture.run()).action).toBe("unchanged");
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test("retitles an existing release PR without changing an up-to-date branch", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    pull.title = "release: prepare the next Codex Security release";
+    const body = pull.body;
+    const writes = fixture.github.writes.length;
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.headSha).toBe(first.headSha);
+    expect(pull.title).toBe("chore(release): 0.1.24");
+    expect(pull.body).toBe(body);
+    expect(fixture.github.writes.slice(writes)).toEqual([
+      {
+        method: "PATCH",
+        path: `pulls/${pull.number}`,
+        body: { title: "chore(release): 0.1.24" },
+      },
+    ]);
+  });
+
+  test("incorporates main-only changes without another proposal review or repeated commits", async () => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    fixture.merge("test: add coverage", {
+      "sdk/typescript/tests-ts/example.test.ts": "// Additional coverage.\n",
+    });
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.headSha).not.toBe(first.headSha);
+    expect(updated.plan.files[packagePath]).toBe(first.plan.files[packagePath]);
+    expect(updated.plan.files[notesPath]).toBe(first.plan.files[notesPath]);
+    expect(updated.reviewRequested).toBe(false);
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(1);
+    expect(
+      fixture.repo.readFile(
+        updated.headSha!,
+        "sdk/typescript/tests-ts/example.test.ts",
+      ),
+    ).toBe("// Additional coverage.\n");
+    fixture.git(
+      "merge-base",
+      "--is-ancestor",
+      fixture.head()!,
+      updated.headSha!,
+    );
+    const writes = fixture.github.writes.length;
+    const rerun = await fixture.run();
+    expect(rerun.action).toBe("unchanged");
+    expect(rerun.headSha).toBe(updated.headSha);
+    expect(rerun.reviewRequested).toBe(false);
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test("posts new suggestions for human-owned notes without repeating an unchanged proposal review", async () => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    fixture.commit(
+      first.plan.branch,
+      {
+        [notesPath]: first.plan.files[notesPath]!.replace(
+          "initial feature",
+          "Human-reviewed notes",
+        ),
+      },
+      "docs: review release notes",
+    );
+    const reviewed = await fixture.run();
+    const commentCount = fixture.github.comments.get(first.pull!)!.length;
+    fixture.merge("feat: another feature");
+    const updated = await fixture.run();
+    expect(updated.plan.files).toEqual(reviewed.plan.files);
+    expect(updated.reviewRequested).toBe(false);
+    const comments = fixture.github.comments.get(first.pull!)!;
+    expect(comments).toHaveLength(commentCount + 1);
+    expect(comments.at(-1)!.body).toContain("another feature");
+    expect(comments.at(-1)!.body).not.toContain("@codex review");
+    const rerun = await fixture.run();
+    expect(rerun.action).toBe("unchanged");
+    expect(comments).toHaveLength(commentCount + 1);
+  });
+
+  test("recovers a failed review comment without another release commit", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const request = fixture.github.request.bind(fixture.github);
+    let failComment = true;
+    fixture.github.request = async (method, path, body) => {
+      if (failComment && method === "POST" && path.startsWith("issues/")) {
+        failComment = false;
+        throw apiError(500);
+      }
+      return request(method, path, body);
+    };
+    await expect(fixture.run()).rejects.toThrow("HTTP 500");
+    const head = fixture.head("release/next-0.1.23");
+    const recovered = await fixture.run();
+    expect(recovered.headSha).toBe(head!);
+    expect(recovered.reviewRequested).toBe(true);
+    expect(fixture.github.comments.get(recovered.pull!)).toHaveLength(1);
+  });
+
+  test("recovers review on a manual rerun after GitHub exposes the updated head", async () => {
+    const { fixture, first, pull, page, comments, original } =
+      await laggingPull("fix!: later fix");
+    fixture.github.releaseReviewPage = async () => {
+      const snapshot = page();
+      snapshot.pullRequest.headRefOid = first.headSha!;
+      return snapshot;
+    };
+    const delays: number[] = [];
+    const pending = await fixture.run(false, async (ms) => {
+      expect(pull.title).toBe("chore(release): 0.2.0");
+      delays.push(ms);
+    });
+    expect(pending.reviewRequested).toBe(false);
+    expect(pending.reason).toContain("Rerun");
+    expect(delays).toEqual([1000, 2000, 4000]);
+    expect(comments).toHaveLength(1);
+    const count = fixture.github.writes.length;
+    expect((await fixture.run()).reviewRequested).toBe(false); // No new ref write to wait for.
+    expect(fixture.github.writes).toHaveLength(count);
+    fixture.github.request = original;
+    const recovered = await fixture.run();
+    expect(recovered.action).toBe("unchanged");
+    expect(recovered.headSha).toBe(pending.headSha);
+    expect(recovered.reviewRequested).toBe(true);
+    expect(comments).toHaveLength(2);
+  });
+
+  test.each([
+    "changed plan",
+    "proposal",
+    "suggestions",
+    "same",
+    "release moved",
+    "main moved",
+    "retargeted",
+    "competing PR",
+    "competing head",
+  ])(
+    "checks the latest target and marker when the release PR head catches up: %s",
+    async (change) => {
+      const { fixture, first, pull, comments, page } = await laggingPull(
+        change === "changed plan"
+          ? "fix!: change the public interface"
+          : "test: more coverage",
+      );
+      const initial = comments[0]!.body;
+      const digest = change === "competing PR" ? "proposal" : change;
+      const newer = initial.replace(
+        new RegExp(`release-pr-${digest}: [a-f0-9]+`),
+        `release-pr-${digest}: ${"0".repeat(64)}`,
+      );
+      let visible = false;
+      const cursors: [string | null, string | null][] = [];
+      const writes = fixture.github.writes.length;
+      fixture.github.releaseReviewPage = async (
+        number,
+        branch,
+        after,
+        openAfter,
+      ) => {
+        expect([number, branch]).toEqual([pull.number, first.plan.branch]);
+        if (visible && after && change === "competing PR")
+          fixture.github.addPull(
+            "manual",
+            "release: alternate",
+            first.headSha!,
+          );
+        const snapshot = page();
+        const pr = snapshot.pullRequest;
+        if (!visible) {
+          pr.headRefOid = first.headSha!;
+          return snapshot;
+        }
+        cursors.push([after, openAfter]);
+        // Comments need two pages; a long open-PR list needs three. A new
+        // marker can arrive as the last comments page is read again.
+        if (change === "proposal" && openAfter !== "last") {
+          snapshot.open.nodes = [];
+          snapshot.open.pageInfo = {
+            hasNextPage: true,
+            endCursor: openAfter ? "last" : "more",
+          };
+        }
+        pr.comments.nodes = after
+          ? [{ id: "9007199254740992", body: initial }]
+          : [
+              {
+                id: "9007199254740993",
+                body: change === "proposal" ? initial : newer,
+              },
+            ];
+        if (openAfter === "last")
+          pr.comments.nodes.push({ id: "9007199254740994", body: newer });
+        if (!after)
+          pr.comments.pageInfo = { hasNextPage: true, endCursor: "older" };
+        else if (change === "release moved") snapshot.branch.target = null;
+        else if (change === "main moved")
+          snapshot.main.target.oid = first.headSha!;
+        else if (change === "retargeted") pr.baseRefName = "maintenance";
+        return snapshot;
+      };
+      const result = await fixture.run(false, async () => {
+        visible = true;
+        if (change === "changed plan")
+          expect(pull.title).toBe("chore(release): 0.2.0");
+        if (change === "competing head") pull.head.sha = "c".repeat(40);
+      });
+      expect(visible).toBe(true);
+      expect(
+        fixture.github.writes
+          .slice(writes)
+          .filter((w) => w.path.startsWith("git/refs")),
+      ).toHaveLength(1);
+      expect(cursors).toEqual(
+        change === "proposal"
+          ? [
+              [null, null],
+              ["older", "more"],
+              ["older", "last"],
+            ]
+          : change === "competing head"
+            ? [[null, null]]
+            : [
+                [null, null],
+                ["older", null],
+              ],
+      );
+      if (
+        ["changed plan", "proposal", "suggestions", "same"].includes(change)
+      ) {
+        const eligible = change === "proposal" || change === "changed plan";
+        expect(result.action).toBe("updated");
+        expect(result.reviewRequested).toBe(eligible);
+        expect(comments).toHaveLength(change === "same" ? 1 : 2);
+        if (change !== "same") {
+          expect(comments[1]!.body).toContain(
+            `<!-- release-pr-head: ${result.headSha} -->`,
+          );
+          expect(
+            comments[1]!.body.includes(
+              `@codex review the current head ${result.headSha}.`,
+            ),
+          ).toBe(eligible);
+        }
+      } else {
+        expect(result.action).toBe("held");
+        expect(result.reviewRequested).toBe(false);
+        expect(comments).toHaveLength(1);
+      }
+    },
+  );
+
+  test("requests review when the proposal changes back to previously reviewed content", async () => {
+    const fixture = new Fixture();
+    const merged = fixture.merge("feat: initial feature");
+    const first = await fixture.run();
+    const mergedPull = fixture.github.commitPulls.get(merged)![0]!;
+    mergedPull.title = "feat: reworded feature";
+    expect((await fixture.run()).reviewRequested).toBe(true);
+    mergedPull.title = "feat: initial feature";
+    const restored = await fixture.run();
+    expect(restored.plan.files).toEqual(first.plan.files);
+    expect(restored.headSha).not.toBe(first.headSha);
+    expect(restored.reviewRequested).toBe(true);
+    expect(fixture.github.comments.get(first.pull!)).toHaveLength(3);
+  });
+
+  test("recomputes when main moves during the update", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    fixture.github.afterCommit = () => {
+      fixture.merge("fix!: concurrent breaking change");
+    };
+    const result = await fixture.run();
+    expect(result.plan.version).toBe("0.2.0");
+    expect(result.plan.mainSha).toBe(fixture.head()!);
+    expect(
+      fixture.github.pulls.filter((pull) => pull.state === "open"),
+    ).toHaveLength(1);
+  });
+
+  test.each(["closed", "retargeted"])(
+    "does not request review after a PR is %s during its final checks",
+    async (change) => {
+      const { fixture, pull } = await Fixture.withInitialPull();
+      const commentCount = fixture.github.comments.get(pull.number)!.length;
+      fixture.merge("fix: another fix");
+      const request = fixture.github.request.bind(fixture.github);
+      let reads = 0;
+      fixture.github.request = async (method, path, body) => {
+        const result = structuredClone(await request(method, path, body));
+        if (
+          method === "GET" &&
+          path === `pulls/${pull.number}` &&
+          ++reads === 1
+        ) {
+          if (change === "closed") pull.state = "closed";
+          else pull.base.ref = "maintenance";
+        }
+        return result;
+      };
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain("closed or retargeted");
+      expect(fixture.github.comments.get(pull.number)).toHaveLength(
+        commentCount,
+      );
+    },
+  );
+
+  test("waits for a new change after a release is squash-merged before opening the next ready PR", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    fixture.merge("fix: another change before release");
+    const updated = await fixture.run();
+    expect(updated.headSha).not.toBe(first.headSha);
+    fixture.merge(updated.plan.title, updated.plan.files);
+    pull.state = "closed";
+    pull.merged_at = "2026-01-01T00:00:00Z";
+    const writes = fixture.github.writes.length;
+    const second = await fixture.run();
+    expect(second.action).toBe("unchanged");
+    expect(second.pull).toBeUndefined();
+    expect(second.plan.branch).not.toBe(first.plan.branch);
+    expect(second.plan.baseVersion).toBe("0.1.24");
+    expect(second.plan.version).toBe("0.1.24");
+    expect(second.plan.changes).toHaveLength(0);
+    expect(fixture.head(second.plan.branch)).toBeNull();
+    expect(fixture.github.writes).toHaveLength(writes);
+    fixture.merge("feat: next feature");
+    const third = await fixture.run();
+    expect(third.action).toBe("created");
+    expect(third.pull).not.toBe(first.pull);
+    expect(third.plan.branch).toBe(second.plan.branch);
+    expect(third.plan.version).toBe("0.1.25");
+    expect(
+      fixture.github.pulls.find((candidate) => candidate.number === third.pull)
+        ?.draft,
+    ).toBe(false);
+  });
+
+  test.each(["chore(release): 0.1.24", "release: prepare a release"])(
+    "does not touch another %s PR or recreate an intentionally closed proposal",
+    async (title) => {
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const manual = fixture.github.addPull(
+        "manual-release",
+        title,
+        fixture.head()!,
+      );
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain(`#${manual.number}`);
+      expect(fixture.github.writes).toHaveLength(0);
+      manual.state = "closed";
+      const created = await fixture.run();
+      const pull = fixture.github.pulls.find(
+        (candidate) => candidate.number === created.pull,
+      )!;
+      pull.state = "closed";
+      const writes = fixture.github.writes.length;
+      expect((await fixture.run()).action).toBe("held");
+      expect(fixture.github.writes).toHaveLength(writes);
+      pull.state = "open";
+      expect((await fixture.run()).pull).toBe(pull.number);
+    },
+  );
+
+  test("does not create a duplicate when a manual release PR opens during preparation", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    fixture.github.beforeRefWrite = () => {
+      fixture.github.addPull(
+        "manual-release",
+        "release: prepare a manual release",
+        fixture.head()!,
+      );
+    };
+    expect((await fixture.run()).action).toBe("held");
+    expect(
+      fixture.github.pulls.filter((pull) => pull.state === "open"),
+    ).toHaveLength(1);
+  });
+
+  test("preserves a deleted notes file on the remote branch", async () => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    fixture.commit(
+      first.plan.branch,
+      { [notesPath]: null },
+      "docs: remove draft notes",
+    );
+    fixture.merge("fix: another fix");
+    const next = await fixture.run();
+    expect(fixture.repo.readFile(next.headSha!, notesPath)).toBeNull();
+    expect(next.plan.humanOwned).toEqual(["highlights", "upgrades"]);
+  });
+
+  test.each([
+    { "sdk/typescript/src/example.ts": "Human implementation changes.\n" },
+    { [packagePath]: packageText("0.1.24", { example: "1.0.0" }) },
+  ])("pauses instead of losing unrelated human edits (%#)", async (files) => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    const humanSha = fixture.commit(
+      first.plan.branch,
+      files,
+      "fix: additional human changes",
+    );
+    const writes = fixture.github.writes.length;
+    for (const title of [
+      "fix: first fix",
+      "fix: second fix",
+      "fix: third fix",
+    ]) {
+      fixture.merge(title);
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain("edits");
+      expect(fixture.head(first.plan.branch)).toBe(humanSha);
+      expect(fixture.github.writes).toHaveLength(writes);
+    }
+  });
+
+  test("recovers a branch whose PR creation failed without another commit or a duplicate PR", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    fixture.github.failPullCreation = true;
+    await expect(fixture.run()).rejects.toThrow("HTTP 500");
+    const head = fixture.head("release/next-0.1.23");
+    fixture.github.failPullCreation = false;
+    const result = await fixture.run();
+    expect(result.action).toBe("created");
+    expect(result.headSha).toBe(head!);
+    expect(
+      fixture.github.pulls.filter((pull) => pull.state === "open"),
+    ).toHaveLength(1);
+  });
+});
+
+describe("read-only release previews and Git history", () => {
+  test.each([true, false])(
+    "leaves an empty release cycle unchanged with dryRun=%p",
+    async (dryRun) => {
+      const fixture = new Fixture();
+      const result = await fixture.run(dryRun);
+      expect(result.action).toBe("unchanged");
+      expect(result.plan.changes).toHaveLength(0);
+      expect(result.pull).toBeUndefined();
+      expect(fixture.head(result.plan.branch)).toBeNull();
+      expect(fixture.github.writes).toHaveLength(0);
+      expect(fixture.github.pulls).toHaveLength(0);
+    },
+  );
+
+  test("previews a title update and holds the proposal after an unrelated edit", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    const previousTitle = "release: prepare the next Codex Security release";
+    pull.title = previousTitle;
+    const refs = fixture.git("show-ref");
+    const writes = fixture.github.writes.length;
+    const preview = await fixture.run(true);
+    expect(preview.action).toBe("would-update");
+    expect(preview.plan.title).toBe(first.plan.title);
+    expect(fixture.git("show-ref")).toBe(refs);
+
+    fixture.commit(
+      first.plan.branch,
+      { "sdk/typescript/src/example.ts": "export const changed = true;\n" },
+      "fix: unrelated source change",
+    );
+    const editedRefs = fixture.git("show-ref");
+    const held = await fixture.run(true);
+    expect(held.action).toBe("held");
+    expect(held.reason).toContain("other file edits");
+    expect(fixture.git("show-ref")).toBe(editedRefs);
+    expect(pull.title).toBe(previousTitle);
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test("deduplicates rebased PRs and recognizes breaking direct commits", async () => {
+    const fixture = new Fixture();
+    const first = fixture.merge("feat: a rebased feature");
+    const second = fixture.commit("main", {}, "feat: follow-up commit");
+    fixture.github.commitPulls.set(
+      second,
+      fixture.github.commitPulls.get(first)!,
+    );
+    fixture.commit(
+      "main",
+      {},
+      "fix: direct commit\n\nBREAKING CHANGE: configuration changes",
+    );
+    const releaseHistory = await readReleaseHistory(
+      fixture.repo,
+      fixture.head()!,
+      fixture.github,
+    );
+    expect(releaseHistory.changes).toHaveLength(2);
+    expect(
+      nextReleaseVersion(releaseHistory.baseVersion, releaseHistory.changes),
+    ).toBe("0.2.0");
+    expect(JSON.stringify(releaseHistory.changes)).not.toContain(
+      "BREAKING CHANGE:",
+    );
+  });
+
+  test("uses the merge commit as the boundary for a release merged without squashing", async () => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    const releaseTree = fixture
+      .git("rev-parse", `${first.headSha}^{tree}`)
+      .trim();
+    const merged = fixture
+      .git(
+        "commit-tree",
+        releaseTree,
+        "-p",
+        fixture.head()!,
+        "-p",
+        first.headSha!,
+        "-m",
+        first.plan.title,
+      )
+      .trim();
+    fixture.git("update-ref", "refs/heads/main", merged);
+    fixture.merge("fix: next change");
+    const releaseHistory = await readReleaseHistory(
+      fixture.repo,
+      fixture.head()!,
+      fixture.github,
+    );
+    expect(releaseHistory.baseCommit).toBe(merged);
+    expect(releaseHistory.baseVersion).toBe("0.1.24");
+    expect(releaseHistory.changes).toHaveLength(1);
+    expect(
+      nextReleaseVersion(releaseHistory.baseVersion, releaseHistory.changes),
+    ).toBe("0.1.25");
+  });
+});
+
+describe("release proposal pauses", () => {
+  test.each(["comment", "formatting", "deletion"] as const)(
+    "preserves example workflow %s edits on the release branch",
+    async (change) => {
+      const fixture = new Fixture();
+      fixture.merge("docs: add workflow example", {
+        [exampleWorkflowPath]: exampleWorkflowText(),
+      });
+      const first = await fixture.run();
+      const generated = first.plan.files[exampleWorkflowPath]!;
+      const edited =
+        change === "deletion"
+          ? null
+          : change === "comment"
+            ? generated.replace("Exact CLI release", "Reviewed CLI release")
+            : generated.replace('"0.1.24"', "'0.1.24'");
+      const humanSha = fixture.commit(
+        first.plan.branch,
+        { [exampleWorkflowPath]: edited },
+        "docs: adjust workflow example",
+      );
+      fixture.merge("fix: another fix");
+      const writes = fixture.github.writes.length;
+      const result = await fixture.run();
+      expect(result.action).toBe("held");
+      expect(result.reason).toContain("example edits beyond its CLI version");
+      expect(fixture.head(first.plan.branch)).toBe(humanSha);
+      expect(fixture.repo.readFile(humanSha, exampleWorkflowPath)).toBe(edited);
+      expect(fixture.github.writes).toHaveLength(writes);
+    },
+  );
+
+  test.each([
+    { path: actionPackagePath, change: "dependencies" },
+    { path: actionLockPath, change: "dependencies" },
+    { path: actionLockPath, change: "deletion" },
+  ])("preserves Action $change edits to $path", async ({ path, change }) => {
+    const fixture = new Fixture();
+    fixture.merge("feat: add Action", actionFiles());
+    const first = await fixture.run();
+    const edited = change === "deletion" ? null : actionFiles("2.0.0")[path]!;
+    const humanSha = fixture.commit(
+      first.plan.branch,
+      { [path]: edited },
+      "fix: adjust Action dependency",
+    );
+    fixture.merge("fix: another fix");
+    const writes = fixture.github.writes.length;
+    const result = await fixture.run();
+    expect(result.action).toBe("held");
+    expect(result.reason).toContain("package edits");
+    expect(fixture.head(first.plan.branch)).toBe(humanSha);
+    expect(fixture.repo.readFile(humanSha, path)).toBe(edited);
+    expect(fixture.github.writes).toHaveLength(writes);
+  });
+
+  test.each(["open", "closed"] as const)(
+    "keeps a retargeted %s proposal paused across workflow runs",
+    async (state) => {
+      const { fixture, first, pull } = await Fixture.withInitialPull();
+      pull.base.ref = "maintenance";
+      pull.state = state;
+      fixture.merge("fix: later fix");
+      const writes = fixture.github.writes.length;
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain(state === "open" ? "retargeted" : "closed");
+      expect(fixture.head(first.plan.branch)).toBe(first.headSha!);
+      expect(fixture.github.writes).toHaveLength(writes);
+      expect(
+        fixture.github.pulls.filter(
+          (candidate) => candidate.head.ref === first.plan.branch,
+        ),
+      ).toHaveLength(1);
+      pull.base.ref = "main";
+      pull.state = "open";
+      const resumed = await fixture.run();
+      expect(resumed.action).toBe("updated");
+      expect(resumed.pull).toBe(first.pull);
+    },
+  );
+
+  test("does not pause for an unrelated release targeting another base", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    const maintenance = fixture.github.addPull(
+      "maintenance-release",
+      "release: prepare a maintenance release",
+      fixture.head()!,
+    );
+    maintenance.base.ref = "maintenance";
+    const result = await fixture.run();
+    expect(result.action).toBe("created");
+    expect(result.pull).not.toBe(maintenance.number);
+    expect(maintenance.base.ref).toBe("maintenance");
+  });
+
+  test("pauses recovery when the orphan branch gains a PR targeting another base", async () => {
+    const fixture = new Fixture();
+    fixture.merge("feat: initial feature");
+    fixture.github.failPullCreation = true;
+    await expect(fixture.run()).rejects.toThrow("HTTP 500");
+    fixture.github.failPullCreation = false;
+    const branch = "release/next-0.1.23";
+    const previousHead = fixture.head(branch)!;
+    fixture.merge("fix: later fix");
+    fixture.github.afterCommit = () => {
+      const pull = fixture.github.addPull(
+        branch,
+        "release: review the existing proposal",
+        previousHead,
+      );
+      pull.base.ref = "maintenance";
+    };
+    const held = await fixture.run();
+    expect(held.action).toBe("held");
+    expect(held.reason).toContain("retargeted");
+    expect(fixture.head(branch)).toBe(previousHead);
+    expect(
+      fixture.github.pulls.filter((candidate) => candidate.head.ref === branch),
+    ).toHaveLength(1);
+  });
+
+  test("keeps an existing release proposal in draft when updating it", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    pull.draft = true;
+    fixture.merge("feat!: later breaking change");
+    const updated = await fixture.run();
+    expect(updated.action).toBe("updated");
+    expect(updated.pull).toBe(first.pull);
+    expect(pull.draft).toBe(true);
+  });
+
+  test("does not advance a proposal closed during preparation", async () => {
+    const { fixture, first, pull } = await Fixture.withInitialPull();
+    fixture.merge("fix: later fix");
+    fixture.github.afterCommit = () => {
+      pull.state = "closed";
+    };
+    const held = await fixture.run();
+    expect(held.action).toBe("held");
+    expect(fixture.head(first.plan.branch)).toBe(first.headSha!);
+  });
+
+  test.each(["new", "existing"])(
+    "pauses before writing a %s release branch when another release opens",
+    async (proposal) => {
+      const hasPull = proposal === "existing";
+      const fixture = new Fixture();
+      fixture.merge("feat: initial feature");
+      const first = hasPull ? await fixture.run() : null;
+      if (first) fixture.merge("fix: later fix");
+      const branch = first?.plan.branch ?? "release/next-0.1.23";
+      const previousHead = fixture.head(branch);
+      fixture.github.afterCommit = () => {
+        fixture.github.addPull(
+          "manual-release",
+          "release: prepare a manual release",
+          fixture.head()!,
+        );
+      };
+      const held = await fixture.run();
+      expect(held.action).toBe("held");
+      expect(held.reason).toContain("Another release PR");
+      expect(fixture.head(branch)).toBe(previousHead);
+      expect(
+        fixture.github.pulls.filter((candidate) => candidate.state === "open"),
+      ).toHaveLength(hasPull ? 2 : 1);
+    },
+  );
+});
