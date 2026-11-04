@@ -2065,6 +2065,11 @@ credentials those settings reference available when replaying. Settings inherite
 from a named file profile are reloaded from that file. If an older scan
 omitted your endpoint, start a new scan with the original `--codex` override.
 
+When routing through environment variables, set them for each launch, including
+rerun and resume. Deep workers inherit `CODEX_OSS_BASE_URL` and `CODEX_OSS_PORT`
+for Ollama and LM Studio, and `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`,
+and `GOOGLE_APPLICATION_CREDENTIALS` for Vertex AI.
+
 Supply replacement scan and custom-validation prompts when the original used them:
 
 ```bash
