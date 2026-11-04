@@ -1,4 +1,4 @@
-import type { DeepReducerContext } from "../artifact-io.js";
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type {
@@ -44,20 +44,12 @@ export type DeepScanWorkerMutation = Omit<
   "completionSequence" | "consecutiveErrors" | "mergeState"
 > & {
   scanId: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
-
-/** Inputs committed atomically when a reducer finishes. */
-export interface DedupCommit {
-  id: string;
-  scanId: string;
-  newFindings: number;
-  resultManifestPath: string;
-  candidateLedgerPath?: string;
-}
 
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
@@ -68,13 +60,13 @@ export type DeepScanStore = Omit<
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
 export interface CodexWorkerRequest {
-  kind: DeepScanWorkerKind;
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -103,6 +95,12 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {
@@ -120,6 +118,7 @@ export interface DeepScanLogEvent {
   count?: number;
   completed?: number;
   newFindings?: number;
+  retainedFindings?: number;
   pass?: number;
   reason?: string;
   total?: number;

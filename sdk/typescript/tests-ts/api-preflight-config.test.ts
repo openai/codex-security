@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -7,34 +7,17 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
-  FIREWORKS_CODEX_PROVIDER,
-  OPENROUTER_CODEX_PROVIDER,
+  mergedCodexConfig,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { TestClient } from "./support/api-client.js";
+import { EXTERNAL_PROVIDER_CASES, TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-preflight-",
 );
-const EXTERNAL_PROVIDER_CASES = [
-  [
-    "OpenRouter",
-    "openrouter",
-    "OPENROUTER_API_KEY",
-    "anthropic/claude-sonnet-4.5",
-    OPENROUTER_CODEX_PROVIDER,
-  ],
-  [
-    "Fireworks AI",
-    "fireworks",
-    "FIREWORKS_API_KEY",
-    "accounts/fireworks/models/qwen3-235b-a22b",
-    FIREWORKS_CODEX_PROVIDER,
-  ],
-] as const;
 
 afterEach(cleanup);
 
@@ -85,6 +68,83 @@ describe("CodexSecurity preflight configuration", () => {
       skills: { config: [] },
     });
   });
+
+  test.each([
+    ["approval-only", { approval_policy: "never" }],
+    ["windows-only", { windows: { sandbox: "unelevated" } }],
+  ])(
+    "preserves %s inline-profile identity in saved recipes",
+    async (_name, profile) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "selected.config.toml"),
+        'model_provider = "fireworks"\n',
+      );
+      const original = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "selected",
+            profiles: { selected: profile as JsonObject },
+          },
+        },
+        home,
+      );
+      const saved = scanPreflightCodexConfig(original);
+      const replayed = await mergedCodexConfig({ codexOverrides: saved }, home);
+      expect(scanModelProvider(replayed)).toBe(scanModelProvider(original));
+      expect(saved["profile"]).toBe("selected");
+      expect(saved["profiles"]).toEqual({ selected: {} });
+    },
+  );
+
+  test("preserves resolved file-profile model files and tool exclusions", async () => {
+    const home = await temporaryDirectory();
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model_catalog_json = "catalog.json"\nexperimental_compact_prompt_file = "compact.md"\n[features.code_mode]\nenabled = true\nexcluded_tool_namespaces = ["synthetic_tools"]\n',
+    );
+    const config = await mergedCodexConfig(
+      { codexOverrides: { profile: "review" } },
+      home,
+    );
+    const requested = {
+      model_catalog_json: join(home, "catalog.json"),
+      experimental_compact_prompt_file: join(home, "compact.md"),
+      features: {
+        code_mode: {
+          enabled: true,
+          excluded_tool_namespaces: ["synthetic_tools"],
+        },
+      },
+    };
+    expect(config).toMatchObject(requested);
+    expect(scanPreflightCodexConfig(config)).toMatchObject(requested);
+  });
+
+  test.each([undefined, "low"])(
+    "preserves resolved file-profile worker settings and explicit verbosity: %s",
+    async (verbosity) => {
+      const home = await temporaryDirectory();
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_instructions_file = "instructions.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      );
+      const config = await mergedCodexConfig(
+        {
+          codexOverrides: {
+            profile: "review",
+            ...(verbosity === undefined ? {} : { model_verbosity: verbosity }),
+          },
+        },
+        home,
+      );
+      expect(scanPreflightCodexConfig(config)).toMatchObject({
+        model_instructions_file: join(home, "instructions.md"),
+        model_verbosity: verbosity ?? "high",
+        web_search: "disabled",
+      });
+    },
+  );
 
   test.each([
     ["model", { model: null }, true],
@@ -171,7 +231,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("separates writable scans from repository-scoped policy reads", () => {
+  test("separates writable scans from read-only policy permissions", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -202,7 +262,7 @@ describe("CodexSecurity preflight configuration", () => {
         },
         codex_security_policy: {
           filesystem: {
-            ":minimal": "read",
+            [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
           },
           network: { enabled: false },
@@ -233,19 +293,13 @@ describe("CodexSecurity preflight configuration", () => {
       },
       codex_security_policy: {
         filesystem: {
-          ":minimal": "read",
+          [process.platform === "win32" ? ":root" : ":minimal"]: "read",
           ":workspace_roots": "read",
+          [credentialHome]: { ".": "deny" },
         },
         network: { enabled: false },
       },
     });
-    const policyFilesystem = (
-      (config["permissions"] as JsonObject)[
-        "codex_security_policy"
-      ] as JsonObject
-    )["filesystem"] as JsonObject;
-    expect(policyFilesystem).not.toHaveProperty(":root");
-    expect(policyFilesystem).not.toHaveProperty(credentialHome);
   });
 
   test("preserves an explicitly requested strict approval policy", () => {
@@ -261,23 +315,30 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("preserves a strict approval policy from the selected profile", () => {
-    const config = {
-      approval_policy: "on-request",
-      profile: "strict",
-      profiles: {
-        strict: { approval_policy: "never", model: "profile-model" },
-        other: { approval_policy: "on-request" },
-      },
-    };
+  test.each([
+    ["on-request", "never"],
+    ["never", "on-request"],
+  ] as const)(
+    "lets root %s use the selected profile's %s approval policy",
+    (rootPolicy, profilePolicy) => {
+      const config = {
+        approval_policy: rootPolicy,
+        profile: "selected",
+        profiles: {
+          selected: { approval_policy: profilePolicy, model: "profile-model" },
+          other: { approval_policy: rootPolicy },
+        },
+      };
 
-    expect(scanRuntimeCodexConfig(config)).toMatchObject({
-      approval_policy: "never",
-      approvals_reviewer: "auto_review",
-      profiles: { strict: { model: "profile-model" }, other: {} },
-    });
-    expect(config.profiles.strict.approval_policy).toBe("never");
-  });
+      expect(scanRuntimeCodexConfig(config)).toMatchObject({
+        approval_policy: profilePolicy,
+        approvals_reviewer: "auto_review",
+        profiles: { selected: { model: "profile-model" }, other: {} },
+      });
+      expect(config.approval_policy).toBe(rootPolicy);
+      expect(config.profiles.selected.approval_policy).toBe(profilePolicy);
+    },
+  );
 
   test("removes execution and permission overrides from every configured profile", () => {
     const original = {
@@ -495,6 +556,35 @@ describe("CodexSecurity preflight configuration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("keeps resolved tool disables in isolated worker settings", () => {
+    expect(
+      scanPreflightCodexConfig({
+        profile: "review",
+        features: { shell_tool: true, unified_exec: true },
+        profiles: {
+          review: { features: { shell_tool: false, unified_exec: false } },
+        },
+      })["features"],
+    ).toEqual({ shell_tool: false, unified_exec: false });
+  });
+
+  test("uses resolved native file settings without a legacy profile selector", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config-preflight.toml");
+    const snapshot = scanPreflightCodexConfig({
+      profile: "review",
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    expect(snapshot).toEqual({
+      model: "native-model",
+      model_reasoning_summary: "concise",
+      features: { goals: true },
+    });
+    await writeCodexConfig(path, snapshot);
+  });
+
   test("keeps every valid profile, project, and root marker", () => {
     const activeProject = "/workspace/active";
     const profiles = Object.fromEntries([
@@ -631,21 +721,14 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
-    const config = scanPreflightCodexConfig({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
-        },
-      },
-      model_providers: {
+  test.each(["root", "profile", "merged"] as const)(
+    "preserves safe Bedrock provider settings from %s in scan recipes",
+    (source) => {
+      const providers = {
         "amazon-bedrock": {
           aws: {
             region: "us-east-2",
-            profile: "security-prod",
+            profile: "scan-profile",
             access_key_id: "synthetic-aws-access-key",
             secret_access_key: "synthetic-aws-secret-key",
             session_token: "synthetic-aws-session-token",
@@ -654,25 +737,46 @@ describe("CodexSecurity preflight configuration", () => {
           api_key: "synthetic-provider-key",
         },
         openrouter: { api_key: "synthetic-unrelated-key" },
-      },
-    });
+      };
+      const selectedProviders = structuredClone(providers);
+      if (source === "merged") {
+        providers["amazon-bedrock"].aws.region = "us-west-2";
+        delete (selectedProviders["amazon-bedrock"].aws as JsonObject)[
+          "profile"
+        ];
+      }
+      const config = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+            ...(source === "root"
+              ? {}
+              : { model_providers: selectedProviders }),
+          },
+        },
+        ...(source === "profile" ? {} : { model_providers: providers }),
+      });
 
-    expect(config).toEqual({
-      model_provider: "openai",
-      profile: "bedrock",
-      profiles: {
-        bedrock: {
-          model: "openai.gpt-5.6-luna",
-          model_provider: "amazon-bedrock",
+      expect(config).toEqual({
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
         },
-      },
-      model_providers: {
-        "amazon-bedrock": {
-          aws: { region: "us-east-2", profile: "security-prod" },
+        model_providers: {
+          "amazon-bedrock": {
+            aws: { region: "us-east-2", profile: "scan-profile" },
+          },
         },
-      },
-    });
-    expect(scanModelProvider(config)).toBe("amazon-bedrock");
-    expect(JSON.stringify(config)).not.toContain("synthetic-");
-  });
+      });
+      expect(scanModelProvider(config)).toBe("amazon-bedrock");
+      expect(JSON.stringify(config)).not.toContain("synthetic-");
+    },
+  );
 });

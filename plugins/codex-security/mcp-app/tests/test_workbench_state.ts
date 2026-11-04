@@ -64,7 +64,7 @@ async function openWorkspace(env: NodeJS.ProcessEnv) {
     env,
   });
   try {
-    assertNoError(await server.initialize("workbench-state-test"));
+    await server.initialize("workbench-state-test");
     return await server.callTool(2, {
       name: "open_codex_security_workspace",
       arguments: { targetPath, scope: ".", mode: "standard" },
@@ -117,7 +117,32 @@ try {
   );
   assert.equal(await readFile(defaultState, "utf8"), "occupied state path\n");
 
+  const inspectSetup = [
+    "inspect-setup",
+    "--target-path",
+    targetPath,
+    "--mode",
+    "standard",
+    "--scope=.",
+  ];
+  const inspection = runWorkbench(
+    inspectSetup,
+    { ...explicitEnvironment, PYTHONPROFILEIMPORTTIME: "1" },
+    true,
+  );
+  assert.equal(inspection.status, 0, inspection.stderr);
+  assert.equal(JSON.parse(inspection.stdout).target.targetPath, targetPath);
+  assert.doesNotMatch(
+    inspection.stderr,
+    /\b(?:workbench_db|finalize_scan_contract)\s*$/mu,
+  );
+
   for (const args of [
+    inspectSetup,
+    ["inspect-target", "--help"],
+    ["inspect-setup", "--help"],
+    [...inspectSetup, "--unknown"],
+    ["inspect-target", "--target-path", targetPath, "--unknown"],
     ["--help"],
     ["create-workspace", "--help"],
     ["resolve-scan-root"],

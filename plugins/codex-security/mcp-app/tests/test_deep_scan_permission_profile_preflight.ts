@@ -1,3 +1,4 @@
+import { test } from "node:test";
 import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, readJsonLines } from "./support/json.ts";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
@@ -36,6 +37,7 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  readDeepScanParentCyberAccessProgram,
   prepareCliDeepScanSession,
 } = await importSource(
   path.join(
@@ -63,32 +65,762 @@ const unsupportedConfiguration = (error: Error) =>
   error?.name === "Error" &&
   error.message.includes("with this Codex configuration");
 
-await testAllowedProfileAndRawArgv();
-await testPreflightStartsInWorkerCwd();
-await testProvidedEnvForwardedWithoutMutation();
-await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
-await testSequentialPaginatedResponsesAcrossChunks();
-await testMalformedStreamFailsClosed();
-await testRepeatedCatalogCursorFailsClosed();
-await testDisallowedProfileGivesAdminGuidance();
-await testOtherManagedPolicyRejectionIsGeneric();
-await testMergedProfileCollisionFailsClosed();
-await testDroppedLiteralOrGlobFailsClosed();
-await testLiteralProtoKeyCollisionFailsClosed();
-await testSelectedProfileClassificationRequiresVerifiedString();
-await testMalformedAndUnsupportedResponsesFailClosed();
-await testEarlyExecutableExitIsNotVersionError();
-await testUnexpectedTerminationRemainsRetryable();
-await testStdioFailuresRemainRetryable();
-await testUnknownJsonRpcFailuresPreserveNativeDiagnostics();
-await testRuntimeFallbackWarningClassification();
-await testSpawnErrorFailsClosed();
-await testMissingWorkerDirectoryRemainsRetryable();
-await testAbortKillsPreflightChild();
-await testAbortPreservesCallerReason();
-await testDirectScanSession();
+test(async function testAllowedProfileAndRawArgv() {
+  const codexHome = "/fixture/canonical-codex-home";
+  const env = Object.freeze({
+    ...process.env,
+    CODEX_HOME: codexHome,
+    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
+  });
 
-async function testDirectScanSession() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult({
+        ...expectedProfile,
+        description: "Display text from a normal config layer.",
+        workspace_roots: null,
+        filesystem: {
+          ...expectedProfile.filesystem,
+          glob_scan_max_depth: null,
+        },
+        network: {
+          ...expectedProfile.network,
+          proxy_url: null,
+          domains: null,
+        },
+      }),
+      catalogResults: [
+        {
+          data: [
+            // Catalog ids are opaque; an unrelated empty id must not make the
+            // desired Deep Scan profile unverifiable.
+            { id: "", description: null, allowed: false },
+            { id: profileId, description: null, allowed: true },
+          ],
+          nextCursor: null,
+        },
+      ],
+    },
+    async ({
+      codexPath,
+      cwd,
+      argvPath,
+      callsPath,
+      envPath,
+      cwdPath,
+      children,
+      terminatedPath,
+    }) => {
+      assert.notEqual(cwd, process.cwd());
+      await preflightDeepScanWorkerPermissionProfile({
+        env,
+        codexPath,
+        cwd,
+        configOverrides: [
+          ...rawOverrides,
+          'model_provider="synthetic.gateway"',
+        ],
+        providerConfigOverrides: [
+          'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        ],
+        expectedProfile,
+        signal: new AbortController().signal,
+      });
+
+      assert.deepEqual(await readJson(argvPath), [
+        "--config",
+        rawOverrides[0],
+        "--config",
+        rawOverrides[1],
+        "--config",
+        'model_provider="synthetic.gateway"',
+        "--config",
+        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
+        "app-server",
+        "--stdio",
+      ]);
+      const calls = await readJsonLines(callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "config/read", "permissionProfile/list"],
+      );
+      assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
+      assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
+      assert.deepEqual(calls[3].params, { cwd });
+      assert.equal(
+        await realpath(await readJson(cwdPath)),
+        await realpath(cwd),
+      );
+      assert.deepEqual(await readJson(envPath), {
+        codexHome,
+        sentinel: "same-snapshot",
+      });
+      await assertPreflightStopped(children, terminatedPath);
+    },
+    { longExecutable: true },
+  );
+});
+
+test(async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
+  for (const { account, requiresOpenaiAuth, forcedLoginMethod, expected } of [
+    { account: null, requiresOpenaiAuth: true, expected: true },
+    { account: { type: "apiKey" }, requiresOpenaiAuth: true, expected: false },
+    {
+      account: {
+        type: "chatgpt",
+        email: "fixture@example.com",
+        planType: "pro",
+      },
+      requiresOpenaiAuth: true,
+      expected: false,
+    },
+    { account: null, requiresOpenaiAuth: false, expected: false },
+    {
+      account: null,
+      requiresOpenaiAuth: true,
+      forcedLoginMethod: "chatgpt",
+      expected: false,
+    },
+  ]) {
+    const configResult = configReadResult(expectedProfile);
+    if (forcedLoginMethod)
+      configResult.config.forced_login_method = forcedLoginMethod;
+    await withFakeCodex(
+      {
+        configResult,
+        catalogResults: [catalogResult(true)],
+        accountResult: { account, requiresOpenaiAuth },
+      },
+      async ({ codexPath, cwd, callsPath }) => {
+        const result = await preflightDeepScanWorkerPermissionProfile({
+          codexPath,
+          cwd,
+          configOverrides: rawOverrides,
+          expectedProfile,
+          allowOpenAiApiKeyFallback: true,
+          signal: new AbortController().signal,
+        });
+        assert.equal(result.useOpenAiApiKey, expected);
+        const calls = await readJsonLines(callsPath);
+        const accountCalls = calls.filter(
+          (call) => call.method === "account/read",
+        );
+        assert.equal(
+          accountCalls.length,
+          forcedLoginMethod === "chatgpt" ? 0 : 1,
+        );
+        if (accountCalls.length)
+          assert.deepEqual(accountCalls[0].params, { refreshToken: false });
+      },
+    );
+  }
+});
+
+test(async function testSequentialPaginatedResponsesAcrossChunks() {
+  await withFakeCodex(
+    {
+      streamResponses: true,
+      configResult: configReadResult(expectedProfile),
+      catalogResults: [
+        {
+          data: [{ id: "unrelated", description: null, allowed: false }],
+          nextCursor: "second-page",
+        },
+        catalogResult(true),
+      ],
+    },
+    async ({ codexPath, cwd, callsPath }) => {
+      await preflight(codexPath, cwd);
+
+      const calls = await readJsonLines(callsPath);
+      assert.deepEqual(
+        calls.filter((call) => call.id !== undefined).map((call) => call.id),
+        [1, 2, 3, 4],
+      );
+      assert.deepEqual(
+        calls
+          .filter((call) => call.method === "permissionProfile/list")
+          .map((call) => call.params),
+        [{ cwd }, { cwd, cursor: "second-page" }],
+      );
+    },
+  );
+});
+
+test(async function testMalformedStreamFailsClosed() {
+  for (const output of [
+    "not JSON\n",
+    "[]\n",
+    JSON.stringify({ jsonrpc: "2.0", id: 2, result: {} }) + "\n",
+    JSON.stringify({ jsonrpc: "2.0", id: 1 }) + "\n",
+  ]) {
+    await withFakeCodex(
+      {
+        rawOutputByMethod: { initialize: output },
+      },
+      async ({ codexPath, cwd, terminatedPath, children }) => {
+        await assert.rejects(
+          preflight(codexPath, cwd),
+          unsupportedConfiguration,
+        );
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
+test(async function testRepeatedCatalogCursorFailsClosed() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile),
+      catalogResults: [
+        { data: [], nextCursor: "same-page" },
+        { data: [], nextCursor: "same-page" },
+      ],
+    },
+    async ({ codexPath, cwd, callsPath }) => {
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
+      const calls = await readJsonLines(callsPath);
+      assert.equal(
+        calls.filter((call) => call.method === "permissionProfile/list").length,
+        2,
+      );
+    },
+  );
+});
+
+test(async function testDisallowedProfileGivesAdminGuidance() {
+  await withFakeCodex(
+    {
+      stderr: "SECRET_REPOSITORY_PATH=/repo/private\n",
+      configResult: configReadResult(expectedProfile, "enterprise-default"),
+      catalogResults: [catalogResult(false)],
+      requirementsResult: {
+        requirements: {
+          allowedPermissionProfiles: { "enterprise-default": true },
+        },
+      },
+    },
+    async ({ codexPath, cwd, callsPath }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "DeepScanNonRetryableError" &&
+          error.message.includes(`\`${profileId}\``) &&
+          error.message.includes(`[permissions.${profileId}]`) &&
+          error.message.includes("[allowed_permission_profiles]") &&
+          error.message.includes("existing allowlist") &&
+          error.message.includes(`${profileId} = true`) &&
+          error.message.includes("Deep Scan did not run.") &&
+          error.message.includes("SECRET_REPOSITORY_PATH"),
+      );
+      const calls = await readJsonLines(callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        [
+          "initialize",
+          "initialized",
+          "config/read",
+          "permissionProfile/list",
+          "configRequirements/read",
+        ],
+      );
+      assert.equal(Object.hasOwn(calls[4], "params"), false);
+    },
+  );
+});
+
+test(async function testOtherManagedPolicyRejectionIsGeneric() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile, "enterprise-default"),
+      catalogResults: [catalogResult(false)],
+      requirementsResult: {
+        requirements: {
+          allowedPermissionProfiles: { [profileId]: true },
+        },
+      },
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "DeepScanNonRetryableError" &&
+          error.message.includes("managed Codex policy rejected") &&
+          error.message.includes(`\`${profileId}\``) &&
+          !error.message.includes("[allowed_permission_profiles]") &&
+          !error.message.includes(`[permissions.${profileId}]`),
+      );
+    },
+  );
+});
+
+test(async function testMergedProfileCollisionFailsClosed() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult({
+        ...expectedProfile,
+        extends: ":workspace",
+      }),
+      catalogResults: [catalogResult(true)],
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "DeepScanNonRetryableError" &&
+          error.message.includes("existing Codex configuration changes") &&
+          error.message.includes(`\`${profileId}\``) &&
+          error.message.includes('extends = ":read-only"'),
+      );
+    },
+  );
+});
+
+test(async function testDroppedLiteralOrGlobFailsClosed() {
+  for (const key of ["/repo/temp[1]", "/"] as const) {
+    const weakened = structuredClone(expectedProfile);
+    delete weakened.filesystem[key];
+    await withFakeCodex(
+      {
+        configResult: configReadResult(weakened),
+        catalogResults: [catalogResult(true)],
+      },
+      async ({ codexPath, cwd }) => {
+        await assert.rejects(
+          preflight(codexPath, cwd),
+          (error: Error) =>
+            error?.name === "DeepScanNonRetryableError" &&
+            error.message.includes("existing Codex configuration changes"),
+        );
+      },
+    );
+  }
+});
+
+test(async function testLiteralProtoKeyCollisionFailsClosed() {
+  const profileWithLiteralProtoKey = Object.fromEntries([
+    ...Object.entries(expectedProfile),
+    ["__proto__", "write"],
+  ]);
+  assert.equal(Object.hasOwn(profileWithLiteralProtoKey, "__proto__"), true);
+
+  await withFakeCodex(
+    {
+      configResult: configReadResult(profileWithLiteralProtoKey),
+      catalogResults: [catalogResult(true)],
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "DeepScanNonRetryableError" &&
+          error.message.includes("existing Codex configuration changes"),
+      );
+    },
+  );
+});
+
+test(async function testSelectedProfileClassificationRequiresVerifiedString() {
+  for (const selected of [undefined, null, 17, ":read-only"]) {
+    const configResult = configReadResult(expectedProfile);
+    configResult.config.default_permissions = selected;
+    await withFakeCodex(
+      {
+        configResult,
+        catalogResults: [catalogResult(true)],
+      },
+      async ({ codexPath, cwd, terminatedPath, children }) => {
+        await assert.rejects(
+          preflight(codexPath, cwd),
+          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+            selected === ":read-only"
+              ? error?.name === "DeepScanNonRetryableError" &&
+                error.message.includes("did not select the required")
+              : unsupportedConfiguration(error),
+        );
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
+test(async function testMalformedAndUnsupportedResponsesFailClosed() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile),
+      catalogResults: [
+        {
+          data: [{ id: profileId, description: null, allowed: "yes" }],
+          nextCursor: null,
+        },
+      ],
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
+    },
+  );
+
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile),
+      catalogResults: [
+        { data: [{ id: profileId, description: null }], nextCursor: null },
+      ],
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          unsupportedConfiguration(error) &&
+          !error.message.includes("does not support"),
+      );
+    },
+  );
+
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile),
+      methodErrors: {
+        "permissionProfile/list": { code: -32601, message: "Method not found" },
+      },
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "DeepScanNonRetryableError" &&
+          error.message.includes(JSON.stringify(codexPath)) &&
+          error.message.includes("permissionProfile/list") &&
+          error.message.includes("does not support") &&
+          error.message.includes(
+            "Update the Codex installation at that path",
+          ) &&
+          error.message.includes("desktop app if it is bundled") &&
+          error.message.includes("otherwise the selected CLI") &&
+          !error.message.includes("host/CLI"),
+      );
+    },
+  );
+});
+
+test(async function testEarlyExecutableExitIsNotVersionError() {
+  await withFakeCodex(
+    {
+      exitOnMethod: "initialize",
+      exitCode: 17,
+    },
+    async ({ codexPath, cwd }) => {
+      await assert.rejects(
+        preflight(codexPath, cwd),
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "Error" &&
+          error.message.includes(JSON.stringify(codexPath)) &&
+          error.message.includes(
+            "exited before permission-profile verification completed",
+          ) &&
+          error.message.includes("code 17") &&
+          error.message.includes("with --version") &&
+          error.message.includes("CODEX_CLI_PATH/PATH") &&
+          !error.message.includes("does not support") &&
+          !error.message.includes("host/CLI"),
+      );
+    },
+  );
+});
+
+test(async function testUnexpectedTerminationRemainsRetryable() {
+  await withFakeCodex(
+    {
+      hangAt: "config/read",
+    },
+    async ({ codexPath, cwd, readyPath, children }) => {
+      const running = preflight(codexPath, cwd);
+      await waitForFile(readyPath);
+      assert.equal(children.length, 1);
+      children[0].kill("SIGKILL");
+      await assert.rejects(
+        running,
+        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+          error?.name === "Error" &&
+          error.message.includes(JSON.stringify(codexPath)) &&
+          error.message.includes("signal SIGKILL") &&
+          !error.message.includes("does not support"),
+      );
+      assert.equal(children[0].signalCode, "SIGKILL");
+    },
+  );
+});
+
+test(async function testStdioFailuresRemainRetryable() {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
+    await withFakeCodex(
+      { hangAt: "initialize" },
+      async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+        const running = preflight(codexPath, cwd);
+        await waitForFile(readyPath);
+        assert.equal(children.length, 1);
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
+test(async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
+  for (const code of [-32603, -32602, -32000, undefined]) {
+    await withFakeCodex(
+      {
+        methodErrors: {
+          "config/read": {
+            ...(code === undefined ? {} : { code }),
+            message: "SECRET_REPOSITORY_PATH=/repo/private",
+          },
+        },
+      },
+      async ({ codexPath, cwd, terminatedPath, children }) => {
+        await assert.rejects(
+          preflight(codexPath, cwd),
+          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+            error?.name === "Error" &&
+            error.message.includes(JSON.stringify(codexPath)) &&
+            error.message.includes("config/read") &&
+            (code === undefined
+              ? !error.message.includes("JSON-RPC code")
+              : error.message.includes(`JSON-RPC code ${code}`)) &&
+            error.message.includes("SECRET_REPOSITORY_PATH") &&
+            !error.message.includes("does not support"),
+        );
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
+test(async function testRuntimeFallbackWarningClassification() {
+  const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
+  const error = deepScanPermissionProfileFallbackError(warning);
+  assert.equal(error?.name, "DeepScanNonRetryableError");
+  assert.equal(error?.message.includes(warning), true);
+  assert.equal(
+    error?.message.includes(
+      "worker was stopped and its results were discarded",
+    ),
+    true,
+  );
+  assert.equal(error?.message.includes("existing allowlist"), true);
+  assert.equal(error?.message.includes("Deep Scan did not run."), false);
+  assert.equal(
+    deepScanPermissionProfileFallbackError(`prefix ${warning}`),
+    undefined,
+  );
+  assert.equal(
+    deepScanPermissionProfileFallbackError(
+      warning.replace(profileId, "different-profile"),
+    ),
+    undefined,
+  );
+  const unusualDestination = "\n`quoted destination`\n";
+  const unusualWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`${unusualDestination}\`.`;
+  assert.equal(
+    deepScanPermissionProfileFallbackError(unusualWarning)?.name,
+    "DeepScanNonRetryableError",
+  );
+  const emptyDestinationWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`\`.`;
+  assert.equal(
+    deepScanPermissionProfileFallbackError(emptyDestinationWarning)?.name,
+    "DeepScanNonRetryableError",
+  );
+});
+
+test(async function testSpawnErrorFailsClosed() {
+  const missingCodex = path.join(tmpdir(), `missing-codex-${process.pid}`);
+  await assert.rejects(
+    preflight(missingCodex, tmpdir()),
+    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+      error?.name === "Error" &&
+      error.cause?.code === "ENOENT" &&
+      error.message.includes(JSON.stringify(missingCodex)) &&
+      error.message.includes("could not start") &&
+      error.message.includes("with --version") &&
+      error.message.includes("CODEX_CLI_PATH/PATH") &&
+      !error.message.includes("does not support"),
+  );
+});
+
+test(async function testMissingWorkerDirectoryRemainsRetryable() {
+  await withFakeCodex({}, async ({ codexPath, cwd, argvPath }) => {
+    await assert.rejects(
+      preflight(codexPath, path.join(cwd, "missing-worker-directory")),
+      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+        error?.name === "Error" &&
+        error.cause?.code === "ENOENT" &&
+        error.message.includes("could not start"),
+    );
+    await assert.rejects(readFile(argvPath), { code: "ENOENT" });
+  });
+});
+
+test(async function testAbortKillsPreflightChild() {
+  for (const [ignoreTermination, inheritStdio] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    await withFakeCodex(
+      {
+        hangAt: "config/read",
+        ignoreTermination,
+        inheritStdio,
+      },
+      async ({
+        codexPath,
+        cwd,
+        readyPath,
+        terminatedPath,
+        descendantPidPath,
+        children,
+      }) => {
+        const controller = new AbortController();
+        const running = preflightDeepScanWorkerPermissionProfile({
+          codexPath,
+          cwd,
+          configOverrides: rawOverrides,
+          expectedProfile,
+          signal: controller.signal,
+        });
+        await waitForFile(readyPath);
+        controller.abort(new DOMException("fixture aborted", "AbortError"));
+        let timeout: NodeJS.Timeout | undefined;
+        try {
+          await assert.rejects(
+            Promise.race([
+              running,
+              new Promise((_, reject) => {
+                timeout = setTimeout(
+                  () => reject(new Error("Preflight did not stop")),
+                  5_000,
+                );
+              }),
+            ]),
+            (error: NodeJS.ErrnoException) => error?.name === "AbortError",
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
+        assert.ok(
+          children[0].exitCode !== null || children[0].signalCode !== null,
+        );
+        if (inheritStdio) {
+          const pid = Number(await readFile(descendantPidPath, "utf8"));
+          assert.doesNotThrow(() => process.kill(pid, 0));
+        }
+        if (ignoreTermination && process.platform !== "win32") {
+          assert.equal(children[0].signalCode, "SIGKILL");
+        } else {
+          await assertPreflightStopped(children, terminatedPath);
+        }
+      },
+    );
+  }
+});
+
+test(async function testAbortPreservesCallerReason() {
+  for (const run of [
+    preflightDeepScanWorkerPermissionProfile,
+    readDeepScanRuntimeConfig,
+  ]) {
+    for (const stderr of ["", "synthetic native abort diagnostic\n"]) {
+      for (const reason of [
+        undefined,
+        new DOMException("fixture aborted", "AbortError"),
+        Object.assign(
+          new Error("fixture caller error", { cause: { fixture: true } }),
+          { code: "SYNTHETIC_CANCELED" },
+        ),
+      ]) {
+        await withFakeCodex(
+          { hangAt: "config/read", stderr },
+          async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+            const controller = new AbortController();
+            const running = run({
+              codexPath,
+              cwd,
+              configOverrides: rawOverrides,
+              expectedProfile,
+              signal: controller.signal,
+            });
+            if (stderr) {
+              await new Promise<void>((resolve) => {
+                children[0].stderr!.once("data", () => resolve());
+              });
+            }
+            await waitForFile(readyPath);
+            controller.abort(reason);
+            const aborted = controller.signal.reason;
+            const expected = {
+              message: aborted.message + (stderr ? "\n" + stderr : ""),
+              name: aborted.name,
+              code: aborted.code,
+              cause: aborted.cause,
+            };
+            await assert.rejects(running, (error: Error) => {
+              assert.equal(error, aborted);
+              assert.equal(error.name, expected.name);
+              assert.equal(error.message, expected.message);
+              assert.equal(
+                (error as NodeJS.ErrnoException).code,
+                expected.code,
+              );
+              assert.equal(error.cause, expected.cause);
+              return true;
+            });
+            await assertPreflightStopped(children, terminatedPath);
+          },
+        );
+      }
+    }
+  }
+});
+
+test(async function testDirectScanSession() {
   const permissionProfile = {
     type: "managed",
     file_system: {
@@ -157,796 +889,105 @@ async function testDirectScanSession() {
       /effective permissions/,
     );
   });
-}
+});
 
-async function testAllowedProfileAndRawArgv() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult({
-        ...expectedProfile,
-        description: "Display text from a normal config layer.",
-        workspace_roots: null,
-        filesystem: {
-          ...expectedProfile.filesystem,
-          glob_scan_max_depth: null,
-        },
-        network: {
-          ...expectedProfile.network,
-          proxy_url: null,
-          domains: null,
-        },
-      }),
-      catalogResults: [
-        {
-          data: [
-            // Catalog ids are opaque; an unrelated empty id must not make the
-            // desired Deep Scan profile unverifiable.
-            { id: "", description: null, allowed: false },
-            { id: profileId, description: null, allowed: true },
-          ],
-          nextCursor: null,
-        },
-      ],
+test(async function testParentTurnCyberAccessProgram() {
+  const parentTurn = {
+    threadId: "fixture-parent-thread",
+    turnId: "fixture-current-turn",
+  };
+  const context = (turnId: string, program: unknown) => ({
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      ...(program === undefined ? {} : { cyber_access_program: program }),
     },
-    async ({ codexPath, cwd, argvPath, callsPath }) => {
-      await preflightDeepScanWorkerPermissionProfile({
-        codexPath,
-        cwd,
-        configOverrides: [
-          ...rawOverrides,
-          'model_provider="synthetic.gateway"',
-        ],
-        providerConfigOverrides: [
-          'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
-        ],
-        expectedProfile,
-        signal: new AbortController().signal,
-      });
-
-      assert.deepEqual(await readJson(argvPath), [
-        "--config",
-        rawOverrides[0],
-        "--config",
-        rawOverrides[1],
-        "--config",
-        'model_provider="synthetic.gateway"',
-        "--config",
-        'model_providers={"synthetic.gateway"={name="Synthetic gateway",wire_api="responses",requires_openai_auth=false}}',
-        "app-server",
-        "--stdio",
-      ]);
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.map((call) => call.method),
-        ["initialize", "initialized", "config/read", "permissionProfile/list"],
-      );
-      assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
-      assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
-      assert.deepEqual(calls[3].params, { cwd });
-    },
-    { longExecutable: true },
-  );
-}
-
-async function testProvidedEnvForwardedWithoutMutation() {
-  const codexHome = "/fixture/canonical-codex-home";
-  const env = Object.freeze({
-    ...process.env,
-    CODEX_HOME: codexHome,
-    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
   });
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({ codexPath, cwd, envPath }) => {
-      await preflight(codexPath, cwd, env);
-      assert.deepEqual(await readJson(envPath), {
-        codexHome,
-        sentinel: "same-snapshot",
-      });
-    },
-  );
-}
-
-async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
-  for (const { account, requiresOpenaiAuth, forcedLoginMethod, expected } of [
-    { account: null, requiresOpenaiAuth: true, expected: true },
-    { account: { type: "apiKey" }, requiresOpenaiAuth: true, expected: false },
-    {
-      account: {
-        type: "chatgpt",
-        email: "fixture@example.com",
-        planType: "pro",
-      },
-      requiresOpenaiAuth: true,
-      expected: false,
-    },
-    { account: null, requiresOpenaiAuth: false, expected: false },
-    {
-      account: null,
-      requiresOpenaiAuth: true,
-      forcedLoginMethod: "chatgpt",
-      expected: false,
-    },
-  ]) {
-    const configResult = configReadResult(expectedProfile);
-    if (forcedLoginMethod)
-      configResult.config.forced_login_method = forcedLoginMethod;
-    await withFakeCodex(
-      {
-        configResult,
-        catalogResults: [catalogResult(true)],
-        accountResult: { account, requiresOpenaiAuth },
-      },
-      async ({ codexPath, cwd, callsPath }) => {
-        const result = await preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd,
-          configOverrides: rawOverrides,
-          expectedProfile,
-          allowOpenAiApiKeyFallback: true,
-          signal: new AbortController().signal,
-        });
-        assert.equal(result.useOpenAiApiKey, expected);
-        const calls = await readJsonLines(callsPath);
-        const accountCalls = calls.filter(
-          (call) => call.method === "account/read",
-        );
-        assert.equal(
-          accountCalls.length,
-          forcedLoginMethod === "chatgpt" ? 0 : 1,
-        );
-        if (accountCalls.length)
-          assert.deepEqual(accountCalls[0].params, { refreshToken: false });
-      },
-    );
-  }
-}
-
-async function testPreflightStartsInWorkerCwd() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({
-      codexPath,
-      cwd,
-      cwdPath,
-      callsPath,
-      terminatedPath,
-      children,
-    }) => {
-      assert.notEqual(cwd, process.cwd());
-      await preflight(codexPath, cwd);
-
-      const childCwd = await readJson(cwdPath);
-      assert.equal(await realpath(childCwd), await realpath(cwd));
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.find((call) => call.method === "config/read").params,
-        {
-          cwd,
-          includeLayers: false,
-        },
-      );
-      assert.deepEqual(
-        calls.find((call) => call.method === "permissionProfile/list").params,
-        {
-          cwd,
-        },
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
-}
-
-async function testSequentialPaginatedResponsesAcrossChunks() {
-  await withFakeCodex(
-    {
-      streamResponses: true,
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [
-        {
-          data: [{ id: "unrelated", description: null, allowed: false }],
-          nextCursor: "second-page",
-        },
-        catalogResult(true),
-      ],
-    },
-    async ({ codexPath, cwd, callsPath }) => {
-      await preflight(codexPath, cwd);
-
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.filter((call) => call.id !== undefined).map((call) => call.id),
-        [1, 2, 3, 4],
-      );
-      assert.deepEqual(
-        calls
-          .filter((call) => call.method === "permissionProfile/list")
-          .map((call) => call.params),
-        [{ cwd }, { cwd, cursor: "second-page" }],
-      );
-    },
-  );
-}
-
-async function testMalformedStreamFailsClosed() {
-  for (const output of [
-    "not JSON\n",
-    "[]\n",
-    JSON.stringify({ jsonrpc: "2.0", id: 2, result: {} }) + "\n",
-    JSON.stringify({ jsonrpc: "2.0", id: 1 }) + "\n",
+  const read = (fixture: PreflightFixture) =>
+    readDeepScanParentCyberAccessProgram({
+      codexPath: fixture.codexPath,
+      cwd: fixture.cwd,
+      configOverrides: rawOverrides,
+      parentTurn,
+      signal: new AbortController().signal,
+    });
+  for (const program of [
+    "standard",
+    "daybreak_blue",
+    "daybreak_red",
+    "future_program",
+    null,
+    undefined,
   ]) {
     await withFakeCodex(
       {
-        rawOutputByMethod: { initialize: output },
-      },
-      async ({ codexPath, cwd, terminatedPath, children }) => {
-        await assert.rejects(
-          preflight(codexPath, cwd),
-          unsupportedConfiguration,
-        );
-        await assertPreflightStopped(children, terminatedPath);
-      },
-    );
-  }
-}
-
-async function testRepeatedCatalogCursorFailsClosed() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [
-        { data: [], nextCursor: "same-page" },
-        { data: [], nextCursor: "same-page" },
-      ],
-    },
-    async ({ codexPath, cwd, callsPath }) => {
-      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
-      const calls = await readJsonLines(callsPath);
-      assert.equal(
-        calls.filter((call) => call.method === "permissionProfile/list").length,
-        2,
-      );
-    },
-  );
-}
-
-async function testDisallowedProfileGivesAdminGuidance() {
-  await withFakeCodex(
-    {
-      stderr: "SECRET_REPOSITORY_PATH=/repo/private\n",
-      configResult: configReadResult(expectedProfile, "enterprise-default"),
-      catalogResults: [catalogResult(false)],
-      requirementsResult: {
-        requirements: {
-          allowedPermissionProfiles: { "enterprise-default": true },
-        },
-      },
-    },
-    async ({ codexPath, cwd, callsPath }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes(`\`${profileId}\``) &&
-          error.message.includes(`[permissions.${profileId}]`) &&
-          error.message.includes("[allowed_permission_profiles]") &&
-          error.message.includes("existing allowlist") &&
-          error.message.includes(`${profileId} = true`) &&
-          error.message.includes("Deep Scan did not run.") &&
-          error.message.includes("SECRET_REPOSITORY_PATH"),
-      );
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.map((call) => call.method),
-        [
-          "initialize",
-          "initialized",
-          "config/read",
-          "permissionProfile/list",
-          "configRequirements/read",
+        parentRollout: [
+          context("fixture-older-turn", "daybreak_blue"),
+          context(parentTurn.turnId, program),
+          context("fixture-newer-turn", "daybreak_red"),
         ],
-      );
-      assert.equal(Object.hasOwn(calls[4], "params"), false);
-    },
-  );
-}
-
-async function testOtherManagedPolicyRejectionIsGeneric() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile, "enterprise-default"),
-      catalogResults: [catalogResult(false)],
-      requirementsResult: {
-        requirements: {
-          allowedPermissionProfiles: { [profileId]: true },
-        },
       },
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes("managed Codex policy rejected") &&
-          error.message.includes(`\`${profileId}\``) &&
-          !error.message.includes("[allowed_permission_profiles]") &&
-          !error.message.includes(`[permissions.${profileId}]`),
-      );
-    },
-  );
-}
-
-async function testMergedProfileCollisionFailsClosed() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult({
-        ...expectedProfile,
-        extends: ":workspace",
-      }),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes("existing Codex configuration changes") &&
-          error.message.includes(`\`${profileId}\``) &&
-          error.message.includes('extends = ":read-only"'),
-      );
-    },
-  );
-}
-
-async function testDroppedLiteralOrGlobFailsClosed() {
-  for (const key of ["/repo/temp[1]", "/"] as const) {
-    const weakened = structuredClone(expectedProfile);
-    delete weakened.filesystem[key];
-    await withFakeCodex(
-      {
-        configResult: configReadResult(weakened),
-        catalogResults: [catalogResult(true)],
-      },
-      async ({ codexPath, cwd }) => {
-        await assert.rejects(
-          preflight(codexPath, cwd),
-          (error: Error) =>
-            error?.name === "DeepScanNonRetryableError" &&
-            error.message.includes("existing Codex configuration changes"),
+      async (fixture) => {
+        assert.equal(await read(fixture), program ?? undefined);
+        const calls = await readJsonLines(fixture.callsPath);
+        assert.deepEqual(
+          calls.map((call) => call.method),
+          ["initialize", "initialized", "thread/read"],
         );
+        assert.deepEqual(calls[2].params, {
+          threadId: parentTurn.threadId,
+          includeTurns: false,
+        });
       },
     );
   }
-}
-
-async function testLiteralProtoKeyCollisionFailsClosed() {
-  const profileWithLiteralProtoKey = Object.fromEntries([
-    ...Object.entries(expectedProfile),
-    ["__proto__", "write"],
-  ]);
-  assert.equal(Object.hasOwn(profileWithLiteralProtoKey, "__proto__"), true);
-
-  await withFakeCodex(
+  for (const scenario of [
+    { parentRollout: [context("fixture-other-turn", "daybreak_blue")] },
+    { parentPathUnavailable: true },
     {
-      configResult: configReadResult(profileWithLiteralProtoKey),
-      catalogResults: [catalogResult(true)],
+      returnedParentThreadId: "fixture-other-thread",
+      parentRollout: [context(parentTurn.turnId, "daybreak_blue")],
     },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes("existing Codex configuration changes"),
-      );
-    },
-  );
-}
-
-async function testSelectedProfileClassificationRequiresVerifiedString() {
-  for (const selected of [undefined, null, 17, ":read-only"]) {
-    const configResult = configReadResult(expectedProfile);
-    configResult.config.default_permissions = selected;
-    await withFakeCodex(
-      {
-        configResult,
-        catalogResults: [catalogResult(true)],
-      },
-      async ({ codexPath, cwd, terminatedPath, children }) => {
-        await assert.rejects(
-          preflight(codexPath, cwd),
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            selected === ":read-only"
-              ? error?.name === "DeepScanNonRetryableError" &&
-                error.message.includes("did not select the required")
-              : unsupportedConfiguration(error),
-        );
-        await assertPreflightStopped(children, terminatedPath);
-      },
-    );
+  ]) {
+    await withFakeCodex(scenario, async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    });
   }
-}
-
-async function testMalformedAndUnsupportedResponsesFailClosed() {
   await withFakeCodex(
     {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [
-        {
-          data: [{ id: profileId, description: null, allowed: "yes" }],
-          nextCursor: null,
-        },
-      ],
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
-    },
-  );
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [
-        { data: [{ id: profileId, description: null }], nextCursor: null },
-      ],
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          unsupportedConfiguration(error) &&
-          !error.message.includes("does not support"),
-      );
-    },
-  );
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
       methodErrors: {
-        "permissionProfile/list": { code: -32601, message: "Method not found" },
-      },
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes(JSON.stringify(codexPath)) &&
-          error.message.includes("permissionProfile/list") &&
-          error.message.includes("does not support") &&
-          error.message.includes(
-            "Update the Codex installation at that path",
-          ) &&
-          error.message.includes("desktop app if it is bundled") &&
-          error.message.includes("otherwise the selected CLI") &&
-          !error.message.includes("host/CLI"),
-      );
-    },
-  );
-}
-
-async function testEarlyExecutableExitIsNotVersionError() {
-  await withFakeCodex(
-    {
-      exitOnMethod: "initialize",
-      exitCode: 17,
-    },
-    async ({ codexPath, cwd }) => {
-      await assert.rejects(
-        preflight(codexPath, cwd),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "Error" &&
-          error.message.includes(JSON.stringify(codexPath)) &&
-          error.message.includes(
-            "exited before permission-profile verification completed",
-          ) &&
-          error.message.includes("code 17") &&
-          error.message.includes("with --version") &&
-          error.message.includes("CODEX_CLI_PATH/PATH") &&
-          !error.message.includes("does not support") &&
-          !error.message.includes("host/CLI"),
-      );
-    },
-  );
-}
-
-async function testUnexpectedTerminationRemainsRetryable() {
-  await withFakeCodex(
-    {
-      hangAt: "config/read",
-    },
-    async ({ codexPath, cwd, readyPath, children }) => {
-      const running = preflight(codexPath, cwd);
-      await waitForFile(readyPath);
-      assert.equal(children.length, 1);
-      children[0].kill("SIGKILL");
-      await assert.rejects(
-        running,
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "Error" &&
-          error.message.includes(JSON.stringify(codexPath)) &&
-          error.message.includes("signal SIGKILL") &&
-          !error.message.includes("does not support"),
-      );
-      assert.equal(children[0].signalCode, "SIGKILL");
-    },
-  );
-}
-
-async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout", "write callback"] as const) {
-    await withFakeCodex(
-      { hangAt: "initialize" },
-      async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-        const running = preflight(codexPath, cwd);
-        await waitForFile(readyPath);
-        assert.equal(children.length, 1);
-        const stdin = children[0].stdin!;
-        const originalWrite = stdin.write;
-        try {
-          if (stream === "write callback") {
-            stdin.write = ((
-              _message: unknown,
-              callback: (error: Error) => void,
-            ) => {
-              queueMicrotask(() =>
-                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
-              );
-              return false;
-            }) as typeof stdin.write;
-            children[0].stdout!.emit(
-              "data",
-              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
-            );
-          } else {
-            children[0][stream]!.destroy(
-              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-            );
-          }
-          await assert.rejects(
-            running,
-            (
-              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
-            ) =>
-              error?.name === "Error" &&
-              error.message.includes(JSON.stringify(codexPath)) &&
-              error.message.includes(
-                "could not exchange app-server JSON-RPC over stdio",
-              ) &&
-              error.message.includes("SECRET_REPOSITORY_PATH"),
-          );
-        } finally {
-          stdin.write = originalWrite;
-        }
-        await assertPreflightStopped(children, terminatedPath);
-      },
-    );
-  }
-}
-
-async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
-  for (const code of [-32603, -32602, -32000, undefined]) {
-    await withFakeCodex(
-      {
-        methodErrors: {
-          "config/read": {
-            ...(code === undefined ? {} : { code }),
-            message: "SECRET_REPOSITORY_PATH=/repo/private",
-          },
+        "thread/read": {
+          code: -32600,
+          message: `thread not loaded: ${parentTurn.threadId}`,
         },
       },
-      async ({ codexPath, cwd, terminatedPath, children }) => {
-        await assert.rejects(
-          preflight(codexPath, cwd),
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes("config/read") &&
-            (code === undefined
-              ? !error.message.includes("JSON-RPC code")
-              : error.message.includes(`JSON-RPC code ${code}`)) &&
-            error.message.includes("SECRET_REPOSITORY_PATH") &&
-            !error.message.includes("does not support"),
-        );
-        await assertPreflightStopped(children, terminatedPath);
-      },
-    );
-  }
-}
-
-async function testSpawnErrorFailsClosed() {
-  const missingCodex = path.join(tmpdir(), `missing-codex-${process.pid}`);
-  await assert.rejects(
-    preflight(missingCodex, tmpdir()),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.cause?.code === "ENOENT" &&
-      error.message.includes(JSON.stringify(missingCodex)) &&
-      error.message.includes("could not start") &&
-      error.message.includes("with --version") &&
-      error.message.includes("CODEX_CLI_PATH/PATH") &&
-      !error.message.includes("does not support"),
+    },
+    async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    },
   );
-}
-
-async function testMissingWorkerDirectoryRemainsRetryable() {
-  await withFakeCodex({}, async ({ codexPath, cwd, argvPath }) => {
-    await assert.rejects(
-      preflight(codexPath, path.join(cwd, "missing-worker-directory")),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" &&
-        error.cause?.code === "ENOENT" &&
-        error.message.includes("could not start"),
-    );
-    await assert.rejects(readFile(argvPath), { code: "ENOENT" });
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32000,
+          message: "Synthetic native read failure",
+        },
+      },
+      stderr: "Synthetic native stderr detail",
+    },
+    async (fixture) => {
+      await assert.rejects(read(fixture), (error: Error) => {
+        assert.match(error.message, /Synthetic native read failure/);
+        assert.match(error.message, /Synthetic native stderr detail/);
+        return true;
+      });
+    },
+  );
+  await withFakeCodex({}, async (fixture) => {
+    await assert.rejects(read(fixture), { code: "ENOENT" });
   });
-}
-
-async function testRuntimeFallbackWarningClassification() {
-  const warning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`enterprise-default\`.`;
-  const error = deepScanPermissionProfileFallbackError(warning);
-  assert.equal(error?.name, "DeepScanNonRetryableError");
-  assert.equal(error?.message.includes(warning), true);
-  assert.equal(
-    error?.message.includes(
-      "worker was stopped and its results were discarded",
-    ),
-    true,
-  );
-  assert.equal(error?.message.includes("existing allowlist"), true);
-  assert.equal(error?.message.includes("Deep Scan did not run."), false);
-  assert.equal(
-    deepScanPermissionProfileFallbackError(`prefix ${warning}`),
-    undefined,
-  );
-  assert.equal(
-    deepScanPermissionProfileFallbackError(
-      warning.replace(profileId, "different-profile"),
-    ),
-    undefined,
-  );
-  const unusualDestination = "\n`quoted destination`\n";
-  const unusualWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`${unusualDestination}\`.`;
-  assert.equal(
-    deepScanPermissionProfileFallbackError(unusualWarning)?.name,
-    "DeepScanNonRetryableError",
-  );
-  const emptyDestinationWarning = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${profileId}\` to required value \`\`.`;
-  assert.equal(
-    deepScanPermissionProfileFallbackError(emptyDestinationWarning)?.name,
-    "DeepScanNonRetryableError",
-  );
-}
-
-async function testAbortKillsPreflightChild() {
-  for (const [ignoreTermination, inheritStdio] of [
-    [false, false],
-    [true, false],
-    [false, true],
-    [true, true],
-  ]) {
-    await withFakeCodex(
-      {
-        hangAt: "config/read",
-        ignoreTermination,
-        inheritStdio,
-      },
-      async ({
-        codexPath,
-        cwd,
-        readyPath,
-        terminatedPath,
-        descendantPidPath,
-        children,
-      }) => {
-        const controller = new AbortController();
-        const running = preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd,
-          configOverrides: rawOverrides,
-          expectedProfile,
-          signal: controller.signal,
-        });
-        await waitForFile(readyPath);
-        controller.abort(new DOMException("fixture aborted", "AbortError"));
-        let timeout: NodeJS.Timeout | undefined;
-        try {
-          await assert.rejects(
-            Promise.race([
-              running,
-              new Promise((_, reject) => {
-                timeout = setTimeout(
-                  () => reject(new Error("Preflight did not stop")),
-                  5_000,
-                );
-              }),
-            ]),
-            (error: NodeJS.ErrnoException) => error?.name === "AbortError",
-          );
-        } finally {
-          clearTimeout(timeout);
-        }
-        assert.ok(
-          children[0].exitCode !== null || children[0].signalCode !== null,
-        );
-        if (inheritStdio) {
-          const pid = Number(await readFile(descendantPidPath, "utf8"));
-          assert.doesNotThrow(() => process.kill(pid, 0));
-        }
-        if (ignoreTermination && process.platform !== "win32") {
-          assert.equal(children[0].signalCode, "SIGKILL");
-        } else {
-          await assertPreflightStopped(children, terminatedPath);
-        }
-      },
-    );
-  }
-}
-
-async function testAbortPreservesCallerReason() {
-  for (const run of [
-    preflightDeepScanWorkerPermissionProfile,
-    readDeepScanRuntimeConfig,
-  ]) {
-    for (const stderr of ["", "synthetic native abort diagnostic\n"]) {
-      for (const reason of [
-        undefined,
-        new DOMException("fixture aborted", "AbortError"),
-        Object.assign(
-          new Error("fixture caller error", { cause: { fixture: true } }),
-          { code: "SYNTHETIC_CANCELED" },
-        ),
-      ]) {
-        await withFakeCodex(
-          { hangAt: "config/read", stderr },
-          async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
-            const controller = new AbortController();
-            const running = run({
-              codexPath,
-              cwd,
-              configOverrides: rawOverrides,
-              expectedProfile,
-              signal: controller.signal,
-            });
-            if (stderr) {
-              await new Promise<void>((resolve) => {
-                children[0].stderr!.once("data", () => resolve());
-              });
-            }
-            await waitForFile(readyPath);
-            controller.abort(reason);
-            const aborted = controller.signal.reason;
-            const expected = {
-              message: aborted.message + (stderr ? "\n" + stderr : ""),
-              name: aborted.name,
-              code: aborted.code,
-              cause: aborted.cause,
-            };
-            await assert.rejects(running, (error: Error) => {
-              assert.equal(error, aborted);
-              assert.equal(error.name, expected.name);
-              assert.equal(error.message, expected.message);
-              assert.equal(
-                (error as NodeJS.ErrnoException).code,
-                expected.code,
-              );
-              assert.equal(error.cause, expected.cause);
-              return true;
-            });
-            await assertPreflightStopped(children, terminatedPath);
-          },
-        );
-      }
-    }
-  }
-}
+});
 
 async function assertPreflightStopped(
   children: ChildProcess[],
@@ -964,17 +1005,12 @@ async function assertPreflightStopped(
   }
 }
 
-function preflight(
-  codexPath: string,
-  cwd: string,
-  env?: Record<string, string>,
-) {
+function preflight(codexPath: string, cwd: string) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
     configOverrides: rawOverrides,
     expectedProfile,
-    ...(env === undefined ? {} : { env }),
     signal: new AbortController().signal,
   });
 }
@@ -1169,6 +1205,17 @@ function handle(message) {
       thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
       model: 'synthetic-model', reasoningEffort: 'high',
     });
+    return;
+  }
+  if (message.method === "thread/read") {
+    const path = scenario.callsPath + '.parent.jsonl';
+    if (scenario.parentRollout !== undefined) {
+      writeFileSync(path, scenario.parentRollout.map((item) => JSON.stringify(item)).join("\\n") + "\\n");
+    }
+    send(message.id, { thread: {
+      id: scenario.returnedParentThreadId ?? message.params.threadId,
+      path: scenario.parentPathUnavailable ? null : path,
+    } });
     return;
   }
   if (message.method === "thread/inject_items") {

@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { getEventListeners } from "node:events";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -6,6 +7,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -24,12 +26,14 @@ import {
   type ScanTarget,
 } from "../src/index.js";
 import {
+  abortable,
   enclosingGitWorktreeRoot,
   gitMarkerRoot,
   isGitMetadataDirectory,
   gitProtectionRoots,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { runCommand } from "./support/shell.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -44,12 +48,108 @@ const { temporaryDirectory, cleanup, temporaryDirectories } =
 
 afterEach(cleanup);
 
+describe("abortable", () => {
+  test.each([
+    { label: "error", reason: new Error("Canceled before execution") },
+    { label: "object", reason: { message: "Canceled before execution" } },
+    { label: "string", reason: "Canceled before execution" },
+    { label: "zero", reason: 0 },
+    { label: "false", reason: false },
+    { label: "null", reason: null },
+    { label: "default", reason: undefined },
+  ])(
+    "does not start canceled work with a $label reason",
+    async ({ reason }) => {
+      for (const beforeAdmission of [true, false]) {
+        const controller = new AbortController();
+        let calls = 0;
+        if (beforeAdmission) controller.abort(reason);
+        const pending = abortable(async () => {
+          calls++;
+          return "unused";
+        }, controller.signal);
+        if (!beforeAdmission) controller.abort(reason);
+        if (reason === null)
+          await expect(pending).rejects.toMatchObject({
+            name: "AbortError",
+            message: "The operation was aborted.",
+          });
+        else await expect(pending).rejects.toBe(controller.signal.reason);
+        expect(calls).toBe(0);
+        expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "preserves operation ordering with a signal: %p",
+    async (withSignal) => {
+      const controller = new AbortController();
+      const order: string[] = [];
+      const result = { completed: true };
+      const pending = abortable(
+        async () => {
+          order.push("operation");
+          return result;
+        },
+        withSignal ? controller.signal : undefined,
+      );
+      order.push("returned");
+      expect(await pending).toBe(result);
+      expect(order).toEqual(
+        withSignal ? ["returned", "operation"] : ["operation", "returned"],
+      );
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      controller.abort(new Error("Canceled after completion"));
+      expect(await pending).toBe(result);
+    },
+  );
+
+  test("cancels started work without awaiting its late failure", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const operation = Promise.withResolvers<void>();
+    const pending = abortable(() => {
+      started.resolve();
+      return operation.promise;
+    }, controller.signal);
+    await started.promise;
+    const reason = new Error("Canceled while running");
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    operation.reject(new Error("Late operation failure"));
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  test.each(["resolve", "reject"])(
+    "preserves cancellation before a queued %s is observed",
+    async (settlement) => {
+      const controller = new AbortController();
+      const started = Promise.withResolvers<void>();
+      const operation = Promise.withResolvers<number>();
+      const pending = abortable(() => {
+        started.resolve();
+        return operation.promise;
+      }, controller.signal);
+      await started.promise;
+      if (settlement === "resolve") operation.resolve(7);
+      else operation.reject(new Error("Queued operation failure"));
+      const reason = new Error("Canceled before settlement");
+      controller.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    },
+  );
+});
+
 async function repository(name = "repo"): Promise<string> {
   const root = await temporaryDirectory();
   const repo = join(root, name);
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
   git(repo, "init", "-b", "main");
+  git(repo, "config", "--local", "core.autocrlf", "false");
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
   git(repo, "add", ".");
@@ -126,11 +226,6 @@ function environmentWithPath(entries: readonly string[]): NodeJS.ProcessEnv {
 }
 
 describe("scan target normalization", () => {
-  test("tolerates a temporary repository removed before cleanup", async () => {
-    const repo = await repository();
-    await rm(join(repo, ".."), { recursive: true, force: true });
-  });
-
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
     const alias = join(repo, "source-link");
@@ -215,6 +310,58 @@ describe("scan target normalization", () => {
     },
   );
 
+  test("keeps repository and target paths distinct from their UTF-8 replacements", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repo-\uFFFD");
+    const file = "sibling-\uFFFD.ts";
+    await mkdir(repository);
+    await writeFile(join(repository, file), "");
+    await expect(
+      normalizeTarget(join(root, "repo-") + "\uD800", [file]),
+    ).rejects.toThrow("Repository path cannot be represented as UTF-8");
+    await expect(
+      normalizeTarget(repository, ["sibling-\uDC00.ts"]),
+    ).rejects.toThrow("Path target cannot be represented as UTF-8");
+    expect((await normalizeTarget(repository, [file])).paths).toEqual([file]);
+    if (process.platform === "linux") {
+      const raw = Buffer.concat([
+        Buffer.from(join(root, "repo-")),
+        Buffer.from([0xff]),
+      ]);
+      const alias = join(root, "selected");
+      await mkdir(raw);
+      try {
+        await symlink(raw, alias);
+        await expect(normalizeTarget(alias, [file])).rejects.toThrow(
+          "Repository path cannot be represented as UTF-8",
+        );
+      } finally {
+        await rm(raw, { recursive: true });
+      }
+    }
+  });
+
+  test.skipIf(process.platform === "win32").each(["node", "bun"])(
+    "identifies special file targets and their links in %s",
+    async (runtime) => {
+      const root = await temporaryDirectory("cs-target-");
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(
+            new URL("./fixtures/socket-target.ts", import.meta.url),
+          ),
+        ],
+        outdir: root,
+        naming: "socket-target.mjs",
+        target: "node",
+      });
+      const result = await runCommand(runtime, [build.outputs[0]!.path, root], {
+        cwd: root,
+      });
+      expect(result.status, result.stderr || result.error?.message).toBe(0);
+    },
+  );
+
   test.skipIf(process.platform !== "win32")(
     "rejects NTFS alternate streams before runtime initialization",
     async () => {
@@ -242,19 +389,44 @@ describe("scan target normalization", () => {
     },
   );
 
-  test("reports a path that disappears during normalization as invalid", async () => {
+  test.each(
+    process.platform === "win32"
+      ? ["removed"]
+      : ["removed", "retargeted", "replaced after resolution"],
+  )("rejects a path %s during canonical resolution", async (change) => {
     const repo = await repository();
+    const target = join(repo, "src", "app.ts");
+    if (change === "retargeted") {
+      const pending = join(repo, "pending");
+      execFileSync("mkfifo", [pending]);
+      if (process.platform === "linux") {
+        const raw = Buffer.concat([Buffer.from(pending), Buffer.from([0xff])]);
+        await rename(pending, raw);
+        await symlink(raw, pending);
+        await writeFile(raw.toString(), "regular sibling");
+      }
+    }
+    if (change === "replaced after resolution")
+      await writeFile(join(repo, "..", "outside-file"), "outside");
     const script = `
       import { mockFs } from ${JSON.stringify(fileURLToPath(new URL("./support/module-mocks.ts", import.meta.url)))};
-      import { rmSync } from "node:fs";
+      import { rmSync, symlinkSync } from "node:fs";
       import * as original from "node:fs/promises";
       import { join } from "node:path";
-      const [repo, targets] = process.argv.slice(1);
-      const target = join(repo, "src", "app.ts");
+      const [repo, targets, target, change] = process.argv.slice(1);
       const actualRealpath = original.realpath;
       mockFs(() => ({
         realpath: async (path, ...args) => {
-          if (path === target) rmSync(target);
+          if (path === target && change === "replaced after resolution") {
+            const canonical = await actualRealpath(path, ...args);
+            rmSync(target);
+            symlinkSync(join(repo, "..", "outside-file"), target);
+            return canonical;
+          }
+          if (path === target) {
+            rmSync(target);
+            if (change === "retargeted") symlinkSync(join(repo, "pending"), target);
+          }
           return await actualRealpath(path, ...args);
         },
       }));
@@ -278,11 +450,17 @@ describe("scan target normalization", () => {
         script,
         repo,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        target,
+        change,
       ],
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("REJECTED true Path target does not exist");
+    expect(result.stdout).toContain(
+      change === "removed"
+        ? "REJECTED true Path target does not exist"
+        : "REJECTED true Path target is not a regular file or directory",
+    );
   });
 
   test("binds ref and working-tree targets to commit IDs", async () => {

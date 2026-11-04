@@ -4,15 +4,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
 }
 
 /**
@@ -21,7 +15,8 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
+  layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -33,7 +28,6 @@ export interface ArtifactContext {
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
@@ -240,15 +234,26 @@ export async function replaceArtifactText(
   content: string,
 ): Promise<void> {
   const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
+  const handle = await fs.open(temporary, "wx", 0o600);
   try {
-    await fs.writeFile(temporary, content, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
+    await handle.writeFile(content, "utf8").then(
+      () => handle.close(),
+      async (writeError: NodeJS.ErrnoException) => {
+        try {
+          await handle.close();
+        } catch (closeError) {
+          throw Object.assign(
+            new AggregateError([writeError, closeError], writeError.message),
+            { code: writeError.code },
+          );
+        }
+        throw writeError;
+      },
+    );
     await fs.rename(temporary, path);
-  } finally {
+  } catch (error) {
     await fs.rm(temporary, { force: true });
+    throw error;
   }
 }
 

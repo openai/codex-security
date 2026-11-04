@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,15 +26,28 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text
+from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
-    return re.sub(r"[^\w.-]", "-", value).strip("-") or "scan"
+    segment = re.sub(r"[^\w.-]", "-", value)
+    if segment != value:
+        segment = segment.strip("-")
+    return segment or "scan"
 
 
 def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def loaded_plugin_version() -> str:
+    manifest = read_json_object(
+        Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+    )
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
+    return version
 
 
 def scan_target_identity(
@@ -160,8 +174,13 @@ def archive_scan(
             archived_scan_dir.rmdir()
             scan_dir.rename(archived_scan_dir)
             moved = True
-            scan_dir.mkdir(mode=0o700)
-            scan_dir.chmod(0o700)
+            if os.name == "nt":
+                from windows_scan_local_files import create_directory_with_same_dacl
+
+                create_directory_with_same_dacl(scan_dir, archived_scan_dir)
+            else:
+                scan_dir.mkdir(mode=0o700)
+                scan_dir.chmod(0o700)
         if previous_scan is not None:
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
@@ -221,18 +240,27 @@ def insert_running_scan(
     scope: str,
     diff_target: dict[str, str] | None,
     target_identity: tuple[str, str | None, int | str, int | str],
+    source_scopes: dict[str, Any],
     target_root: Path,
     target_summary: str | None,
-    scope_file_count: int,
+    scope_file_count: int | None,
     timestamp: str,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    surface: str | None = "plugin",
+    package_version: str | None = None,
+    launch_kind: str = "scan",
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
     user_context = optional_text(workspace["user_context"])
+    try:
+        plugin_version = loaded_plugin_version()
+    except SystemExit:
+        # Missing version attribution must not prevent scan registration.
+        plugin_version = None
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -244,12 +272,13 @@ def insert_running_scan(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, scope, mode, user_context,
+            target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?)
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            launch_surface, launch_package_version, launch_plugin_version, launch_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'running', 'preflight', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -257,6 +286,7 @@ def insert_running_scan(
             workspace["target_id"],
             str(target),
             *target_identity,
+            json.dumps(source_scopes, allow_nan=False, separators=(",", ":"), sort_keys=True),
             scope,
             workspace["default_mode"],
             user_context,
@@ -270,6 +300,10 @@ def insert_running_scan(
             timestamp,
             timestamp,
             timestamp,
+            surface,
+            package_version,
+            plugin_version,
+            launch_kind,
         ),
     )
     connection.execute(

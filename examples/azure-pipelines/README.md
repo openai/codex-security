@@ -70,7 +70,7 @@ complete repository inventory; use full scans to track the baseline over time.
 ## Results and failures
 
 The `codex-security` pipeline artifact contains `result.json`, available
-`report.md`, `coverage.json`, and `findings.json`, plus `results.sarif` after a
+`report.md`, `scan-manifest.json`, and `findings.json`, plus `results.sarif` after a
 successful export. Check the JSON/report for findings, scope, runtime, and
 usage. Scope exclusions and deferred investigations do not fail the scan or
 bypass the findings policy; exit `2` indicates an execution error.

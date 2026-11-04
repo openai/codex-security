@@ -1,7 +1,7 @@
-import { Tiktoken } from "js-tiktoken/lite";
-import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
+import { VERSION } from "../version.js";
+import { createEmbeddingEncoder } from "./embedding-tokenizer.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
 
@@ -22,7 +22,7 @@ interface Chunk {
 }
 
 export class OpenAiFindingEmbedder implements FindingEmbedder {
-  private readonly encoding = new Tiktoken(cl100kBase);
+  private readonly encode = createEmbeddingEncoder();
 
   constructor(
     private readonly apiKey:
@@ -50,7 +50,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
     let chunks: Chunk[] = [];
     let requestTokens = 0;
     for (const [findingIndex, finding] of findings.entries()) {
-      const tokens = this.encoding.encode(JSON.stringify(finding), [], []);
+      const tokens = this.encode(JSON.stringify(finding));
       for (let start = 0; start < tokens.length; start += MAX_INPUT_TOKENS) {
         const chunk = tokens.slice(start, start + MAX_INPUT_TOKENS);
         if (
@@ -84,8 +84,10 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   ): Promise<void> {
     let response: Response;
     try {
+      this.signal?.throwIfAborted();
       const apiKey =
         typeof this.apiKey === "function" ? await this.apiKey() : this.apiKey;
+      this.signal?.throwIfAborted();
       if (!apiKey) throw new Error("Missing embedding credentials");
       response = await this.request(this.url, {
         method: "POST",
@@ -93,6 +95,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          "User-Agent": `codex-security/${VERSION}`,
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,

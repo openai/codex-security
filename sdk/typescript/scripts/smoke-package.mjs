@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -21,6 +22,7 @@ import { resolveNpm } from "./package-smoke-npm.mjs";
 const {
   commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
   installTimeoutMs: PACKAGE_SMOKE_INSTALL_TIMEOUT_MS,
+  deepScanTimeoutMs: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS,
 } = packageSmokeTimeouts();
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
@@ -395,7 +397,7 @@ try {
       "--input-type=module",
       "--eval",
       `const sdk = await import(${JSON.stringify(packageManifest.name)});
-      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig"]) {
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "deduplicateRecords", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings", "securityPolicyDiff", "loadProjectConfig", "resolveProjectConfig", "prepareExternalPublication", "prepareNormalizedExternalPublication", "normalizeOpenGrepFindings", "readOpenGrepFindings"]) {
         if (typeof sdk[name] !== "function") {
           throw new Error("The installed package does not export " + name + ".");
         }
@@ -434,6 +436,38 @@ try {
       `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
     ],
     { cwd: consumer },
+  );
+
+  const { OpenAiFindingEmbedder } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/api.js")).href
+  );
+  const finding = { description: "🔒 café 中文 ".repeat(1800) };
+  const chunks = [];
+  const embedder = new OpenAiFindingEmbedder(
+    "synthetic",
+    async (_url, init) => {
+      const { model, dimensions, input } = JSON.parse(init.body);
+      chunks.push(...input);
+      return Response.json({
+        model,
+        data: input.map((_, index) => ({
+          index,
+          embedding: Array(dimensions).fill(1),
+        })),
+      });
+    },
+  );
+  await embedder.embed([finding]);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.length),
+    [8192, 813],
+  );
+  // Generated with js-tiktoken 1.0.21 using cl100k_base on JSON.stringify(finding).
+  // The installed-package job runs in a clean checkout with no SDK build dependencies.
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(chunks.flat())).digest("hex"),
+    "ed8b5af712556ad433415337fcc69ea7a564c89f892855eea729c6d5c49bcf04",
+    "Installed embedding token IDs differ from the upstream cl100k_base encoding.",
   );
 
   await cp(
@@ -660,6 +694,24 @@ try {
     { recursive: true },
   );
   if (process.platform !== "win32") await chmod(publicationScan, 0o700);
+  const trackingIds = run(
+    process.execPath,
+    [
+      join(installedRoot, "_bundled_plugin", "mcp", "helpers.mjs"),
+      "validate-tracking-source",
+      publicationScan,
+    ],
+    {
+      cwd: consumer,
+      capture: true,
+      env: {
+        ...process.env,
+        PATH: "",
+        PYTHON: join(consumer, "unavailable-python"),
+      },
+    },
+  );
+  assert.equal(trackingIds, "csf_852f90d6e1177502ff113d4a\n");
   const publication = JSON.parse(
     run(
       process.execPath,
@@ -805,6 +857,14 @@ try {
     [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
     { cwd: consumer },
   );
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "smoke-hosted-remediation.mjs"),
+      installedRoot,
+    ],
+    { cwd: consumer },
+  );
   const selectedPlugin = join(consumer, "compatibility-selected-plugin");
   await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
     recursive: true,
@@ -841,12 +901,17 @@ try {
       join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
       installedRoot,
     ],
-    { cwd: consumer },
+    { cwd: consumer, timeout: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS },
   );
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
+} catch (error) {
+  // A timed-out child can leave Windows handles open. Report the smoke failure
+  // before cleanup so an EBUSY error cannot hide its cause.
+  console.error(error);
+  throw error;
 } finally {
   await rm(consumer, {
     recursive: true,

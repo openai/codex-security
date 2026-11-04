@@ -11,6 +11,10 @@ the nested [QA guide](qa/README.md) explain the sample and its expected findings
 The [threat model](SECURITY.md) describes the app's assets, trust boundaries, and
 intended security properties. It also stays outside the standalone scanner input.
 
+To scan the sample and verify a patch, follow the
+[scan, inspect, patch, and verify walkthrough](walkthrough.md). It uses a standalone
+copy of the app and keeps illustrative evidence separate from your actual results.
+
 ## Start
 
 From the repository root:
@@ -50,18 +54,23 @@ installing dependencies.
 ## CI and OpenAI scans
 
 The [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml) runs behavior
-tests on PRs targeting `main`, including drafts and forks, regardless of which
-files changed. A separate [OpenAI scan workflow](../../.github/workflows/invoice-desk-scan.yml)
-scans the entire application at the PR's exact head. Scans run automatically
-without a manual approval step. Failed behavior tests do not suppress a scan.
+tests on PRs targeting `main`, including drafts and forks, when the sample,
+its workflow helpers, or its workflows change. Title and description edits do not
+rerun those checks. Behavior tests do not use inference or request environment
+approval.
+
+A separate [OpenAI scan workflow](../../.github/workflows/invoice-desk-scan.yml)
+provides manual evaluation of an exact PR head or `main`, plus a weekly `main`
+baseline on Mondays at 03:17 UTC. Inference is not triggered by ordinary PR
+updates or behavior-test completion.
 
 ### Setup
 
-Both workflows must be on `main` before automatic scans can run. Configure the
-`codex-security-smoke-test` environment without required reviewers or a wait timer,
-and with a deployment branch rule allowing only protected `main`. Store a
-dedicated service-account key in its `OPENAI_API_KEY` environment secret, with
-access to `gpt-5.6-sol` and permission to use the API from the selected runner's
+The scan workflow must be on protected `main`. Configure the
+`codex-security-smoke-test` environment with a deployment branch rule allowing
+only protected `main`. Keep the environment's approval and wait policies for both
+manual and scheduled runs. Store a dedicated service-account key in its
+`OPENAI_API_KEY` environment secret, with access to `gpt-5.6-sol` and permission to use the API from the selected runner's
 network. Creating a service account alone does not grant that network access.
 Do not use a repository or organization Actions secret for this workflow. A
 missing key fails the scan with a setup error.
@@ -74,9 +83,8 @@ endpoint.
 
 The workflow on protected `main` selects and extracts the exact PR source before
 inference. Behavior tests receive no inference credentials; GitHub may separately
-require approval to run them for a first-time contributor. Adding required
-reviewers to the inference environment makes every scan wait for approval and
-disables unattended scanning.
+require approval to run them for a first-time contributor. Inference waits for any
+approval required by the protected environment, including scheduled baselines.
 
 For a manual baseline, select **Actions → Invoice Desk OpenAI scan → Run
 workflow** on `main` and leave both inputs empty. To scan an open PR, provide its
@@ -84,34 +92,29 @@ number and exact current head SHA.
 
 The scan adapts the existing [GitHub Actions example](../github-actions/README.md)
 to OpenAI inference. It uses CLI 0.1.30, standard mode, high effort, Node.js 24,
-and Python 3.12. Each run scans the full application so unchanged cases remain
-in scope. Inference consumes API usage.
+and Python 3.12. This evaluates the sample with the pinned published CLI; it does
+not build or validate SDK changes from the PR. Candidate SDK behavior is covered
+by the repository's package and runtime checks. Each evaluation scans the full
+application so unchanged cases remain in scope. Inference consumes API usage.
 
 ### Triggers and source selection
 
-A [default-branch dispatcher](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
-queues scans when a PR is opened, reopened, updated, or retargeted to `main`.
-It handles only the PR number and head SHA, with no checkout or inference secret,
-and starts the scan on protected `main`. PR edits cannot disable that dispatcher.
-Title and description edits do not request another scan.
-
-GitHub can suppress `pull_request_target` for PRs created using `GITHUB_TOKEN`
-and for certain branch names. A `workflow_run` fallback handles completed
-behavior workflows, including failed tests. It looks up the current PR and skips
-PR/head pairs already dispatched from the same `main` workflow revision. It
-queues eligible revisions through the same dispatch path, whose run title includes
-the PR number and full source SHA. Later fallback events can find those runs and
-avoid rescanning an unchanged revision.
-
-If GitHub suppresses the target event and no behavior workflow completes,
-automatic scanning cannot start. Use the manual PR dispatch above with the current
-head SHA; the same protected workflow and source checks apply.
+Manual runs on protected `main` accept an open PR number and its exact current
+head SHA, or empty inputs for a baseline. Scheduled runs use the trusted `main`
+workflow commit. PR events and behavior-test completion no longer dispatch
+inference.
 
 The scan checks the PR's base and exact head through GitHub's API before queuing
 and again immediately before inference. Closed, retargeted, and superseded PR
-revisions are skipped. Repeated scans of the same PR revision cancel older runs
-of that revision. A scan that has already started
-inference may finish after the PR head changes; its reports identify the source SHA.
+revisions are skipped. After target validation succeeds, duplicate scan jobs for
+the same PR and exact SHA share a concurrency group, replacing any active or
+pending duplicate. Different revisions use separate groups so a delayed request
+cannot cancel a newer revision's scan. A superseded revision waiting for approval
+can be cancelled manually; if approved, it skips inference after the eligibility
+recheck. Invalid requests do not cancel an active scan. Manual and scheduled `main`
+baselines share a concurrency group only when they evaluate the same exact SHA.
+Updating a PR alone does not start a replacement scan; dispatch the new head when
+another evaluation is needed. Reports identify the source SHA that was scanned.
 
 The workflow installs the CLI outside the checkout and copies committed `app/`
 blobs into a fresh directory. Archive attributes cannot omit or substitute files;
@@ -171,8 +174,9 @@ so cache availability is a performance signal, not a pass/fail condition.
 
 After merging this setup, run a main baseline and inspect the completed reports.
 Run the same revision again to verify a cache hit and compare elapsed time and
-token use. Then use an ordinary PR to verify the automatic dispatcher and the
-reported source SHA.
+token use. Then select **Actions → Invoice Desk OpenAI scan → Run workflow** on
+`main`, enter an open PR's number in `pr_number` and its exact current head SHA in
+`source_sha`, and verify that the reports identify that source SHA.
 
 Review actual findings against the ten root causes in the QA manifest. Record
 matched cases, misses, uncertain cases, duplicates, and additional findings;

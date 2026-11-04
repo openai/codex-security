@@ -3,11 +3,7 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ArtifactContext } from "./artifact-io.js";
 
-export type {
-  ArtifactContext,
-  DeepReducerContext,
-  DeepReducerWorkerContext,
-} from "./artifact-io.js";
+export type { ArtifactContext } from "./artifact-io.js";
 
 export type RunArtifactWorkbench = (
   arguments_: string[],
@@ -87,6 +83,7 @@ export async function createScanArtifactContext(
     repoRoot: await canonicalDirectory(
       rawRepoRoot,
       "Codex Security scan target root",
+      options.requireRunning === false && status === "complete",
     ),
     layout: "scan",
     scanId,
@@ -119,12 +116,22 @@ function scanRecord(
 export async function canonicalDirectory(
   value: string,
   label: string,
+  allowMissing = false,
 ): Promise<string> {
   if (!value || !isAbsolute(value)) {
     throw new Error(label + " must be an absolute directory.");
   }
   const requested = resolve(value);
-  if (!(await fs.lstat(requested).catch(() => undefined))?.isDirectory()) {
+  let entry;
+  try {
+    entry = await fs.lstat(requested);
+  } catch (error) {
+    // Completed artifact reads use the scan directory after a checkout is removed.
+    if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return requested;
+    }
+  }
+  if (!entry?.isDirectory()) {
     throw new Error(label + " is not a safe regular directory.");
   }
   try {

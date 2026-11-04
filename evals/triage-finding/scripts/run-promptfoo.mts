@@ -26,12 +26,9 @@ const PROMPTFOO_ENTRYPOINT = path.join(
 function copyDirectory(
   sourceRoot: string,
   targetRoot: string,
-  excludedNames = new Set<string>(),
+  filter?: (source: string) => boolean,
 ) {
-  fs.cpSync(sourceRoot, targetRoot, {
-    recursive: true,
-    filter: (source) => !excludedNames.has(path.basename(source)),
-  });
+  fs.cpSync(sourceRoot, targetRoot, { recursive: true, filter });
 }
 
 /**
@@ -46,12 +43,14 @@ function stageSkillRuntime() {
   copyDirectory(
     TRIAGE_SKILL_ROOT,
     path.join(stagedPluginRoot, "skills", "triage-finding"),
-    new Set(["evals"]),
+    (source) => path.basename(source) !== "evals",
   );
   for (const sharedDirectory of ["references", "schemas"]) {
     copyDirectory(
       path.join(PLUGIN_ROOT, sharedDirectory),
       path.join(stagedPluginRoot, sharedDirectory),
+      // Schema generation atomically renames temporary files in this directory.
+      (source) => sharedDirectory !== "schemas" || !source.endsWith(".tmp"),
     );
   }
   fs.mkdirSync(path.join(stagedPluginRoot, "scripts"));
@@ -74,6 +73,7 @@ function stageSkillRuntime() {
 async function runPromptfoo(
   promptfooArgs: string[],
   environment: NodeJS.ProcessEnv = {},
+  builtMcp?: string,
 ) {
   const runtimeRoot = stageSkillRuntime();
   const artifacts = path.join(EVAL_ROOT, "artifacts");
@@ -131,17 +131,22 @@ async function runPromptfoo(
     });
   }
   try {
-    const built = await runChild(
-      [
-        path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        path.join(runtimeRoot, "plugins", "codex-security", "mcp"),
-        "--native",
-        "host",
-      ],
-      path.join(PLUGIN_ROOT, "mcp-app"),
-    );
-    if (built !== 0) return built;
+    const mcp = path.join(runtimeRoot, "plugins", "codex-security", "mcp");
+    if (builtMcp) {
+      copyDirectory(builtMcp, mcp);
+    } else {
+      const built = await runChild(
+        [
+          path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
+          "--output",
+          mcp,
+          "--native",
+          "host",
+        ],
+        path.join(PLUGIN_ROOT, "mcp-app"),
+      );
+      if (built !== 0) return built;
+    }
     return await runChild(
       [
         "--import",

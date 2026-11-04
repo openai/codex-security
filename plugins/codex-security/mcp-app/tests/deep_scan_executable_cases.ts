@@ -151,7 +151,6 @@ export async function testExecutorExecutablePinning({
         (
           await executor.run({
             ...request,
-            kind: "dedup",
             resumeThreadId: "fixture-resumed-thread",
           })
         ).threadId,
@@ -184,50 +183,43 @@ export async function testExecutorExecutablePinning({
           "fixture pinned executable\n",
         );
       }
-      for (const kind of ["discovery", "dedup"] as const) {
-        for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-          const firstLaunch =
-            kind === "discovery" && resumeThreadId === undefined;
-          await Promise.all(
-            fixtures.map((fixture, index) => {
-              process.env.CODEX_CLI_PATH =
-                fixtures[firstLaunch ? index : 1 - index]!.executablePath;
-              process.env.FAKE_CODEX_MARKER = fixture.markerPath;
-              return executors[index]!.run(
-                workerRequest(
-                  path.join(fixture.root, "prompt.md"),
-                  fixture.root,
-                  { kind, resumeThreadId },
-                ),
-              );
-            }),
+      for (const turn of ["discovery", "resume", "compare"] as const) {
+        const firstLaunch = turn === "discovery";
+        await Promise.all(
+          fixtures.map((fixture, index) => {
+            process.env.CODEX_CLI_PATH =
+              fixtures[firstLaunch ? index : 1 - index]!.executablePath;
+            process.env.FAKE_CODEX_MARKER = fixture.markerPath;
+            return runTurn(
+              executors[index]!,
+              path.join(fixture.root, "prompt.md"),
+              fixture.root,
+              turn,
+            );
+          }),
+        );
+        for (const fixture of fixtures) {
+          const preflight = await readJson(fixture.preflightMarkerPath);
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(
+            await realpath(preflight.executablePath),
+            fixture.executablePath,
           );
-          for (const fixture of fixtures) {
-            const preflight = await readJson(fixture.preflightMarkerPath);
-            const invocation = await readJson(fixture.markerPath);
-            assert.equal(
-              await realpath(preflight.executablePath),
-              fixture.executablePath,
-            );
-            assert.deepEqual(preflight.requests, [
-              { method: "config/read", cwd: fixture.root },
-              { method: "permissionProfile/list", cwd: fixture.root },
-            ]);
-            assert.equal(
-              await realpath(invocation.executablePath),
-              fixture.executablePath,
-            );
-            assert.equal(
-              invocation.argv.includes("resume"),
-              resumeThreadId !== undefined,
-            );
-            if (resumeThreadId !== undefined) {
-              assertFlagPair(invocation.argv, "resume", resumeThreadId);
-            }
-            assertFlagPair(invocation.argv, "--cd", fixture.root);
-            await rm(fixture.preflightMarkerPath);
-            await rm(fixture.markerPath);
+          assert.deepEqual(preflight.requests, [
+            { method: "config/read", cwd: fixture.root },
+            { method: "permissionProfile/list", cwd: fixture.root },
+          ]);
+          assert.equal(
+            await realpath(invocation.executablePath),
+            fixture.executablePath,
+          );
+          assert.equal(invocation.argv.includes("resume"), turn === "resume");
+          if (turn === "resume") {
+            assertFlagPair(invocation.argv, "resume", "fixture-resumed-thread");
           }
+          assertFlagPair(invocation.argv, "--cd", fixture.root);
+          await rm(fixture.preflightMarkerPath);
+          await rm(fixture.markerPath);
         }
       }
     } finally {
@@ -255,21 +247,14 @@ export async function testExecutorExecutablePinning({
             `${original}\n// replaced after scan start\n`,
           );
         }
-        for (const kind of ["discovery", "dedup"] as const) {
-          for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-            await assert.rejects(
-              executor.run(
-                workerRequest(promptPath, workingDirectory, {
-                  kind,
-                  resumeThreadId,
-                }),
-              ),
-              {
-                name: "DeepScanNonRetryableError",
-                message: /changed after this Deep Scan started/i,
-              },
-            );
-          }
+        for (const turn of ["discovery", "resume", "compare"] as const) {
+          await assert.rejects(
+            runTurn(executor, promptPath, workingDirectory, turn),
+            {
+              name: "DeepScanNonRetryableError",
+              message: /changed after this Deep Scan started/i,
+            },
+          );
         }
         await assert.rejects(readFile(fixture.preflightMarkerPath), {
           code: "ENOENT",
@@ -283,37 +268,35 @@ export async function testExecutorExecutablePinning({
     const previousReplace = process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT;
     process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT = "1";
     try {
-      for (const kind of ["discovery", "dedup"] as const) {
-        for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-          await withWorkerFixture(
-            async (fixture, promptPath, workingDirectory) => {
-              await writeFile(
+      for (const turn of ["discovery", "resume", "compare"] as const) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(
+              promptPath,
+              "fixture replacement after preflight\n",
+            );
+            await assert.rejects(
+              runTurn(
+                new CodexSdkWorkerExecutor({ parentSandbox }),
                 promptPath,
-                "fixture replacement after preflight\n",
-              );
-              await assert.rejects(
-                new CodexSdkWorkerExecutor({ parentSandbox }).run(
-                  workerRequest(promptPath, workingDirectory, {
-                    kind,
-                    resumeThreadId,
-                  }),
-                ),
-                {
-                  name: "DeepScanNonRetryableError",
-                  message: /changed after this Deep Scan started/i,
-                },
-              );
-              const preflight = await readJson(fixture.preflightMarkerPath);
-              assert.equal(
-                await realpath(preflight.executablePath),
-                fixture.executablePath,
-              );
-              await assert.rejects(readFile(fixture.markerPath), {
-                code: "ENOENT",
-              });
-            },
-          );
-        }
+                workingDirectory,
+                turn,
+              ),
+              {
+                name: "DeepScanNonRetryableError",
+                message: /changed after this Deep Scan started/i,
+              },
+            );
+            const preflight = await readJson(fixture.preflightMarkerPath);
+            assert.equal(
+              await realpath(preflight.executablePath),
+              fixture.executablePath,
+            );
+            await assert.rejects(readFile(fixture.markerPath), {
+              code: "ENOENT",
+            });
+          },
+        );
       }
     } finally {
       restoreEnv("FAKE_CODEX_REPLACE_AFTER_PREFLIGHT", previousReplace);
@@ -344,6 +327,28 @@ export async function testExecutorExecutablePinning({
       restoreEnv("FAKE_CODEX_MARKER", previousMarker);
     }
   }
+}
+
+function runTurn(
+  executor: WorkerExecutor,
+  promptPath: string,
+  cwd: string,
+  turn: "discovery" | "resume" | "compare",
+) {
+  if (turn === "compare")
+    return executor.compareFindings(
+      "fixture comparison",
+      cwd,
+      new AbortController().signal,
+      { type: "object" },
+    );
+  return executor.run(
+    workerRequest(
+      promptPath,
+      cwd,
+      turn === "resume" ? { resumeThreadId: "fixture-resumed-thread" } : {},
+    ),
+  );
 }
 
 function workerRequest(

@@ -4,6 +4,9 @@
 stdin/stdout. Use the flag alone. It performs no login, update check, local
 inference, or model fallback. Ordinary local scans keep their existing behavior.
 
+For hosted patch generation and verification, use the separate
+[hosted remediation API](hosted-remediation.md).
+
 ## Public executor API
 
 Use the standalone `runHostedScan(input, { executor, signal, onEvent })`
@@ -71,11 +74,63 @@ Standard scan lifecycle. Omit `scope` for the entire repository, or pass literal
 repository-relative folders/files. Model settings come from the frozen input;
 local profiles and other local scan options are not accepted.
 
+To supply grading rules, pass `severityRubric` with the Markdown text in
+`markdown`, a positive integer `revision`, and the lowercase `sha256` digest of
+the exact UTF-8 text, including any trailing newline. The SDK verifies the digest
+before dispatch, includes the rubric in the model prompt, and echoes the snapshot
+in `execution.run` and the terminal scan receipt. Omit the field to use the
+existing Standard scan grading rules.
+
+When a logical run spans multiple attempts, save the selected snapshot in the
+host's durable run state before starting its first CLI process. Send that saved
+snapshot with every subsequent attempt for the same run, including attempts in
+a fresh checkout or container. A configuration change then applies to new runs.
+
+Set `ownerSuggestions: true` to record ownership evidence during the existing
+scan execution. The scan agent may include an optional hint on each finding:
+
+```json
+{
+  "extensions": {
+    "ownerSuggestion": {
+      "email": "alex@example.test",
+      "commit": "0123456789012345678901234567890123456789",
+      "reason": "Maintains the affected source."
+    }
+  }
+}
+```
+
+Use an observed contributor email and a full supporting commit hash from Git
+blame/history for the affected source. Omit the hint when ownership is unclear.
+Hints use the scan's existing session and budget; there is no extra ownership
+turn or model call. Security findings take priority over optional hints.
+
+After sealing the scan, the SDK builds `owner-suggestions.json` without inference.
+CODEOWNERS declarations take precedence. Other hints must match an observed Git
+identity and supporting commit in the finding's evidence. Missing hints abstain;
+invalid hints produce per-finding owner errors. Neither invalid hints nor report
+failures invalidate sealed findings. A completed receipt includes the artifact
+when available, or `ownerSuggestionsError` if finalization fails.
+
+Hosts run the normal scan request and capture the optional owner report.
+Automatic reporting uses `suggestOwnersFromScan`; it does not use the legacy
+`ownerCodex` option or send `owner.infer` / `owner.cancel` requests.
+
+The standalone `suggestOwners` API and `suggest-owners` command can call a
+model under their own budget. Both paths use the same CODEOWNERS rules, Git
+evidence, identity checks, and report format.
+
+Report generation works after the scan reaches `maxCostUsd`. It uses the
+hints already recorded and never starts another model call to fill gaps.
+
 `ScanExecutor.run` receives an AbortSignal and an optional `onEvent` observer for
 `{type: "progress", progress}` or `{type: "activity", activity}` events. Progress
-uses the existing `ScanProgress` type; activity uses `ScanActivity`. Observer
-failures cannot stop execution. Aborting waits for the executor to settle; the
-host must cancel remote work and return its recorded outcome.
+uses the existing `ScanProgress` type; activity uses `ScanActivity`. Progress may
+include `reviewItems: { completed, total }` for saved reviews, counted separately
+from files. Observer failures cannot stop execution. Aborting waits for the
+executor to settle; the host must cancel remote work and return its recorded
+outcome.
 
 Preparation errors throw before execution. Execution and finalization return a
 `HostedScanResult` receipt with status `completed`, `failed`,
@@ -165,6 +220,20 @@ needs before returning that outcome. Use shared mounts or a coordinated transfer
 that preserves the supplied path bindings, not independent copies of mutable
 workbench state.
 
+For path scans with the Linux CLI and a current plugin, use the inventory
+path the scope helper reports. A Linux executor can keep the inventory in
+`stateDirectory` outside the checkout and captured output. The state binding
+may include one protected symlink and must exclude `..` from the path and
+link target. Its protected directory must support executor-owned mode-`0600`
+files and keep a reader open across writer close.
+
+Other layouts use `scoped-source-input.jsonl` in scan output. If a later
+shell loses the inventory, run the recovery command in the prompt. It may
+replace an earlier output file, so the executor needs permission to remove it.
+State transfers include private inventories named
+`<scope-input-filename>.scoped-<24 lowercase hex digits>.jsonl`. Hosts can
+remove the request's private inventories after execution finishes.
+
 Run the plugin stdio server from
 `pluginRoot/scripts/launch_codex_security_mcp --stdio` with the supplied
 environment. The executor needs the target files, plugin skills and registered
@@ -214,10 +283,20 @@ with `{id: <original run RPC id>, event}`. Invalid optional event payloads are
 ignored; mismatched request IDs are rejected. Stdout contains JSON-RPC only.
 
 Send `{"jsonrpc":"2.0","method":"cancel","params":{"id":"run"}}` with the
-original run request ID. The CLI aborts its executor signal, emits
+original run request ID. If canceled during checkout verification, the CLI returns
+a canceled receipt with the requested checkout, scope, and rubric before starting
+the executor. Invalid request fields still return a JSON-RPC error.
+After dispatch the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
-before returning a canceled result. The host must continue reading notifications
-while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
+before returning a canceled result. For a registered scan, the durable lifecycle
+and final scan receipt record cancellation even if the executor reports failure.
+The `execution` field retains that failure, its diagnostics, and any usage.
+A caller deadline expiring after registration records a failed scan, including
+when the executor acknowledges the deadline with a canceled execution.
+If the executor reports `acceptance_unknown`, the local scan records `failed`
+and the host receives `acceptance_unknown` for reconciliation.
+
+The host must continue reading notifications while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
 blocked output terminate the transport even while a write callback is stuck.
 Input EOF before the terminal response fails the run; EOF while that response is
 flushing waits for the write callback. A selected successful result is not a

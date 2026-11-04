@@ -37,12 +37,12 @@ test.each(["standard", "deep"] as const)(
       stopAfterNoNew: 3,
       stopAfterConsecutiveErrors: 2,
       maxDiscoveryRuns: 6,
-      maxTimeHours: 1.5,
     };
     const input = {
       auth: "api-key",
       scan: {
         mode,
+        max_time_minutes: 90,
         scope: { paths: ["src"] },
         knowledge_base: ["context.md"],
         instructions_file: "scan.md",
@@ -52,7 +52,6 @@ test.each(["standard", "deep"] as const)(
           stop_after_no_new: 3,
           stop_after_consecutive_errors: 2,
           max_discovery_runs: 6,
-          max_time_hours: 1.5,
         },
       },
       output: { directory: "../output" },
@@ -69,6 +68,7 @@ test.each(["standard", "deep"] as const)(
     const options = {
       auth: "api-key",
       mode,
+      maxTimeMinutes: 90,
       target: ["src"],
       knowledgeBasePaths: [join(directory, "context.md")],
       scanPromptFile: join(directory, "scan.md"),
@@ -135,6 +135,8 @@ test.each(["standard", "deep"] as const)(
       output,
       "--max-cost",
       "5",
+      "--max-time",
+      "90",
       "--fail-on-severity",
       "high",
       "--codex",
@@ -153,8 +155,6 @@ test.each(["standard", "deep"] as const)(
             "3",
             "--max-discovery-runs",
             "6",
-            "--max-time-hours",
-            "1.5",
           ]
         : []),
     ]);
@@ -167,6 +167,7 @@ test.each(["standard", "deep"] as const)(
         const client = new TestClient(config, clientDependencies);
         return {
           run: client.run.bind(client),
+          validate: client.validate.bind(client),
           close: client.close.bind(client),
           preflight: async (repository, options) => {
             selected = options;

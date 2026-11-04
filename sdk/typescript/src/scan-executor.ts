@@ -1,7 +1,12 @@
 import { z } from "zod";
-import { CodexSecurityError } from "./errors.js";
+import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
+import {
+  CodexSecurityError,
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
-import type { ScanProgress } from "./worker-progress.js";
+import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
 
 /** One Standard scan. The host owns execution, persistence and reconciliation. */
 export interface ScanExecutionRequest {
@@ -12,6 +17,7 @@ export interface ScanExecutionRequest {
   revision: string;
   scope: { paths: string[] };
   identity: { runId: string; attemptId: string; buildId: string };
+  severityRubric?: z.infer<typeof severityRubricSnapshotSchema>;
   prompt: string;
   model: string;
   reasoningEffort: string;
@@ -57,16 +63,16 @@ export const ScanExecutionEventSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("progress"),
     progress: z.strictObject({
-      phase: z.enum([
-        "preflight",
-        "threat_model",
-        "discovery",
-        "validation",
-        "attack_path",
-        "reporting",
-      ]),
+      phase: scanPhaseSchema,
       filesCompleted: z.number().int().nonnegative(),
       filesTotal: z.number().int().nonnegative(),
+      reviewItems: z
+        .strictObject({
+          completed: z.number().int().nonnegative(),
+          total: z.number().int().nonnegative(),
+        })
+        .refine(({ completed, total }) => completed <= total)
+        .optional(),
     }),
   }),
   z.strictObject({
@@ -106,4 +112,32 @@ export class ScanExecutionError extends CodexSecurityError {
         `Hosted execution ${result.status}.`,
     );
   }
+}
+
+export function explicitlyCanceled(signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true &&
+    !(signal.reason instanceof ScanCostLimitExceededError) &&
+    !(
+      signal.reason instanceof DOMException &&
+      signal.reason.name === "TimeoutError"
+    )
+  );
+}
+
+/** Classify the scan separately from the executor's retained outcome. */
+export function hostedScanFailureStatus(
+  error: unknown,
+  signal?: AbortSignal,
+  execution?: ScanExecutionResult,
+): "failed" | "canceled" | "acceptance_unknown" {
+  const status = (
+    error instanceof ScanExecutionError ? error.result : execution
+  )?.status;
+  if (status === "acceptance_unknown") return status;
+  if (signal?.aborted)
+    return explicitlyCanceled(signal) ? "canceled" : "failed";
+  return status === "canceled" || error instanceof ScanInterruptedError
+    ? "canceled"
+    : "failed";
 }
