@@ -1206,11 +1206,10 @@ export function createCodexSecurityServer(): McpServer {
         threadId,
       }),
     );
-    const retained = await finalizeNativeStoppedScan(scanId, nativeScans, {
-      threadId,
-    });
+    await finalizeNativeStoppedScan(scanId, nativeScans, { threadId });
+    // An older canceled scan may already have been replaced in this workspace.
     return workspaceResult(
-      retained.workspace as unknown as WorkspaceState,
+      await getWorkspace((canceled as unknown as WorkspaceState).id),
       canceled.canceledScanId,
     );
   };

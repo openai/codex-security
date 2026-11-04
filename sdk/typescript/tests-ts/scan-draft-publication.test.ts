@@ -1,4 +1,4 @@
-import { cp } from "node:fs/promises";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -121,3 +121,40 @@ test.each(["completed-scan", "legacy-completed-scan"])(
     });
   },
 );
+
+test("a blocked discovery checkpoint is admitted only after the review finishes", async () => {
+  await using temp = await scopedTemporaryDirectory("scan-publication-");
+  const scanDir = join(temp.path, "scan");
+  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+    recursive: true,
+  });
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const findingsPath = join(scanDir, "findings.json");
+  const findings = JSON.parse(await readFile(findingsPath, "utf8"));
+  findings.findings = [];
+  await writeFile(findingsPath, JSON.stringify(findings));
+  const reviewState = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [
+      {
+        id: "source-access",
+        reason: "Source access was denied before review.",
+      },
+    ],
+  };
+  const context = { scanDir, signal: new AbortController().signal };
+  manifest.scan.complete = false;
+  manifest.scan.reviewState = reviewState;
+  const checkpoint = JSON.stringify(manifest);
+  await writeFile(manifestPath, checkpoint);
+  await expect(admitCanonicalArtifacts(context)).rejects.toThrow(
+    "unfinished audit checkpoint",
+  );
+  expect(await readFile(manifestPath, "utf8")).toBe(checkpoint);
+  manifest.scan.complete = true;
+  manifest.scan.reviewState = { ...reviewState, deferred: [] };
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await admitCanonicalArtifacts(context);
+});
