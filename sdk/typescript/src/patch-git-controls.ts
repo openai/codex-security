@@ -817,6 +817,19 @@ export async function capturePatchGitControls(
     [...administrationRoots.keys()].some((administration) =>
       inside(administration, path),
     );
+  // Global configuration can include a checkout-controlled file.
+  const userSelectedConfig = async (
+    scope: string | undefined,
+    origin: string | undefined,
+    checkout: string,
+  ): Promise<boolean> =>
+    (scope === "global" || scope === "system" || scope === "command") &&
+    !(
+      origin?.startsWith("file:") &&
+      insideSelectedRoots(
+        await canonicalPath(relativeFile(checkout, origin.slice(5))),
+      )
+    );
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
       const reference = administrationReferences.find(
@@ -896,12 +909,17 @@ export async function capturePatchGitControls(
       "--name-only",
     ]);
     let includes = false;
+    const activeConfigurations = new Set<string>();
     for (let index = 0; index + 1 < origins.length; index += 2) {
       const origin = origins[index]!;
-      if (origin.startsWith("file:"))
-        await rememberConfiguration(
-          relativeFile(configurationDirectory, configPath(origin.slice(5))),
+      if (origin.startsWith("file:")) {
+        const path = relativeFile(
+          configurationDirectory,
+          configPath(origin.slice(5)),
         );
+        await rememberConfiguration(path);
+        activeConfigurations.add(controlPaths.get(path)!.canonical);
+      }
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
         includes = true;
     }
@@ -937,6 +955,7 @@ export async function capturePatchGitControls(
       relativeTo: string,
       value: string,
       optional: boolean,
+      userSelected: boolean,
     ): Promise<void> => {
       let path = configPath(value);
       if (path.length === 0) return;
@@ -970,6 +989,16 @@ export async function capturePatchGitControls(
       }
       const includePath = relativeFile(relativeTo, path);
       try {
+        if (optional && !userSelected) {
+          const canonical = await canonicalPath(includePath);
+          if (
+            !insideSelectedRoots(canonical) &&
+            !activeConfigurations.has(canonical)
+          )
+            throw new Error(
+              `Checkout requested a conditional include outside the selected Git roots: ${includePath}`,
+            );
+        }
         await rememberConfiguration(includePath, !optional, optional);
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
@@ -1010,21 +1039,28 @@ export async function capturePatchGitControls(
         const value = entry.slice(separator + 1);
         if (key === "core.hookspath") await captureHooks(configPath(value));
         else if (/^(include|includeif\..*)\.path$/u.test(key))
-          await captureInclude(origin, value, true);
+          await captureInclude(
+            origin,
+            value,
+            true,
+            userSelected && !insideSelectedRoots(control.canonical),
+          );
       }
     };
     if (includes) {
       const paths = await runConfigFields(checkout, [
         "config",
         "--null",
+        "--show-scope",
         "--show-origin",
         "--includes",
         "--get-regexp",
         "^(include|includeif\\..*)\\.path$",
       ]);
-      for (let index = 0; index + 1 < paths.length; index += 2) {
-        const origin = paths[index]!;
-        const value = paths[index + 1]!;
+      for (let index = 0; index + 2 < paths.length; index += 3) {
+        const scope = paths[index]!;
+        const origin = paths[index + 1]!;
+        const value = paths[index + 2]!;
         const separator = value.indexOf("\n");
         const key = value.slice(0, separator);
         const relativeTo = origin.startsWith("file:")
@@ -1036,6 +1072,7 @@ export async function capturePatchGitControls(
           relativeTo,
           value.slice(separator + 1),
           key.startsWith("includeif."),
+          await userSelectedConfig(scope, origin, configurationDirectory),
         );
       }
     }
@@ -1417,16 +1454,7 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        // A user config can include a checkout file, whose values cannot grant
-        // snapshot writes to a directory outside the selected Git roots.
-        const userSelected =
-          (scope === "global" || scope === "system" || scope === "command") &&
-          !(
-            origin?.startsWith("file:") &&
-            insideSelectedRoots(
-              await canonicalPath(relativeFile(checkout, origin.slice(5))),
-            )
-          );
+        const userSelected = await userSelectedConfig(scope, origin, checkout);
         pendingStoragePaths.push({ path: lfs, userSelected });
       }
       let tracked: Buffer;
@@ -1591,7 +1619,8 @@ export async function capturePatchGitControls(
           // Keep model write restrictions and let snapshots inherit host access.
           for (const child of children) {
             await rememberControl(child, true, false, true);
-            modelOnlyReadOnlyPaths.add(controlPaths.get(child)!.canonical);
+            const target = controlPaths.get(child)!.canonical;
+            if (insideSelectedRoots(target)) modelOnlyReadOnlyPaths.add(target);
           }
           continue;
         }
@@ -1605,6 +1634,10 @@ export async function capturePatchGitControls(
           const target = controlPaths.get(child)!.canonical;
           modelOnlyReadOnlyPaths.add(target);
           if (!inside(canonical, target)) {
+            if (!userSelected || insideSelectedRoots(canonical))
+              throw new Error(
+                `Git LFS storage left the selected cache: ${child}`,
+              );
             await rememberControl(child);
             snapshotStoragePaths.add(target);
           }
