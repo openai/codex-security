@@ -76,6 +76,7 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  hasProviderEnvKey?: boolean;
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
@@ -296,7 +297,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,
           expectedProfile: workerProfile,
-          allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+          allowOpenAiApiKeyFallback: Boolean(
+            openAiApiKey && !codexApiKey && !runtimeSettings.hasProviderEnvKey,
+          ),
         });
       const inheritedServers = new Set([
         ...mcpServerNames,
@@ -456,6 +459,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           CODEX_SECURITY_ARTIFACT_LAYOUT: assigned.layout,
           CODEX_SECURITY_SCAN_ID: scan.scanId,
           CODEX_SECURITY_PLUGIN_ROOT: scan.pluginRoot,
+          ...(assigned.discoveryBoard && {
+            CODEX_SECURITY_DISCOVERY_BOARD_ROOT: assigned.discoveryBoard.root,
+            CODEX_SECURITY_DISCOVERY_WORKER: assigned.discoveryBoard.author,
+          }),
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
@@ -740,6 +747,23 @@ export async function workerRuntimeSettings(
       );
     }
     if (isRecord(nativeProfileConfig.model_providers)) {
+      const providerId = workerConfig.model_provider ?? selected.model_provider;
+      const provider =
+        typeof providerId === "string"
+          ? nativeProfileConfig.model_providers[providerId]
+          : undefined;
+      if (
+        isRecord(provider) &&
+        typeof provider.env_key === "string" &&
+        provider.auth == null
+      ) {
+        settings.hasProviderEnvKey =
+          environmentVariable(
+            settings.environment ?? {},
+            provider.env_key,
+            process.platform,
+          ) !== undefined;
+      }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
       );
