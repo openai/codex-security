@@ -137,7 +137,7 @@ limits, and aggregation and reporting can continue afterward.
 | `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Unset; preserve Codex defaults     |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
-| `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
+| `scan.instructions_file`       | Additional scan instructions, including [credential reporting][credentials]          | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
 | `scan.owner_suggestions`       | Generate an owner-suggestions report after a committed Git scan                      | `false`                            |
 | `scan.deep`                    | Deep discovery settings shown below                                                  | Existing deep defaults             |
@@ -146,9 +146,7 @@ limits, and aggregation and reporting can continue afterward.
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-For an example of using `scan.instructions_file` to delegate known-format key
-and token findings to another scanner, see
-[checked-in credentials](../sdk/typescript/docs/cli.md#checked-in-credentials).
+[credentials]: ../sdk/typescript/docs/cli.md#checked-in-credentials
 
 See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.

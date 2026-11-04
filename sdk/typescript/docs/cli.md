@@ -318,21 +318,19 @@ code. It assesses exposure offline. Severity reflects who can read the value
 and what access the evidence supports. Live status stays unknown unless the
 issuer or credential owner provides evidence.
 
-If another scanner handles known-format API keys and tokens, add this reporting
-rule to the repository’s root `SECURITY.md`:
+If another scanner handles known-format API keys and tokens, add one line to
+the repository’s root `SECURITY.md`:
 
-> Skip standalone findings for known-format API keys and tokens. Another
-> scanner covers those. Continue reporting hardcoded passwords, custom
-> credentials, and bugs that expose credentials, such as a server token sent
-> to a browser.
+> Skip standalone findings for known-format API keys and tokens.
 
-Remove the rule to restore the default. To opt a component back in, add “Report
-standalone findings for known-format API keys and tokens” to its `SECURITY.md`.
-These instructions guide what Codex reports without importing alerts.
+This rule guides reporting. Codex still looks for hardcoded passwords, custom
+credentials, and bugs such as a server token sent to a browser. Remove the rule
+to restore the default, or put “Report standalone findings for known-format API
+keys and tokens” in a component’s `SECURITY.md` to opt that component back in.
 
-To override the repository rule for one scan, put the desired instruction in a
-file and pass it to the CLI. Project configs use `scan.instructions_file`, and
-the TypeScript SDK accepts `scanPrompt` or `scanPromptFile`.
+For one scan, override repository policy with an instruction file. Project
+configs use `scan.instructions_file`, and the SDK accepts `scanPrompt` or
+`scanPromptFile`.
 
 ```bash
 codex-security scan . --scan-prompt-file credential-policy.md
