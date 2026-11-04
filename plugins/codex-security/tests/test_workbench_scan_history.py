@@ -1188,7 +1188,14 @@ def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Pa
         second["afterFindings"][0]["occurrenceId"],
     ]
     assert "crossModeOccurrenceIds" not in same_mode
-    compared = save_scan_matches(state_dir, before, after)
+    inferred = save_scan_matches(state_dir, before, after)
+    assert [item["status"] for item in inferred["findings"]] == ["persisting"]
+    related = {
+        "beforeOccurrenceId": old["findings"][0]["occurrenceId"],
+        "afterOccurrenceId": first["afterFindings"][0]["occurrenceId"],
+        "reason": "The findings identify distinct controls at the same location.",
+    }
+    compared = save_scan_matches(state_dir, before, after, related=(related,))
     assert sorted(item["status"] for item in compared["findings"]) == ["new", "not_observed"]
 
 
