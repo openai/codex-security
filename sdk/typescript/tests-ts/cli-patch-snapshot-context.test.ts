@@ -725,9 +725,17 @@ test.each([
     expect(snapshots).toBeGreaterThan(0);
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
-    if (filtered)
-      for (const binding of bindings)
-        expect(binding).toHaveProperty(selector, environment[selector]);
+    if (filtered) {
+      for (const binding of bindings) {
+        if (selector === "GIT_CONFIG_COUNT")
+          expect(binding).toMatchObject({
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.fsmonitor",
+            GIT_CONFIG_VALUE_0: "false",
+          });
+        else expect(binding).toHaveProperty(selector, environment[selector]);
+      }
+    }
   },
   nativeSnapshotTimeout,
 );

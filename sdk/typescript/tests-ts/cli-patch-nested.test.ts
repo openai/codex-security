@@ -1383,8 +1383,24 @@ describe("patch change tracking", () => {
                   : gitEnvironment.GIT_WORK_TREE,
               );
             }
-            expect(environment["GIT_CONFIG_COUNT"]).toBe("1");
-            expect(environment["SYNTHETIC_GIT_SETTING"]).toBe("preserved");
+            expect(environment).toMatchObject({
+              GIT_CONFIG_KEY_0: "core.quotePath",
+              GIT_CONFIG_VALUE_0: "false",
+              SYNTHETIC_GIT_SETTING: "preserved",
+            });
+            if (environment["GIT_CONFIG_COUNT"] === "1") {
+              // The coordinator's two path lookups do not read the index.
+              expect(args[0]).toBe("rev-parse");
+              expect(["--show-toplevel", "--absolute-git-dir"]).toContain(
+                args[1] ?? "",
+              );
+            } else {
+              expect(environment).toMatchObject({
+                GIT_CONFIG_COUNT: "2",
+                GIT_CONFIG_KEY_1: "core.fsmonitor",
+                GIT_CONFIG_VALUE_1: "false",
+              });
+            }
             return runGitRepositoryCommand(command, args, cwd, {
               ...options,
               environment,
