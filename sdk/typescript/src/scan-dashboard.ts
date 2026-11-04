@@ -27,6 +27,7 @@ import {
   formatTokenUsage,
   type ScanTokenUsage,
 } from "./cost-model.js";
+import { formatDeepScanReviews } from "./scan-progress.js";
 import type { ScanActivity } from "./scan-activity.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
@@ -169,6 +170,7 @@ export class ScanDashboard {
   } | null = null;
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #componentReviews: string | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #tokens: string | null = null;
@@ -480,7 +482,6 @@ export class ScanDashboard {
       const dashboard = new ScanDashboard(this.#stream, {
         ...this.#options,
         presentation: "scan",
-        mode: "standard",
         componentName: receipt.name,
       });
       dashboard.setStage(COMPONENT_STATUS.pending);
@@ -502,6 +503,7 @@ export class ScanDashboard {
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
         const status = COMPONENT_STATUS[receipt.status];
+        dashboard.#componentReviews = null;
         dashboard.#finishedAt = this.#options.clock.now();
         dashboard.setStage(status);
         dashboard.note(
@@ -527,6 +529,13 @@ export class ScanDashboard {
       case "progress":
         dashboard.setFiles(event.value);
         dashboard.setStage(scanPhaseLabel(event.value.phase));
+        break;
+      case "deep-progress":
+        dashboard.#componentReviews = `${event.value.completed} done, ${event.value.active} active`;
+        dashboard.setStage(
+          event.value.consolidating ? "consolidating results" : "discovery",
+        );
+        dashboard.note(formatDeepScanReviews(event.value));
         break;
       case "activity":
         dashboard.record(event.value);
@@ -940,9 +949,10 @@ export class ScanDashboard {
             ? null
             : scanProgressCount(dashboard.#files);
         const progress =
-          count === null
+          dashboard.#componentReviews ??
+          (count === null
             ? "—"
-            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`;
+            : `${formatCount(count.completed)}/${formatCount(count.total)} ${count.label}`);
         const status =
           receipt.status === "started"
             ? dashboard.#stage
