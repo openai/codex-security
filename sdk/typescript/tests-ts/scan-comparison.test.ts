@@ -76,14 +76,16 @@ function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
 function fakeCodex(response: unknown) {
   const calls: {
     prompt?: string;
+    turns: number;
     threadOptions?: ThreadOptions;
     turnOptions?: TurnOptions;
-  } = {};
+  } = { turns: 0 };
   const codex: NonNullable<ScanComparisonOptions["codex"]> = {
     startThread(options) {
       calls.threadOptions = options;
       return {
         async run(prompt, turnOptions) {
+          calls.turns++;
           calls.prompt = prompt;
           calls.turnOptions = turnOptions;
           return { finalResponse: modelResponseText(response) };
@@ -130,6 +132,43 @@ function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
+  test.each([false, true])(
+    "suggests full evidence for selected cross-mode sites (single turn %s)",
+    async (singleTurn) => {
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      await matchScanFindingsInternal(
+        {
+          before: [
+            { occurrenceId: "older", findingId: "same" },
+            { occurrenceId: "representative", findingId: "same" },
+            { occurrenceId: "unrelated" },
+          ],
+          after: [
+            {
+              occurrenceId: "current",
+              rootCause: { code: "synthetic source excerpt" },
+            },
+          ],
+          crossModeOccurrenceIds: ["older", "current"],
+        },
+        { codex },
+        { surface: "cli", singleTurn },
+      );
+      const { before, after } = JSON.parse(
+        calls.prompt!.split("\n").at(-1)!,
+      ).findings;
+      expect(before[0].occurrenceId).toBe("representative");
+      expect(Boolean(before[0].crossModeSite)).toBe(!singleTurn);
+      expect(before[1].crossModeSite).toBeUndefined();
+      expect(Boolean(after[0].crossModeSite)).toBe(!singleTurn);
+      expect(calls.prompt!.includes("Cards marked crossModeSite")).toBe(
+        !singleTurn,
+      );
+      expect(calls.prompt).not.toContain("synthetic source excerpt");
+      expect(calls.turns).toBe(1);
+    },
+  );
+
   test.each([
     ["sdk", "matching"],
     ["cli", "matching"],
@@ -2866,7 +2905,14 @@ process.exit(0);
                 afterScanId: "current",
                 afterFindings: [after],
                 beforeScans: [
-                  { scanId: "unselected", findings: [unselected] },
+                  {
+                    scanId: "unselected",
+                    findings: [unselected],
+                    crossModeOccurrenceIds: [
+                      unselected.occurrenceId,
+                      after.occurrenceId,
+                    ],
+                  },
                   { scanId: "first", findings: [firstShared, firstOther] },
                   { scanId: "latest", findings: [latestShared] },
                 ],

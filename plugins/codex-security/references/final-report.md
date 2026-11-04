@@ -29,6 +29,8 @@ Use `scope` for reviewed context, artifacts, runtime/test status, validation mod
 
 Every scan mode uses the same final report pipeline. Workbench-owned Standard and workbench-backed diff scans submit canonical semantics with `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`; the workbench supplies authoritative metadata and writes the unsealed canonical draft. For Deep caller behavior and completion ownership, follow the [Deep Scan lifecycle](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans). SDK-owned Standard scans instead write unsealed canonical files with the exact SDK-provided metadata and leave finalization to the SDK. Terminal scans without a `scanId` retain their existing canonical JSON workflow. No mode authors, repairs, or treats an existing `report.md` as input. Finalization validates and enriches the canonical JSON, seals the canonical JSON and evidence artifacts, then deterministically generates `report.md`. Supply report prose through structured canonical semantics rather than a separately authored report.
 
+The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF or CSV.
+
 ## Review State And Pending Work
 
 Keep unfinished requested work and essential in-scope proof gaps in `reviewState.deferred`. Retain optional follow-up in `reviewState.openQuestions`. These notes are checkpoint bookkeeping, not measured file coverage, and do not change the scan execution outcome.

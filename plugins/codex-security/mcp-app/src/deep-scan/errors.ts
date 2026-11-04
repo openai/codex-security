@@ -1,6 +1,6 @@
-import { isCodexUsageLimit } from "../../../../../sdk/typescript/src/errors.js";
+import { isCodexNonRetryableFailure } from "../../../../../sdk/typescript/src/errors.js";
 
-/** Explicitly opt a confirmed permission prerequisite failure out of retries. */
+/** A confirmed terminal worker failure stops the scan without retries. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -9,7 +9,7 @@ export class DeepScanNonRetryableError extends Error {
 }
 
 export function codexWorkerTurnError(message: string): Error {
-  return isCodexUsageLimit(message)
+  return isCodexNonRetryableFailure(message)
     ? new DeepScanNonRetryableError(message)
     : new Error(message);
 }

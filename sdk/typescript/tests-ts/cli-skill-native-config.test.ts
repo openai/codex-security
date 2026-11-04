@@ -533,6 +533,12 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
         };
         try {
           await writeCodexConfig(join(sharedHome, "config.toml"), {
+            mcp_servers: {
+              "codex-security": {
+                url: "https://fixture.invalid/mcp",
+                enabled: false,
+              },
+            },
             cli_auth_credentials_store: "file",
             features: { plugins: false },
             analytics: { enabled: false },

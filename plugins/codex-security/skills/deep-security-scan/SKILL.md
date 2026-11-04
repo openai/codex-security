@@ -40,7 +40,7 @@ After an ended turn or host timeout, rejoin with the same scan ID and token. If 
 
 - On success, use `structuredContent.scanId` and `structuredContent.scanDir` as the authoritative scan identity and directory, and follow `structuredContent.instructions`. The returned `manifestPath` identifies the sealed parent scan-manifest.json and `reportPath` identifies the generated report.md. The scan is complete. Do not call complete_codex_security_scan, rerun validation or attack-path analysis, construct another draft, or start a replacement scan.
 - On cancellation, retain `structuredContent.scanId` and `structuredContent.scanDir` and follow `structuredContent.instructions` to stop scan work. Report retained findings and pending candidates with incomplete coverage; do not claim successful completion.
-- On failure, surface the exact MCP error. Read the existing scan context when available to describe retained results and incomplete coverage. Do not start replacement work, fabricate findings, or claim a successful or no-findings scan.
+- On failure, surface the exact MCP error. For a policy refusal, identify the Standard scan from its saved error when available. Read the existing scan context when available to describe retained results and incomplete coverage. Do not start replacement work, fabricate findings, or claim a successful or no-findings scan.
 
 ## Report the Completed Scan
 

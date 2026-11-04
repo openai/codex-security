@@ -9,8 +9,15 @@ const { codexWorkerTurnError, DeepScanNonRetryableError } = await importModule({
   ],
 });
 
-test(function testUsageLimitClassification() {
+test(function testNativeTurnFailureClassification() {
   for (const message of [
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
     "Quota exceeded. Check your plan and billing details.",
     "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
     "Your workspace is out of credits. Add credits to continue.",
@@ -26,6 +33,10 @@ test(function testUsageLimitClassification() {
     assert.equal(error.message, message);
   }
   for (const message of [
+    "Command failed: Request blocked by cyberPolicy.",
+    "Error running remote compact task: Request blocked by cyberPolicy.",
+    "Request blocked by cyberPolicy. See the fixture.",
+    " Request blocked by cyberPolicy.",
     "429 Too Many Requests",
     "Command failed: Quota exceeded. Check your plan and billing details.",
     "Error running remote compact task: stream disconnected before completion: synthetic reset",
