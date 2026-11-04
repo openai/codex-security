@@ -123,6 +123,7 @@ test("shares findings only between explicitly identified repository and scope al
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   const probe = `
 import argparse, json, sqlite3, sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import workbench_native_indexes as indexes
 import workbench_target_state as state
@@ -149,6 +150,11 @@ CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, cl
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
 CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
 """)
+history = Path(sys.argv[1]).parent / "shared" / "workbench-migrations.json"
+for migration in json.loads(history.read_text(encoding="utf-8")):
+    if migration["version"] in (61, 62):
+        for statement in migration["statements"]:
+            connection.execute(statement)
 origin = "https://example.invalid/synthetic/repository"
 connection.executemany("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)", [
     ("primary", "/primary", "Primary", "common-git-directory::.", origin),
