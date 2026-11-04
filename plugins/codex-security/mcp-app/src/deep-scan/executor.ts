@@ -226,6 +226,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
+              tools: {
+                experimental_request_user_input: { enabled: false },
+                update_plan: { enabled: false },
+              },
               features: {
                 ...(isRecord(runtimeSettings.config.features) &&
                   runtimeSettings.config.features),
@@ -234,6 +238,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                 shell_tool: false,
                 view_image: false,
                 image_generation: false,
+                goals: false,
+                request_permissions_tool: false,
                 computer_use: false,
                 unified_exec: false,
                 code_mode: false,
