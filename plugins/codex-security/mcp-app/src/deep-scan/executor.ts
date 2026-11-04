@@ -127,10 +127,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
-    const scopeInput = JSON.stringify({
-      paths: includePaths,
-      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
-    });
     const includePathsFile =
       !discovery || includePaths === undefined
         ? undefined
@@ -151,7 +147,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv).catch((error: unknown) => {
+          // A failed read produced no snapshot. Let the next worker retry it.
+          this.runtimeSettings = undefined;
+          throw error;
+        }));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -189,7 +189,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
-        await writePrivateFile(includePathsFile, scopeInput);
+        await writePrivateFile(
+          includePathsFile,
+          JSON.stringify({
+            paths: includePaths,
+            filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+          }),
+        );
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
