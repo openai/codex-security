@@ -546,7 +546,7 @@ describe("multiscan", () => {
     );
 
     await expect(runMultiscan(configured)).rejects.toThrow(
-      `${ledger}:1: Expected a positive safe integer attempt`,
+      "Expected a positive integer receipt attempt",
     );
     expect(scans).toHaveBeenCalledTimes(1);
     expect(await readFile(preserved, "utf8")).toBe("preserved\n");

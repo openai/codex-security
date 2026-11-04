@@ -515,10 +515,12 @@ describe("multiscan", () => {
     ["non-object", "null", false],
     ["missing ID", "{}", false],
     ["non-string ID", '{"id":42}', false],
-    ["known repository with a missing attempt", { attempt: undefined }, false],
-    ["zero attempt", { attempt: 0 }, false],
-    ["unsafe attempt", { attempt: Number.MAX_SAFE_INTEGER + 1 }, false],
-    ["unknown status", { status: "pending" }, false],
+    ["missing attempt", '{"id":"receipt"}', false],
+    ["string attempt", '{"id":"receipt","attempt":"1"}', false],
+    ["zero attempt", '{"id":"receipt","attempt":0}', false],
+    ["fractional attempt", '{"id":"receipt","attempt":1.5}', true],
+    ["blank ID", { id: " " }, false],
+    ["unknown status", { status: "pending" }, true],
     ["missing output directory", { outputDir: undefined }, false],
     ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],
     ["non-boolean policy outcome", { policyFailed: "true" }, false],
@@ -535,35 +537,30 @@ describe("multiscan", () => {
       ];
       const deps = dependencies();
       const run = mock(completeRun);
-      const runWorkbench = mock(deps.runWorkbench);
       const configured: Parameters<typeof main>[3] = {
         ...deps,
-        runWorkbench,
         createSecurity: (config) => ({ ...deps.createSecurity(config), run }),
       };
       expect(await createCliTest(main).runCli(args, configured)).toBe(0);
       const ledger = join(paths.output, "results.jsonl");
       const valid = await readFile(ledger, "utf8");
-      const artifactRoot = join(paths.output, "artifacts", "receipt");
-      const report = join(artifactRoot, "attempt-1", "report.md");
+      const report = join(
+        paths.output,
+        "artifacts",
+        "receipt",
+        "attempt-1",
+        "report.md",
+      );
       const originalReport = await readFile(report);
       const record =
         typeof bad === "string"
           ? bad
-          : JSON.stringify({
-              ...JSON.parse(valid),
-              status: "failed",
-              attempt: 2,
-              outputDir: join(artifactRoot, "attempt-2"),
-              ...bad,
-            });
+          : JSON.stringify({ ...JSON.parse(valid), attempt: 2, ...bad });
       const damaged = Buffer.concat([
         Buffer.from(`${valid}\n${record}\n`),
         ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),
       ]);
       await writeFile(ledger, damaged);
-      const campaignFiles = (await readdir(paths.output)).sort();
-      runWorkbench.mockClear();
       for (const flags of [[], ["--recover"]]) {
         const cli = createCliTest(main);
         expect(await cli.runCli([...args, ...flags], configured)).toBe(2);
@@ -573,12 +570,50 @@ describe("multiscan", () => {
         expect(cli.stderr.text()).toContain("Restore a complete");
         expect(cli.stderr.text()).toContain("new --output-dir");
         expect(await readFile(ledger)).toEqual(damaged);
-        expect((await readdir(paths.output)).sort()).toEqual(campaignFiles);
-        expect(await readdir(artifactRoot)).toEqual(["attempt-1"]);
         expect(await readFile(report)).toEqual(originalReport);
+        expect(
+          (await readdir(paths.output)).filter((name) =>
+            name.startsWith("results.jsonl.interrupted-"),
+          ),
+        ).toEqual([]);
       }
       expect(run).toHaveBeenCalledTimes(1);
-      expect(runWorkbench).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each(["rerun", "recover receipt", "recover directory"])(
+    "preserves exhausted attempt numbers on %s",
+    async (mode) => {
+      const { paths } = await repositoryFixture("repo");
+      const setup = options(paths, client(rejecting("Initial failure")), {
+        maxAttempts: 1,
+      });
+      const { resultsPath: ledger } = await runMultiscan(setup);
+      const root = join(paths.output, "artifacts", "repo");
+      const last = join(root, `attempt-${Number.MAX_SAFE_INTEGER}`);
+      if (mode === "recover directory") {
+        await mkdir(last);
+      } else {
+        const [receipt] = await results(ledger);
+        await writeFile(
+          ledger,
+          JSON.stringify({
+            ...receipt,
+            attempt: Number.MAX_SAFE_INTEGER,
+            outputDir: last,
+          }) + "\n",
+        );
+      }
+      const saved = await readFile(ledger, "utf8");
+      const directories = await readdir(root);
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), {
+        ...(mode === "rerun" ? {} : { recoverScan: async () => undefined }),
+      });
+      await expect(runMultiscan(configured)).rejects.toThrow("attempt numbers");
+      expect(run).not.toHaveBeenCalled();
+      expect(await readFile(ledger, "utf8")).toBe(saved);
+      expect(await readdir(root)).toEqual(directories);
     },
   );
 
@@ -1863,11 +1898,12 @@ describe("multiscan", () => {
       const checkout = join(paths.output, "checkouts", "invalid-recovery");
       await mkdir(checkout, { recursive: true, mode: 0o700 });
       await writeFile(join(checkout, "retained.txt"), "Original checkout.");
+      const nextAttempt = newerAttempt ? Number.MAX_SAFE_INTEGER : 2;
       const nextOutput = join(
         paths.output,
         "artifacts",
         "invalid-recovery",
-        "attempt-2",
+        `attempt-${nextAttempt}`,
       );
       if (newerAttempt) await completedScan(nextOutput);
       const recoverScan = mock(async (path: string) => ({
@@ -1895,7 +1931,7 @@ describe("multiscan", () => {
       );
       expect((await results(summary.resultsPath)).at(-1)).toMatchObject({
         status: "completed",
-        attempt: 2,
+        attempt: nextAttempt,
       });
     },
   );

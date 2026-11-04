@@ -1275,13 +1275,13 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-Each committed receipt in `results.jsonl` needs a nonempty task ID and output
-directory, a positive integer attempt, and a supported status. Optional knowledge
-extraction and severity-policy flags must be booleans. Invalid records stop both
-ordinary resume and `--recover`. The error identifies the line, and the original
-ledger and any interrupted tail stay intact.
-Restore a complete ledger backup that includes every committed attempt, or start
-a separate campaign in a new `--output-dir`.
+Each nonempty committed line in `results.jsonl` must be valid JSON with a nonempty
+task ID and output directory, a supported status, and a positive safe integer attempt
+number. Optional failure flags must be booleans. If a line fails these checks,
+the command reports its line number and preserves the ledger. Restore a complete
+ledger backup that includes every committed attempt, or start a separate campaign
+in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
+a fresh attempt requires a new campaign.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
