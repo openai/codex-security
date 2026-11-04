@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import shutil
 import sqlite3
 import subprocess
@@ -75,19 +74,6 @@ def test_finding_matches_hide_other_children_and_keep_requested_child(workbench_
             assert known_scans == ["parent", "rerun"]
         rows, _, _ = matches(connection, "c", "child", timestamps[1])
         assert {row["occurrenceId"] for row in rows} == {"p", "c2", "r"}
-
-
-def run_workbench(state_dir: Path, *args: str, check: bool = True) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        check=check,
-        capture_output=True,
-        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
-        text=True,
-    )
-    if not check:
-        return {"returncode": completed.returncode, "stderr": completed.stderr}
-    return json.loads(completed.stdout)
 
 
 @pytest.mark.parametrize("complete", [False, True])
