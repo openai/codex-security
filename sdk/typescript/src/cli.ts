@@ -107,6 +107,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
+import type { DeepScanDiagnostic } from "./deep-scan.js";
 import {
   formatDeepScanReviews,
   type DeepScanProgress,
@@ -237,6 +238,7 @@ import {
 } from "./github-advisories.js";
 import {
   collectSnykIssues,
+  snykRestApiVersion,
   SNYK_REST_ISSUES_FORMAT,
 } from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
@@ -1291,6 +1293,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
+    onDeepScanDiagnostic?: (event: DeepScanDiagnostic) => void,
   ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
@@ -1400,8 +1403,11 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
   };
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) =>
-    new CodexSecurity(config, undefined, { surface: "cli" }),
+  createSecurity: (config, onDeepScanDiagnostic) =>
+    new CodexSecurity(config, undefined, {
+      surface: "cli",
+      onDeepScanDiagnostic,
+    }),
   environment: process.env,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
@@ -4249,7 +4255,7 @@ export async function main(
       output: z
         .object({
           format: z.literal(SNYK_REST_ISSUES_FORMAT),
-          apiVersion: z.string(),
+          apiVersion: z.literal(snykRestApiVersion),
           apiOrigin: z.string(),
           organizationId: z.string(),
           projectId: z.string(),
@@ -10193,7 +10199,12 @@ async function executeScan(
         progress.startTimer("Preparing scan");
       }
     }
-    security = dependencies.createSecurity(config);
+    security = dependencies.createSecurity(
+      config,
+      verbose && arguments_.mode === "deep"
+        ? (fields) => diagnostic("deep_scan.coordinator", fields)
+        : undefined,
+    );
     if (arguments_.mock) {
       errorOutput.write(
         "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
