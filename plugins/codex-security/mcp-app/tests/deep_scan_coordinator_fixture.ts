@@ -15,8 +15,8 @@ import type {
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { once } from "node:events";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importModule } from "./import-module.ts";
 

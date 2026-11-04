@@ -2390,7 +2390,14 @@ export class ScanCostTracker {
               blockingReadError ??= error;
               if (!observeHealthySessions || !isBlockedLogRead(error))
                 break directories;
-            } else collectionErrors.push(error);
+            } else if (
+              directory !== "archived_sessions" ||
+              !path.endsWith(".zst")
+            ) {
+              collectionErrors.push(error);
+            }
+            // A damaged cold archive with no readable identity cannot be
+            // attributed to this scan. Registered threads still require usage.
           }
         }
       } catch (error) {

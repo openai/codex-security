@@ -1408,6 +1408,13 @@ test.each([
     input.severityRubric.markdown = "Edited by caller.";
     const result = await pending;
     expect(result.status).toBe(scanStatus);
+    const journal = await readOperationTelemetry(input.stateDirectory);
+    expect(
+      journal.events.find((entry) => entry.type === "attempt_finished"),
+    ).toMatchObject({
+      outcome: scanStatus === "acceptance_unknown" ? "unresolved" : scanStatus,
+      failureCategory: scanStatus === "canceled" ? "canceled" : "execution",
+    });
     expect(
       readSavedScanLifecycle(
         { CODEX_SECURITY_STATE_DIR: input.stateDirectory },

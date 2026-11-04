@@ -6703,6 +6703,10 @@ describe("live scan cost tracking", () => {
       await filesystem.mkdir(archive);
       await writeFile(join(archive, "rollout-copy.jsonl.zst"), compressed);
       await writeFile(
+        join(archive, "rollout-damaged.jsonl.zst"),
+        compressed.subarray(0, 3),
+      );
+      await writeFile(
         join(archive, "rollout-unrelated.jsonl.zst"),
         zlib.zstdCompressSync(
           Buffer.from(
@@ -6718,6 +6722,7 @@ describe("live scan cost tracking", () => {
       const observations: ScanUsageObservation[] = [];
       const tracker = costTracker(home, {
         scanDirectory,
+        maxCostUsd: 10,
         onUsageObservation: (value) => observations.push(value),
       });
       tracker.start("scan-thread");
