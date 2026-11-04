@@ -1,201 +1,132 @@
-import { execFileSync } from "node:child_process";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 import {
   access,
-  appendFile,
+  chmod,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import * as filesystem from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
-import type { ScanResult } from "../src/result.js";
-import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
-import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
+import { main } from "../src/cli.js";
+import { ScanCostLimitExceededError } from "../src/errors.js";
+import { runMultiscan } from "../src/multiscan.js";
+import { DiffTarget } from "../src/targets.js";
+import { workflowDigest } from "../src/finding-workflow.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
+import { dependencies } from "./cli-fixtures.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { rejecting } from "./support/errors.js";
+import {
+  type SecurityClient,
+  type MultiscanOptions,
+  createMultiscanFixtures,
+  repository,
+  completedScan,
+  customPlugin,
+  completeRun,
+  client,
+  options,
+  results,
+} from "./support/multiscan.js";
 
-type MultiscanOptions = Parameters<typeof runMultiscan>[0];
-type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
+const { fixture, repositoryFixture, cleanup } = createMultiscanFixtures();
 
-const temporaryDirectories: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-
-async function fixture(): Promise<{
-  root: string;
-  input: string;
-  output: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-multiscan-"));
-  temporaryDirectories.push(root);
-  return {
-    root,
-    input: join(root, "repositories.csv"),
-    output: join(root, "results"),
-  };
-}
-
-function git(repository: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", repository, ...args], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-}
-
-async function repository(
-  root: string,
-  name: string,
-): Promise<{ path: string; revision: string }> {
-  const path = join(root, name);
-  await mkdir(join(path, "src"), { recursive: true });
-  await writeFile(
-    join(path, "src", "app.ts"),
-    `export const name = "${name}";\n`,
-  );
-  git(path, "init", "-q");
-  git(path, "add", ".");
-  git(
-    path,
-    "-c",
-    "user.name=Multiscan Test",
-    "-c",
-    "user.email=multiscan@example.test",
-    "commit",
-    "-qm",
-    "initial",
-  );
-  return { path, revision: git(path, "rev-parse", "HEAD") };
-}
-
-async function completedScan(
-  outputDir: string,
-  completeness: "complete" | "partial" = "complete",
-): Promise<ScanResult> {
-  await mkdir(outputDir, { recursive: true });
-  await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"].map(
-      (name) => writeFile(join(outputDir, name), "{}\n"),
-    ),
-  );
-  return { coverage: { completeness } } as ScanResult;
-}
-
-function client(
-  run: SecurityClient["run"],
-  close: SecurityClient["close"] = async () => {},
-): SecurityClient {
-  return { run, close };
-}
-
-function options(
-  paths: { input: string; output: string },
-  security: SecurityClient,
-  overrides: Partial<MultiscanOptions> = {},
-): MultiscanOptions {
-  return {
-    inputPath: paths.input,
-    outputDir: paths.output,
-    workers: 1,
-    mode: "standard",
-    maxAttempts: 2,
-    config: {},
-    createSecurity: () => security,
-    ...overrides,
-  };
-}
-
-async function results(path: string): Promise<Record<string, unknown>[]> {
-  return (await readFile(path, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
+afterEach(cleanup);
 
 describe("multiscan", () => {
-  test("scopes GitHub CLI credentials to the discovered GitHub host", () => {
-    expect(buildGitHubCredentialArgs(undefined)).toEqual([]);
-    expect(buildGitHubCredentialArgs("github.com")).toEqual([
-      "-c",
-      "credential.https://github.com.helper=",
-      "-c",
-      "credential.https://github.com.helper=!gh auth git-credential",
-    ]);
-    expect(buildGitHubCredentialArgs("github.acme.example")).toEqual([
-      "-c",
-      "credential.https://github.acme.example.helper=",
-      "-c",
-      "credential.https://github.acme.example.helper=!gh auth git-credential",
-    ]);
-    for (const host of [
-      "github.com/another-owner",
-      "user@github.com",
-      "github.com?token=secret",
-      "github.com#fragment",
-    ]) {
-      expect(() => buildGitHubCredentialArgs(host)).toThrow(
-        "GitHub credential host is invalid",
-      );
-    }
-  });
-
-  test("uses GitHub credentials for discovered checkouts without changing global Git configuration", async () => {
+  test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
-    const source = await repository(paths.root, "github-credentials");
+    const source = await repository(paths.root, "prompt-source");
+    const prompt = join(paths.root, "shared-prompt.md");
+    await writeFile(prompt, "Review synthetic boundaries.");
     await writeFile(
       paths.input,
-      `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
+      `id,repository,revision\nmissing,${join(paths.root, "absent")},${source.revision}\nfirst,${source.path},${source.revision}\nsecond,${source.path},${source.revision}\n`,
     );
-    const configured = execFileSync(
-      "git",
-      [
-        ...buildGitHubCredentialArgs("github.acme.example"),
-        "config",
-        "--get-all",
-        "credential.https://github.acme.example.helper",
-      ],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-    expect(configured.trim()).toBe("!gh auth git-credential");
-
+    let scans = 0;
     const summary = await runMultiscan(
       options(
         paths,
-        client(
-          async (_checkout, scanOptions = {}) =>
-            await completedScan(scanOptions.outputDir!),
-        ),
-        { githubHost: "github.acme.example" },
+        client(async (_checkout, scanOptions = {}) => {
+          expect(scanOptions.scanPrompt).toBe("Review synthetic boundaries.");
+          expect(scanOptions.scanPromptFile).toBeUndefined();
+          if (scans++ === 0) await rm(prompt);
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { maxAttempts: 1, scanPromptFile: prompt },
       ),
     );
-
-    expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+    expect(scans).toBe(2);
+    expect(summary).toMatchObject({ total: 3, completed: 2, failed: 1 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "missing", status: "failed" },
+      { id: "first", status: "completed" },
+      { id: "second", status: "completed" },
+    ]);
   });
+
+  test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
+    "rejects unsupported bulk diff scopes before preparing a campaign: %j",
+    async (target) => {
+      const { paths } = await repositoryFixture("configured-scope", "example");
+      const createSecurity = mock(() => {
+        return security;
+      });
+      const security = client(
+        rejecting("The unsupported target must not reach a scan."),
+      );
+      await expect(
+        runMultiscan(
+          options(paths, security, {
+            scanOptionsByMode: { standard: { target } },
+            createSecurity,
+          }),
+        ),
+      ).rejects.toThrow(
+        "Bulk scans do not support diff or working-tree scopes",
+      );
+      expect(createSecurity).not.toHaveBeenCalled();
+      await expect(access(paths.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
 
   test("parses quoted CSV fields, embedded delimiters, and Windows line endings", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "comma, quoted");
     await writeFile(
       paths.input,
-      `\uFEFF"id","repository","revision","scope","mode","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","contains ""quotes"""\r\n\r\n`,
+      `\uFEFF"id","repository","revision","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
     );
 
     const summary = await runMultiscan(
       options(
         paths,
-        client(async (_repository, scanOptions = {}) => {
-          expect(scanOptions.target).toEqual(["src"]);
+        client(async (repository, scanOptions = {}) => {
+          expect(scanOptions.target).toEqual([join(repository, "src")]);
           expect(scanOptions.mode).toBe("deep");
+          expect(scanOptions.scanPrompt).toBe(
+            "Review boundaries.\n\nFocus on authentication, authorization.",
+          );
+          expect(scanOptions.postScanPrompt).toBe("Draft confirmed fixes.");
+          expect(scanOptions.maxCostUsd).toBe(12.5);
           return await completedScan(scanOptions.outputDir!);
         }),
+        {
+          scanPrompt: "Review boundaries.",
+          postScanPrompt: "Draft confirmed fixes.",
+          maxCostUsd: 12.5,
+          scanOptionsByMode: {
+            deep: { target: DiffTarget.workingTree() },
+          },
+        },
       ),
     );
 
@@ -203,15 +134,20 @@ describe("multiscan", () => {
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "payments", repository: source.path },
     ]);
+    expect(
+      JSON.parse(await readFile(join(paths.output, "manifest.json"), "utf8")),
+    ).toMatchObject({
+      scanPrompt: "Review boundaries.",
+      postScanPrompt: "Draft confirmed fixes.",
+      maxCostUsd: 12.5,
+      tasks: [
+        { id: "payments", prompt: "Focus on authentication, authorization." },
+      ],
+    });
   });
 
   test("records each completed scan's cost in the resumable ledger", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "priced");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\npriced,${source.path},${source.revision}\n`,
-    );
+    const { paths } = await repositoryFixture("priced");
     const cost = {
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
@@ -230,10 +166,176 @@ describe("multiscan", () => {
       ),
     );
 
+    expect(summary).toMatchObject({ completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "priced", status: "completed", cost },
     ]);
   });
+
+  test("records an exhausted repository budget without retrying the scan", async () => {
+    const { paths } = await repositoryFixture("over-budget");
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 25.25,
+    };
+    const attempts = mock<SecurityClient["run"]>(
+      async (_repository, scanOptions = {}) => {
+        throw new ScanCostLimitExceededError(25, cost, scanOptions.outputDir!);
+      },
+    );
+
+    const summary = await runMultiscan(
+      options(paths, client(attempts), { maxAttempts: 3, maxCostUsd: 25 }),
+    );
+
+    expect(attempts.mock.calls.length).toBe(1);
+    expect(summary).toMatchObject({ completed: 0, failed: 1 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "over-budget", status: "failed", attempt: 1, cost },
+    ]);
+  });
+
+  test("forwards a bulk CLI cost limit and rejects zero", async () => {
+    const { paths } = await repositoryFixture("sample");
+    const { runCli } = createCliTest(main);
+
+    let scanOptions: unknown;
+
+    expect(
+      await runCli(
+        [
+          "bulk-scan",
+          "repositories.csv",
+          "--output-dir",
+          "results",
+          "--max-cost",
+          "12.5",
+          "--json",
+        ],
+        dependencies({
+          currentDirectory: paths.root,
+          onTurn: (_repository, options) => (scanOptions = options),
+        }),
+      ),
+    ).toBe(0);
+    expect(scanOptions).toMatchObject({ maxCostUsd: 12.5 });
+
+    const invalid = captureCli(main, "stderr");
+    expect(
+      await invalid.run(
+        ["bulk-scan", "--max-cost=0"],
+        dependencies({ currentDirectory: paths.root }),
+      ),
+    ).toBe(2);
+    expect(invalid.text()).toContain("expected number to be >0");
+  });
+
+  test("surfaces optional post-scan warnings without failing completed scans", async () => {
+    const { paths } = await repositoryFixture("follow-up-warning");
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+
+    const warnings = [
+      "Could not run post-scan instructions.",
+      "Repository changed during the scan.",
+    ];
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          for (const warning of warnings) scanOptions.onWarning?.(warning);
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { onProgress: (event) => progress.push(event) },
+      ),
+    );
+
+    expect(summary).toMatchObject({
+      completed: 1,
+      failed: 0,
+      warnings: [
+        {
+          repository: "follow-up-warning",
+          warnings,
+        },
+      ],
+    });
+    expect(progress).toContainEqual({
+      repository: "follow-up-warning",
+      attempt: 1,
+      status: "started",
+      warning: "Could not run post-scan instructions.",
+    });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        id: "follow-up-warning",
+        status: "completed",
+        warnings,
+      },
+    ]);
+
+    const resumedProgress: typeof progress = [];
+    const resumed = await runMultiscan(
+      options(
+        paths,
+        client(async () => Promise.reject(new Error("must not rerun"))),
+        {
+          onProgress: (event) => resumedProgress.push(event),
+        },
+      ),
+    );
+
+    expect(resumed).toEqual({ ...summary, skipped: 1 });
+    for (const warning of warnings) {
+      expect(resumedProgress).toContainEqual({
+        repository: "follow-up-warning",
+        attempt: 1,
+        status: "completed",
+        warning,
+      });
+    }
+  });
+
+  test.each([false, true])(
+    "continues scanning when a progress observer fails %p",
+    async (asynchronous) => {
+      const { paths } = await repositoryFixture("observer-failure");
+      const attempts = mock<SecurityClient["run"]>(
+        async (_repository, scanOptions = {}) => {
+          scanOptions.onWarning?.("Optional post-scan warning.");
+          return await completedScan(scanOptions.outputDir!);
+        },
+      );
+      const progress: string[] = [];
+
+      const summary = await runMultiscan(
+        options(paths, client(attempts), {
+          onProgress: (event) => {
+            progress.push(event.warning ?? event.status);
+            const error = new Error("Optional progress observer failed.");
+            if (asynchronous) return Promise.reject(error);
+            throw error;
+          },
+        }),
+      );
+
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+      expect(attempts.mock.calls.length).toBe(1);
+      expect(progress).toEqual([
+        "started",
+        "Optional post-scan warning.",
+        "completed",
+      ]);
+      expect(await results(summary.resultsPath)).toMatchObject([
+        { id: "observer-failure", status: "completed", attempt: 1 },
+      ]);
+    },
+  );
 
   test("rejects malformed CSV and duplicate headers before starting scans", async () => {
     const paths = await fixture();
@@ -243,416 +345,915 @@ describe("multiscan", () => {
       `id,repository,revision,id\npayments,${source.path},${source.revision},again\n`,
       `id,repository,revision\npayments,${source.path}\n`,
     ];
-    let scans = 0;
+    const scans = mock(completeRun);
 
     for (const input of invalid) {
       await writeFile(paths.input, input);
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) => {
-              scans += 1;
-              return await completedScan(scanOptions.outputDir!);
-            }),
-          ),
-        ),
-      ).rejects.toThrow(/CSV/);
-    }
-
-    expect(scans).toBe(0);
-  });
-
-  test("materializes the pinned commit, applies row options, and removes its checkout", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "payments");
-    await writeFile(
-      join(source.path, "src", "app.ts"),
-      "export const changed = true;\n",
-    );
-    git(source.path, "add", ".");
-    git(
-      source.path,
-      "-c",
-      "user.name=Multiscan Test",
-      "-c",
-      "user.email=multiscan@example.test",
-      "commit",
-      "-qm",
-      "later",
-    );
-    await writeFile(
-      paths.input,
-      `id,repository,revision,scope,mode\npayments,${source.path},${source.revision},src,deep\n`,
-    );
-
-    let checkout = "";
-    let closed = 0;
-    const summary = await runMultiscan(
-      options(
-        paths,
-        client(
-          async (path, scanOptions = {}) => {
-            checkout = path;
-            expect(git(path, "rev-parse", "HEAD")).toBe(source.revision);
-            expect(
-              await readFile(join(path, "src", "app.ts"), "utf8"),
-            ).toContain('name = "payments"');
-            expect(scanOptions.target).toEqual(["src"]);
-            expect(scanOptions.mode).toBe("deep");
-            expect(scanOptions.outputDir).toBe(
-              join(paths.output, "artifacts", "payments", "attempt-1"),
-            );
-            return await completedScan(scanOptions.outputDir!);
-          },
-          async () => {
-            closed += 1;
-          },
-        ),
-      ),
-    );
-
-    expect(summary).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(closed).toBe(1);
-    await expect(access(checkout)).rejects.toThrow();
-    expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
-    expect(await results(summary.resultsPath)).toMatchObject([
-      {
-        id: "payments",
-        repository: source.path,
-        revision: source.revision,
-        scope: "src",
-        mode: "deep",
-        status: "completed",
-        attempt: 1,
-      },
-    ]);
-  });
-
-  test("limits simultaneous checkouts to the requested worker count", async () => {
-    const paths = await fixture();
-    const knowledgeBasePaths = [
-      join(paths.root, "architecture.md"),
-      "shared/threat-model.md",
-    ];
-    const sources = await Promise.all(
-      ["one", "two", "three"].map((name) => repository(paths.root, name)),
-    );
-    await writeFile(
-      paths.input,
-      `id,repository,revision\n${sources
-        .map(
-          (source, index) => `${index + 1},${source.path},${source.revision}`,
-        )
-        .join("\n")}\n`,
-    );
-
-    let active = 0;
-    let maximum = 0;
-    let created = 0;
-    let closed = 0;
-    let release!: () => void;
-    const simultaneous = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const security = client(async (_repository, scanOptions = {}) => {
-      expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
-      active += 1;
-      maximum = Math.max(maximum, active);
-      if (active === 2) release();
-      await simultaneous;
-      active -= 1;
-      return await completedScan(scanOptions.outputDir!);
-    });
-    const summary = await runMultiscan(
-      options(paths, security, {
-        workers: 2,
-        knowledgeBasePaths,
-        createSecurity: () => {
-          created += 1;
-          let running = false;
-          return client(
-            async (repository, scanOptions) => {
-              if (running) {
-                throw new Error("A scan is already running for this client.");
-              }
-              running = true;
-              try {
-                return await security.run(repository, scanOptions);
-              } finally {
-                running = false;
-              }
-            },
-            async () => {
-              closed += 1;
-            },
-          );
-        },
-      }),
-    );
-
-    expect(maximum).toBe(2);
-    expect(created).toBe(2);
-    expect(closed).toBe(2);
-    expect(summary).toMatchObject({ total: 3, completed: 3, failed: 0 });
-    expect(await results(summary.resultsPath)).toHaveLength(3);
-  });
-
-  test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "exclusive");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nexclusive,${source.path},${source.revision}\n`,
-    );
-    let started!: () => void;
-    let release!: () => void;
-    const running = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const finish = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const security = client(async (_repository, scanOptions = {}) => {
-      started();
-      await finish;
-      return await completedScan(scanOptions.outputDir!);
-    });
-    const first = runMultiscan(options(paths, security));
-    await running;
-    try {
-      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
-        /running|locked|supervisor/iu,
+      await expect(runMultiscan(options(paths, client(scans)))).rejects.toThrow(
+        /CSV/,
       );
-    } finally {
-      release();
-      await first;
     }
 
-    const [receipt] = await results(join(paths.output, "results.jsonl"));
-    await rm(join(receipt!["outputDir"] as string, "report.md"));
-    const lock = join(paths.output, ".lock");
-    await mkdir(lock);
-    await writeFile(
-      join(lock, "owner.json"),
-      JSON.stringify({ pid: 999_999_999 }),
-    );
-    const checkout = join(paths.output, "checkouts", "exclusive");
-    await mkdir(checkout);
-
-    const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
-    await expect(access(lock)).rejects.toThrow();
+    expect(scans.mock.calls.length).toBe(0);
   });
 
-  test("retries a failed attempt and records both durable receipts", async () => {
+  test("rejects task IDs that collide with Windows path names", async () => {
     const paths = await fixture();
-    const source = await repository(paths.root, "retry");
-    const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
-    const knowledgeBasePaths = ["architecture.md"];
-    const proxyUrl =
-      "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
-    const queryUrl =
-      "https://proxy.test/v1/responses?api_key=SYNTHETIC_MULTISCAN_QUERY_123&safe=1";
-    const shortAuthorization = "Bearer abc123";
-    const suffixedSecret = "SYNTHETIC_SUFFIXED_CLIENT_SECRET_123";
-    const suffixedToken = "SYNTHETIC_SUFFIXED_ACCESS_TOKEN_123";
-    const suffixedQuery = "SYNTHETIC_SUFFIXED_QUERY_SECRET_123";
-    const quotedSecret = "SYNTHETIC correct horse battery staple";
-    const opaqueAuthorization = "SYNTHETIC opaque authorization secret";
-    const npmAuthorization = "SYNTHETIC_NPM_AUTH_VALUE_123";
-    const customAuthorization = "SYNTHETIC_CUSTOM_AUTHORIZATION_123";
-    const suffixedAuthorization = "SYNTHETIC_SUFFIXED_AUTHORIZATION_123";
-    const paddedAuthorization = "SYNTHETIC_PADDED_AUTHORIZATION_TOKEN==";
-    const keyedAuthorization = "SYNTHETIC_KEYED_AUTHORIZATION_SECRET_123";
-    const camelCaseSecret = "SYNTHETIC_CAMEL_CASE_CLIENT_SECRET_123";
+    const scans = mock(completeRun);
+    for (const id of [
+      "CON",
+      "con.txt",
+      "NUL",
+      "AUX.txt",
+      "PRN",
+      "COM1",
+      "com9.log",
+      "LPT1",
+      "lpt9.txt",
+      "report.",
+    ]) {
+      await writeFile(
+        paths.input,
+        `id,repository,revision\n${id},./repository,${"0".repeat(40)}\n`,
+      );
+
+      await expect(
+        runMultiscan(options(paths, client(scans))),
+        id,
+      ).rejects.toThrow("safe, unique path names");
+    }
+
+    expect(scans.mock.calls.length).toBe(0);
+  });
+
+  test("knowledge failures do not hide a later real scan failure behind an older completed result", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "later-failure");
     await writeFile(
       paths.input,
-      `id,repository,revision\nretry,${source.path},${source.revision}\n`,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
     );
-
-    let attempts = 0;
-    const summary = await runMultiscan(
-      options(
-        paths,
-        client(async (_repository, scanOptions = {}) => {
-          expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
-          attempts += 1;
-          if (attempts === 1) {
-            throw new Error(
-              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} Authorization: Custom key=${keyedAuthorization} clientSecretValue=${camelCaseSecret} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
-            );
-          }
-          return await completedScan(scanOptions.outputDir!);
-        }),
-        { knowledgeBasePaths },
-      ),
+    const document = join(paths.root, "context.md");
+    await writeFile(document, "Original context.");
+    let calls = 0;
+    const configured = options(
+      paths,
+      client(async (_repo, scan = {}) => {
+        calls++;
+        if (calls === 2) {
+          await mkdir(scan.outputDir!, { recursive: true, mode: 0o700 });
+          await writeFile(join(scan.outputDir!, "checkpoint"), "keep");
+          throw new Error("Actual scan failed");
+        }
+        return completedScan(scan.outputDir!);
+      }),
+      { knowledgeBasePaths: [document], maxAttempts: 1 },
     );
-
-    expect(attempts).toBe(2);
-    expect(summary).toMatchObject({ completed: 1, failed: 0 });
-    expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "retry", status: "failed", attempt: 1 },
-      { id: "retry", status: "completed", attempt: 2 },
-    ]);
-    const ledger = await readFile(summary.resultsPath, "utf8");
-    expect(ledger).not.toContain(secret);
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_PASSWORD");
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_QUERY_123");
-    expect(ledger).not.toContain(suffixedSecret);
-    expect(ledger).not.toContain(suffixedToken);
-    expect(ledger).not.toContain(suffixedQuery);
-    expect(ledger).not.toContain(quotedSecret);
-    expect(ledger).not.toContain(opaqueAuthorization);
-    expect(ledger).not.toContain(npmAuthorization);
-    expect(ledger).not.toContain(customAuthorization);
-    expect(ledger).not.toContain(suffixedAuthorization);
-    expect(ledger).not.toContain(paddedAuthorization);
-    expect(ledger).not.toContain(keyedAuthorization);
-    expect(ledger).not.toContain(camelCaseSecret);
-    expect(ledger).not.toContain(shortAuthorization);
-    expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
+    await runMultiscan(configured);
+    const oldReport = join(
+      paths.output,
+      "artifacts",
+      "repo",
+      "attempt-1",
+      "report.md",
+    );
+    await rm(oldReport);
+    expect(await runMultiscan(configured)).toMatchObject({ failed: 1 });
+    await writeFile(oldReport, "{}\n");
+    await rm(document);
+    expect(await runMultiscan(configured)).toMatchObject({ failed: 1 });
+    await writeFile(document, "Original context.");
+    const repaired = await runMultiscan(configured);
+    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(3);
+    expect((await results(repaired.resultsPath)).at(-1)).toMatchObject({
+      status: "completed",
+      attempt: 4,
+    });
   });
 
-  test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
+  test.each(["partial write", "rename"])(
+    "preserves the campaign manifest after a knowledge repair %s failure",
+    async (failure) => {
+      const testName = `preserves the campaign manifest after a knowledge repair ${failure} failure`;
+      if (runTestInSubprocess(import.meta.path, testName)) return;
+      const paths = await fixture();
+      const source = await repository(paths.root, "manifest-repair");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,mode\nfailed,${source.path},${source.revision},deep\ngood,${source.path},${source.revision},standard\n`,
+      );
+      const document = join(paths.root, "missing.md");
+      const scans: string[] = [];
+      const configured = options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          scans.push(scan.mode!);
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxAttempts: 1,
+          scanOptionsByMode: { deep: { knowledgeBasePaths: [document] } },
+        },
+      );
+      const initial = await runMultiscan(configured);
+      expect(initial).toMatchObject({ completed: 1, failed: 1 });
+      const manifestPath = join(paths.output, "manifest.json");
+      const originalManifest = await readFile(manifestPath, "utf8");
+      const originalReceipts = await readFile(initial.resultsPath, "utf8");
+      await writeFile(document, "Repaired context.");
+      const originalWrite = filesystem.writeFile;
+      const originalRename = filesystem.rename;
+      const write = spyOn(filesystem, "writeFile").mockImplementation(
+        async (file, data, opts) => {
+          if (
+            failure === "partial write" &&
+            ((String(file) === manifestPath &&
+              (typeof opts !== "object" || opts?.flag !== "wx")) ||
+              String(file).startsWith(`${manifestPath}.`))
+          ) {
+            await originalWrite(file, "{", opts);
+            throw Object.assign(new Error("Synthetic manifest I/O failure"), {
+              code: "EIO",
+            });
+          }
+          return originalWrite(file, data, opts);
+        },
+      );
+      const move = spyOn(filesystem, "rename").mockImplementation(
+        async (from, to) => {
+          if (failure === "rename" && String(to) === manifestPath)
+            throw Object.assign(new Error("Synthetic manifest I/O failure"), {
+              code: "EIO",
+            });
+          return originalRename(from, to);
+        },
+      );
+      try {
+        await expect(runMultiscan(configured)).rejects.toThrow(
+          "Synthetic manifest I/O failure",
+        );
+      } finally {
+        write.mockRestore();
+        move.mockRestore();
+      }
+      expect(await readFile(manifestPath, "utf8")).toBe(originalManifest);
+      expect(await readFile(initial.resultsPath, "utf8")).toBe(
+        originalReceipts,
+      );
+      expect(scans).toEqual(["standard"]);
+      expect(await readdir(paths.output)).not.toContainEqual(
+        expect.stringMatching(/^manifest\.json\..*\.tmp$/),
+      );
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(scans).toEqual(["standard", "deep"]);
+      expect(await runMultiscan(configured)).toMatchObject({ skipped: 2 });
+    },
+  );
+
+  test("rejects legacy campaigns when unrecorded inputs are omitted", async () => {
     const paths = await fixture();
-    const source = await repository(paths.root, "resume");
-    const csv = `id,repository,revision\nresume,${source.path},${source.revision}\n`;
-    await writeFile(paths.input, csv);
+    const source = await repository(paths.root, "legacy-inputs");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const document = join(paths.root, "architecture.md");
+    await writeFile(document, "Original context.");
     let calls = 0;
     const security = client(async (_repository, scanOptions = {}) => {
-      calls += 1;
-      return await completedScan(scanOptions.outputDir!);
+      calls++;
+      return completedScan(scanOptions.outputDir!);
     });
+    const initial = options(paths, security, {
+      knowledgeBasePaths: [document],
+      config: { codexOverrides: { model: "synthetic-model" } },
+    });
+    await runMultiscan(initial);
+    expect(await runMultiscan(initial)).toMatchObject({ skipped: 1 });
 
-    const initial = await runMultiscan(options(paths, security));
-    await appendFile(initial.resultsPath, '{"id":"interrupted"');
-    const resumed = await runMultiscan(options(paths, security));
-    expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
-    expect(calls).toBe(1);
-
-    const [receipt] = await results(initial.resultsPath);
-    await rm(join(receipt!["outputDir"] as string, "report.md"));
-    const repaired = await runMultiscan(options(paths, security));
-    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(calls).toBe(2);
-    expect((await results(repaired.resultsPath)).at(-1)?.["outputDir"]).toBe(
-      join(paths.output, "artifacts", "resume", "attempt-2"),
+    const manifestPath = join(paths.output, "manifest.json");
+    const { tasks } = JSON.parse(await readFile(manifestPath, "utf8"));
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ version: 1, tasks }, null, 2) + "\n",
     );
-
-    await writeFile(paths.input, csv.replace("resume,", "changed,"));
     await expect(runMultiscan(options(paths, security))).rejects.toThrow(
       "manifest does not match",
     );
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
   });
 
-  test("ignores repository-local Git shims while preserving credential configuration", async () => {
+  test.each([false, true])(
+    "campaign resume binds extracted knowledge from mode settings=%p",
+    async (perMode) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "knowledge");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nknowledge,${source.path},${source.revision}\n`,
+      );
+      const knowledge = join(paths.root, "knowledge-base");
+      const nested = join(knowledge, "nested");
+      await mkdir(nested, { recursive: true });
+      const document = join(knowledge, "architecture.md");
+      const deployment = join(nested, "deployment.md");
+      const priorities = join(nested, "priorities.md");
+      await writeFile(document, "Original context.");
+      await writeFile(deployment, "Deployment context.");
+      await writeFile(priorities, "Review priorities.");
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls++;
+        return completedScan(scanOptions.outputDir!);
+      });
+      const run = (
+        knowledgeBasePaths: string[],
+        overrides: Partial<MultiscanOptions> = {},
+      ) =>
+        runMultiscan(
+          options(paths, security, {
+            ...(perMode
+              ? { scanOptionsByMode: { standard: { knowledgeBasePaths } } }
+              : { knowledgeBasePaths }),
+            ...overrides,
+          }),
+        );
+      const recover = { recoverScan: async () => undefined };
+      const manifestPath = join(paths.output, "manifest.json");
+      let reverseListing = false;
+      const originalReaddir = filesystem.readdir;
+      const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          const entries = await Reflect.apply(
+            originalReaddir,
+            filesystem,
+            args,
+          );
+          if (args[0] === knowledge || args[0] === nested) {
+            entries.sort((left: { name: string }, right: { name: string }) =>
+              left.name.localeCompare(right.name),
+            );
+            if (reverseListing) entries.reverse();
+          }
+          return entries;
+        },
+      );
+      try {
+        let attempts = 0;
+        for (const failure of [
+          "missing",
+          ...(process.platform === "win32" ? [] : ["unreadable"]),
+          "invalid",
+        ]) {
+          const moved = `${knowledge}-moved`;
+          if (failure === "missing") await rename(knowledge, moved);
+          else if (failure === "unreadable") await chmod(document, 0);
+          else await writeFile(document, Buffer.from([0xff]));
+          try {
+            const failed = await run([knowledge], attempts > 0 ? recover : {});
+            attempts += 2;
+            expect(failed).toMatchObject({
+              completed: 0,
+              failed: 1,
+              skipped: 0,
+            });
+            const receipts = await results(failed.resultsPath);
+            expect(receipts).toHaveLength(attempts);
+            expect(receipts.at(-1)).toMatchObject({
+              id: "knowledge",
+              status: "failed",
+              attempt: attempts,
+            });
+            expect(calls).toBe(0);
+            expect(
+              JSON.parse(await readFile(manifestPath, "utf8"))
+                .knowledgeBaseDigests,
+            ).toEqual({ standard: null });
+            await expect(run([])).rejects.toThrow("manifest does not match");
+            expect(calls).toBe(0);
+          } finally {
+            if (failure === "missing") await rename(moved, knowledge);
+            else if (failure === "unreadable") await chmod(document, 0o600);
+            else await writeFile(document, "Original context.");
+          }
+        }
+        await run([knowledge], perMode ? recover : {});
+        reverseListing = true;
+        expect(await run([knowledge])).toMatchObject({ skipped: 1 });
+      } finally {
+        listingSpy.mockRestore();
+      }
+      const boundManifest = await readFile(manifestPath, "utf8");
+      const completedReceipt = (
+        await results(join(paths.output, "results.jsonl"))
+      ).at(-1)!;
+      await writeFile(document, Buffer.from([0xff]));
+      await expect(
+        run([knowledge], { scanPrompt: "Changed review scope." }),
+      ).rejects.toThrow("manifest does not match");
+      expect(await run([knowledge], perMode ? recover : {})).toMatchObject({
+        completed: 0,
+        failed: 1,
+        skipped: 0,
+      });
+      expect(calls).toBe(1);
+      expect(await readFile(manifestPath, "utf8")).toBe(boundManifest);
+      expect(
+        await readFile(
+          join(completedReceipt["outputDir"] as string, "report.md"),
+          "utf8",
+        ),
+      ).toBe("{}\n");
+      await writeFile(document, "Original context.");
+      expect(await run([knowledge], perMode ? recover : {})).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(
+        await run(
+          perMode ? [knowledge] : [document, deployment, priorities, document],
+        ),
+      ).toMatchObject({ skipped: 1 });
+      if (!perMode) {
+        await expect(run([deployment, document, priorities])).rejects.toThrow(
+          "manifest does not match",
+        );
+      }
+      await writeFile(document, "Revised context.");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      await writeFile(document, "Original context.");
+      const additional = join(knowledge, "constraints.txt");
+      await writeFile(additional, "Additional context.");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      await rm(additional);
+      expect(await run([knowledge])).toMatchObject({ skipped: 1 });
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      delete manifest.knowledgeBaseDigests;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      expect(calls).toBe(1);
+    },
+  );
+
+  test.each([
+    ["standard", true],
+    ["deep", true],
+    ["deep", false],
+  ] as const)(
+    "knowledge failure in %s preserves other modes with knowledge=%p",
+    async (failedMode, goodKnowledge) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "mixed-knowledge");
+      const goodMode = failedMode === "standard" ? "deep" : "standard";
+      await writeFile(
+        paths.input,
+        `id,repository,revision,mode\nfailed,${source.path},${source.revision},${failedMode}\ngood,${source.path},${source.revision},${goodMode}\n`,
+      );
+      const missing = join(paths.root, "missing.md");
+      const good = join(paths.root, "good.md");
+      await writeFile(good, "Original context.");
+      const scans: string[] = [];
+      const configured = options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          scans.push(scan.mode!);
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxAttempts: 1,
+          scanOptionsByMode: {
+            [failedMode]: { knowledgeBasePaths: [missing] },
+            ...(goodKnowledge
+              ? { [goodMode]: { knowledgeBasePaths: [good] } }
+              : {}),
+          },
+        },
+      );
+      const initial = await runMultiscan(configured);
+      expect(initial).toMatchObject({ completed: 1, failed: 1, skipped: 0 });
+      expect(scans).toEqual([goodMode]);
+      expect(await results(initial.resultsPath)).toMatchObject([
+        { id: "failed", status: "failed", attempt: 1 },
+        { id: "good", status: "completed", attempt: 1 },
+      ]);
+      const manifestPath = join(paths.output, "manifest.json");
+      const partialManifest = await readFile(manifestPath, "utf8");
+      expect(JSON.parse(partialManifest).knowledgeBaseDigests).toEqual({
+        [failedMode]: null,
+        ...(goodKnowledge
+          ? {
+              [goodMode]: workflowDigest({
+                "0-good.md.txt": "Original context.",
+              }),
+            }
+          : {}),
+      });
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 1,
+        skipped: 1,
+      });
+      expect(scans).toEqual([goodMode]);
+      for (const repaired of [false, true]) {
+        if (repaired) await writeFile(missing, "Repaired context.");
+        if (goodKnowledge) {
+          await writeFile(good, "Changed context.");
+          await expect(runMultiscan(configured)).rejects.toThrow(
+            "manifest does not match",
+          );
+        }
+        expect(await readFile(manifestPath, "utf8")).toBe(partialManifest);
+      }
+      await writeFile(good, "Original context.");
+      expect(
+        await runMultiscan({
+          ...configured,
+          recoverScan: async () => {
+            throw new Error("An extraction failure has no scan to recover.");
+          },
+        }),
+      ).toMatchObject({ completed: 2, failed: 0, skipped: 1 });
+      expect(scans).toEqual([goodMode, failedMode]);
+      expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+        id: "failed",
+        status: "completed",
+        attempt: 3,
+      });
+      if (!goodKnowledge) return;
+      const boundManifest = await readFile(manifestPath, "utf8");
+      await rm(good);
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 1,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(boundManifest);
+      await writeFile(good, "Changed context.");
+      await expect(runMultiscan(configured)).rejects.toThrow(
+        "manifest does not match",
+      );
+      expect(scans).toEqual([goodMode, failedMode]);
+    },
+  );
+
+  test("a mode-specific knowledge failure preserves other interrupted scans for recovery", async () => {
     const paths = await fixture();
-    const source = await repository(paths.root, "private");
+    const source = await repository(paths.root, "mixed-recovery");
     await writeFile(
       paths.input,
-      `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
+      `id,repository,revision,mode\nstandard,${source.path},${source.revision},standard\ndeep,${source.path},${source.revision},deep\n`,
     );
-    const shimDirectory = join(paths.root, "node_modules", ".bin");
-    const leakedCredential = join(paths.root, "leaked-credential");
-    await mkdir(shimDirectory, { recursive: true });
+    const document = join(paths.root, "standard.md");
+    await writeFile(document, "Original context.");
+    let runs = 0;
+    const configured = options(
+      paths,
+      client(async (_repo, scan = {}) => {
+        runs++;
+        await mkdir(scan.outputDir!, { recursive: true, mode: 0o700 });
+        await writeFile(join(scan.outputDir!, "checkpoint"), "keep");
+        throw new Error("Interrupted scan");
+      }),
+      {
+        maxAttempts: 1,
+        scanOptionsByMode: { standard: { knowledgeBasePaths: [document] } },
+      },
+    );
+    await runMultiscan(configured);
+    const resumed: string[] = [];
+    const recover = {
+      ...configured,
+      recoverScan: async (dir: string) => {
+        resumed.push(dir);
+        return completedScan(dir);
+      },
+    };
+    const standard = join(paths.output, "artifacts", "standard", "attempt-1");
+    const deep = join(paths.output, "artifacts", "deep", "attempt-1");
+    await rm(document);
+    expect(await runMultiscan(recover)).toMatchObject({
+      completed: 1,
+      failed: 1,
+      skipped: 0,
+    });
+    expect(resumed).toEqual([deep]);
+    expect(
+      (await results(join(paths.output, "results.jsonl"))).slice(-2),
+    ).toMatchObject([
+      { id: "standard", status: "failed", attempt: 1, outputDir: standard },
+      { id: "deep", status: "completed", attempt: 1, outputDir: deep },
+    ]);
+    await writeFile(document, "Original context.");
+    expect(await runMultiscan(recover)).toMatchObject({
+      completed: 2,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(resumed).toEqual([deep, standard]);
+    expect(runs).toBe(2);
+    expect(await readFile(join(standard, "checkpoint"), "utf8")).toBe("keep");
+    expect(await readFile(join(deep, "checkpoint"), "utf8")).toBe("keep");
+  });
+
+  test("shared knowledge failures affect all modes before mode-specific inputs", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "shared-knowledge");
     await writeFile(
-      join(shimDirectory, "git"),
-      `#!/bin/sh\nprintf '%s' "$GIT_CONFIG_VALUE_0" > "${leakedCredential}"\nexit 1\n`,
-      { mode: 0o700 },
+      paths.input,
+      `id,repository,revision,mode\nstandard,${source.path},${source.revision},standard\ndeep,${source.path},${source.revision},deep\n`,
     );
-    const previousDirectory = process.cwd();
-    const environment = new Map(
-      [
-        "PATH",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_KEY_0",
-        "GIT_CONFIG_VALUE_0",
-      ].map((name) => [name, process.env[name]] as const),
+    const shared = join(paths.root, "shared.md");
+    const perMode = join(paths.root, "per-mode.md");
+    await writeFile(perMode, "Mode-specific context.");
+    const scans: string[] = [];
+    const configured = options(
+      paths,
+      client(async (_repo, scan = {}) => {
+        scans.push(scan.mode!);
+        expect(scan.knowledgeBaseSnapshot?.documents).toEqual({
+          "0-shared.md.txt": "Shared context.",
+        });
+        return completedScan(scan.outputDir!);
+      }),
+      {
+        maxAttempts: 1,
+        knowledgeBasePaths: [shared],
+        scanOptionsByMode: {
+          standard: { knowledgeBasePaths: [perMode] },
+          deep: { knowledgeBasePaths: [perMode] },
+        },
+      },
     );
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 0,
+      failed: 2,
+    });
+    expect(scans).toEqual([]);
+    await writeFile(shared, "Shared context.");
+    await rm(perMode);
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 2,
+      failed: 0,
+    });
+    expect(scans).toEqual(["standard", "deep"]);
+  });
 
-    try {
-      process.chdir(paths.root);
-      process.env["PATH"] =
-        `${shimDirectory}${process.platform === "win32" ? ";" : ":"}${environment.get("PATH") ?? ""}`;
-      process.env["GIT_CONFIG_COUNT"] = "1";
-      process.env["GIT_CONFIG_KEY_0"] = "multiscan.credential";
-      process.env["GIT_CONFIG_VALUE_0"] = "SYNTHETIC_GIT_CREDENTIAL";
-
+  test.each([false, true])(
+    "campaign workers stage the fingerprinted snapshot with mode settings=%p",
+    async (perMode) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "snapshot");
+      const modes = ["standard", "deep", "standard", "deep"] as const;
+      await writeFile(
+        paths.input,
+        "id,repository,revision,mode\n" +
+          modes
+            .map(
+              (mode, index) =>
+                `repo-${index},${source.path},${source.revision},${mode}`,
+            )
+            .join("\n") +
+          "\n",
+      );
+      const standard = join(paths.root, "architecture.md");
+      const deep = join(paths.root, "threat-model.txt");
+      await writeFile(standard, "Original architecture.");
+      await writeFile(deep, "Original threat model.");
+      const homes = [join(paths.root, "home-1"), join(paths.root, "home-2")];
+      await Promise.all(homes.map((home) => mkdir(home)));
+      let created = 0;
+      let calls = 0;
+      const staged: Record<string, string>[] = [];
+      const recipes: Record<string, unknown>[] = [];
       const summary = await runMultiscan(
         options(
           paths,
-          client(async (checkout, scanOptions = {}) => {
-            const trustedGit = await resolveTrustedExecutable(
-              "git",
-              { ...process.env, PATH: environment.get("PATH") ?? "" },
-              paths.root,
-            );
-            if (trustedGit === null) {
-              throw new Error("Git is not available on a trusted PATH.");
-            }
-            const credential = execFileSync(
-              trustedGit.executable,
-              ["-C", checkout, "config", "--get", "multiscan.credential"],
-              {
-                encoding: "utf8",
-                env: trustedGit.environment,
-                stdio: ["ignore", "pipe", "pipe"],
-              },
-            ).trim();
-            expect(credential).toBe("SYNTHETIC_GIT_CREDENTIAL");
-            return await completedScan(scanOptions.outputDir!);
+          client(async () => {
+            throw new Error("Unexpected client");
           }),
+          {
+            workers: 2,
+            maxAttempts: 1,
+            ...(perMode ? {} : { knowledgeBasePaths: [standard] }),
+            scanOptionsByMode: {
+              standard: { knowledgeBasePaths: [standard] },
+              deep: { knowledgeBasePaths: [deep] },
+            },
+            createSecurity: (config) => {
+              const home = homes[created++]!;
+              return new TestClient(config, {
+                environment: {},
+                prepareRuntime: async () => preparedRuntime(home),
+                resolvePluginPython: async () => "/managed/python",
+                repositoryRevision: async () => source.revision,
+                runWorkbench: async (_options, args, input) => {
+                  if (args[0] === "register-cli-scan")
+                    recipes.push(JSON.parse(input!).recipe);
+                  return mockWorkbench(args, input);
+                },
+                createCodex: (codex) => ({
+                  startThread: () => ({
+                    id: null,
+                    async runStreamed() {
+                      const first = calls++ === 0;
+                      if (first) {
+                        await writeFile(
+                          standard,
+                          "Changed after the manifest was saved.",
+                        );
+                        await rm(deep);
+                      }
+                      const directory =
+                        codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+                      staged.push(
+                        Object.fromEntries(
+                          await Promise.all(
+                            (await readdir(directory)).map(async (name) => [
+                              name,
+                              await readFile(join(directory, name), "utf8"),
+                            ]),
+                          ),
+                        ),
+                      );
+                      throw new Error(
+                        "Synthetic model stop after reading staged knowledge.",
+                      );
+                    },
+                  }),
+                }),
+              });
+            },
+          },
         ),
       );
-
-      expect(summary).toMatchObject({ completed: 1, failed: 0 });
-      await expect(access(leakedCredential)).rejects.toThrow();
-    } finally {
-      process.chdir(previousDirectory);
-      for (const [name, value] of environment) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
+      expect(created).toBe(2);
+      expect(calls).toBe(4);
+      expect(summary).toMatchObject({ total: 4, failed: 4 });
+      expect(
+        (await results(summary.resultsPath)).every((row) =>
+          String(row["error"]).includes("Synthetic model stop"),
+        ),
+      ).toBe(true);
+      const standardDocuments = {
+        "0-architecture.md.txt": "Original architecture.",
+      };
+      const deepDocuments = perMode
+        ? { "0-threat-model.txt.txt": "Original threat model." }
+        : standardDocuments;
+      expect(
+        staged.filter(
+          (documents) =>
+            JSON.stringify(documents) === JSON.stringify(standardDocuments),
+        ),
+      ).toHaveLength(perMode ? 2 : 4);
+      if (perMode)
+        expect(
+          staged.filter(
+            (documents) =>
+              JSON.stringify(documents) === JSON.stringify(deepDocuments),
+          ),
+        ).toHaveLength(2);
+      for (const recipe of recipes) {
+        expect(recipe["knowledgeBasePaths"]).toEqual([
+          perMode && recipe["mode"] === "deep" ? deep : standard,
+        ]);
+        expect(recipe["knowledgeBaseSnapshot"]).toBeUndefined();
       }
-    }
+      const manifestText = await readFile(
+        join(paths.output, "manifest.json"),
+        "utf8",
+      );
+      expect(JSON.parse(manifestText).knowledgeBaseDigests).toEqual({
+        standard: workflowDigest(standardDocuments),
+        deep: workflowDigest(deepDocuments),
+      });
+      expect(manifestText).not.toContain("Original architecture.");
+      expect(manifestText).not.toContain("Original threat model.");
+    },
+  );
+
+  test("renaming a top-level knowledge document invalidates saved results", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "renamed-knowledge");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const document = join(paths.root, "architecture.md");
+    const renamed = join(paths.root, "deployment.md");
+    await writeFile(document, "Unchanged text.");
+    const security = client(async (_repository, scan = {}) =>
+      completedScan(scan.outputDir!),
+    );
+    await runMultiscan(
+      options(paths, security, { knowledgeBasePaths: [document] }),
+    );
+    await rename(document, renamed);
+    await expect(
+      runMultiscan(options(paths, security, { knowledgeBasePaths: [renamed] })),
+    ).rejects.toThrow("manifest does not match");
   });
 
-  test("rejects output-directory symlinks before deleting external checkouts", async () => {
-    for (const directory of ["", "checkouts", "artifacts"]) {
+  test.each([
+    ["pluginPath", false],
+    ["pluginPath", true],
+    ["pythonPath", false],
+    ["pythonPath", true],
+  ] as const)(
+    "campaign binds explicit %s before client creation and recovery=%p",
+    async (field, recovery) => {
       const paths = await fixture();
-      const source = await repository(paths.root, "victim");
+      const source = await repository(paths.root, "runtime-selection");
       await writeFile(
         paths.input,
-        `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
+        `id,repository,revision\ndone,${source.path},${source.revision}\npending,${source.path},${source.revision}\n`,
       );
-      const external = join(paths.root, "external");
-      const preserved = join(external, "victim", "keep.txt");
-      await mkdir(join(external, "victim"), { recursive: true });
-      await writeFile(preserved, "preserved\n");
-      if (directory) await mkdir(paths.output);
-      await symlink(
-        external,
-        directory ? join(paths.output, directory) : paths.output,
+      const pending = join(paths.output, "artifacts", "pending", "attempt-1");
+      const run = mock(
+        async (
+          _repository: string,
+          scan: Parameters<SecurityClient["run"]>[1] = {},
+        ) => {
+          if (scan.outputDir === pending) {
+            await mkdir(pending, { recursive: true });
+            await writeFile(
+              join(pending, "checkpoint"),
+              "Preserve this attempt.",
+            );
+            throw new Error("Synthetic interruption before completion.");
+          }
+          return completedScan(scan.outputDir!);
+        },
       );
+      const security = client(run);
+      const createSecurity = mock(
+        (_config: MultiscanOptions["config"]) => security,
+      );
+      const recoverScan = mock(async (scanDir: string) =>
+        completedScan(scanDir),
+      );
+      const config: MultiscanOptions["config"] = {
+        [field]:
+          field === "pluginPath"
+            ? await customPlugin(paths.root, "directory")
+            : join(paths.root, "selected-runtime"),
+      };
+      const configured = options(paths, security, {
+        config,
+        createSecurity,
+        maxAttempts: 1,
+      });
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        failed: 1,
+      });
+      const manifest = await readFile(
+        join(paths.output, "manifest.json"),
+        "utf8",
+      );
+      const receipts = await readFile(
+        join(paths.output, "results.jsonl"),
+        "utf8",
+      );
+      const continuation = {
+        ...configured,
+        workers: 3,
+        maxAttempts: 4,
+        ...(recovery ? { recoverScan } : {}),
+      };
+      for (const changed of [
+        { [field]: join(paths.root, "other-runtime") },
+        {},
+      ]) {
+        await expect(
+          runMultiscan({ ...continuation, config: changed }),
+        ).rejects.toThrow("manifest does not match");
+        expect(createSecurity).toHaveBeenCalledTimes(1);
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(recoverScan).not.toHaveBeenCalled();
+        expect(
+          await readFile(join(paths.output, "manifest.json"), "utf8"),
+        ).toBe(manifest);
+        expect(
+          await readFile(join(paths.output, "results.jsonl"), "utf8"),
+        ).toBe(receipts);
+      }
+      expect(await runMultiscan(continuation)).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(createSecurity).toHaveBeenLastCalledWith(config);
+      expect(recoverScan).toHaveBeenCalledTimes(recovery ? 1 : 0);
+      expect(run).toHaveBeenCalledTimes(recovery ? 2 : 3);
+      expect(await readFile(join(pending, "checkpoint"), "utf8")).toBe(
+        "Preserve this attempt.",
+      );
+      expect(await readFile(join(paths.output, "manifest.json"), "utf8")).toBe(
+        manifest,
+      );
+    },
+  );
 
-      let scans = 0;
+  test("campaign preserves absent runtime selections and rejects adding one", async () => {
+    const { paths } = await repositoryFixture("default-runtime");
+    const security = client(completeRun);
+    const createSecurity = mock(() => security);
+    const configured = options(paths, security, { createSecurity });
+    await runMultiscan(configured);
+    const manifest = await readFile(
+      join(paths.output, "manifest.json"),
+      "utf8",
+    );
+    expect(JSON.parse(manifest).configurationDigest).toBeUndefined();
+    for (const field of ["pluginPath", "pythonPath"] as const) {
       await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) => {
-              scans += 1;
-              return await completedScan(scanOptions.outputDir!);
-            }),
-          ),
-        ),
-      ).rejects.toThrow("symbolic links");
-      expect(scans).toBe(0);
-      expect(await readFile(preserved, "utf8")).toBe("preserved\n");
+        runMultiscan({
+          ...configured,
+          config: { [field]: join(paths.root, "selected-runtime") },
+        }),
+      ).rejects.toThrow("manifest does not match");
     }
+    expect(
+      await runMultiscan({
+        ...configured,
+        workers: 3,
+        maxAttempts: 4,
+        config: { pluginPath: undefined, pythonPath: undefined },
+      }),
+    ).toMatchObject({ skipped: 1 });
+    expect(createSecurity).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(paths.output, "manifest.json"), "utf8")).toBe(
+      manifest,
+    );
   });
+
+  test.each([false, true])(
+    "campaign resume binds overrides with configured modes=%p",
+    async (configuredModes) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "configuration");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nconfiguration,${source.path},${source.revision}\n`,
+      );
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls++;
+        return completedScan(scanOptions.outputDir!);
+      });
+      const initial = options(paths, security, {
+        ...(configuredModes
+          ? { scanOptionsByMode: { standard: { target: ["src"] } } }
+          : {}),
+        config: {
+          codexOverrides: {
+            model: "synthetic-model",
+            features: { example: true },
+          },
+        },
+      });
+      await runMultiscan(initial);
+      expect(
+        await runMultiscan({
+          ...initial,
+          workers: 3,
+          maxAttempts: 4,
+          config: {
+            codexOverrides: {
+              features: { example: true },
+              model: "synthetic-model",
+            },
+          },
+        }),
+      ).toMatchObject({ skipped: 1 });
+      await expect(
+        runMultiscan({
+          ...initial,
+          config: {
+            codexOverrides: {
+              model: "changed-model",
+              features: { example: true },
+            },
+          },
+        }),
+      ).rejects.toThrow("manifest does not match");
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      delete manifest.configurationDigest;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      await expect(runMultiscan(initial)).rejects.toThrow(
+        "manifest does not match",
+      );
+      expect(calls).toBe(1);
+    },
+  );
 
   test("rejects unsafe input without starting scans or exposing URL credentials", async () => {
     const paths = await fixture();
@@ -664,9 +1265,21 @@ describe("multiscan", () => {
         row: `../escape,${source.path},${source.revision},.`,
       },
       {
+        name: "windows-alias",
+        row: `report,${source.path},${source.revision},.\nreport.,${source.path},${source.revision},.`,
+      },
+      {
         name: "scope",
         row: `safe,${source.path},${source.revision},../outside`,
       },
+      ...(process.platform === "win32"
+        ? [
+            {
+              name: "windows-qualified-scope",
+              row: `safe,${source.path},${source.revision},src:stream`,
+            },
+          ]
+        : []),
       {
         name: "revision",
         row: `safe,${source.path},HEAD,.`,
@@ -680,11 +1293,7 @@ describe("multiscan", () => {
         row: `safe,https://user:${secret}@example.test/private.git,${source.revision},.`,
       },
     ];
-    let scans = 0;
-    const security = client(async (_repository, scanOptions = {}) => {
-      scans += 1;
-      return await completedScan(scanOptions.outputDir!);
-    });
+    const security = client(mock(completeRun));
 
     for (const entry of invalid) {
       await writeFile(
@@ -698,48 +1307,11 @@ describe("multiscan", () => {
         () => null,
         (reason: unknown) => reason,
       );
-      expect(error).toBeInstanceOf(Error);
-      expect(String(error)).not.toContain(secret);
+      expect(error, entry.name).toBeInstanceOf(Error);
+      if (entry.name === "credentials")
+        expect(String(error)).not.toContain(secret);
     }
 
-    expect(scans).toBe(0);
-  });
-
-  test("treats incomplete coverage as a failure and still finishes other repositories", async () => {
-    const paths = await fixture();
-    const incomplete = await repository(paths.root, "incomplete");
-    const complete = await repository(paths.root, "complete");
-    await writeFile(
-      paths.input,
-      [
-        "id,repository,revision",
-        `incomplete,${incomplete.path},${incomplete.revision}`,
-        `complete,${complete.path},${complete.revision}`,
-        "",
-      ].join("\n"),
-    );
-
-    const summary = await runMultiscan(
-      options(
-        paths,
-        client(async (checkout, scanOptions = {}) =>
-          completedScan(
-            scanOptions.outputDir!,
-            (await readFile(join(checkout, "src", "app.ts"), "utf8")).includes(
-              'name = "incomplete"',
-            )
-              ? "partial"
-              : "complete",
-          ),
-        ),
-        { maxAttempts: 1 },
-      ),
-    );
-
-    expect(summary).toMatchObject({ total: 2, completed: 1, failed: 1 });
-    expect(await results(summary.resultsPath)).toMatchObject([
-      { id: "incomplete", status: "failed", attempt: 1 },
-      { id: "complete", status: "completed", attempt: 1 },
-    ]);
+    expect(security.run.mock.calls.length).toBe(0);
   });
 });

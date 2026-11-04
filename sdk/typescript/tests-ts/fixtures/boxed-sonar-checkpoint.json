@@ -1,0 +1,81 @@
+{
+  "filename": "64800b63401460aadf4376cef6cf4d8aa6c1684d66c0541aa11aa3ce84306799.pending.json",
+  "checkpoint": {
+    "accountId": "synthetic-account",
+    "requests": [
+      {
+        "request_id": "1b018e6f-7f68-40f0-90cc-e855e383f63c",
+        "repository": {
+          "id": "repo-example",
+          "repo_connector_id": "github",
+          "environment_id": "environment-example",
+          "reset_marker": "generation-1"
+        },
+        "source": {
+          "provider": "sonar",
+          "source_key": "tenant-example/vulnerability-finding"
+        },
+        "items": [
+          {
+            "client_id": "item-1",
+            "source_finding_id": "issue-1",
+            "expected_version": 1,
+            "evidence": {
+              "title": "Review input handling",
+              "severity": "high",
+              "source_data": {
+                "format": "sonar-issues/v1",
+                "repositoryUrl": "https://github.com/example/project",
+                "issue": {
+                  "key": "issue-1"
+                },
+                "effort": 2.5
+              },
+              "description": null,
+              "url": null,
+              "advisory_ids": [],
+              "packages": [],
+              "locations": [],
+              "branch": null,
+              "code_revision": null,
+              "source_scan_id": null,
+              "image_digests": [],
+              "source_updated_at": null
+            }
+          },
+          {
+            "client_id": "item-2",
+            "source_finding_id": "issue-2",
+            "expected_version": 1,
+            "evidence": {
+              "title": "Review input handling",
+              "severity": "high",
+              "source_data": {
+                "format": "sonar-issues/v1",
+                "repositoryUrl": "https://github.com/example/project",
+                "branch": "main",
+                "issue": {
+                  "key": "issue-2"
+                }
+              },
+              "branch": "main",
+              "description": null,
+              "url": null,
+              "advisory_ids": [],
+              "packages": [],
+              "locations": [],
+              "code_revision": null,
+              "source_scan_id": null,
+              "image_digests": [],
+              "source_updated_at": null
+            }
+          }
+        ]
+      }
+    ],
+    "inputProjection": {
+      "inputDigest": "35c7201ca98d5808994aece0d04b7f330ae32f9836d443f9676c329f808dbb58",
+      "savedEvidenceDigest": "5443dab95a2cd679f58b9fcfefc2ccacdc74dad2e6b2697f318883013ab5740a"
+    }
+  }
+}
