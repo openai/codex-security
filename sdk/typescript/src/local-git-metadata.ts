@@ -192,11 +192,17 @@ export async function localGitProtectionRoots(
 }
 
 /** Discover Git metadata for the selection, then for the current working directory. */
-export async function importGitProtectionRoots(
+export async function commandGitProtectionRoots(
   repository: string,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
-  requestedPaths: readonly string[] = [],
+  {
+    cwd = process.cwd(),
+    requestedPaths,
+  }: {
+    cwd?: string;
+    requestedPaths?: readonly string[];
+  } = {},
 ): Promise<string[]> {
   const roots = await localGitProtectionRoots(
     repository,
@@ -204,7 +210,6 @@ export async function importGitProtectionRoots(
     signal,
     requestedPaths,
   );
-  const cwd = process.cwd();
   if (signal?.aborted) throw abortReason(signal);
   if (cwd !== repository)
     roots.push(...(await localGitProtectionRoots(cwd, environment, signal)));
