@@ -9869,7 +9869,9 @@ if __name__ == "__main__":
     | readonly ["boundary"]
     | readonly ["resolve"]
     | readonly ["begin"];
+  type ProgressPartition = "batch" | "staged" | "each";
   type ProgressScenario = {
+    partitions?: readonly ProgressPartition[];
     name: string;
     expected: ScanProgress;
     steps: readonly ProgressScenarioStep[];
@@ -9877,10 +9879,6 @@ if __name__ == "__main__":
   };
   type ScopedProgressScenario = ProgressScenario & {
     initialScope: number | null;
-    partitions?: readonly ("batch" | "each")[];
-  };
-  type SplitProgressScenario = ProgressScenario & {
-    partitions?: readonly boolean[];
   };
   function lastAnchorOrSave(steps: readonly ProgressScenarioStep[]): number {
     const anchor = steps.findLastIndex(
@@ -9955,16 +9953,14 @@ if __name__ == "__main__":
       initialScope = 8,
       workerFirst,
       stopBeforeResolution,
-      split,
-      partition = split ? "each" : "batch",
+      partition = "batch",
     }: {
       steps: readonly ProgressScenarioStep[];
       expected: ScanProgress;
       initialScope?: number | null;
       workerFirst: boolean;
       stopBeforeResolution?: boolean;
-      split?: boolean;
-      partition?: "batch" | "staged" | "each";
+      partition?: ProgressPartition;
     },
     {
       resolutionIndex = -1,
@@ -10151,6 +10147,37 @@ if __name__ == "__main__":
     expect(updates).toEqual(settled);
   }
 
+  const progressScheduleTitle =
+    "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)";
+
+  function progressSchedules(
+    scenarios: readonly ProgressScenario[],
+    defaultPartitions: readonly ProgressPartition[] = ["batch", "each"],
+  ) {
+    return scenarios.flatMap((scenario) =>
+      [false, true].flatMap((workerFirst) =>
+        (scenario.partitions ?? defaultPartitions).flatMap((partition) =>
+          [false, true].map((stopBeforeResolution) => ({
+            ...scenario,
+            workerFirst,
+            partition,
+            stopBeforeResolution,
+          })),
+        ),
+      ),
+    );
+  }
+
+  function testProgressSchedules(
+    scenarios: readonly ProgressScenario[],
+    partitions?: readonly ProgressPartition[],
+  ) {
+    test.each(progressSchedules(scenarios, partitions))(
+      progressScheduleTitle,
+      (scenario) => runProgressScenario(scenario),
+    );
+  }
+
   describe("displayed receipt eligibility after inventory recovery", () => {
     const scenarios: ScopedProgressScenario[] = [];
     for (const mode of [
@@ -10221,24 +10248,7 @@ if __name__ == "__main__":
         ],
       });
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("recovered scope and phase authority", () => {
@@ -10378,24 +10388,7 @@ if __name__ == "__main__":
         });
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("admitted inventory across truncated live copies", () => {
@@ -10509,24 +10502,7 @@ if __name__ == "__main__":
         });
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
-            (partition) =>
-              [false, true].map((stopBeforeResolution) => ({
-                ...scenario,
-                workerFirst,
-                partition,
-                stopBeforeResolution,
-              })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("saved inventory receipts and live prefix proof", () => {
@@ -10672,23 +10648,7 @@ if __name__ == "__main__":
         ["live", "anchor", "done"],
       ],
     });
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (["batch", "each"] as const).flatMap((partition) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              partition,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios);
   });
 
   describe("source eligibility and durable inventory proof", () => {
@@ -10806,31 +10766,15 @@ if __name__ == "__main__":
         );
       }
     }
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (["batch", "staged", "each"] as const).flatMap((partition) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              partition,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      (scenario) => runProgressScenario(scenario),
-    );
+    testProgressSchedules(scenarios, ["batch", "staged", "each"]);
   });
 
   function progressWithWorkerFollowup(
     name: string,
     state: ScanProgress,
     steps: readonly ProgressScenarioStep[],
-    partitions?: readonly boolean[],
-  ): SplitProgressScenario {
+    partitions?: readonly ProgressPartition[],
+  ): ProgressScenario {
     const next =
       state.filesCompleted < state.filesTotal
         ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
@@ -10866,28 +10810,8 @@ if __name__ == "__main__":
     };
   }
 
-  function testProgressSchedules(scenarios: readonly SplitProgressScenario[]) {
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          (scenario.partitions ?? [false, true]).flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) => runProgressScenario(scenario),
-    );
-  }
-
   describe("review eligibility and ordered projections", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const mode of ["exact", "changed", "after inventory"] as const) {
       for (const eligible of [false, true]) {
         const initialTotal = eligible ? 7 : 6;
@@ -10966,7 +10890,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory authority before scope projection", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const persisted of ["late", "early", "absent"] as const) {
       for (const phase of ["reporting", "attack_path"] as const) {
         const scenario = progressWithWorkerFollowup(
@@ -11037,7 +10961,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory proof across completion intervals", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const total of [9, 10]) {
       for (const tail of ["same", "shrink", "none"] as const) {
         for (const exact of [false, true]) {
@@ -11146,7 +11070,7 @@ if __name__ == "__main__":
   });
 
   describe("bounded inventory marker evidence", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const command of ["changed", "exact"] as const) {
       const live = command === "changed" ? "live-changed" : "live";
       const scenario = progressWithWorkerFollowup(
@@ -11287,7 +11211,7 @@ if __name__ == "__main__":
   });
 
   describe("inventory occurrence and cutoff revalidation", () => {
-    const scenarios: SplitProgressScenario[] = [];
+    const scenarios: ProgressScenario[] = [];
     for (const control of ["dropped", "delivered", "eligible"] as const) {
       const review = progress("validation", 3, control === "eligible" ? 8 : 10);
       const scenario = progressWithWorkerFollowup(
@@ -11340,7 +11264,7 @@ if __name__ == "__main__":
             : []),
           ["live", "anchor", "done"],
         ],
-        control === "single batch" ? [false] : undefined,
+        control === "single batch" ? ["batch"] : undefined,
       );
       scenarios.push(scenario);
     }
@@ -11754,26 +11678,11 @@ if __name__ == "__main__":
         ],
       },
     );
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          [false, true].flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) =>
-        runProgressScenario(scenario, {
-          resolutionIndex: lastLiveAnchor(scenario.steps),
-          pollReceipts: false,
-        }),
+    test.each(progressSchedules(scenarios))(progressScheduleTitle, (scenario) =>
+      runProgressScenario(scenario, {
+        resolutionIndex: lastLiveAnchor(scenario.steps),
+        pollReceipts: false,
+      }),
     );
   });
 
@@ -11905,26 +11814,11 @@ if __name__ == "__main__":
         };
       }),
     ];
-    test.each(
-      scenarios.flatMap((scenario) =>
-        [false, true].flatMap((workerFirst) =>
-          [false, true].flatMap((split) =>
-            [false, true].map((stopBeforeResolution) => ({
-              ...scenario,
-              workerFirst,
-              split,
-              stopBeforeResolution,
-            })),
-          ),
-        ),
-      ),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) =>
-        runProgressScenario(scenario, {
-          resolutionIndex: lastLiveAnchor(scenario.steps),
-          pollReceipts: false,
-        }),
+    test.each(progressSchedules(scenarios))(progressScheduleTitle, (scenario) =>
+      runProgressScenario(scenario, {
+        resolutionIndex: lastLiveAnchor(scenario.steps),
+        pollReceipts: false,
+      }),
     );
   });
 
