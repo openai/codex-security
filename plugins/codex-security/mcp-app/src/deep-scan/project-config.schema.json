@@ -16,6 +16,20 @@
     "review_events": {
       "type": "object",
       "properties": {
+        "batch_size": {
+          "default": 10,
+          "description": "Maximum number of JSONL records per live review window (default 10).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_wait_seconds": {
+          "default": 600,
+          "description": "Maximum seconds from the first pending record to flush a live window (default 600).",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 2147483.647
+        },
         "screen_with_decisions": {
           "default": false,
           "description": "Screen event groups with the OpenAI Decisions API (requires OPENAI_API_KEY).",

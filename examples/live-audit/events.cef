@@ -1,0 +1,4 @@
+CEF:0|Example|Audit Service|1.0|session-start|Session started|Low|rt=1767268800000 suser=deploy src=192.0.2.10 externalId=evt-1
+CEF:0|Example|Audit Service|1.0|artifact-read|Artifact read|Low|rt=1767268860000 suser=deploy act=read externalId=evt-read
+CEF:0|Example|Audit Service|1.0|role-grant|Administrative role granted|High|rt=1767268920000 suser=deploy duser=deploy act=grant cs1=administrator cs1Label=role externalId=evt-2
+CEF:0|Example|Audit Service|1.0|artifact-read|Artifact read|Low|rt=1767268980000 suser=deploy act=read externalId=evt-after

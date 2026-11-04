@@ -8,7 +8,19 @@ import {
 const nonempty = z.string().min(1);
 
 export const DEFAULT_DECISIONS_CUTOFF = 0.95;
+export const DEFAULT_EVENT_BATCH_SIZE = 10;
+export const DEFAULT_EVENT_MAX_WAIT_SECONDS = 600;
 export const ReviewEventSettingsSchema = z.strictObject({
+  batch_size: z.number().int().positive().optional().meta({
+    default: DEFAULT_EVENT_BATCH_SIZE,
+    description:
+      "Maximum number of JSONL records per live review window (default 10).",
+  }),
+  max_wait_seconds: z.number().positive().max(2_147_483.647).optional().meta({
+    default: DEFAULT_EVENT_MAX_WAIT_SECONDS,
+    description:
+      "Maximum seconds from the first pending record to flush a live window (default 600).",
+  }),
   screen_with_decisions: z.boolean().optional().meta({
     default: false,
     description:
