@@ -62,6 +62,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  AZURE_CODEX_PROVIDER,
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -74,6 +75,7 @@ import {
   ScanCostTracker,
   type ScanCost,
 } from "../src/cost.js";
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
@@ -1271,53 +1273,85 @@ describe("CodexSecurity orchestration", () => {
         'X-Private = "synthetic-private-header"',
       ].join("\n"),
     );
-    async function register(
+    async function run(
       codexOverrides: JsonObject,
-      endpoint: string,
-      key: string,
+      environment: NodeJS.ProcessEnv,
     ) {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      let saved!: JsonObject;
+      let recipe!: { config: JsonObject; providerProfile?: unknown };
+      let native!: JsonObject;
       await using client = new TestClient(
         { codexOverrides },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
-          environment: {
-            CODEX_HOME: sourceHome,
-            CODEX_SECURITY_STATE_DIR: join(root, "state"),
-            AZURE_OPENAI_ENDPOINT: endpoint,
-            AZURE_OPENAI_API_KEY: key,
+          environment,
+          createCodex: async (options) => {
+            native = parseToml(
+              await readFile(
+                join(codexHome, `${options.nativeProfile}.config.toml`),
+                "utf8",
+              ),
+            ) as JsonObject;
+            return completedCodex(root)(options);
           },
-          createCodex: completedCodex(root),
           runWorkbench: async (_options, args, input) => {
-            if (args[0] === "register-cli-scan") {
-              saved = JSON.parse(input!).recipe.config;
-            }
+            if (args[0] === "register-cli-scan")
+              recipe = JSON.parse(input!).recipe;
             return mockWorkbench(args, input);
           },
         },
       );
       await client.run(repository);
-      return saved;
+      return { recipe, native };
     }
     await Promise.all(
       ["first", "second"].map(async (name) => {
         const endpoint = `https://${name}.openai.azure.com`;
-        const key = `synthetic-key-${name}`;
-        const original = await register({ profile: "review" }, endpoint, key);
-        expect(original).toMatchObject({
+        const environment = {
+          CODEX_HOME: sourceHome,
+          CODEX_SECURITY_STATE_DIR: await temporaryDirectory(),
+          AZURE_OPENAI_API_KEY: `synthetic-key-${name}`,
+        };
+        const base_url = endpoint + "/openai/v1";
+        const azure = {
+          ...AZURE_CODEX_PROVIDER,
+          ...(name === "first" ? { base_url } : {}),
+          env_http_headers: { "X-Extra": "SYNTHETIC_HEADER" },
+        };
+        const { recipe, native } = await run(
+          { profile: "review", model_providers: { azure } },
+          { ...environment, AZURE_OPENAI_ENDPOINT: endpoint },
+        );
+        expect(recipe.config).toMatchObject({
           profile: "review",
           model_provider: "azure",
         });
-        const expected = { azure: { base_url: endpoint + "/openai/v1" } };
-        expect(original["model_providers"]).toEqual(expected);
-        expect(JSON.stringify(original)).not.toContain("synthetic-");
-        const replayed = await register(
-          original,
-          "https://changed.example",
-          key,
+        expect(recipe.config["model_providers"]).toEqual({
+          azure: { base_url },
+        });
+        expect(recipe.providerProfile).toBeDefined();
+        expect(JSON.stringify(recipe)).not.toContain("synthetic-");
+        const overrides = await restoreProviderProfile(
+          recipe.config,
+          recipe.providerProfile,
+          environment,
         );
-        expect(replayed["model_providers"]).toEqual(expected);
+        const replay = await run(overrides, {
+          ...environment,
+          ...(name === "first"
+            ? { AZURE_OPENAI_ENDPOINT: "https://changed.example" }
+            : {}),
+        });
+        expect(replay.native).toEqual(native);
+        expect(replay.native).toMatchObject({
+          model_providers: {
+            azure: {
+              ...azure,
+              base_url,
+              http_headers: { "X-Private": "synthetic-private-header" },
+            },
+          },
+        });
       }),
     );
   });

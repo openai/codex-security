@@ -143,12 +143,14 @@ export async function restoreProviderProfile(
   if (profile["home"] === "managed")
     await requireSecureCredentialHome(codexHome);
   let saved: unknown;
+  let legacyProfile = false;
   try {
     saved = JSON.parse(
       await readFile(join(codexHome, `${profile["name"]}.config.json`), "utf8"),
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    legacyProfile = true;
     saved = parse(
       await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
     );
@@ -164,13 +166,16 @@ export async function restoreProviderProfile(
     );
   }
   const { model_providers: providers, ...overrides } = saved;
-  return {
-    ...deepMerge({ ...config }, overrides as JsonObject),
-    ...(providers === null ||
+  const restored = deepMerge({ ...config }, overrides as JsonObject);
+  if (
+    providers === null ||
     (isRecord(providers) && Object.keys(providers).length > 0)
-      ? { model_providers: providers as JsonObject | null }
-      : {}),
-  };
+  ) {
+    // JSON stores only omitted settings. Older TOML profiles hold complete tables.
+    if (legacyProfile) delete restored["model_providers"];
+    deepMerge(restored, { model_providers: providers as JsonObject | null });
+  }
+  return restored;
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */

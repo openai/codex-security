@@ -91,7 +91,6 @@ import {
   SCAN_AUTH_MODES,
   scanAuthentication,
   runtimeScanAuthentication,
-  selectedScanEnvironment,
   validateScanCostLimit,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -106,6 +105,7 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  withoutOpenAiApiKeys,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanProgress } from "./scan-progress.js";
@@ -1684,7 +1684,7 @@ export async function runCodexSkillCommand(
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...selectedScanEnvironment(selected, "chatgpt"),
+          ...withoutOpenAiApiKeys(selected),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {

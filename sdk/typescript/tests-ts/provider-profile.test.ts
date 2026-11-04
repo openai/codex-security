@@ -85,7 +85,10 @@ test.each([false, true])(
     expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
     const restore = (index: number) =>
       restoreProviderProfile(
-        { model_provider: "openrouter" },
+        {
+          model_provider: "openrouter",
+          model_providers: { openrouter: { name: "Saved provider" } },
+        },
         { name: profiles[index]!.name, home: "managed" },
         environment,
       );
@@ -93,7 +96,12 @@ test.each([false, true])(
     for (const [index, profile] of profiles.entries()) {
       expect(restored[index]).toEqual({
         model_provider: "openrouter",
-        model_providers: providers[index]!,
+        model_providers: {
+          openrouter: {
+            ...(replay ? { name: "Saved provider" } : {}),
+            ...providers[index]!.openrouter,
+          },
+        },
       });
       if (process.platform !== "win32")
         expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
