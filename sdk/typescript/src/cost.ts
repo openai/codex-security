@@ -2356,8 +2356,15 @@ export class ScanCostTracker {
     const collectionErrors: unknown[] = [];
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for (const directory of ["sessions", "archived_sessions"]) {
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
+    const unreadable = new Map<SessionUsage, unknown>();
+    let blockingReadError: unknown;
+    directories: for (const directory of ["sessions", "archived_sessions"]) {
       try {
         for await (const path of sessionFiles(
           join(this.#options.codexHome, directory),
@@ -2378,12 +2385,17 @@ export class ScanCostTracker {
               true,
             );
           } catch (error) {
-            if (session.threadId === null) collectionErrors.push(error);
-            else unreadable.push({ session, error });
+            if (session.threadId !== null) unreadable.set(session, error);
+            else if (isRecord(error) && typeof error["syscall"] === "string") {
+              blockingReadError ??= error;
+              if (!observeHealthySessions || !isDeniedLogRead(error))
+                break directories;
+            } else collectionErrors.push(error);
           }
         }
       } catch (error) {
-        collectionErrors.push(error);
+        // Retain the blocking read if traversal also stops on a later entry.
+        if (blockingReadError === undefined) collectionErrors.push(error);
       }
     }
 
@@ -2436,9 +2448,14 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) collectionErrors.push(error);
+    for (const [session, error] of unreadable) {
+      if (session.threadId !== null && included.has(session.threadId)) {
+        if (isDeniedLogRead(error)) blockingReadError ??= error;
+        else collectionErrors.push(error);
+      }
     }
+    if (blockingReadError !== undefined)
+      collectionErrors.unshift(blockingReadError);
 
     const usages = new Map<string, ScanTokenUsage | null>(
       [...included].map((threadId) => [
@@ -2461,7 +2478,10 @@ export class ScanCostTracker {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
       let session = tracked;
-      if (path.endsWith(".zst") && !tracked.compressedRead) {
+      const observe =
+        !unreadable.has(tracked) &&
+        (blockingReadError === undefined || observeHealthySessions);
+      if (observe && path.endsWith(".zst") && !tracked.compressedRead) {
         // The metadata pass associates this archive with the scan. A full read
         // starts at the beginning, including when retrying a partial decode.
         const archive: SessionUsage = createSessionUsage(observeUsage);
@@ -2479,6 +2499,7 @@ export class ScanCostTracker {
           this.#sessions.set(path, archive);
         }
       } else if (
+        observe &&
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
@@ -2509,6 +2530,28 @@ export class ScanCostTracker {
           collectionErrors.push(error);
         }
       }
+      const receipt = usages.get(threadId);
+      if (
+        session.usage !== null &&
+        session.usage.total_tokens >=
+          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
+      )
+        incomplete.delete(threadId);
+      // A discovered thread without a receipt has unknown usage, not zero.
+      // Retain it so a parent-only subtotal cannot appear to be complete.
+      if (receipt === undefined) usages.set(threadId, null);
+      if (
+        session.usage !== null &&
+        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+          // Worker receipts retain field presence; the SDK may default to zero.
+          (session.usage.total_tokens === receipt?.total_tokens &&
+            (receipt.cache_write_input_tokens_reported === false ||
+              (receipt === this.#receipts.get(threadId) &&
+                receipt.cache_write_input_tokens === 0))))
+      ) {
+        usages.set(threadId, session.usage);
+      }
+      if (!observe) continue;
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
         worker = this.#workers.get(threadId);
@@ -2622,27 +2665,6 @@ export class ScanCostTracker {
         }
       }
       this.#reportedSessionPositions.set(eventStream, reported);
-      const receipt = usages.get(threadId);
-      if (
-        session.usage !== null &&
-        session.usage.total_tokens >=
-          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
-      )
-        incomplete.delete(threadId);
-      // A discovered thread without a receipt has unknown usage, not zero.
-      // Retain it so a parent-only subtotal cannot appear to be complete.
-      if (receipt === undefined) usages.set(threadId, null);
-      if (
-        session.usage !== null &&
-        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // Worker receipts retain field presence; the SDK may default to zero.
-          (session.usage.total_tokens === receipt?.total_tokens &&
-            (receipt.cache_write_input_tokens_reported === false ||
-              (receipt === this.#receipts.get(threadId) &&
-                receipt.cache_write_input_tokens === 0))))
-      ) {
-        usages.set(threadId, session.usage);
-      }
     }
     let usage: ScanTokenUsage | null = null;
     let missingThreadCount = workerReceipts.unknownAttempts;
@@ -2679,7 +2701,13 @@ export class ScanCostTracker {
     if (complete) {
       this.#reportUsage(usage);
     }
-    this.#reportCost(cost, complete);
+    // A blocking read leaves a native-only subtotal unconfirmed until the retry.
+    if (
+      blockingReadError === undefined ||
+      this.#receipts.size > 0 ||
+      workerReceipts.usages.size > 0
+    )
+      this.#reportCost(cost, complete);
     // Preserve measured usage and every diagnostic when several logs fail together.
     if (collectionErrors.length === 1) throw collectionErrors[0];
     if (collectionErrors.length > 1)
@@ -4002,6 +4030,14 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isDeniedLogRead(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
