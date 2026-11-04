@@ -3794,20 +3794,15 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(failure)}`,
-              ...(snapshot?.cost
-                ? ["--cost-json", JSON.stringify(snapshot.cost)]
-                : []),
-            ],
+          await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            signal,
+            failure,
+            snapshot?.cost,
           );
           activeScan = null;
-          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -4898,17 +4893,14 @@ export class CodexSecurity {
     } catch (error) {
       if (activeScan !== undefined) {
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(error)}`,
-            ],
+          await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            signal,
+            error,
           );
           activeScan = undefined;
-          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (this.#closed) this.#requireOpen();
@@ -6120,6 +6112,58 @@ function notifyScanLifecycle(
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
     notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+async function stopRegisteredScan(
+  workbench: typeof runWorkbench,
+  activeScan: { id: string; options: WorkbenchCommandOptions },
+  options: ScanOptions,
+  signal: AbortSignal,
+  error: unknown,
+  cost?: Readonly<ScanCost> | null,
+): Promise<void> {
+  const cleanupOptions = { ...activeScan.options, signal: undefined };
+  const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  const canceled =
+    error instanceof ScanExecutionError
+      ? error.result.status === "canceled"
+      : signal.aborted &&
+        !(signal.reason instanceof ScanCostLimitExceededError) &&
+        !(
+          signal.reason instanceof DOMException &&
+          signal.reason.name === "TimeoutError"
+        );
+  if (canceled) {
+    try {
+      const stopped = await workbench(cleanupOptions, [
+        "cancel-scan",
+        "--scan-id",
+        activeScan.id,
+        ...costArgs,
+      ]);
+      // A workspace can already display a replacement when cancellation returns.
+      const results = stopped["results"];
+      if (isRecord(results) && results["scanId"] === activeScan.id)
+        notifyScanLifecycle(options, results, true);
+      else observeSettledScan(options, activeScan);
+      return;
+    } catch (cause) {
+      // Older external workbenches can only persist cost on a failed scan.
+      if (
+        !cost ||
+        !errorMessage(cause).includes("unrecognized arguments: --cost-json")
+      )
+        throw cause;
+    }
+  }
+  const failed = await workbench(cleanupOptions, [
+    "fail-scan",
+    "--scan-id",
+    activeScan.id,
+    `--message=${errorMessage(error)}`,
+    ...costArgs,
+  ]);
+  notifyScanLifecycle(options, failed["scan"], true);
 }
 
 function observeSettledScan(

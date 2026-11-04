@@ -38,6 +38,7 @@ import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
+import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -1098,6 +1099,15 @@ test.each([
     expect(terminal.status).toBe(status);
     expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
+    expect(
+      readSavedScanLifecycle(
+        { CODEX_SECURITY_STATE_DIR: input.stateDirectory },
+        terminal.scanId!,
+      ),
+    ).toMatchObject({
+      scanId: terminal.scanId,
+      status: status === "canceled" ? "canceled" : "failed",
+    });
   },
 );
 
@@ -1302,7 +1312,8 @@ test("cancellation after registration retains scan identity before executor disp
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
+      lifecycle: { status: "canceled" },
     },
   ]);
 });

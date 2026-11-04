@@ -988,6 +988,9 @@ findings. Use `codex-security scans list --json` for the current repository.
 To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
 with its output directory. Imported scans have lifecycle mode `import`. The SDK
 exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Canceling a newly registered SDK scan through its abort signal, closing the
+client during the scan, or receiving a canceled hosted execution records
+`canceled`. A scan that has already completed keeps its committed outcome.
 Applications can choose how to collect and export these observations.
 
 For filesystem and approval behavior, see the
