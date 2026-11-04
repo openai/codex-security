@@ -95,6 +95,8 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
