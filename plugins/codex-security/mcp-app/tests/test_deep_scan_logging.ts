@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { DeepScanLogEvent } from "../src/deep-scan/types.js";
 import {
   coordinatorFixture,
-  createCoordinator,
+  startCoordinator,
   FakeExecutor,
   runCoordinator,
   temporaryDirectories,
@@ -66,7 +66,7 @@ try {
       });
       let workerSignal: AbortSignal | undefined;
       const events: DeepScanLogEvent[] = [];
-      const coordinator = createCoordinator(
+      const coordinator = startCoordinator(
         fixture,
         store,
         {
@@ -86,7 +86,6 @@ try {
           },
         },
       );
-      coordinator.start();
       await executor.discoveryStarted.promise;
       const reason = "fixture cancellation\nwith diagnostic detail";
       try {
