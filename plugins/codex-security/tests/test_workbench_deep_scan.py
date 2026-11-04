@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +41,7 @@ from workbench_test_support import (
     update_progress,
     upsert_deep_worker,
     worker_paths,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -91,6 +94,33 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
     target.mkdir()
     run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
+
+
+@pytest.mark.cross_platform
+def test_target_admission_reads_one_entry_without_looking_up_its_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
+    check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
+    events = []
+
+    def entries():
+        events.append("read")
+        # A filesystem can report DT_UNKNOWN. Any entry-type lookup here fails.
+        yield object()
+        pytest.fail("admission read a second directory entry")
+
+    @contextmanager
+    def scandir(path):
+        assert Path(path) == tmp_path
+        try:
+            yield entries()
+        finally:
+            events.append("closed")
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    check_selected_targets(tmp_path, ["."], [])
+    assert events == ["read", "closed"]
 
 
 def restore_v53_schema(state_dir: Path) -> None:
@@ -194,6 +224,7 @@ class DeepScan:
         thread_id: str | None = None,
         error: str | None = None,
         replaceable_failure_kind: str | None = None,
+        terminal_failure: bool = False,
         coordinator_generation: int | None = None,
         check: bool = True,
     ) -> dict[str, object]:
@@ -209,6 +240,7 @@ class DeepScan:
             *(("--attempt", str(attempt)) if attempt is not None else ()),
             *(("--sdk-thread-id", thread_id) if thread_id is not None else ()),
             *(("--error-message", error) if error is not None else ()),
+            *(("--terminal-failure",) if terminal_failure else ()),
             *(
                 ("--replaceable-failure-kind", replaceable_failure_kind)
                 if replaceable_failure_kind is not None
@@ -349,6 +381,76 @@ def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> N
     assert "other completed scans" in save(sources, check=False)["stderr"]
 
 
+@pytest.mark.parametrize("legacy_archive", [False, True])
+def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(
+    tmp_path: Path, legacy_archive: bool
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    worker, *_ = deep.dispatch_discovery_worker(name="discovery-0001")
+    deep.record_iteration(name="dedup-0001", input_worker_ids=[worker], new_findings_count=1)
+    manifest = deep.directory / "coordinator.json"
+    manifest.write_text("{}")
+    before = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", str(manifest)
+    )["deepScan"]
+
+    target = tmp_path / "target"
+    registration = run_workbench(
+        deep.state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(deep.directory),
+        "--archive-existing",
+        "--recipe-json",
+        json.dumps(
+            {
+                "config": {},
+                "mode": "deep",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+            }
+        ),
+        environment=deep_environment(deep.codex_home),
+    )
+    archived = Path(registration["archivedScanDir"])
+    if legacy_archive:
+        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+                (str(manifest), deep.id),
+            )
+            connection.executemany(
+                "UPDATE deep_scan_workers SET prompt_path = ?, artifact_dir = ?, "
+                "result_manifest_path = ? WHERE id = ?",
+                [
+                    (row["promptPath"], row["artifactDir"], row["resultManifestPath"], row["id"])
+                    for row in before["workers"]
+                ],
+            )
+    after = deep.read("thread-deep-scan")
+    assert Path(after["manifestPath"]) == archived / manifest.name
+    for old, current in zip(before["workers"], after["workers"], strict=True):
+        assert old["id"] == current["id"]
+        for field in ("promptPath", "artifactDir", "resultManifestPath"):
+            path = Path(current[field])
+            assert path == archived / Path(old[field]).relative_to(deep.directory)
+            assert path.exists()
+    replay = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", after["manifestPath"]
+    )
+    assert replay["deepScan"]["manifestPath"] == after["manifestPath"]
+    worker_output = Path(
+        next(row["artifactDir"] for row in after["workers"] if row["id"] == worker)
+    )
+    checkpoint = write_checkpoint(worker_output / "checkpoints", saved_draft(deep.id))
+    assert deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
+    deep.command("recover-scan-results")
+    saved = json.loads((archived / "scan-manifest.json").read_text())
+    assert checkpoint.relative_to(archived).as_posix() in saved["scan"]["preservedSources"]
+
+
 def test_existing_generation_safely_claims_and_reclaims_without_schema_migration(
     tmp_path: Path,
 ) -> None:
@@ -428,6 +530,7 @@ def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_pat
     assert adopted["deepScan"]["coordinatorGeneration"] == 2
     assert adopted["deepScan"]["workers"][0]["status"] == "canceled"
     assert adopted["deepScan"]["dispatchedCount"] == 0
+    assert adopted["deepScan"]["discoveryStarted"] is True
 
 
 def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
@@ -445,6 +548,35 @@ def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
     recovered = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
     assert (recovered["phase"], recovered["coordinatorGeneration"]) == ("setup", 3)
     assert not inventory.exists()
+
+
+def test_observer_and_successor_see_discovery_progress_before_first_dispatch(
+    tmp_path: Path,
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    owner = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
+    assert owner["discoveryStarted"] is False
+
+    deep.command(
+        "update-progress",
+        "--phase",
+        "discovery",
+        "--coordinator-generation",
+        str(owner["coordinatorGeneration"]),
+    )
+    before = deep.read("thread-deep-scan")
+    observed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert observed["coordinatorDisposition"] == "observing"
+    assert observed["deepScan"]["updatedAt"] == before["updatedAt"]
+
+    expire_deep_scan_coordinator(deep.state_dir, deep.id)
+    adopted = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert adopted["coordinatorDisposition"] == "adopted"
+    for run in (before, observed["deepScan"], adopted["deepScan"]):
+        assert run["phase"] == "setup"
+        assert run["discoveryStarted"] is True
+        assert run["dispatchedCount"] == 0
+        assert run["workers"] == []
 
 
 @pytest.mark.cross_platform
@@ -510,7 +642,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         "completed": 1,
         "active": 0,
         "maximum": 2,
-        "consolidating": False,
+        "consolidating": True,
     }
     assert (paused["reportAvailable"], paused["findingCount"], paused["artifacts"]) == (
         False,
@@ -798,6 +930,51 @@ def test_expired_generation_refunds_shutdown_canceled_discovery(
     )
 
 
+@pytest.mark.parametrize("terminal,cancel", [(False, False), (True, False), (True, True)])
+def test_worker_failure_diagnostic_survives_coordinator_adoption(
+    tmp_path: Path, terminal: bool, cancel: bool
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    claim = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    generation = claim["deepScan"]["coordinatorGeneration"]
+    worker, prompt, artifacts, _ = deep.dispatch_discovery_worker(
+        name="discovery-1", succeed=False, coordinator_generation=generation
+    )
+    message = "Worker stopped by policy."
+    failed = deep.upsert_worker(
+        worker_id=worker,
+        prompt_path=prompt,
+        artifact_dir=artifacts,
+        status="failed",
+        error=message,
+        terminal_failure=terminal,
+        coordinator_generation=generation,
+    )["deepScan"]
+    expected = message if terminal else None
+    assert (failed["status"], failed["error"]) == ("running", expected)
+    assert failed["workers"][0]["error"] == message
+
+    expire_deep_scan_coordinator(deep.state_dir, deep.id)
+    adopted = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert adopted["coordinatorDisposition"] == "adopted"
+    assert adopted["deepScan"]["error"] == expected
+    generation = ("--coordinator-generation", str(adopted["deepScan"]["coordinatorGeneration"]))
+    manifest = deep.directory / "finish.json"
+    manifest.write_text("{}")
+    if terminal:
+        assert message in deep.finish("capped", manifest, *generation, check=False)["stderr"]
+    if cancel:
+        deep.command("cancel-scan", "--thread-id", "thread-deep-scan")
+        final = deep.read("thread-deep-scan")
+        assert (final["status"], final["error"]) == ("canceled", None)
+    else:
+        final = deep.command("fail-deep-scan", "--message", "Cleanup failed.", *generation)[
+            "deepScan"
+        ]
+        assert final["error"] == (expected or "Cleanup failed.")
+    assert final["workers"][0]["error"] == message
+
+
 @pytest.mark.cross_platform
 def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None:
     deep = start_empty_target_scan(tmp_path)
@@ -866,6 +1043,9 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
 
     def independent_reviews() -> dict[str, int | bool]:
         context = get_scan(deep.state_dir, deep.id)
+        assert get_scan(deep.state_dir, deep.id, "--progress-only") == {
+            "scan": {"progress": context["scan"]["progress"]}
+        }
         return context["scan"]["progress"]["independentReviews"]
 
     assert independent_reviews() == {
@@ -921,8 +1101,12 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         "active": 0,
         "completed": 1,
         "maximum": 40,
-        "consolidating": False,
+        "consolidating": True,
     }
+    deep.record_iteration(
+        name="dedup-0001", input_worker_ids=[first_worker_id], new_findings_count=0
+    )
+    assert independent_reviews()["consolidating"] is False
 
 
 @pytest.mark.parametrize(

@@ -18,5 +18,5 @@ being embedded in its source tree or shipped npm runtime.
   for individual skill files and bundles, including cross-file behavior.
 
 Model runs are opt-in. CI runs the deterministic triage, secret-discovery,
-time-budget, and workflow-routing helper checks and the real-IPC reducer
-regression through the normal MCP test suite.
+time-budget, and workflow-routing helper checks. The MCP suite covers Deep Scan
+iterations, recovery, and publication.

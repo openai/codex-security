@@ -9,7 +9,6 @@ import {
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
-  isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDiscoveryPrompt } from "./templates.js";
 import type {
@@ -174,7 +173,15 @@ export class DeepScanWorkerRunner {
       );
     }
 
-    // Once SQLite accepts the scan, leave its result available for recovery.
+    // A validation success can still race with cancellation or a lease change.
+    // Report worker success only once SQLite accepts the result.
+    this.options.log({
+      event: "worker_succeeded",
+      scanId: run.scanId,
+      workerId,
+      kind: "discovery",
+      attempt: persisted.attempt,
+    });
     this.options.log({
       event: "discovery_accepted",
       scanId: run.scanId,
@@ -212,6 +219,7 @@ export class DeepScanWorkerRunner {
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
+      let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -240,7 +248,21 @@ export class DeepScanWorkerRunner {
           workingDirectory: input.artifactDir,
           subagents: run.config.subagents,
           signal,
-          onNonRetryableError: this.options.onNonRetryableError,
+          onNonRetryableError: (error) => {
+            if (signal.aborted || terminalFailure) return;
+            terminalFailure = this.options.store
+              .updateWorker({
+                ...baseMutation,
+                threadId: activeThreadId,
+                status: "failed",
+                error: deepScanErrorMessage(error),
+                terminalFailure: true,
+              })
+              .then(() => ({ status: "failed", error }));
+            // Await this write after executor cleanup, even if it rejects first.
+            void terminalFailure.catch(() => {});
+            this.options.onNonRetryableError?.(error);
+          },
           resumeThreadId: resumableThreadId,
           continuationPrompt:
             resumePrompt && run.severityRubric
@@ -271,6 +293,7 @@ export class DeepScanWorkerRunner {
             });
           },
         });
+        if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
@@ -284,13 +307,6 @@ export class DeepScanWorkerRunner {
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        this.options.log({
-          event: "worker_succeeded",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
-          attempt,
-        });
         return {
           status: "succeeded",
           attempt,
@@ -298,20 +314,17 @@ export class DeepScanWorkerRunner {
         };
       } catch (error) {
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
+        if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
         const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
-        const policyRefusal =
-          retryable && isCodexCybersecurityPolicyRefusal(normalized);
-        if (policyRefusal || !retryable || attempt === maximumAttempts) {
+        if (!retryable || attempt === maximumAttempts) {
           const replaceableFailureKind = retryable
-            ? policyRefusal
-              ? "policy_refusal"
-              : validationStarted
-                ? "invalid_discovery_artifacts"
-                : "transient_error"
+            ? validationStarted
+              ? "invalid_discovery_artifacts"
+              : "transient_error"
             : undefined;
           await this.options.store.updateWorker({
             ...baseMutation,
@@ -378,6 +391,7 @@ export class DeepScanWorkerRunner {
           kind: "discovery",
           attempt,
           count: delayMs,
+          reason: deepScanErrorMessage(normalized),
         });
         try {
           await this.options.clock.sleep(delayMs, signal);

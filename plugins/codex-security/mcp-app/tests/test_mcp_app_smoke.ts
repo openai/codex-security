@@ -78,6 +78,8 @@ assert.deepEqual(
     "CODEX_HOME",
     "CODEX_SQLITE_HOME",
     "CODEX_API_KEY",
+    "CODEX_OSS_BASE_URL",
+    "CODEX_OSS_PORT",
     "CODEX_SAFETY_IDENTIFIER",
     "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_CLI_PATH",
@@ -88,6 +90,9 @@ assert.deepEqual(
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
     "CHEAPER_INFERENCE_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -126,7 +131,7 @@ assert.deepEqual(
     "NODE_EXTRA_CA_CERTS",
     "XDG_CACHE_HOME",
   ],
-  "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
+  "The MCP process and SDK workers must inherit provider routing and authentication, runtime paths, and enterprise proxy/certificate configuration.",
 );
 const target = await temporaryDirectory("codex-security-target-");
 const replacementTarget = await temporaryDirectory(
