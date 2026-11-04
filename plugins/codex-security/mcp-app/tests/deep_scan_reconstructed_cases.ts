@@ -58,7 +58,7 @@ export async function testReconstructedWorkers({
       literalFilesystemDenies:
         trustedParentSandboxWithDenials.literalFilesystemDenies,
     };
-    const currentParentSandbox =
+    const observerSandbox =
       name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
     const filesystem = { ...deniedWorkerPermissionProfile.filesystem };
     delete filesystem["glob_scan_max_depth"];
@@ -70,6 +70,11 @@ export async function testReconstructedWorkers({
     const configPath = path.join(fixture.root, "scan config.toml");
     const promptPath = path.join(fixture.root, "prompt.md");
     await mkdir(codexHome);
+    await mkdir(path.join(fixture.root, "observer-home"));
+    const currentParentSandbox = {
+      ...observerSandbox,
+      filesystemDenies: [...observerSandbox.filesystemDenies, codexHome],
+    };
     const config: Record<string, string> = {
       model: `fixture-${name}-inherited`,
       model_provider: name === "first" ? "openrouter" : "amazon-bedrock",
@@ -129,6 +134,10 @@ export async function testReconstructedWorkers({
         CODEX_SECURITY_CONFIG_PATH: configPath,
         CODEX_API_KEY: `synthetic-${name}-credential`,
         FAKE_CODEX_MARKER: fixture.markerPath,
+        FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify({
+          ...deniedWorkerPermissionProfile,
+          filesystem: { ...filesystem, [codexHome]: "deny" },
+        }),
         FAKE_CODEX_PROVIDER_ENV_KEYS: JSON.stringify(providerKeys),
         FAKE_CODEX_SCAN_VALUE: name,
       },

@@ -54,6 +54,7 @@ import type {
 
 export interface CodexSdkWorkerModelSettings {
   nativeProfileHome?: string;
+  protectedCredentialHome?: (home: string) => Promise<string | undefined>;
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
   /** Resolved by the execution owner, including when reconstructing a scan. */
@@ -254,19 +255,22 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? {}
           : { service_tier: runtimeSettings.serviceTier }),
       };
-      const profileHome = this.modelSettings.nativeProfileHome;
+      const currentHome = this.modelSettings.nativeProfileHome;
+      const workerHome = childEnv.CODEX_HOME || join(homedir(), ".codex");
       if (
-        runtimeSettings.nativeProfile !== undefined &&
-        profileHome !== undefined
+        currentHome !== undefined &&
+        currentHome !== workerHome &&
+        (await fs.realpath(currentHome)) !== (await fs.realpath(workerHome))
       ) {
-        const boundHome = await fs.realpath(
-          environmentVariable(childEnv, "CODEX_HOME", process.platform) ||
-            join(homedir(), ".codex"),
-        );
-        if ((await fs.realpath(profileHome)) !== boundHome) {
-          // A previous coordinator can still have readers in the original home.
+        // A previous coordinator can still have readers in the original home.
+        if (runtimeSettings.nativeProfile !== undefined) {
           throw new DeepScanNonRetryableError(
             "Resume this Deep Scan from its original Codex home to use a private provider profile.",
+          );
+        }
+        if (!(await this.modelSettings.protectedCredentialHome?.(workerHome))) {
+          throw new DeepScanNonRetryableError(
+            "Resume this Deep Scan from its original Codex home or deny the current parent access to that home before restoring its credentials.",
           );
         }
       }

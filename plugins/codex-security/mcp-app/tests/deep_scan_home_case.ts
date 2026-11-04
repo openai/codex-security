@@ -37,6 +37,23 @@ export async function testHome(
     );
     await writeFile(promptPath, "fixture captured home settings\n");
 
+    await writeFile(
+      path.join(home, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "synthetic-home-key" }),
+    );
+    const currentSandbox = {
+      ...sandbox,
+      filesystemDenies: [...sandbox.filesystemDenies, home],
+    };
+    const continuation = {
+      ...process.env,
+      CODEX_HOME: fixture.root,
+      FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify({
+        extends: ":read-only",
+        filesystem: { ":root": "read", [home]: "deny" },
+        network: { enabled: false },
+      }),
+    };
     for (const configuredHome of [
       `${path.relative(process.cwd(), link)}/..`,
       `${link}/..`,
@@ -48,11 +65,28 @@ export async function testHome(
       assert.equal(captured.reasoningSummary, "none");
       assert.equal(await realpath(captured.codexHome), await realpath(home));
       for (const saved of [captured, JSON.parse(JSON.stringify(captured))]) {
+        const exposed = new Executor(
+          restore(
+            { ...saved, parentSandbox: currentSandbox },
+            sandbox,
+            () => continuation,
+          ),
+        );
+        for (const resumeThreadId of [undefined, "fixture-home-resume"]) {
+          await assert.rejects(
+            exposed.run({
+              promptPath,
+              workingDirectory,
+              kind: "discovery",
+              resumeThreadId,
+              subagents: 0,
+              signal: new AbortController().signal,
+            }),
+            /deny the current parent access/,
+          );
+        }
         const executor = new Executor(
-          restore(saved, sandbox, () => ({
-            ...process.env,
-            CODEX_HOME: fixture.root,
-          })),
+          restore(saved, currentSandbox, () => continuation),
         );
         for (const resumeThreadId of [undefined, "fixture-home-resume"]) {
           await executor.run({
@@ -148,10 +182,7 @@ export async function testHome(
     });
     for (const saved of [captured, recovered]) {
       const executor = new Executor(
-        restore(saved, sandbox, () => ({
-          ...process.env,
-          CODEX_HOME: fixture.root,
-        })),
+        restore(saved, currentSandbox, () => continuation),
       );
       for (const resumeThreadId of [undefined, "fixture-history-resume"]) {
         await executor.run({

@@ -465,6 +465,7 @@ export function restoredDeepScanWorkerSettings(
   environment: () => NodeJS.ProcessEnv = () => process.env,
 ): {
   nativeProfileHome: string;
+  protectedCredentialHome: (home: string) => Promise<string | undefined>;
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
   codexOptions: CodexOptions;
@@ -510,6 +511,8 @@ export function restoredDeepScanWorkerSettings(
   if (settings.modelProvider !== "amazon-bedrock")
     delete config.model_providers;
   return {
+    protectedCredentialHome: (home) =>
+      protectedRuntimeHome(home, currentParentSandbox),
     get nativeProfileHome() {
       return environment().CODEX_HOME || join(homedir(), ".codex");
     },
