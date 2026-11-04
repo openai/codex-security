@@ -9079,7 +9079,7 @@ async function patchPreflightRemoteSettings(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<string[]> {
-  const entries = await patchTransportConfig(
+  const entries = await patchScopedConfig(
     "^remote\\.origin\\.(vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
     repository,
     dependencies,
@@ -9312,7 +9312,7 @@ async function operatorPatchConfig(
   );
 }
 
-async function patchTransportConfig(
+async function patchScopedConfig(
   pattern: string,
   repository: string,
   dependencies: CliDependencies,
@@ -9358,7 +9358,7 @@ async function patchTransportEnvironment(
     if (override !== undefined) {
       environment = { ...environment, GIT_PROXY_COMMAND: override };
     } else {
-      const proxies = await patchTransportConfig(
+      const proxies = await patchScopedConfig(
         "^core\\.gitproxy$",
         repository,
         dependencies,
@@ -9385,7 +9385,7 @@ async function patchTransportEnvironment(
   if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
     return environment;
   // Git accumulates credential helpers until an empty helper resets them.
-  const entries = await patchTransportConfig(
+  const entries = await patchScopedConfig(
     "^(http\\..*|credential(\\..*)?\\.helper|core\\.askpass)$",
     repository,
     dependencies,
@@ -9728,6 +9728,32 @@ async function preparePatchPublication(
     );
   }
   const root = await patchRepositoryRoot(repository, dependencies);
+  const filters = await patchScopedConfig(
+    "^filter\\..*\\.(clean|process)$",
+    root,
+    dependencies,
+  );
+  for (let index = 0; index + 2 < filters.length; index += 3) {
+    const entry = filters[index + 2]!;
+    const separator = entry.indexOf("\n");
+    if (
+      separator < 0 ||
+      !entry.slice(separator + 1).trim() ||
+      (await operatorPatchConfig(filters[index]!, filters[index + 1]!, root))
+    )
+      continue;
+    // ls-files inventories untracked and ignored paths without running filters.
+    const local = await patchGitRecords(
+      root,
+      ["ls-files", "--others", "--directory", "-z"],
+      dependencies,
+    );
+    if (local.some(Boolean))
+      throw new CodexSecurityError(
+        "Cannot automatically publish from a checkout with local-only files and a checkout-selected Git filter. Review and publish the patch separately.",
+      );
+    break;
+  }
   const paths = await patchGitRecords(
     repository,
     [

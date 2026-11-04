@@ -45,7 +45,7 @@ test("streams captured blob bytes through the selected Git context", async () =>
   );
 });
 
-test.each(["scrubbed copy", "filtered copy", "independent"])(
+test.each(["scrubbed copy", "filtered copy", "transform", "independent"])(
   "checks ignored content in the assessed publication snapshot: %s",
   async (mode) => {
     const { directory, git } = await publicationRepository(fixtures);
@@ -54,19 +54,32 @@ test.each(["scrubbed copy", "filtered copy", "independent"])(
       mode === "independent" ? "Synthetic fixed content\n" : ignored;
     const file = "src/finding-1.ts";
     await writeFile(join(directory, ".gitignore"), ".env\n");
-    if (mode === "filtered copy") {
+    const filtered = mode === "filtered copy" || mode === "transform";
+    const environment: NodeJS.ProcessEnv = {};
+    if (filtered) {
       const support = await fixtures.create("patch-publication-filter-");
       const script = join(support, "clean.cjs");
+      const output =
+        mode === "transform"
+          ? Buffer.from(ignored).toString("base64")
+          : ignored;
       await writeFile(
         script,
-        `const fs = require("node:fs"); const input = fs.readFileSync(0, "utf8"); process.stdout.write(input === "Synthetic filter input\\n" ? ${JSON.stringify(ignored)} : input);\n`,
+        `const fs = require("node:fs"); const input = fs.readFileSync(0, "utf8"); process.stdout.write(input === "Synthetic filter input\\n" ? ${JSON.stringify(output)} : input);\n`,
       );
+      const configuration: string[] = [];
+      if (mode === "filtered copy") {
+        const global = join(support, "global");
+        environment["GIT_CONFIG_GLOBAL"] = global;
+        configuration.push("--file", global);
+      }
       git(
         "config",
+        ...configuration,
         "filter.synthetic.clean",
         `node ${JSON.stringify(script.replaceAll("\\", "/"))}`,
       );
-      git("config", "filter.synthetic.required", "true");
+      git("config", ...configuration, "filter.synthetic.required", "true");
       await writeFile(
         join(directory, ".gitattributes"),
         `${file} filter=synthetic\n`,
@@ -89,6 +102,7 @@ test.each(["scrubbed copy", "filtered copy", "independent"])(
       ],
       {
         currentDirectory: directory,
+        environment,
         onRepositoryCommand: (command, args, cwd, options) => {
           if (command !== "git")
             return args[1] === "list"
@@ -98,7 +112,10 @@ test.each(["scrubbed copy", "filtered copy", "independent"])(
             pushes++;
             return "";
           }
-          return runGitRepositoryCommand(command, args, cwd, options);
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
         },
         onCodex: async (_args, output) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
@@ -111,7 +128,7 @@ test.each(["scrubbed copy", "filtered copy", "independent"])(
           } else {
             await writeFile(
               join(directory, file),
-              mode === "filtered copy" ? "Synthetic filter input\n" : captured,
+              filtered ? "Synthetic filter input\n" : captured,
             );
             output!.stdout.write("Synthetic patch complete.\n");
           }
@@ -119,6 +136,15 @@ test.each(["scrubbed copy", "filtered copy", "independent"])(
         },
       },
     );
+    if (mode === "transform") {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("checkout-selected Git filter");
+      expect(assessments).toBe(0);
+      expect(pushes).toBe(0);
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(directory, file), "utf8")).toBe("original\n");
+      return;
+    }
     expect(assessments).toBe(1);
     expect(outcome.exitCode, outcome.stderr).toBe(
       mode === "independent" ? 0 : 2,
