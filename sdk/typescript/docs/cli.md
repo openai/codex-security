@@ -104,6 +104,13 @@ the stored login. Patch follow-up assessments and `scan --patch` retain the
 chosen authentication. Environment keys do not replace the saved login.
 The SDK uses `auth` on `run()`, `validate()`, and `preflight()`.
 
+For a scan using a custom native provider, `auto` and `api-key` use the
+environment variable declared by `model_providers.<id>.env_key`, including
+when a Codex file profile selects that provider. Set that variable before
+starting the scan. To use `--auth chatgpt`, select a provider configured for
+account authentication. A custom provider that requires its own key cannot
+honor that combination.
+
 Stored OpenAI credentials live in
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this private home

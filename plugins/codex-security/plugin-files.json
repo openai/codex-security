@@ -61,6 +61,7 @@
     "schemas/tools/review-items.schema.json",
     "schemas/tools/scan-draft.schema.json",
     "scripts/candidate_identity.py",
+    "scripts/check_deep_scan_target.py",
     "scripts/codex_profile.mjs",
     "scripts/codex_session.mjs",
     "scripts/deep_scan_config.py",
