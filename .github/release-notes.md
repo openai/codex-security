@@ -43,6 +43,7 @@
 - report a failed ignored-but-tracked file listing ([#864](https://github.com/openai/codex-security/pull/864))
 - check resolved path types before scan registration ([#549](https://github.com/openai/codex-security/pull/549))
 - preserve worker activity when a session log is unreadable ([#970](https://github.com/openai/codex-security/pull/970))
+- preserve shell-escaped whitespace in repository paths ([#2163](https://github.com/openai/codex-security/pull/2163))
 
 <!-- release-section: highlights:end -->
 
