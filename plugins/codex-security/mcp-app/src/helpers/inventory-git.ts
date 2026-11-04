@@ -434,7 +434,7 @@ const unavailableGit: ToolResult = {
   stderr: "",
 };
 
-async function git(repo: string, args: string[]) {
+export async function git(repo: string, args: string[]) {
   try {
     const execution = gitProcess(repo, args);
     if (execution) {
@@ -447,7 +447,7 @@ async function git(repo: string, args: string[]) {
   return unavailableGit;
 }
 
-function decodeGitPath(data: Buffer): string {
+export function decodeGitPath(data: Buffer): string {
   if (!windows) return decodePosixBytes(data);
   // Git index paths can contain UTF-8-encoded lone UTF-16 code units on Windows.
   return data
