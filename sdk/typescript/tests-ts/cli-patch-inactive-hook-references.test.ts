@@ -47,7 +47,7 @@ for (const mode of [
     if (!missingHook) await writeFile(hook, trusted, { mode: 0o755 });
     const config = join(directory, ".git", "branch-config");
     const nested = mode.includes("nested");
-    const nestedConfig = join(support, "nested-config");
+    const nestedConfig = join(directory, ".git", "nested-config");
     await writeFile(
       config,
       nested
