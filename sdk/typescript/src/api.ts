@@ -30,6 +30,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  parse as parsePath,
   posix,
   relative,
   resolve,
@@ -108,7 +109,12 @@ import {
 import type { ScanTokenUsage } from "./cost-model.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
-import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
+import {
+  DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  deepScanParentToolOverrides,
+  readDeepScanParentConfig,
+  runDeepScan,
+} from "./deep-scan.js";
 import {
   getDefaultSeverityRubric,
   readSeverityRubricFile,
@@ -133,7 +139,7 @@ import {
   type ScanSettings,
   type ScanPromptSettings,
 } from "./scan-settings.js";
-import { resolveScanPrompts } from "./prompt-files.js";
+import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
   readScanTimeBudgetPolicy,
   renderScanTimeBudgetPolicy,
@@ -224,7 +230,13 @@ import {
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
-import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
+import {
+  CODEX_EXECUTABLE_VERSION,
+  CODEX_SDK_VERSION,
+  VERSION,
+} from "./version.js";
+import { SCAN_MODES } from "./scan-modes.js";
+import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
@@ -343,6 +355,21 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
+const scanLifecycleSchema = z.object({
+  scanId: z.string(),
+  mode: z.enum([...SCAN_MODES, "diff", "import"]),
+  startedAt: z.string(),
+  status: z.enum(["running", "completed", "failed", "canceled"]),
+  finishedAt: z.string().nullable(),
+  hasReportableFindings: z.boolean().nullable(),
+  surface: z.enum(["plugin", "cli", "sdk"]).nullable(),
+  packageVersion: z.string().nullable(),
+  pluginVersion: z.string().nullable(),
+  mock: z.boolean().nullable(),
+});
+
+export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
+
 export interface ScanOptions extends ScanSettings {
   /** Explicit policy for the initial scan and its workers. */
   severityRubric?: SeverityRubricSnapshot;
@@ -371,6 +398,9 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** Best-effort snapshots at fresh registration and observed terminal state.
+   * Resume preserves the scan ID and only reports a terminal outcome. */
+  onLifecycle?: (scan: ScanLifecycle) => void;
   /** @internal Authoritative registration receipt for CLI scan navigation. */
   onScanRegistered?: (scan: {
     scanId: string;
@@ -618,6 +648,7 @@ type ScanObserverName =
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
+  | "onLifecycle"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -698,6 +729,7 @@ interface ClientDependencies {
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
   runDeepScan?: typeof runDeepScan;
+  readDeepScanParentConfig?: typeof readDeepScanParentConfig;
   canRunDirectDeepScan?: () => boolean;
 }
 
@@ -833,6 +865,7 @@ export class CodexSecurity {
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
         const { scan, recipe } = await workflow.registeredScan(state.scanId);
+        notifyScanLifecycle(options, scan, true);
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
@@ -2698,6 +2731,8 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
+                surface: this.#surface,
+                packageVersion: VERSION,
                 userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
@@ -2861,6 +2896,8 @@ export class CodexSecurity {
         });
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (options.resumeScanId === undefined)
+        notifyScanLifecycle(options, registration);
       notifyObserver(
         options,
         "onScanRegistered",
@@ -3070,9 +3107,6 @@ export class CodexSecurity {
           runtimePaths,
           options.auth,
           git,
-          mode === "deep" && !directDeepScan
-            ? deepScanParentConfig(session.sessionConfig)
-            : undefined,
         );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -3080,40 +3114,113 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy,
       };
-      let thread: CodexThreadLike;
-      if (typeof resumeThreadId === "string") {
-        if (codex.resumeThread === undefined) {
-          throw new CodexSecurityError(
-            "The configured Codex client does not support resuming sessions.",
-          );
-        }
-        thread = codex.resumeThread(resumeThreadId, threadOptions);
-        tracker.start(resumeThreadId);
-        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
-        await tracker.refresh().catch(reportTrackingError);
-        checkOpen();
-      } else {
-        thread = codex.startThread(threadOptions);
-      }
-      const serializedPaths =
-        normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
-      checkOpen();
-      if (serializedPaths !== null && targetPathsFile !== null) {
-        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
-          flag: "wx",
-          mode: 0o400,
-          signal,
-        });
-        await chmod(targetPathsFile, 0o400);
-      }
-      checkOpen();
       const turnOptions: TurnOptions = {
         signal,
         cyberAccessProgram: options.cyberAccessProgram,
       };
       const postScanPrompt = options.postScanPrompt;
+      const openThread = (client: CodexClientLike, id: unknown) => {
+        if (typeof id !== "string") return client.startThread(threadOptions);
+        if (!client.resumeThread)
+          throw new CodexSecurityError(
+            "The configured Codex client does not support resuming sessions.",
+          );
+        return client.resumeThread(id, threadOptions);
+      };
+      if (typeof resumeThreadId === "string") {
+        tracker.start(resumeThreadId);
+        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
+        await tracker.refresh().catch(reportTrackingError);
+      }
+      checkOpen();
+      if (normalized.kind === "paths" && targetPathsFile !== null) {
+        await writeFile(
+          targetPathsFile,
+          `${jsonForPrompt(normalized.paths)}\n`,
+          {
+            flag: "wx",
+            mode: 0o400,
+            signal,
+          },
+        );
+        await chmod(targetPathsFile, 0o400);
+        checkOpen();
+      }
+      let parentCodex = codex;
+      const pluginServers =
+        mode === "deep" && !directDeepScan && !this.#dependencies.hostedScan
+          ? await readInstalledDeepScanPluginServers(
+              runtime.plugin.installedRoot,
+            )
+          : undefined;
+      if (pluginServers !== undefined) {
+        // The scan is already registered when native routing is inspected.
+        if (postScanPrompt?.trim()) {
+          runPostScan = () =>
+            openThread(codex, resumeThreadId).runStreamed(
+              postScanPrompt,
+              turnOptions,
+            );
+        }
+        const parentConfig = await (
+          this.#dependencies.readDeepScanParentConfig ??
+          readDeepScanParentConfig
+        )({
+          codexOptions,
+          preflightCommand:
+            await this.#providerPreflightCommand(effectiveConfig),
+          scanDir,
+          signal,
+          ...(pluginServers !== "native" && { pluginServers }),
+          ...(pluginServers === "native" && {
+            plugin: {
+              marketplacePath: join(
+                runtime.plugin.marketplaceRoot,
+                ".agents",
+                "plugins",
+                "marketplace.json",
+              ),
+              pluginName: runtime.plugin.name,
+            },
+          }),
+        });
+        const overrides =
+          parentConfig === undefined
+            ? []
+            : deepScanParentToolOverrides(
+                parentConfig,
+                pluginServers === "native" ? {} : pluginServers,
+              );
+        if (overrides.length > 0) {
+          // Only the coordinator turn needs to keep its MCP call outside a yielding cell.
+          parentCodex = await this.#dependencies.createCodex({
+            ...codexOptions,
+            configOverrides: [
+              ...(codexOptions.configOverrides ?? []),
+              ...overrides,
+            ],
+          });
+        }
+        runPostScan = null;
+      }
+      checkOpen();
+      const thread = openThread(parentCodex, resumeThreadId);
+      let scanThreadId = thread.id;
       if (postScanPrompt?.trim()) {
-        runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
+        runPostScan = () => {
+          if (
+            (parentCodex !== codex || directDeepScan) &&
+            scanThreadId !== null
+          ) {
+            return openThread(codex, scanThreadId).runStreamed(
+              postScanPrompt,
+              turnOptions,
+            );
+          }
+          const followUp =
+            parentCodex === codex ? thread : codex.startThread(threadOptions);
+          return followUp.runStreamed(postScanPrompt, turnOptions);
+        };
       }
       if (mode === "standard" && options.maxTimeMinutes !== undefined) {
         const timePolicy = await readScanTimeBudgetPolicy(
@@ -3168,17 +3275,7 @@ export class CodexSecurity {
               "Codex did not resume the original scan session.",
             );
           }
-          if (directDeepScan && postScanPrompt?.trim()) {
-            runPostScan = () => {
-              if (codex.resumeThread === undefined)
-                throw new CodexSecurityError(
-                  "The configured Codex client does not support resuming sessions.",
-                );
-              return codex
-                .resumeThread(threadId, threadOptions)
-                .runStreamed(postScanPrompt, turnOptions);
-            };
-          }
+          scanThreadId = threadId;
           if (resumeThreadId !== undefined) {
             return;
           }
@@ -3334,6 +3431,7 @@ export class CodexSecurity {
       ]);
       activeScan = null;
       const completedScan = completion["scan"];
+      notifyScanLifecycle(options, completedScan);
       await finalizeScanUsage(
         scanId,
         workbenchOptions,
@@ -3603,6 +3701,7 @@ export class CodexSecurity {
               terminalTurnStatus,
             );
           activeScan = null;
+          notifyScanLifecycle(options, completion["scan"]);
           runPostScan = null;
           const result = await collectResult(
             {
@@ -3663,6 +3762,7 @@ export class CodexSecurity {
           if (isRecord(progress) && progress["status"] === "complete") {
             const scanId = activeScan.id;
             activeScan = null;
+            notifyScanLifecycle(options, completedScan);
             if (terminalTurnStatus !== null)
               await finalizeScanUsage(
                 scanId,
@@ -3694,15 +3794,20 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
-            "--scan-id",
-            activeScan.id,
-            `--message=${errorMessage(failure)}`,
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
-          ]);
+          const failed = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              `--message=${errorMessage(failure)}`,
+              ...(snapshot?.cost
+                ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                : []),
+            ],
+          );
+          activeScan = null;
+          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -3748,6 +3853,7 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       }
+      observeSettledScan(options, activeScan);
     }
   }
 
@@ -4687,6 +4793,8 @@ export class CodexSecurity {
             }),
             mock: true,
           },
+          surface: this.#surface,
+          packageVersion: VERSION,
           userContext: options.scanPrompt,
           workflowId: options.workflowId,
         }),
@@ -4703,6 +4811,7 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyScanLifecycle(options, registration);
       notifyObserver(
         options,
         "onScanRegistered",
@@ -4743,6 +4852,7 @@ export class CodexSecurity {
       ]);
       activeScan = undefined;
       const completedScan = completion["scan"];
+      notifyScanLifecycle(options, completedScan);
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string")
@@ -4787,18 +4897,26 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
-        await workbench({ ...activeScan.options, signal: undefined }, [
-          "fail-scan",
-          "--scan-id",
-          activeScan.id,
-          `--message=${errorMessage(error)}`,
-        ]).catch(() => undefined);
+        try {
+          const failed = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              `--message=${errorMessage(error)}`,
+            ],
+          );
+          activeScan = undefined;
+          notifyScanLifecycle(options, failed["scan"], true);
+        } catch {}
       }
       if (this.#closed) this.#requireOpen();
       throwIfAborted(signal, scanDir);
       throw error;
     } finally {
       await cleanupSdkDirectory(workspace);
+      observeSettledScan(options, activeScan);
     }
   }
 
@@ -5993,6 +6111,35 @@ export function selectedScanEnvironment(
   return selected;
 }
 
+function notifyScanLifecycle(
+  options: ScanOptions,
+  saved: unknown,
+  terminalOnly = false,
+): void {
+  if (!options.onLifecycle || !isRecord(saved)) return;
+  const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
+  if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
+    notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+function observeSettledScan(
+  options: ScanOptions,
+  activeScan:
+    { id: string; options: WorkbenchCommandOptions } | null | undefined,
+): void {
+  if (!activeScan || !options.onLifecycle) return;
+  // An interrupted workbench command can commit before its caller receives the result.
+  try {
+    const lifecycle = readSavedScanLifecycle(
+      activeScan.options.environment,
+      activeScan.id,
+    );
+    notifyScanLifecycle(options, { lifecycle }, true);
+  } catch {
+    // Preserve the original failure when its persisted outcome cannot be read.
+  }
+}
+
 function notifyObserver<Name extends ScanObserverName>(
   options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
   observerName: Name,
@@ -6134,32 +6281,6 @@ export function classifyConnectionFailure(
   }
   if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
   return "unknown";
-}
-
-function deepScanParentConfig(config: JsonObject): JsonObject {
-  const resolved = resolveCodexProfile(config);
-  const features = resolved["features"] ?? {};
-  if (!isRecord(features)) return resolved;
-  const mode = features["code_mode"];
-  const settings = typeof mode === "boolean" ? { enabled: mode } : (mode ?? {});
-  // Leave malformed user settings for the native config parser to reject.
-  if (!isRecord(settings)) return resolved;
-  const direct = settings["direct_only_tool_namespaces"] ?? [];
-  if (!Array.isArray(direct)) return resolved;
-  // The native parent waits for direct tool calls before it can end its turn.
-  // A code-mode cell can yield the still-running coordinator to the model.
-  return {
-    ...resolved,
-    features: {
-      ...features,
-      code_mode: {
-        ...settings,
-        direct_only_tool_namespaces: [
-          ...new Set([...direct, "mcp__codex_security", "codex_security"]),
-        ],
-      },
-    },
-  };
 }
 
 export function scanRuntimeCodexConfig(
@@ -6578,23 +6699,68 @@ function selectedWorkerRuntimeConfig(
   };
 }
 
+/** Read the declaration selected by the installed Codex plugin manifest. */
+async function readInstalledDeepScanPluginServers(
+  installedRoot: string,
+): Promise<Record<string, unknown> | "native" | undefined> {
+  const read = async (path: string): Promise<unknown> =>
+    JSON.parse(
+      await readRegularInputFile(join(installedRoot, path), installedRoot),
+    );
+  try {
+    const portable = await read("plugin.json").catch(() => undefined);
+    // A portable manifest owns MCP. Its legacy overlay only forwards environment variables.
+    if (
+      isRecord(portable) &&
+      typeof portable["$schema"] === "string" &&
+      portable["$schema"].startsWith("https://agent-plugins.org/schemas/")
+    )
+      return "native";
+    const manifest = await read(".codex-plugin/plugin.json");
+    if (!isRecord(manifest)) return;
+    let source = manifest["mcpServers"];
+    if (!isRecord(source)) {
+      const path =
+        typeof source === "string" && source.startsWith("./")
+          ? source.slice(2)
+          : "";
+      // Native Codex ignores invalid selectors and uses the installed default.
+      const valid =
+        path &&
+        !parsePath(path).root &&
+        !path.split(sep === "\\" ? /[/\\]/u : "/").includes("..");
+      source = await read(valid ? path : ".mcp.json");
+    }
+    if (!isRecord(source)) return;
+    return isRecord(source["mcpServers"]) ? source["mcpServers"] : source;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readDeepScanPluginServers(
+  pluginRoot: string,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const configuration: unknown = JSON.parse(
+      await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
+    );
+    const servers = isRecord(configuration)
+      ? configuration["mcpServers"]
+      : undefined;
+    return isRecord(servers) ? servers : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function pluginSupportsIsolatedDeepScanConfig(
   pluginRoot: string,
 ): Promise<boolean> {
-  let configuration: unknown;
-  try {
-    configuration = JSON.parse(
-      await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
-    );
-  } catch {
-    return false;
-  }
-  if (!isRecord(configuration)) return false;
-  const servers = configuration["mcpServers"];
-  if (!isRecord(servers)) return false;
-  const server = servers["codex-security"];
-  if (!isRecord(server)) return false;
-  const environment = server["env_vars"];
+  const server = (await readDeepScanPluginServers(pluginRoot))?.[
+    "codex-security"
+  ];
+  const environment = isRecord(server) ? server["env_vars"] : undefined;
   return (
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
