@@ -35,7 +35,6 @@ const executor = await importModule({
     // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export { isCodexCybersecurityPolicyRefusal } from "./errors.js";
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -47,7 +46,6 @@ export const {
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = executor;
 export const CodexSdkWorkerExecutor: typeof Executor =
