@@ -2784,15 +2784,13 @@ All configured push destinations are checked for existing branch namespace
 collisions before patching. Separate remote servers cannot be updated atomically:
 a remote can change or fail after that check, leaving an earlier push complete.
 
-Publication uses Git's submodule availability check by default. Existing
-`push.recurseSubmodules` and `submodule.recurse` settings pass through to Git
-unchanged. When recursion is enabled, publication also checks retained local
-metadata for changed, deinitialized submodules. This supplemental check uses
-remote-tracking refs; it does not fetch or publish child commits. Initialized
-submodules retain Git's configured recursive push behavior, and explicit settings
-that disable recursion skip the supplemental check. If publication reports an
-unpublished submodule commit, publish that commit from the submodule first, then
-resume the saved parent commit.
+Automatic publication pushes the parent repository only. By default it checks
+that changed submodule commits are available and also checks remote-tracking
+refs in the retained metadata of deinitialized submodules. An explicit setting
+that disables recursion skips these checks. On-demand recursion and
+`submodule.recurse=true` use check-only mode. Child-only push mode stops
+publication. Publish missing child commits separately, then resume the saved
+parent from a configuration that allows a parent push.
 
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
