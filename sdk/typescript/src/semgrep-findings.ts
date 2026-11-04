@@ -30,14 +30,16 @@ import {
 } from "./native-json-findings.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
   relativePath,
   requiredText,
+  sarifRunRepositories,
   sarifRunResults,
   stableId,
+  readSarifRuns,
   text,
   validateSarifRuleReference,
 } from "./scanner-import.js";
@@ -196,13 +198,16 @@ export function normalizeSemgrepFindings(
     );
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
-  if (array(document["errors"] ?? [], "Semgrep errors").length)
+  const { results, paths: _paths, time: _time, ...context } = document;
+  const rows = array(results, "Semgrep results");
+  if (!rows.length && document["errors"] === undefined)
+    throw new Error("An empty Semgrep report must include its errors array.");
+  if (optionalArray(document["errors"], "Semgrep errors").length)
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
-    array(results, "Semgrep results"),
+    rows,
     (value) =>
       projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
         origin: "Semgrep",
@@ -226,51 +231,27 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
-  const document = record(input, "Semgrep SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Semgrep SARIF 2.1.0.");
   const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
   const verifiedUrls = new Set([repositoryUrl]);
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    for (const entry of array(
-      run["versionControlProvenance"] ?? [],
-      "Version control provenance",
+  const entries = readSarifRuns(input, "Semgrep", (context) => {
+    for (const { url: declared } of sarifRunRepositories(
+      context.run,
+      "Semgrep",
     )) {
-      const declared = text(
-        record(entry, "Repository provenance")["repositoryUri"],
-      );
-      if (!declared || verifiedUrls.has(declared)) continue;
+      if (verifiedUrls.has(declared)) continue;
       if (cloudRepositoryUrlKey(declared) !== repositoryKey)
         throw new Error(
           "SARIF source repository does not match the declared source repository URL.",
         );
       verifiedUrls.add(declared);
     }
-    const tool = record(run["tool"], "SARIF tool");
-    const driver = record(tool["driver"], "SARIF driver");
-    if (!isSemgrepSarifDriver(requiredText(driver["name"], "SARIF producer")))
-      throw new Error("Expected a Semgrep SARIF producer.");
     if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const invocation of array(
-      run["invocations"] ?? [],
-      "Semgrep invocations",
-    )) {
-      const details = record(invocation, "Semgrep invocation");
-      if (details["executionSuccessful"] === false)
-        throw new Error("Semgrep SARIF contains an unsuccessful invocation.");
-      if (
-        array(
-          details["toolExecutionNotifications"] ?? [],
-          "Semgrep scan notifications",
-        ).length
+      !isSemgrepSarifDriver(
+        requiredText(context.driver["name"], "SARIF producer"),
       )
-        throw new Error("Semgrep SARIF contains scan error notifications.");
-    }
-    return sarifRunResults(document, run, tool, driver, "Semgrep");
+    )
+      throw new Error("Expected a Semgrep SARIF producer.");
+    return sarifRunResults(context, "Semgrep");
   });
   return normalizeRecords(
     entries,

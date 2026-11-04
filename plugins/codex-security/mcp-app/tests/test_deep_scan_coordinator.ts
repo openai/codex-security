@@ -31,7 +31,6 @@ import {
 } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
-  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
   AsyncLock,
@@ -99,6 +98,48 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
     ),
     { code: "ENOENT" },
   );
+}
+
+async function testDiscoveryAllocatesUniqueLabelsAfterRecovery() {
+  const { fixture, store } = await coordinatorFixture({
+    maxDiscoveryRuns: 12,
+    stopAfterNoNew: 1,
+  });
+  const root = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  Object.assign(store.run, {
+    dispatchedCount: 1,
+    persistedWorkers: [
+      {
+        id: randomUUID(),
+        kind: "discovery",
+        status: "canceled",
+        attempt: 1,
+        mergeState: "none",
+        artifactDir: path.join(root, "discovery-0010", "output"),
+        promptPath: path.join(root, "discovery-0010", "prompt.md"),
+      },
+    ],
+  });
+  // A stale coordinator writes its final prompt after the new coordinator's listing.
+  const occupied = path.join(root, "discovery-0011", "prompt.md");
+  const updateProgress = store.updateProgress.bind(store);
+  store.updateProgress = async (input) => {
+    await mkdir(path.dirname(occupied), { recursive: true });
+    await writeFile(occupied, "old coordinator");
+    await updateProgress(input);
+  };
+  const executor = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: store.run,
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.deepEqual([...executor.discoveryAttempts.keys()], ["discovery-0012"]);
+  assert.equal(await readFile(occupied, "utf8"), "old coordinator");
 }
 
 async function testConcurrentCheckpointKeepsExistingIteration() {
@@ -683,15 +724,15 @@ async function testCancellationClearsRetryWait() {
     failFirstDiscoveryAttempt: true,
     blockDiscoveryAfterCalls: 1,
   });
-  const sleepStarted = Promise.withResolvers<void>();
+  const sleepStarted = Promise.withResolvers<DeepScanLogEvent>();
   const coordinator = createCoordinator(fixture, store, executor, {
     clock: undefined,
     log: (event) => {
-      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve(event);
     },
   });
   coordinator.start();
-  await sleepStarted.promise;
+  assert.equal((await sleepStarted.promise).reason, "transient worker failure");
   const callsAtCancellation = executor.discoveryCalls;
   coordinator.cancel("cancel retry wait");
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -1056,7 +1097,11 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
     events.some((event) => event.event === "coordinator_cleanup_settled"),
   );
   assert.equal(
-    events.some((event) => event.event === "discovery_accepted"),
+    events.some(
+      (event) =>
+        event.event === "discovery_accepted" ||
+        event.event === "worker_succeeded",
+    ),
     false,
   );
   const worker = [...store.workers.values()].find(
@@ -2371,7 +2416,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
       async compareFindings(_prompt, _cwd, signal) {
         comparisons++;
         if (mode === "quota")
-          throw new DeepScanNonRetryableError(
+          throw codexWorkerTurnError(
             "Quota exceeded. Check your plan and billing details.",
           );
         await deadline.promise;
@@ -2839,6 +2884,7 @@ registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
 ]);
 test(testStandardWorkersReceiveExistingFalsePositiveFeedback);
 test(testConcurrentCheckpointKeepsExistingIteration);
+test(testDiscoveryAllocatesUniqueLabelsAfterRecovery);
 test(testDiscoveryWorkersKeepOneContextAfterPersistedUpdate);
 test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
 test(testWorkerScopedCandidateSourceAggregation);

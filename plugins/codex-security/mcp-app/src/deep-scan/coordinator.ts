@@ -740,10 +740,13 @@ export class DeepScanCoordinator {
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
+      persisted,
+      this.state.dispatchedCount,
     );
     const checkpointLabel = await nextWorkerLabel(
       this.artifacts.dedupRoot,
       "dedup",
+      persisted,
     );
     let pass = persisted.filter(
       (w) => w.kind === "dedup" && w.status === "succeeded",
@@ -801,7 +804,7 @@ export class DeepScanCoordinator {
           streak = count ? 0 : streak + 1;
         }
         resultPath = join(
-          await reserveCheckpointDirectory(
+          await reserveWorkerDirectory(
             this.artifacts.dedupRoot,
             checkpointLabel,
           ),
@@ -965,11 +968,21 @@ export class DeepScanCoordinator {
     nextLabel: () => string,
     previousFindings: string[],
   ): Promise<DiscoveryOutcome[]> {
-    const scans = Array.from({ length: count }, async () => {
+    // Reserve in dispatch order. Another coordinator may create one of these
+    // labels after our directory listing but before we write its prompt.
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      labels.push(
+        basename(
+          await reserveWorkerDirectory(this.artifacts.workersRoot, nextLabel),
+        ),
+      );
+    }
+    const scans = labels.map(async (label) => {
       try {
         const outcome = await this.discoveryWorkers.runDiscoveryWorker(
           randomUUID(),
-          nextLabel(),
+          label,
           previousFindings,
         );
         if (outcome.status === "failed" && !outcome.replaceableFailureKind)
@@ -1010,6 +1023,7 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
         { ...this.state, workerId: worker.id },
+        "previously-accepted",
       );
       recovered.push({
         id: worker.id,
@@ -1047,14 +1061,14 @@ const systemClock: DeepScanClock = {
   },
 };
 
-async function reserveCheckpointDirectory(
+async function reserveWorkerDirectory(
   root: string,
   nextLabel: () => string,
 ): Promise<string> {
   for (;;) {
     const directory = join(root, nextLabel());
     try {
-      // An old coordinator can finish a batch after its replacement checkpointed.
+      // A coordinator being replaced can still be reserving its last directory.
       await fs.mkdir(directory);
       return directory;
     } catch (error) {
@@ -1066,11 +1080,19 @@ async function reserveCheckpointDirectory(
 async function nextWorkerLabel(
   root: string,
   kind: "dedup" | "discovery",
+  persisted: PersistedDeepScanWorker[],
+  minimum = 0,
 ): Promise<() => string> {
-  let last = (await fs.readdir(root)).reduce((n, name) => {
+  const labels = [
+    ...(await fs.readdir(root)),
+    ...persisted
+      .filter((worker) => worker.kind === kind)
+      .map((worker) => basename(dirname(worker.artifactDir))),
+  ];
+  let last = labels.reduce((n, name) => {
     const sequence = workerLabelSequence(name, kind);
     return sequence > n ? sequence : n;
-  }, 0n);
+  }, BigInt(minimum));
   return () => `${kind}-${String(++last).padStart(4, "0")}`;
 }
 

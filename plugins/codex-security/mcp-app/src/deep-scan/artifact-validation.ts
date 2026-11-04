@@ -18,6 +18,7 @@ import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
+  validateWorkerReport,
 } from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
@@ -150,6 +151,7 @@ export async function validateDiscoveryArtifacts(
   boundScope: Pick<ArtifactContext, "scope" | "includePaths" | "filePaths"> & {
     workerId?: string;
   } = {},
+  admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
@@ -174,6 +176,8 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  // Preserve the existing publication of previously accepted historical payloads.
+  if (admission === "new") validateWorkerReport(result);
   if (boundScope.workerId !== undefined) {
     await recoverWorkerCandidateReceipts(result.reviewState, context);
     for (const finding of result.findings) {
