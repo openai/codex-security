@@ -9744,6 +9744,7 @@ function patchCommandDirectoryDependencies(
       dependencies.runRepositoryCommand(command, args, repository, {
         ...options,
         directory: options?.directory ?? directory,
+        protectedRoots: [directory, ...(options?.protectedRoots ?? [])],
       }),
   };
 }
@@ -9957,6 +9958,20 @@ async function patchCommandContext(
   };
 }
 
+function patchExecutableRoots(
+  context: GitPatchState["context"],
+  additional: readonly string[] = [],
+): string[] {
+  return [
+    ...new Set([
+      context.root,
+      context.directory,
+      context.callerDirectory,
+      ...additional,
+    ]),
+  ];
+}
+
 async function bindPatchCommandContext(
   directory: string,
   repository: string,
@@ -9996,6 +10011,7 @@ async function bindPatchCommandContext(
       trim: false,
       directory:
         currentDirectory !== context.directory ? repository : directory,
+      protectedRoots: patchExecutableRoots(context),
       environment: {
         ...context.environment,
         ...(inspectChangedDirectory ? { GIT_DIR: undefined } : {}),
@@ -10017,6 +10033,10 @@ async function bindPatchCommandContext(
         dependencies.runRepositoryCommand(command, args, root, {
           ...options,
           directory,
+          protectedRoots: patchExecutableRoots(
+            context,
+            options?.protectedRoots,
+          ),
           environment: {
             ...context.environment,
             // Keep relative fallbacks relative: glab versions differ on
@@ -12050,7 +12070,12 @@ async function runPatchRiskAssessment(
           "git",
           ["rev-parse", argument],
           request.repository,
-          { directory: bound.directory, environment, trim: false },
+          {
+            directory: bound.directory,
+            environment,
+            trim: false,
+            protectedRoots: patchExecutableRoots(context),
+          },
         )
         .then((value) => realpath(value.replace(/\n$/u, "")))
         .catch(() => undefined)) !== path
@@ -12995,6 +13020,10 @@ async function runSkill(
                 trim: false,
                 directory:
                   options.patchGitContext?.callerDirectory ?? directory,
+                protectedRoots:
+                  options.patchGitContext === undefined
+                    ? [directory]
+                    : patchExecutableRoots(options.patchGitContext),
                 environment: { LC_ALL: "C", GIT_OBJECT_DIRECTORY: "." },
               },
             );
