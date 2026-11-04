@@ -3259,7 +3259,11 @@ def main(
     sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__, execution_settings=with_execution_settings)
     # The MCP process closes this private pipe after its argv frame and optional digest.
-    if framed_input and args.command in {"record-deep-scan-iteration", "write-scan-draft"}:
+    if framed_input and args.command in {
+        "upsert-deep-scan-worker",
+        "record-deep-scan-iteration",
+        "write-scan-draft",
+    }:
         args.validated_input_sha256 = sys.stdin.read() or None
     command_context = SimpleNamespace(
         **globals(),

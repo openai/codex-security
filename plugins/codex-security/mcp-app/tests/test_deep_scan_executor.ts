@@ -260,6 +260,19 @@ try {
       await check(
         t,
         () =>
+          testHome(
+            CodexSdkWorkerExecutor,
+            captureDeepScanExecutionSettings,
+            restoredDeepScanWorkerSettings,
+            loadDeepScanExecutionSettings,
+            withWorkerFixture,
+            trustedParentSandbox,
+          ),
+        "saved Codex home",
+      );
+      await check(
+        t,
+        () =>
           testConcurrentWorkerExecutableAliases({
             CodexSdkWorkerExecutor,
             fakeCodexFixture,

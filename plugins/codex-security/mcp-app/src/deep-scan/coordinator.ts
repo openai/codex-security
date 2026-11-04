@@ -1272,7 +1272,3 @@ function errorKind(error: unknown): string {
   if (!(error instanceof Error)) return typeof error;
   return errorNameWithCode(error);
 }
-
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
-}

@@ -4,7 +4,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import type { DeepScanStore } from "../src/deep-scan/types.js";
-import { importNativeSource as importSource } from "./import-module.ts";
 import {
   DeepScanCoordinator,
   FakeExecutor,
@@ -12,7 +11,6 @@ import {
   fixtureRun,
   temporaryDirectories,
 } from "./deep_scan_coordinator_fixture.ts";
-import { finding, workerDraft } from "./scan-draft-fixture.ts";
 
 after(() => temporaryDirectories.cleanup());
 

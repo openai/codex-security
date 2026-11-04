@@ -56,22 +56,26 @@ export async function writeJsonAtomic(
 
 export async function readJsonObject(
   path: string,
-  accepted?: { scanRoot: string; sha256?: string },
+  accepted?: {
+    scanRoot: string;
+    sha256?: string;
+    onDigest?: (digest: string) => void;
+  },
 ): Promise<Record<string, unknown>> {
   let parsed: unknown;
   try {
     let contents: Buffer;
-    if (accepted?.sha256 !== undefined) {
+    if (accepted && (accepted.sha256 !== undefined || accepted.onDigest)) {
       contents = await readScanFile(
         accepted.scanRoot,
         relative(accepted.scanRoot, path).split(sep).join("/"),
         "Accepted Deep Scan input",
       );
-      if (
-        createHash("sha256").update(contents).digest("hex") !== accepted.sha256
-      ) {
+      const digest = createHash("sha256").update(contents).digest("hex");
+      if (accepted.sha256 !== undefined && digest !== accepted.sha256) {
         throw new Error("Deep Scan input changed after acceptance.");
       }
+      accepted.onDigest?.(digest);
     } else {
       contents = await fs.readFile(path);
     }

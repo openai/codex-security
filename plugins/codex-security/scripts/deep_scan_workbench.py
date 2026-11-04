@@ -1421,7 +1421,7 @@ def snapshot_accepted_result(
         contents = handle.read()
     digest = hashlib.sha256(contents).hexdigest()
     if validated_result_sha256 is not None and digest != validated_result_sha256:
-        raise SystemExit("The validated reducer result changed before acceptance.")
+        raise SystemExit(f"The validated {worker['kind']} result changed before acceptance.")
     semantic = json.loads(contents)
     if isinstance(semantic, dict):
         semantic.pop("handoffClaimToken", None)
@@ -1811,6 +1811,7 @@ def upsert_deep_scan_worker(
             observed_thread_id=optional_text(args.sdk_thread_id, maximum=512),
             error=optional_text(args.error_message),
             end_reason=args.replaceable_failure_kind,
+            validated_result_sha256=getattr(args, "validated_input_sha256", None),
         )
         result = deep_scan_result(connection, scan_id)
         if args.status in {"succeeded", "failed", "canceled"}:

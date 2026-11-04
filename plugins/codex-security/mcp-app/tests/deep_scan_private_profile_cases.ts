@@ -86,6 +86,8 @@ export async function testRestoredPrivateProfileHomes({
     );
     const sandbox = {
       filesystemDenies: [currentHome],
+      literalFilesystemDenies:
+        originalHome === currentHome ? [] : [originalHome],
     };
     const saved = await captureDeepScanExecutionSettings(
       { model: config.model },
@@ -110,9 +112,7 @@ export async function testRestoredPrivateProfileHomes({
     const filesystem = Object.fromEntries([
       [":root", "read"],
       ...sandbox.filesystemDenies.map((value) => [value, "deny"]),
-      ...(originalHome === currentHome
-        ? []
-        : [[originalHome, { ".": "deny" }]]),
+      ...sandbox.literalFilesystemDenies.map((home) => [home, { ".": "deny" }]),
     ]);
     const environment = {
       ...process.env,
@@ -138,6 +138,28 @@ export async function testRestoredPrivateProfileHomes({
       path: string;
       cleanup(): Promise<void>;
     }[] = [];
+    // Saved denials cannot authorize copying a secret into a currently readable home.
+    if (name !== "same") {
+      const exposed = new CodexSdkWorkerExecutor({
+        ...restoredDeepScanWorkerSettings(
+          {
+            ...saved,
+            parentSandbox: {
+              filesystemDenies: [],
+              literalFilesystemDenies: [originalHome],
+            },
+          },
+          { filesystemDenies: [currentHome] },
+          () => environment,
+        ),
+        createProviderProfile: () =>
+          assert.fail("wrote private profile into exposed home"),
+      });
+      await assert.rejects(
+        exposed.run(workerRequest(promptPath, fixture.root)),
+        /current parent to deny access to the original Codex home/,
+      );
+    }
     const executor = new CodexSdkWorkerExecutor({
       ...restoredDeepScanWorkerSettings(saved, sandbox, () => environment),
       createProviderProfile: async (
@@ -263,7 +285,7 @@ export async function testRestoredPrivateProfileHomes({
           owner.recreated.map((profile) => profile.name),
         ),
       ).size,
-      8,
+      4,
     );
     const owner = owners[1];
     const acceptedProfile = owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -143,8 +144,6 @@ def test_replaced_attempts_retain_observed_sessions_and_accepted_result(tmp_path
 
 
 def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path) -> None:
-    import hashlib
-
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
@@ -328,8 +327,6 @@ def test_iteration_replay_preserves_original_inputs_after_concurrent_discovery(
 
 
 def test_acceptance_reuses_authoritative_checkpoint_without_rewriting(tmp_path: Path) -> None:
-    import hashlib
-
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
@@ -362,8 +359,6 @@ def test_acceptance_reuses_authoritative_checkpoint_without_rewriting(tmp_path: 
 
 
 def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path) -> None:
-    import hashlib
-
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
@@ -391,7 +386,7 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     assert checkpoint.read_bytes() == content
 
 
-@pytest.mark.parametrize("replacement", ["result", "checkpoint", "ordinary"])
+@pytest.mark.parametrize("replacement", ["result", "checkpoint", "changed_bytes", "ordinary"])
 def test_accepted_result_does_not_reopen_replaced_path(
     tmp_path, workbench_api, monkeypatch, replacement
 ):
@@ -441,7 +436,7 @@ def test_accepted_result_does_not_reopen_replaced_path(
         selected = (
             "Accepted worker result" if replacement == "result" else "Accepted worker checkpoint"
         )
-        if replacement != "ordinary" and label == selected:
+        if replacement in {"result", "checkpoint"} and label == selected:
             path = Path(checked)
             path.unlink()
             path.symlink_to(external)
@@ -457,6 +452,7 @@ def test_accepted_result_does_not_reopen_replaced_path(
         prompt_path=str(prompt),
         artifact_dir=str(artifacts),
         result_manifest_path=str(result),
+        validated_input_sha256=hashlib.sha256(original_bytes).hexdigest(),
         attempt=1,
         sdk_thread_id="synthetic-worker",
         error_message=None,
@@ -465,14 +461,21 @@ def test_accepted_result_does_not_reopen_replaced_path(
     )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
-        if replacement == "ordinary":
+        if replacement == "changed_bytes":
+            result.write_bytes(external.read_bytes())
+            with pytest.raises(SystemExit, match="validated discovery result changed"):
+                deep.upsert_deep_scan_worker(connection, args)
+            assert (
+                connection.execute(
+                    "SELECT status FROM deep_scan_workers WHERE id = ?", (worker_id,)
+                ).fetchone()[0]
+                == "running"
+            )
+        elif replacement == "ordinary":
             accepted = deep.upsert_deep_scan_worker(connection, args)["deepScan"]
             attempt = accepted["attempts"][-1]
             assert Path(attempt["acceptedResultPath"]).read_bytes() == original_bytes
-            assert (
-                attempt["acceptedResultSha256"]
-                == __import__("hashlib").sha256(original_bytes).hexdigest()
-            )
+            assert attempt["acceptedResultSha256"] == hashlib.sha256(original_bytes).hexdigest()
         else:
             with pytest.raises(ContractError, match="inside the scan directory"):
                 deep.upsert_deep_scan_worker(connection, args)

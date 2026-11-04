@@ -68,6 +68,7 @@ export type DeepScanWorkerMutation = Omit<
   "completionSequence" | "consecutiveErrors" | "mergeState"
 > & {
   scanId: string;
+  validatedResultSha256?: string;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 

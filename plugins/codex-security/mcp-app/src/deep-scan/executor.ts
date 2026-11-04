@@ -59,6 +59,7 @@ import type {
 
 export interface CodexSdkWorkerModelSettings {
   nativeProfileHome?: string;
+  protectedProfileHome?: (home: string) => Promise<string | undefined>;
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
   createProviderProfile?: typeof createProviderProfile;
@@ -262,7 +263,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           : { service_tier: runtimeSettings.serviceTier }),
       };
       const profileHome = this.modelSettings.nativeProfileHome;
-      let reboundProfileHome: string | undefined;
       if (
         runtimeSettings.nativeProfile !== undefined &&
         profileHome !== undefined &&
@@ -273,7 +273,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             join(homedir(), ".codex"),
         );
         if ((await fs.realpath(profileHome)) !== boundHome) {
-          // Keep the worker in the original account home while selecting the current provider.
+          // A worker-only denial cannot protect this profile from the running parent.
+          if (!(await this.modelSettings.protectedProfileHome?.(boundHome))) {
+            throw new DeepScanNonRetryableError(
+              "Restoring this private provider profile requires the current parent to deny access to the original Codex home. Resume from the original home or protect it in the parent sandbox.",
+            );
+          }
           const profileConfig = parseToml(
             await fs.readFile(
               join(profileHome, `${runtimeSettings.nativeProfile}.config.toml`),
@@ -284,13 +289,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             boundHome,
             profileConfig as Parameters<typeof createProviderProfile>[1],
           );
-          reboundProfileHome = boundHome;
         }
       }
-      const workerProfile = workerPermissionProfile(
-        parentSandbox,
-        reboundProfileHome,
-      );
+      const workerProfile = workerPermissionProfile(parentSandbox);
       // Use the same native configuration for preflight and the worker turn.
       const configOverrides = [
         ...(resolved?.configOverrides ?? []),
@@ -627,18 +628,12 @@ function workerSubagentConfig(
   };
 }
 
-function workerPermissionProfile(
-  sandbox: DeepWorkerParentSandbox,
-  reboundProfileHome?: string,
-) {
+function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
     ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
   ]);
-  // Concurrent workers can each bind a private profile in the original account home.
-  const literalDenies = new Set(sandbox.literalFilesystemDenies);
-  if (reboundProfileHome !== undefined) literalDenies.add(reboundProfileHome);
-  for (const literal of literalDenies) {
+  for (const literal of sandbox.literalFilesystemDenies ?? []) {
     if (sandbox.filesystemDenies.includes(literal)) {
       const root = parse(literal).root;
       const scope = filesystem.get(root);

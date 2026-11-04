@@ -74,6 +74,7 @@ interface DiscoveryAuditOptions extends Pick<
   validateWriteups?: boolean;
   artifactDir?: string;
   resultSha256?: string;
+  onDigest?: (digest: string) => void;
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -116,6 +117,7 @@ export async function readDiscoveryAuditDraft(
   const stored = await readJsonObject(resultPath, {
     scanRoot: artifacts.scanDir,
     sha256: options.resultSha256,
+    onDigest: options.onDigest,
   });
   await retainRecordedReceiptOwnership(context, stored);
   const result = parseStoredScanDraft(

@@ -380,6 +380,7 @@ export class WorkbenchDeepScanStore {
           : []),
       ],
       true,
+      update.validatedResultSha256,
     );
     return parseWorker(result, update.id);
   }

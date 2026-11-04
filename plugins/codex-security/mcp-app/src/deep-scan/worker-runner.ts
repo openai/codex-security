@@ -127,6 +127,7 @@ export class DeepScanWorkerRunner {
       attempt: 1,
     });
     let discoveryResult: ScanDraftInput | undefined;
+    let validatedResultSha256: string | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       promptPath,
@@ -137,7 +138,12 @@ export class DeepScanWorkerRunner {
           artifacts,
           resultPath,
           run.scanId,
-          run,
+          {
+            ...run,
+            onDigest: (digest) => {
+              validatedResultSha256 = digest;
+            },
+          },
         );
         return discoveryResult;
       },
@@ -173,6 +179,7 @@ export class DeepScanWorkerRunner {
       attempt: outcome.attempt,
       threadId: outcome.threadId,
       resultManifestPath: resultPath,
+      validatedResultSha256,
     };
     let persisted: PersistedDeepScanWorker;
     try {
