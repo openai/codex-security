@@ -11,6 +11,7 @@ import Papa from "papaparse";
 import type { CoverageDocument } from "../../src/models.js";
 import type { ScanResult } from "../../src/result.js";
 import type { runMultiscan } from "../../src/multiscan.js";
+import { normalizeTarget, type NormalizedTarget } from "../../src/targets.js";
 import { scanRequestDigest } from "../../src/finding-workflow.js";
 import { runWorkbench } from "../../src/runtime.js";
 import { PYTHON } from "./security-policy.js";
@@ -100,7 +101,12 @@ export function createMultiscanFixtures() {
   const fixtureRoots = new Set<string>();
   const fixtureRequests = new Map<
     string,
-    { repository: string; revision: string; digest: string }
+    {
+      repository: string;
+      revision: string;
+      digest: string;
+      target: NormalizedTarget;
+    }
   >();
   const fixtureScanIds = new Map<string, string>();
   const originalState = process.env["CODEX_SECURITY_STATE_DIR"];
@@ -266,6 +272,9 @@ export function createMultiscanFixtures() {
       repository,
       revision,
       digest: scanRequestDigest(config, settings, repository),
+      target: Array.isArray(settings.target)
+        ? await normalizeTarget(repository, settings.target)
+        : { kind: "repository", paths: [] },
     });
   }
 
@@ -310,7 +319,10 @@ export function createMultiscanFixtures() {
           timestamp,
           timestamp,
           timestamp,
-          JSON.stringify({ scanRequestDigest: request.digest }),
+          JSON.stringify({
+            scanRequestDigest: request.digest,
+            target: request.target,
+          }),
           bytes
             ? `sha256:${createHash("sha256").update(bytes).digest("hex")}`
             : null,

@@ -452,6 +452,10 @@ describe("multiscan", () => {
       removeSpy.mockRestore();
     }
 
+    await expect(lstat(checkout)).rejects.toMatchObject({ code: "ENOENT" });
+    await mkdir(checkout);
+    const marker = join(checkout, "user-edits.txt");
+    await writeFile(marker, "User edits in the replacement checkout.");
     expect(persistedBeforeRemoval).toBeDefined();
     await writeFile(ledger, persistedBeforeRemoval!);
     expect((await results(ledger)).at(-1)).toMatchObject({
@@ -465,6 +469,9 @@ describe("multiscan", () => {
       skipped: 1,
     });
     expect(run).toHaveBeenCalledTimes(1);
+    expect(await readFile(marker, "utf8")).toBe(
+      "User edits in the replacement checkout.",
+    );
   });
 
   test("retries failed scans and continues later tasks when checkout cleanup fails", async () => {
@@ -739,9 +746,12 @@ describe("multiscan", () => {
     const identity = await lstat(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
-    expect(await results(recovered.resultsPath)).toEqual([receipt!]);
-    await access(join(receipt!["outputDir"] as string, "report.md"));
+    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    const receipts = await results(recovered.resultsPath);
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]).toEqual(receipt);
+    expect(receipts[1]).toMatchObject({ attempt: 2, status: "completed" });
+    await access(join(receipts[1]!["outputDir"] as string, "report.md"));
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([
       "exclusive",
     ]);

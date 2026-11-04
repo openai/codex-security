@@ -80,7 +80,6 @@ import {
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
-  type TrustedExecutable,
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
@@ -215,7 +214,7 @@ export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
-export function environmentValue(
+function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
   preserveWhitespace = false,
@@ -3125,12 +3124,6 @@ export async function pluginMetadata(
 export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
-  return (await resolvePluginPythonCommand(options)).executable;
-}
-
-export async function resolvePluginPythonCommand(
-  options: PluginPythonOptions = {},
-): Promise<TrustedExecutable> {
   const environment = options.environment ?? process.env;
   const requestedRoots = options.protectedRoot ?? process.cwd();
   const protectedRoot =
@@ -3259,7 +3252,7 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
-export function pluginHelperEnvironment(
+function pluginHelperEnvironment(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
   return pythonUtf8Environment(
@@ -3543,7 +3536,7 @@ async function requirePython(
   environment: ProcessEnvironment,
   protectedRoot: string | readonly string[],
   signal?: AbortSignal,
-): Promise<TrustedExecutable> {
+): Promise<string> {
   const resolved = await usablePython(
     candidate,
     environment,
@@ -3562,13 +3555,11 @@ async function usablePython(
   environment: ProcessEnvironment = process.env,
   protectedRoot: string | readonly string[] = process.cwd(),
   signal?: AbortSignal,
-): Promise<TrustedExecutable | null> {
-  const original = isPythonPathCandidate(candidate)
-    ? expandExecutableHome(candidate, environment)
-    : candidate;
-  throwIfSignalAborted(signal);
+): Promise<string | null> {
   const command = await resolveTrustedExecutable(
-    original,
+    isPythonPathCandidate(candidate)
+      ? expandExecutableHome(candidate, environment)
+      : candidate,
     environment,
     protectedRoot,
   );
@@ -3590,7 +3581,9 @@ async function usablePython(
         signal,
       },
     );
-    return stdout.trim() === "codex-security-python-ok" ? command : null;
+    return stdout.trim() === "codex-security-python-ok"
+      ? command.executable
+      : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;
