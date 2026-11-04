@@ -1263,6 +1263,7 @@ export async function capturePatchGitControls(
         if (
           hook !== undefined &&
           (!metadata?.isFile() ||
+            !(await hookIsAvailable(path)) ||
             (Buffer.isBuffer(hook)
               ? !(await readFile(canonical)).equals(hook)
               : metadata.size !== hook.size ||
