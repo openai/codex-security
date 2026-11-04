@@ -1,0 +1,87 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "automationDetails": {
+        "id": "scan_example_001"
+      },
+      "properties": {
+        "codexSecuritySchemaVersion": "1.0",
+        "codexSecurityTargetKind": "git_revision"
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/extract.py"
+                },
+                "region": {
+                  "endLine": 44,
+                  "startLine": 41
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Unsafe archive extraction can escape the output directory\n\nAn attacker-controlled path reaches a filesystem write without containment validation.\n\nSeverity: high\n\nCategory: Path traversal\n\nWeaknesses: CWE-22\n\nRemediation:\nNormalize destinations and reject entries that escape the extraction root.\n\nRemediation tests:\n- Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root.\n\nPreventive controls:\n- Route all archive extraction through one helper that normalizes and validates destination paths."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:990a4a6a2ec18440dd47eac4d7256c0ee2c02db1b43104720cab3cbe9db706ca"
+          },
+          "properties": {
+            "category": "path-traversal",
+            "confidence": "high",
+            "findingId": "csf_852f90d6e1177502ff113d4a",
+            "occurrenceId": "occ_e79cb19591e696572a1c22be",
+            "severity": "high"
+          },
+          "ruleId": "path-traversal.archive-extraction",
+          "ruleIndex": 0
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "Codex Security",
+          "rules": [
+            {
+              "fullDescription": {
+                "text": "Path traversal: Archive extraction. Categories: Path traversal. Weaknesses: CWE-22."
+              },
+              "help": {
+                "markdown": "Path traversal: Archive extraction. Categories: Path traversal. Weaknesses: CWE-22.\n\n## Remediation\n\nNormalize destinations and reject entries that escape the extraction root.",
+                "text": "Path traversal: Archive extraction. Categories: Path traversal. Weaknesses: CWE-22.\n\nRemediation:\n\nNormalize destinations and reject entries that escape the extraction root."
+              },
+              "id": "path-traversal.archive-extraction",
+              "name": "Path traversal: Archive extraction",
+              "properties": {
+                "security-severity": "8.1",
+                "tags": [
+                  "external/cwe/cwe-022",
+                  "path-traversal",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Path traversal: Archive extraction"
+              }
+            }
+          ],
+          "version": "0.1.0"
+        }
+      },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/example/repo",
+          "revisionId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  ],
+  "version": "2.1.0"
+}

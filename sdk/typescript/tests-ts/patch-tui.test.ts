@@ -3,11 +3,13 @@ import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { cleanup, render } from "ink-testing-library";
-import { createElement } from "react";
+import { act, createElement } from "react";
 import type { Finding, SeverityLevel } from "../src/index.js";
 import { PatchTui, type PatchSelection } from "../src/patch-tui.js";
 import { fakeResult } from "./cli-fixtures.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 afterEach(() => cleanup());
 
@@ -80,11 +82,80 @@ function findings(severities: readonly SeverityLevel[]): Finding[] {
   return result.findings.findings;
 }
 
-async function settle(): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 60));
+function renderSelection(inputFindings: Finding[]) {
+  const selected: (PatchSelection | null)[] = [];
+  const app = render(
+    createElement(PatchTui, {
+      repository: "/work/example",
+      findings: inputFindings,
+      color: false,
+      onComplete: (value) => selected.push(value),
+    }),
+  );
+  return { app, selected };
+}
+
+async function update(action: () => void): Promise<void> {
+  const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const previous = environment.IS_REACT_ACT_ENVIRONMENT;
+  environment.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    await act(async () => {
+      action();
+      await nextTurn();
+    });
+  } finally {
+    if (previous === undefined) delete environment.IS_REACT_ACT_ENVIRONMENT;
+    else environment.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+}
+
+function press(app: ReturnType<typeof render>, input: string): Promise<void> {
+  return update(() => app.stdin.write(input));
 }
 
 describe("interactive patch finding browser", () => {
+  test("orders findings by severity while keeping navigation and selection aligned", async () => {
+    const inputFindings = findings([
+      "low",
+      "high",
+      "medium",
+      "critical",
+      "high",
+    ]);
+    const originalOrder = inputFindings.map(({ occurrenceId }) => occurrenceId);
+    const { app, selected } = renderSelection(inputFindings);
+
+    const displayedFindings = (app.lastFrame() ?? "")
+      .split("\n")
+      .flatMap(
+        (line) =>
+          line.match(/(?:CRITICAL|HIGH|MEDIUM|LOW) Finding \d+/gu) ?? [],
+      );
+    expect(displayedFindings).toEqual([
+      "CRITICAL Finding 4",
+      "HIGH Finding 2",
+      "HIGH Finding 5",
+      "MEDIUM Finding 3",
+      "LOW Finding 1",
+    ]);
+    expect(app.lastFrame()).toContain("input reaches finding 4.");
+
+    await press(app, "n");
+    await press(app, " ");
+    await press(app, "j");
+    expect(app.lastFrame()).toContain("input reaches finding 2.");
+    await press(app, " ");
+    await press(app, "\r");
+
+    expect(selected).toEqual([
+      { severity: "high", occurrenceIds: ["occ_4", "occ_2"] },
+    ]);
+    expect(inputFindings.map(({ occurrenceId }) => occurrenceId)).toEqual(
+      originalOrder,
+    );
+  });
+
   test("shows complete finding details and scrolls through source evidence", async () => {
     const app = render(
       createElement(PatchTui, {
@@ -101,7 +172,7 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Add instructions for this finding.");
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
     expect(app.lastFrame()).toContain("3/3 selected");
     expect(app.lastFrame()).toContain("SUMMARY");
@@ -112,11 +183,9 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).not.toContain('"rationale"');
 
     const frames = [app.lastFrame() ?? ""];
-    app.stdin.write("\t");
-    await settle();
+    await press(app, "\t");
     for (let page = 0; page < 12; page += 1) {
-      app.stdin.write("\u001B[6~");
-      await settle();
+      await press(app, "\u001B[6~");
       frames.push(app.lastFrame() ?? "");
     }
 
@@ -174,6 +243,7 @@ describe("interactive patch finding browser", () => {
           'const token = "sk-proj-SYNTHETIC_KEY_123";',
         ].join("\n"),
       );
+      await writeFile(join(repository, "eof.ts"), "\r\n".repeat(10));
       const outside = join(directory, "outside.ts");
       await writeFile(outside, "OUTSIDE_PRIVATE_SOURCE");
       await symlink(outside, join(repository, "src", "outside-link.ts"));
@@ -186,6 +256,7 @@ describe("interactive patch finding browser", () => {
           endLine: 6,
           role: "sink",
         },
+        { path: "eof.ts", startLine: 10 },
         { path: "../outside.ts", startLine: 1 },
         { path: "src/outside-link.ts", startLine: 1 },
       ];
@@ -198,10 +269,13 @@ describe("interactive patch finding browser", () => {
         }),
       );
 
+      // Resizing rewraps the source excerpt already displayed for this finding.
+      await writeFile(join(repository, "src", "finding-1.ts"), "file changed");
+      Object.defineProperty(app.stdout, "columns", { value: 110 });
+      await update(() => app.stdout.emit("resize"));
       const frames = [app.lastFrame() ?? ""];
       for (let page = 0; page < 12; page += 1) {
-        app.stdin.write("\u001B[6~");
-        await settle();
+        await press(app, "\u001B[6~");
         frames.push(app.lastFrame() ?? "");
       }
       const reviewed = frames.join("\n");
@@ -213,8 +287,9 @@ describe("interactive patch finding browser", () => {
       expect(reviewed).toContain("›   │");
       expect(reviewed).toContain("includeDeleted: false");
       expect(reviewed).toContain("7 │   audit.record(tenant);");
-      expect(reviewed).toContain("[redacted]");
-      expect(reviewed).not.toContain("SYNTHETIC_KEY_123");
+      expect(reviewed).toContain('const token = "sk-proj-SYNTHETIC_KEY_123";');
+      expect(reviewed).toContain("› 10 │");
+      expect(reviewed).not.toContain(" 11 │");
       expect(reviewed).toContain("../outside.ts:1");
       expect(reviewed).toContain("src/outside-link.ts:1");
       expect(reviewed).not.toContain("OUTSIDE_PRIVATE_SOURCE");
@@ -224,74 +299,48 @@ describe("interactive patch finding browser", () => {
   });
 
   test("combines severity presets with individual finding selection", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high", "medium", "low"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
+    const { app, selected } = renderSelection(
+      findings(["high", "medium", "low"]),
     );
 
-    app.stdin.write("2");
-    await settle();
+    await press(app, "2");
     expect(app.lastFrame()).toContain("1/3 selected");
     expect(app.lastFrame()).toContain("high and above");
 
-    app.stdin.write("\u001B[B ");
-    await settle();
+    await press(app, "\u001B[B ");
     expect(app.lastFrame()).toContain("2/3 selected");
     expect(app.lastFrame()).toContain("custom");
 
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
     expect(selected).toEqual([
       { severity: "medium", occurrenceIds: ["occ_1", "occ_2"] },
     ]);
   });
 
   test("edits instructions per finding and only returns selected guidance", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high", "medium"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high", "medium"]));
 
-    app.stdin.write("i");
-    await settle();
+    await press(app, "i");
     expect(app.lastFrame()).toContain("Enter save");
 
-    app.stdin.write("Use the shared 2FA helper, not a new dependency.");
-    await settle();
+    await press(app, "Use the shared 2FA helper, not a new dependency.");
     expect(app.lastFrame()).toContain("Use the shared 2FA helper");
     expect(app.lastFrame()).toContain("2/2 selected");
 
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Use the shared 2FA helper");
     expect(app.lastFrame()).toContain("✎");
     expect(app.lastFrame()?.match(/PATCH INSTRUCTIONS/gu)).toHaveLength(1);
 
-    app.stdin.write("\u001B[B");
-    await settle();
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("Keep the existing middleware.");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\u001B[B");
+    await press(app, "i");
+    await press(app, "Keep the existing middleware.");
+    await press(app, "\r");
     expect(app.lastFrame()).toContain("Keep the existing middleware.");
 
-    app.stdin.write(" ");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, " ");
+    await press(app, "\r");
 
     expect(selected).toEqual([
       {
@@ -305,26 +354,16 @@ describe("interactive patch finding browser", () => {
   });
 
   test("optionally creates a draft pull request after selected patches", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high"]));
 
     expect(app.lastFrame()).toContain(
-      "[ ] Create draft GitHub pull request after patching",
+      "[ ] Create draft pull request or merge request after patching",
     );
-    app.stdin.write("r");
-    await settle();
+    await press(app, "r");
     expect(app.lastFrame()).toContain(
-      "[✓] Create draft GitHub pull request after patching",
+      "[✓] Create draft pull request or merge request after patching",
     );
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "\r");
 
     expect(selected).toEqual([
       {
@@ -336,63 +375,129 @@ describe("interactive patch finding browser", () => {
   });
 
   test("cancels and clears finding instructions without leaving the browser", async () => {
-    const selected: (PatchSelection | null)[] = [];
-    const app = render(
-      createElement(PatchTui, {
-        repository: "/work/example",
-        findings: findings(["high"]),
-        color: false,
-        onComplete: (value) => selected.push(value),
-      }),
-    );
+    const { app, selected } = renderSelection(findings(["high"]));
 
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("Discard this guidance.");
-    await settle();
-    app.stdin.write("\u001B");
-    await settle();
+    await press(app, "i");
+    await press(app, "Discard this guidance.");
+    // A complete Escape sequence avoids Ink's delay for an ambiguous bare Escape.
+    await press(app, "\u001B[27u");
     expect(selected).toEqual([]);
     expect(app.lastFrame()).not.toContain("Discard this guidance.");
 
-    app.stdin.write("i");
-    await settle();
-    app.stdin.write("x");
-    await settle();
-    app.stdin.write("\u007F");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
-    app.stdin.write("\r");
-    await settle();
+    await press(app, "i");
+    await press(app, "x");
+    await press(app, "\u007F");
+    await press(app, "\r");
+    await press(app, "\r");
 
     expect(selected).toEqual([{ severity: "high", occurrenceIds: ["occ_1"] }]);
   });
 
+  test("deletes complete characters from finding instructions", async () => {
+    const { app, selected } = renderSelection(findings(["high"]));
+
+    await press(app, "i");
+    await press(app, "Ask 👩‍💻");
+    await press(app, "\u007F");
+    await press(app, "the owner 👍🏽");
+    await press(app, "\u007F");
+    await press(app, "\r");
+    await press(app, "\r");
+
+    expect(selected).toEqual([
+      {
+        severity: "high",
+        occurrenceIds: ["occ_1"],
+        instructions: { occ_1: "Ask the owner" },
+      },
+    ]);
+  });
+
+  test("shows the final source line of a large excerpt under Node", async () => {
+    await using repository = await scopedTemporaryDirectory(
+      "patch-large-excerpt-",
+    );
+    const lineCount = 150_000;
+    const path = "large.ts";
+    await writeFile(
+      join(repository.path, path),
+      "x\n".repeat(lineCount - 1) + "last source line\n",
+    );
+    const finding = {
+      ...fakeResult(["high"]).findings.findings[0]!,
+      title: "Large excerpt",
+      occurrenceId: "occ_large",
+      locations: [{ path, startLine: 1, endLine: lineCount }],
+    };
+    const built = await Bun.build({
+      entrypoints: [
+        join(import.meta.dirname, "fixtures", "patch-large-excerpt.ts"),
+      ],
+      target: "node",
+      packages: "external",
+    });
+    expect(built.success).toBe(true);
+    const result = spawnSync(
+      "node",
+      ["--input-type=module", "-", repository.path, JSON.stringify(finding)],
+      {
+        cwd: join(import.meta.dirname, ".."),
+        input: await built.outputs[0]!.text(),
+        encoding: "utf8",
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  test("uses the current finding and viewport for every buffered scroll key", async () => {
+    const items = findings(["high", "medium"]);
+    items[1]!.summary = "Review this long finding. ".repeat(80);
+    const { app } = renderSelection(items);
+    const down = "\u001B[B";
+    const pageDown = "\u001B[6~";
+    const pageUp = "\u001B[5~";
+    const detailRange = () =>
+      app.lastFrame()!.match(/DETAILS\s+(\d+)–\d+\/(\d+)/u)!;
+
+    await press(app, down + "\t" + pageDown.repeat(40));
+    expect(app.lastFrame()).toContain("occ_2");
+    await press(app, pageUp.repeat(40) + down.repeat(3));
+    expect(app.lastFrame()).toContain("DETAILS  4–16/");
+    await press(app, pageDown.repeat(2));
+    expect(app.lastFrame()).toContain("DETAILS  30–42/");
+
+    const wideRows = Number(detailRange()[2]);
+    Object.defineProperty(app.stdout, "columns", { value: 50 });
+    await update(() => app.stdout.emit("resize"));
+    expect(Number(detailRange()[2])).toBeGreaterThan(wideRows);
+    await press(app, pageDown.repeat(40));
+    expect(app.lastFrame()).toContain("occ_2");
+    const lastPageStart = Number(detailRange()[1]);
+    Object.defineProperty(app.stdout, "rows", { value: 38 });
+    await update(() => app.stdout.emit("resize"));
+    expect(app.lastFrame()).toContain(`DETAILS  ${lastPageStart - 10}–`);
+    await press(app, pageDown + pageUp);
+    const previousPage = app.lastFrame();
+    expect(previousPage).not.toContain("occ_2");
+    await press(app, pageDown);
+    await press(app, pageUp);
+    expect(app.lastFrame()).toBe(previousPage);
+  });
+
   test("allows selecting none and canceling without patching", async () => {
     for (const input of ["q", "\r"]) {
-      const selected: (PatchSelection | null)[] = [];
-      const app = render(
-        createElement(PatchTui, {
-          repository: "/work/example",
-          findings: findings(["high"]),
-          color: false,
-          onComplete: (value) => selected.push(value),
-        }),
-      );
+      const { app, selected } = renderSelection(findings(["high"]));
       if (input === "\r") {
-        app.stdin.write("n");
-        await settle();
+        await press(app, "n");
         expect(app.lastFrame()).toContain("0/1 selected");
       }
-      app.stdin.write(input);
-      await settle();
+      await press(app, input);
       expect(selected).toEqual([null]);
       app.unmount();
     }
   });
 
-  test("sanitizes terminal escapes and credential-bearing finding details", () => {
+  test("strips terminal escapes and preserves credential-shaped finding details", () => {
     const [finding] = findings(["high"]);
     finding!.title = "\u001B[31mUnsafe title\u001B[0m\nforged line";
     finding!.summary = "sk-proj-SYNTHETIC_KEY_123";
@@ -406,8 +511,7 @@ describe("interactive patch finding browser", () => {
     );
 
     expect(app.lastFrame()).toContain("Unsafe title forged line");
-    expect(app.lastFrame()).toContain("[redacted]");
-    expect(app.lastFrame()).not.toContain("SYNTHETIC_KEY_123");
+    expect(app.lastFrame()).toContain("sk-proj-SYNTHETIC_KEY_123");
     expect(app.lastFrame()).not.toContain("\u001B[31m");
   });
 
