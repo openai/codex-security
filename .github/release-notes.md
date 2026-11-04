@@ -90,6 +90,7 @@
 - distinguish empty reports from failed scanners and exclusions ([#2082](https://github.com/openai/codex-security/pull/2082))
 - preserve worker configuration, retry and failure diagnostics ([#2309](https://github.com/openai/codex-security/pull/2309))
 - run report comparisons without interactive tools ([#2304](https://github.com/openai/codex-security/pull/2304))
+- pin Deep Scan worker executable ([#764](https://github.com/openai/codex-security/pull/764))
 
 <!-- release-section: highlights:end -->
 
