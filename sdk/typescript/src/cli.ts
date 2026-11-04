@@ -7308,7 +7308,7 @@ export async function main(
           await readCodexFileProfile(overrides, home),
           overrides,
         );
-        requireExternalProviderModel(effective, scanModelProvider(effective));
+        requireExternalProviderModel(effective, scanModelProvider(overrides));
         const codex = await mergedCodexConfig(resolved.config, home);
         const deep =
           resolved.options.mode === "deep"
@@ -12036,6 +12036,15 @@ async function parseScanCodexOverrides(
 ): Promise<JsonObject> {
   const explicit = parseCodexOverrideValues(values, model, effort);
   const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
+  const selectedProvider = provider ?? scanModelProvider(overrides);
+  // A native profile can select its own provider and its default model. Require
+  // a model when the CLI or project explicitly selects the external provider.
+  if (
+    !isExternalModelProvider(selectedProvider) &&
+    selectedProvider !== "amazon-bedrock"
+  ) {
+    return parseCodexOverrides(values, model, effort, provider, defaults);
+  }
   const profile = await readCodexFileProfile(overrides, profileHome);
   const result = parseCodexOverrides(
     values,
