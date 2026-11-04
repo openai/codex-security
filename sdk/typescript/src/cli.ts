@@ -2459,23 +2459,21 @@ export async function main(
       };
       options.signal?.throwIfAborted();
       if (command === "git") {
-        // Git index reads can launch a repository's fsmonitor outside the patch sandbox.
-        if (argv[0] === "patch") {
-          const count = Number(
-            options.environment?.["GIT_CONFIG_COUNT"] ??
-              environmentEntry(
-                parentDependencies.environment,
-                "GIT_CONFIG_COUNT",
-              ) ??
-              0,
-          );
-          options.environment = {
-            ...options.environment,
-            GIT_CONFIG_COUNT: String(count + 1),
-            [`GIT_CONFIG_KEY_${count}`]: "core.fsmonitor",
-            [`GIT_CONFIG_VALUE_${count}`]: "false",
-          };
-        }
+        // Any Git index read can run a checkout-selected fsmonitor as the CLI user.
+        const count = Number(
+          options.environment?.["GIT_CONFIG_COUNT"] ??
+            environmentEntry(
+              parentDependencies.environment,
+              "GIT_CONFIG_COUNT",
+            ) ??
+            0,
+        );
+        options.environment = {
+          ...options.environment,
+          GIT_CONFIG_COUNT: String(count + 1),
+          [`GIT_CONFIG_KEY_${count}`]: "core.fsmonitor",
+          [`GIT_CONFIG_VALUE_${count}`]: "false",
+        };
         gitRepository ??= repository;
         gitEnvironment ??= Object.fromEntries(
           ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
