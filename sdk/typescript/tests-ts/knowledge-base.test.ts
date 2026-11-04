@@ -507,7 +507,10 @@ describe("scan knowledge bases", () => {
     );
     await writeFile(
       join(root, "self-closing-tab.docx"),
-      docx("User", "Permission", "<w:tab/>"),
+      docxBody(
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1701"/></w:tabs></w:pPr>' +
+          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t></w:r></w:p>",
+      ),
     );
     await writeFile(
       join(root, "non-breaking-hyphen.docx"),
@@ -668,6 +671,20 @@ describe("scan knowledge bases", () => {
         "<w:delInstrText>removed field</w:delInstrText></w:r></w:del>" +
         "<w:r><w:instrText>Visible scope</w:instrText></w:r></w:p>",
       "Visible scope\n",
+    ],
+    [
+      "drawing placement and relative dimensions around visible text",
+      '<w:p xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:r><w:t>Before </w:t>' +
+        '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+        '<mc:Choice Requires="wps"><w:drawing><d:anchor><d:positionH relativeFrom="column"><d:align>center</d:align></d:positionH>' +
+        '<d:positionV relativeFrom="paragraph"><d:posOffset><![CDATA[12700]]></d:posOffset></d:positionV>' +
+        "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Rule 12700.</w:t></w:r></w:p></w:txbxContent></wps:txbx>" +
+        '<sizeRelH xmlns="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><pctWidth>75000</pctWidth></sizeRelH>' +
+        '</d:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml">' +
+        '<div xmlns:d="urn:example:format">Rule <d:align>12700.</d:align></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        "<w:drawing><d:anchor><d:positionH><d:posOffset>25400</d:posOffset></d:positionH></d:anchor></w:drawing>" +
+        "<w:t> After.</w:t></w:r></w:p>",
+      "Before Rule 12700.\nRule 12700. After.\n",
     ],
   ])("preserves DOCX text with %s", async (_description, body, expected) => {
     const root = await temporaryDirectory();
@@ -847,16 +864,22 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
-  test("skips Office owner files while a document is open", async () => {
+  test("skips Office owner files and LibreOffice lock files during discovery", async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "policy.docx"), docx("Access policy."));
     await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+    await writeFile(
+      join(root, ".~lock.policy.docx#"),
+      ",Example User,example-host,01.01.2026 09:00,file:///home/example/.config/libreoffice/4;",
+    );
+    await writeFile(join(root, ".~lock.#"), "Named document");
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
 
-    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.\n",
+      "Named document",
     ]);
   });
 
