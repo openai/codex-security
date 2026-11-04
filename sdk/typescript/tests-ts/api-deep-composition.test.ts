@@ -91,6 +91,20 @@ test.each(["active", "completed"] as const)(
   },
 );
 
+test("an empty target checkpoints failure without starting a child scan", async () => {
+  const h = await fixture();
+  await mkdir(join(h.repository, "empty"));
+  await using client = h.makeClient();
+  await expect(
+    client.run(h.repository, { ...h.options, target: ["empty"] }),
+  ).rejects.toThrow("Deep Scan target is empty; no security audit was performed.");
+  expect(h.launches).toHaveLength(0);
+  expect(h.commands).toContain("check-deep-scan-target");
+  const checkpoint = await loadDeepScanCheckpoint(h.outputDir);
+  expect(checkpoint!.passes).toEqual([]);
+  expect(checkpoint!.terminalReason).toBe("failed");
+});
+
 test("ordinary children and reducer share one immutable preparation and knowledge directory", async () => {
   const h = await fixture();
   await using client = h.makeClient();

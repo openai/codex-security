@@ -24,6 +24,7 @@ export function createExecutionProfileCodex(
   codexHome: string,
   configuration: JsonObject,
   checkPermissions = false,
+  preflightEnvironment?: Record<string, string>,
 ): Pick<Codex, "startThread" | "resumeThread"> {
   const wrap = (
     threadOptions: ThreadOptions,
@@ -64,7 +65,12 @@ export function createExecutionProfileCodex(
                 profileName: name,
               }) as Pick<Codex, "startThread" | "resumeThread">;
               const checked = checkPermissions
-                ? createPermissionCheckedCodex(options, codex)
+                ? createPermissionCheckedCodex(
+                    options,
+                    codex,
+                    undefined,
+                    preflightEnvironment,
+                  )
                 : codex;
               const current =
                 id === null

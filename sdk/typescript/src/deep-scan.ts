@@ -81,7 +81,11 @@ export interface DeepScanComposition {
   scanOptions: ScanOptions;
   signal: AbortSignal;
   createClient(): Pick<CodexSecurity, "run" | "close">;
-  workbench(args: readonly string[], input?: string): Promise<JsonObject>;
+  workbench(
+    args: readonly string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
   merge(
     prompt: string,
     signal: AbortSignal,
@@ -1087,6 +1091,18 @@ export async function runDeepScans(
           );
         stopDiscovery(state, stop);
         break;
+      }
+      if (state.passes.length === 0 && state.aggregate === null) {
+        try {
+          await workbench(
+            ["check-deep-scan-target", "--scan-id", scanId],
+            undefined,
+            discoverySignal,
+          );
+        } catch (error) {
+          if (!discoverySignal.aborted) throw error;
+        }
+        if (discoverySignal.aborted || Date.now() >= deadline) continue;
       }
       const batch = unfinished.slice(0, settings.workers);
       while (

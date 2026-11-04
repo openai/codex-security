@@ -26,6 +26,7 @@ export function createPermissionCheckedCodex(
   { config, configOverrides, ...options }: CodexOptions,
   suppliedCodex?: Pick<Codex, "startThread" | "resumeThread">,
   nativeRoot?: string,
+  preflightEnvironment?: Record<string, string>,
 ) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
@@ -124,7 +125,7 @@ export function createPermissionCheckedCodex(
           await verifyPermissionProfile({
             executable: options.codexPathOverride,
             cwd: threadOptions.workingDirectory ?? process.cwd(),
-            environment,
+            environment: preflightEnvironment ?? environment,
             overrides: effectiveOverrides,
             profileId,
             expectedProfile,

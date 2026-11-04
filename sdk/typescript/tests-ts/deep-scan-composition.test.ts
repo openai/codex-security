@@ -154,7 +154,8 @@ async function fixture(
       }
       if (args[0] === "list-scans")
         return { scans: [...records.values()] } as never;
-      if (args[0] === "update-progress") return {};
+      if (args[0] === "update-progress" || args[0] === "check-deep-scan-target")
+        return {};
       if (args[0] === "get-scan")
         return { scan: records.get(args[2]!) } as never;
       if (args[0] === "fail-scan") {

@@ -19,7 +19,6 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import {
-  EXTERNAL_CODEX_PROVIDERS,
   deepMerge,
   providerProcessConfiguration,
   mcpProcessConfiguration,
@@ -28,7 +27,6 @@ import {
   writePrivateConfig,
   hasCommandAuth,
   inlineToml,
-  isExternalModelProvider,
   scanModelProvider,
   scanProviderEnvKey,
   MODEL_FILE_SETTINGS,
@@ -37,9 +35,11 @@ import {
   scanCompositionOverrides,
   type JsonObject,
 } from "./config.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   scanAuthentication,
+  declaredProviderEnvironment,
+  withoutProviderEnvironment,
   environmentApiKey,
   environmentValue,
   selectedScanEnvironment,
@@ -90,12 +90,9 @@ export interface ExecutionSource {
   readonly environment: ProcessEnvironment;
   readonly authentication: ScanAuthentication;
   readonly modelProvider: unknown;
-  readonly externalProvider:
-    | (Omit<
-        (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS],
-        "env_key"
-      > & { env_key: string })
-    | null;
+  readonly providerEnvKey?: string;
+  /** Native credentials travel only to the model process. */
+  readonly modelEnvironment?: Record<string, string>;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
 }
@@ -121,20 +118,14 @@ export function prepareExecutionSource(input: {
   const modelProvider = scanModelProvider(configuration);
   const preserveProviderEnvironment =
     input.preserveProviderEnvironment === true;
-  const providerEnvKey = scanProviderEnvKey(configuration);
-  const externalProvider =
-    !preserveProviderEnvironment &&
-    !commandAuth &&
-    isExternalModelProvider(modelProvider)
-      ? {
-          ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
-          env_key:
-            providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key,
-        }
-      : null;
+  const providerEnvKey = commandAuth
+    ? undefined
+    : scanProviderEnvKey(configuration);
   const authentication = scanAuthentication(
     environment,
-    preserveProviderEnvironment ? "auto" : input.auth,
+    preserveProviderEnvironment && input.auth !== "chatgpt"
+      ? "auto"
+      : input.auth,
     modelProvider,
     commandAuth,
     { preserveProviderEnvironment, providerEnvKey },
@@ -143,26 +134,35 @@ export function prepareExecutionSource(input: {
     !preserveProviderEnvironment && authentication.method === "api_key"
       ? environmentApiKey(environment, modelProvider, providerEnvKey)
       : null;
-  if (externalProvider !== null && apiKey === null)
-    throw new AuthenticationRequiredError(
-      `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
-    );
+  const selected = preserveProviderEnvironment
+    ? environment
+    : selectedScanEnvironment(
+        commandAuth ? configuredAuthEnvironment(environment) : environment,
+        input.auth,
+        modelProvider,
+        providerEnvKey,
+        configuration,
+      );
+  const modelEnvironment =
+    providerEnvKey === undefined
+      ? undefined
+      : {
+          ...declaredProviderEnvironment(
+            resolveCodexProfile(configuration)["model_providers"],
+            selected,
+          ),
+          ...(apiKey === null ? {} : { [providerEnvKey]: apiKey }),
+        };
   return {
     command: { ...input.command },
     configuration,
     modelProvider,
-    externalProvider,
+    providerEnvKey,
+    modelEnvironment,
     authentication,
     apiKey,
     preserveProviderEnvironment,
-    environment: preserveProviderEnvironment
-      ? environment
-      : selectedScanEnvironment(
-          commandAuth ? configuredAuthEnvironment(environment) : environment,
-          input.auth,
-          modelProvider,
-          providerEnvKey,
-        ),
+    environment: withoutProviderEnvironment(selected, modelEnvironment),
   };
 }
 
@@ -266,7 +266,8 @@ export async function createExecutionCodex(
   const { runtime, python, sessionConfig } = session;
   const {
     environment: scanEnvironment,
-    externalProvider,
+    providerEnvKey,
+    modelEnvironment,
     apiKey,
     preserveProviderEnvironment,
   } = session.source;
@@ -278,9 +279,7 @@ export async function createExecutionCodex(
       }),
       git,
     ),
-    ...(externalProvider === null
-      ? {}
-      : { [externalProvider.env_key]: apiKey! }),
+    ...modelEnvironment,
     CODEX_HOME: runtime.codexHome,
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(scanEnvironment),
     ...runtimePaths,
@@ -366,9 +365,7 @@ export async function createExecutionCodex(
       ? environment
       : {
           ...configuredAuthEnvironment(environment),
-          ...(externalProvider === null || apiKey === null
-            ? {}
-            : { [externalProvider.env_key]: apiKey }),
+          ...modelEnvironment,
         },
   );
   if (checkPermissions || process.platform === "win32") {
@@ -381,14 +378,27 @@ export async function createExecutionCodex(
   const createCodex =
     client.createCodex ??
     ((options: CodexOptions) => {
+      const preflightEnvironment =
+        modelEnvironment === undefined
+          ? undefined
+          : definedEnvironment(
+              withoutProviderEnvironment(options.env ?? {}, modelEnvironment),
+            );
       if (requiresConfigFile && runtime.preserveCodexHomeConfig)
         return createExecutionProfileCodex(
           options,
           runtime.codexHome,
           sdkCodexConfig,
           checkPermissions,
+          preflightEnvironment,
         );
-      if (checkPermissions) return createPermissionCheckedCodex(options);
+      if (checkPermissions)
+        return createPermissionCheckedCodex(
+          options,
+          undefined,
+          undefined,
+          preflightEnvironment,
+        );
       const { config, configOverrides, ...settings } = options;
       return new Codex({
         ...settings,
@@ -402,7 +412,7 @@ export async function createExecutionCodex(
     ...(codexPathOverride === undefined
       ? {}
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
-    ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+    ...(providerEnvKey !== undefined || apiKey === null ? {} : { apiKey }),
     configOverrides: [requestContext.configOverride, ...configOverrides],
     env: sdkEnvironment,
     config: {

@@ -525,13 +525,28 @@ describe("semantic scan comparison", () => {
   );
 
   test.each([false, true])(
-    "preserves literal metadata keys in SDK arguments with provider profile %p",
+    "preserves literal metadata and provider header values in SDK children with a private profile %p",
     async (withProfile) => {
       const home = await temporaryDirectory();
+      const repository = await temporaryDirectory();
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      const gateway = (env_key = "SYNTHETIC_GATEWAY_TOKEN") => ({
+        model_provider: "gateway",
+        model_providers: {
+          gateway: {
+            name: "Synthetic",
+            wire_api: "responses",
+            base_url: "https://provider.example.test/v1",
+            env_key,
+            env_http_headers: { "X-Gateway-Key": "CODEX_API_KEY" },
+          },
+        },
+      });
       const preload = join(home, "capture-codex.mjs");
       await writeFile(
         join(home, "config.toml"),
         stringify({
+          ...(withProfile ? {} : gateway()),
           responses_api_metadata: {
             "team.tag": "from-home",
             "overlap.tag": "home",
@@ -544,52 +559,68 @@ describe("semantic scan comparison", () => {
           "for await (const _chunk of process.stdin) {}",
           "const send = (event) => console.log(JSON.stringify(event));",
           'send({ type: "thread.started", thread_id: "fixture-thread" });',
-          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(process.argv.slice(2)) } });',
+          "const { SYNTHETIC_GATEWAY_TOKEN: primary, CODEX_API_KEY: header, OPENAI_API_KEY: account } = process.env;",
+          "const text = JSON.stringify({ args: process.argv.slice(2), credentials: { primary, header, account } });",
+          'send({ type: "item.completed", item: { id: "reply", type: "agent_message", text } });',
           'send({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } });',
           "process.exit(0);",
         ].join("\n"),
       );
       let captured: CodexOptions | undefined;
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const profileClient = await captureProfileClient();
+      const { codex } = fakeCodex(
+        withProfile
+          ? { components: [{ name: "Source", paths: ["source.ts"] }] }
+          : { matches: [], uncertain: [] },
+      );
       const startThread = observeCodexOptions(codex, (options) => {
         captured = options;
       });
       try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment: {
-              PATH: process.env["PATH"],
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_HOME: home,
-              CODEX_SECURITY_STATE_DIR: join(home, "state"),
-              OPENAI_API_KEY: "synthetic-key",
-            },
-            workingDirectory: home,
-            config: {
-              codexOverrides: {
-                responses_api_metadata: {
-                  "caller.tag": "from-caller",
-                  "overlap.tag": "caller",
-                },
-                ...(withProfile
-                  ? {
-                      model_provider: "synthetic",
-                      model_providers: {
-                        synthetic: {
-                          name: "Synthetic",
-                          wire_api: "responses",
-                          base_url: "https://provider.example.test/v1",
-                        },
-                      },
-                    }
-                  : {}),
+        const options = {
+          environment: {
+            PATH: process.env["PATH"],
+            SystemRoot: process.env["SystemRoot"],
+            CODEX_HOME: home,
+            CODEX_SECURITY_STATE_DIR: join(home, "state"),
+            OPENAI_API_KEY: "synthetic-unrelated-account",
+            CODEX_API_KEY: " synthetic-header ",
+            SYNTHETIC_GATEWAY_TOKEN: "synthetic-primary",
+          },
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              responses_api_metadata: {
+                "caller.tag": "from-caller",
+                "overlap.tag": "caller",
               },
+              ...(withProfile ? gateway() : {}),
             },
           },
-        );
+        };
+        if (withProfile) {
+          await planComponents(repository, options);
+          await expect(
+            planComponents(repository, { ...options, auth: "chatgpt" }),
+          ).rejects.toThrow(
+            "ChatGPT authentication cannot use the gateway provider's required SYNTHETIC_GATEWAY_TOKEN",
+          );
+          await expect(
+            planComponents(repository, {
+              ...options,
+              config: { codexOverrides: gateway("CODEX_API_KEY") },
+              environment: { ...options.environment, CODEX_API_KEY: undefined },
+            }),
+          ).rejects.toThrow("Set CODEX_API_KEY");
+          expect(startThread).toHaveBeenCalledTimes(1);
+        } else
+          await matchScanFindings(
+            { before: [finding("before")], after: [finding("after")] },
+            options,
+          );
       } finally {
         startThread.mockRestore();
+        profileClient.spy.mockRestore();
       }
       expect(captured).toBeDefined();
       const capture = new Codex({
@@ -603,7 +634,18 @@ describe("semantic scan comparison", () => {
       const turn = await capture
         .startThread({ workingDirectory: home, skipGitRepoCheck: true })
         .run("Capture the invocation.");
-      const args: string[] = JSON.parse(turn.finalResponse);
+      const {
+        args,
+        credentials,
+      }: {
+        args: string[];
+        credentials: Record<string, string>;
+      } = JSON.parse(turn.finalResponse);
+      expect(credentials).toEqual({
+        primary: "synthetic-primary",
+        header: " synthetic-header ",
+      });
+      expect(captured!.apiKey).toBeUndefined();
       const metadataOverrides = args
         .flatMap((arg, index) => (arg === "--config" ? [args[index + 1]!] : []))
         .filter((value) => value.startsWith("responses_api_metadata"));
@@ -614,7 +656,7 @@ describe("semantic scan comparison", () => {
           "caller.tag": "from-caller",
           "overlap.tag": "caller",
           codex_security_surface: "sdk",
-          codex_security_command: "compare",
+          codex_security_command: withProfile ? "scan-components" : "compare",
           codex_security_package_version: VERSION,
           ...(withProfile ? { codex_security_provider: "custom" } : {}),
         },

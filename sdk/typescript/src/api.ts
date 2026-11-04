@@ -12,6 +12,8 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
+  withoutProviderEnvironment,
+  declaredProviderEnvironment,
   environmentApiKey,
   environmentValue,
   definedEnvironment,
@@ -1017,11 +1019,7 @@ export class CodexSecurity {
       );
       const git = await inspectTrustedExecutable(
         "git",
-        selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          session.source.modelProvider,
-        ),
+        session.source.environment,
         [
           (await gitMarkerRoot(inputs.repository, signal, "outermost")) ??
             inputs.repository,
@@ -3635,12 +3633,8 @@ export class CodexSecurity {
               const ownedWorkbench = (
                 args: readonly string[],
                 input?: string,
-              ) =>
-                workbench(
-                  { ...workbenchOptions, signal: undefined },
-                  args,
-                  input,
-                );
+                signal?: AbortSignal,
+              ) => workbench({ ...workbenchOptions, signal }, args, input);
               notifyObserver(options, "onScanStarted")();
               const composition = await runDeepScans({
                 scanId,
@@ -3962,7 +3956,12 @@ export class CodexSecurity {
               matcherConfig["mcp_servers"] = await disabledMcpServers(
                 executionCommand(session.source),
                 processConfig,
-                definedEnvironment(environment),
+                definedEnvironment(
+                  withoutProviderEnvironment(
+                    environment,
+                    session.source.modelEnvironment,
+                  ),
+                ),
                 { signal, workingDirectory: repo },
                 configOverrides,
               );
@@ -4816,7 +4815,6 @@ export class CodexSecurity {
           environment,
           authentication: { method: "host", verified: false },
           modelProvider: "host",
-          externalProvider: null,
           apiKey: null,
           preserveProviderEnvironment: false,
         },
@@ -4867,7 +4865,7 @@ export class CodexSecurity {
         preserveProviderEnvironment: options.preserveProviderEnvironment,
       });
       const commandAuth = hasCommandAuth(source.configuration);
-      const { modelProvider, externalProvider, apiKey } = source;
+      const { modelProvider, providerEnvKey, apiKey } = source;
       let authentication = source.authentication;
       const scanEnvironment = source.environment;
       if (
@@ -4929,7 +4927,7 @@ export class CodexSecurity {
       );
       if (runtimeNode !== undefined)
         runtimeEnvironment["CODEX_MCP_NODE_PATH"] = runtimeNode;
-      const preparedEnvironment = source.preserveProviderEnvironment
+      const selectedEnvironment = source.preserveProviderEnvironment
         ? runtimeEnvironment
         : selectedScanEnvironment(
             commandAuth
@@ -4937,8 +4935,23 @@ export class CodexSecurity {
               : runtimeEnvironment,
             options.auth,
             modelProvider,
-            externalProvider?.env_key,
+            providerEnvKey,
+            source.configuration,
           );
+      const modelEnvironment =
+        providerEnvKey === undefined
+          ? undefined
+          : {
+              ...declaredProviderEnvironment(
+                resolveCodexProfile(source.configuration)["model_providers"],
+                selectedEnvironment,
+              ),
+              ...source.modelEnvironment,
+            };
+      const preparedEnvironment = withoutProviderEnvironment(
+        selectedEnvironment,
+        modelEnvironment,
+      );
       for (const key of Object.keys(source.environment))
         delete source.environment[key];
       Object.assign(source.environment, preparedEnvironment);
@@ -5008,7 +5021,7 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (externalProvider === null && apiKey !== null) {
+      if (providerEnvKey === undefined && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
       if (
@@ -5055,13 +5068,13 @@ export class CodexSecurity {
       }
       if (!commandAuth)
         authentication = await runtimeScanAuthentication(
-          source.environment,
+          { ...source.environment, ...modelEnvironment },
           runtime.codexHome,
           source.preserveProviderEnvironment ? "auto" : options.auth,
           modelProvider,
           {
             preserveProviderEnvironment: source.preserveProviderEnvironment,
-            providerEnvKey: externalProvider?.env_key,
+            providerEnvKey,
           },
         );
       if (
@@ -5098,7 +5111,7 @@ export class CodexSecurity {
       return {
         policy: "ordinary",
         auth: options.auth,
-        source,
+        source: { ...source, modelEnvironment },
         runtime,
         runtimeConfig,
         safetyIdentifier: options.safetyIdentifier,
@@ -5690,7 +5703,7 @@ export class CodexSecurity {
       });
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
-        isExternalModelProvider(modelProvider) ||
+        source.providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
           : await initialCredentialsAvailable(
