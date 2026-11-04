@@ -16319,12 +16319,16 @@ if __name__ == "__main__":
         async (_input: string, options: { signal: AbortSignal }) => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             yield { type: "thread.started", thread_id: "scan-thread" };
-            const rollout = await writeUsageSession(codexHome, "scan-thread", {
-              input_tokens: 1_250,
-              cached_input_tokens: 200,
-              output_tokens: 30,
-            });
-            if (completion === "failed") await appendFile(rollout, '{"type":');
+            await writeUsageSession(
+              codexHome,
+              "scan-thread",
+              {
+                input_tokens: 1_250,
+                cached_input_tokens: 200,
+                output_tokens: 30,
+              },
+              { trailingRecord: completion === "failed" ? '{"type":' : "" },
+            );
             await (options.signal.aborted
               ? undefined
               : once(options.signal, "abort"));
