@@ -100,14 +100,19 @@ function matches(
     : secretCategory.test(category);
   return (
     !negatedSecretCategory.test(category) &&
-    relevantCategory &&
     cwes.some((value) => {
       const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
+      if (expected.cwes.includes(cwe)) {
+        return (
+          relevantCategory ||
+          (cwe === "CWE-321" &&
+            /^(?:embedded[- ]+)?cryptographic[- ]+keys?$/i.test(category))
+        );
+      }
       return (
-        expected.cwes.includes(cwe) ||
-        (!runtimeLeak &&
-          ["CWE-200", "CWE-540"].includes(cwe) &&
-          explicitSecretCategory.test(category))
+        !runtimeLeak &&
+        ["CWE-200", "CWE-540"].includes(cwe) &&
+        explicitSecretCategory.test(category)
       );
     }) &&
     finding.locations?.some((location) => matchesLocation(location, expected))

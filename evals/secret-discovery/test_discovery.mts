@@ -340,6 +340,23 @@ for (const cwe of ["CWE-312", "CWE-313"]) {
   });
 }
 
+test("accepts cryptographic-key categories only for a matching CWE-321 exposure", () => {
+  const index = fixture.positives.findIndex(({ id }) => id === "private-key");
+  for (const [category, cwe, passes] of [
+    ["Embedded cryptographic key", "CWE-321", true],
+    ["cryptographic_keys", "CWE-321", true],
+    ["Embedded public cryptographic key", "CWE-321", false],
+    ["Not an embedded cryptographic key", "CWE-321", false],
+    ["Weak cryptographic key", "CWE-321", false],
+    ["Embedded cryptographic key", "CWE-200", false],
+    ["Embedded cryptographic key", "CWE-798", false],
+  ] as const) {
+    const result = retainedResult();
+    result.findings[index].taxonomy = { category, cwe: [cwe] };
+    assert.equal(gradeResult(result, fixture).passed, passes, category);
+  }
+});
+
 test("keeps password and cryptographic-key CWEs specific to those exposures", () => {
   for (const [index, expected] of fixture.positives.entries()) {
     for (const [cwe, applicableId] of [
