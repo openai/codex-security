@@ -133,8 +133,7 @@ import {
   EXTERNAL_FINDINGS_READERS,
 } from "./external-findings-read.js";
 import {
-  hasFindingsToImport,
-  isEmptyExternalReport,
+  externalImportDisposition,
   type ExternalFindings,
 } from "./external-findings.js";
 import {
@@ -3859,22 +3858,28 @@ export async function main(
                   `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
                 );
               };
-              const hasFindings = hasFindingsToImport(preview);
+              const disposition = externalImportDisposition(preview);
+              if (disposition === "excluded" || disposition === "failed")
+                throw new NoPublishableFindingsError(preview);
               if (!structured) showPreview();
               if (options.dryRun) {
                 if (humanSummary)
                   renderedOutput = "Dry run complete. No findings stored.\n";
                 return { ...preview, dryRun: true };
               }
-              if (hasFindings && !(await confirmImport(preview, showPreview))) {
+              if (
+                disposition === "ready" &&
+                !(await confirmImport(preview, showPreview))
+              ) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
                 return { imported: false, preview };
               }
               const result = await prepared.import();
               if (result.excluded.length > 0) exitCode = 1;
-              const summary = !hasFindings
-                ? "The report contains no findings. Nothing was stored.\n"
-                : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+              const summary =
+                disposition === "empty"
+                  ? "The report contains no findings. Nothing was stored.\n"
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -3948,7 +3953,7 @@ export async function main(
                 : undefined;
             if (
               selection &&
-              isEmptyExternalReport(selection) &&
+              externalImportDisposition(selection) === "empty" &&
               !controller.signal.aborted
             ) {
               const message =

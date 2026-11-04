@@ -18,7 +18,8 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
-  hasFindingsToImport,
+  externalImportDisposition,
+  NoPublishableFindingsError,
   cloneImportPreview,
   snapshotImportOptions,
   snapshotNormalizedFindings,
@@ -1245,7 +1246,9 @@ export async function prepareLocalImport(
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
-      const hasFindings = hasFindingsToImport(current);
+      const disposition = externalImportDisposition(current);
+      if (disposition === "failed")
+        throw new NoPublishableFindingsError(cloneImportPreview(current));
       const summary = {
         repository,
         read: current.read,
@@ -1255,7 +1258,7 @@ export async function prepareLocalImport(
         ready: current.findings.length,
         excluded: structuredClone(current.excluded),
       };
-      if (!hasFindings) {
+      if (disposition !== "ready") {
         return {
           ...summary,
           findings: [],

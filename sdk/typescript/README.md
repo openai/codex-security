@@ -737,7 +737,9 @@ options)` accepts already normalized evidence, and
 `listLocalExternalFindings({ repository })` reads the stored records. Imports
 remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
-records remain stored, and unknown evidence fields are not inferred.
+records remain stored, and unknown evidence fields are not inferred. A local
+SDK import with only excluded records returns the exclusions and zero write
+counts. The CLI exits 2 for that result so automation can detect it.
 
 File imports forward repository references from the reader automatically. With
 `prepareNormalizedLocalImport()`, supply additional known references in the

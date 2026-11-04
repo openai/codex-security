@@ -72,25 +72,43 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
-  test("only a clean empty selection may finish without findings or a workbench", async () => {
+  test("reports empty and excluded selections without storage and preserves failed scanner diagnostics", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const options = { repository, ...source };
     const empty = { read: 0, findings: [], excluded: [] };
-    for (const selection of [
-      empty,
-      { ...empty, report: { errors: [{ message: "Scanner timed out" }] } },
-      { ...empty, read: 1, excluded: input().excluded },
-    ]) {
+    const failed = {
+      ...empty,
+      report: { errors: [{ message: "Scanner timed out" }] },
+    };
+    const excluded = {
+      ...empty,
+      read: 1,
+      excluded: [
+        {
+          position: 1,
+          source_finding_id: null,
+          reason: "Unsupported severity",
+        },
+      ],
+    };
+    for (const [selection, shouldFail] of [
+      [empty, false],
+      [excluded, false],
+      [failed, true],
+      [{ ...excluded, report: failed.report }, true],
+      [{ ...empty, read: 1 }, true],
+    ] as const) {
       const prepared = await prepareNormalizedLocalImport(selection, options, {
         environment,
       });
       expect(prepared.preview).toMatchObject(selection);
-      if (selection === empty)
+      if (shouldFail)
+        await expect(prepared.import()).rejects.toMatchObject({ selection });
+      else
         expect(await prepared.import()).toMatchObject({
           ...selection,
           counts: { created: 0, updated: 0, unchanged: 0 },
         });
-      else await expect(prepared.import()).rejects.toMatchObject({ selection });
       expect(existsSync(stateDirectory)).toBe(false);
     }
   });

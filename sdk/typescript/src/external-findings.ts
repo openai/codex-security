@@ -44,18 +44,15 @@ export function hasNoExternalRecords(input: ExternalFindings): boolean {
   return input.read === 0 && !input.findings.length && !input.excluded.length;
 }
 
-export function isEmptyExternalReport(input: ExternalFindings): boolean {
+/** Classify a reader selection before deciding whether to store, publish, or report it. */
+export function externalImportDisposition(
+  input: ExternalFindings,
+): "ready" | "empty" | "excluded" | "failed" {
+  if (input.findings.length) return "ready";
   const errors = input.report?.["errors"];
-  return (
-    hasNoExternalRecords(input) && !(Array.isArray(errors) && errors.length)
-  );
-}
-
-/** Empty imports can skip storage; dropping every selected finding is an error. */
-export function hasFindingsToImport(input: ExternalFindings): boolean {
-  if (input.findings.length) return true;
-  if (isEmptyExternalReport(input)) return false;
-  throw new NoPublishableFindingsError(cloneImportPreview(input));
+  if (Array.isArray(errors) && errors.length) return "failed";
+  if (hasNoExternalRecords(input)) return "empty";
+  return input.read === input.excluded.length ? "excluded" : "failed";
 }
 
 /** No findings can be imported. The selection retains every reader exclusion and diagnostic. */
@@ -64,9 +61,10 @@ export class NoPublishableFindingsError extends CodexSecurityError {
 
   constructor(public readonly selection: ExternalFindings) {
     const diagnostics = reportForJson(selection.report)?.["errors"];
-    const summary = isEmptyExternalReport(selection)
-      ? "No supported findings are ready to publish: the report is empty."
-      : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`;
+    const summary =
+      externalImportDisposition(selection) === "empty"
+        ? "No supported findings are ready to publish: the report is empty."
+        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`;
     const reasons = selection.excluded.map(
       (item) => `Item ${item.position}: ${item.reason}`,
     );
