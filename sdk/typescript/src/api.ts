@@ -114,6 +114,7 @@ import {
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
+  type DeepScanDiagnostic,
 } from "./deep-scan.js";
 import {
   getDefaultSeverityRubric,
@@ -697,6 +698,7 @@ export interface CodexSecurityMetadata {
 export type CodexSecuritySurface = "cli" | "sdk";
 
 interface CodexSecurityRuntimeOptions {
+  onDeepScanDiagnostic?: (event: DeepScanDiagnostic) => void;
   surface: CodexSecuritySurface;
 }
 
@@ -760,6 +762,7 @@ export class CodexSecurity {
 
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
+  readonly #onDeepScanDiagnostic: CodexSecurityRuntimeOptions["onDeepScanDiagnostic"];
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -783,6 +786,7 @@ export class CodexSecurity {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
     this.#surface = runtimeOptions.surface;
+    this.#onDeepScanDiagnostic = runtimeOptions.onDeepScanDiagnostic;
   }
 
   public async run(
@@ -3238,6 +3242,7 @@ export class CodexSecurity {
       tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
+            onDiagnostic: this.#onDeepScanDiagnostic,
             codexOptions,
             preflightCommand:
               await this.#providerPreflightCommand(effectiveConfig),
