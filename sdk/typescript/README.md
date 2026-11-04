@@ -421,6 +421,30 @@ report with a `null` `threadId`. Failed and canceled checkpoints are terminal.
 
 ### Progress and cost
 
+Use `onLifecycle` to observe the saved state of a top-level scan in your own
+application:
+
+```ts
+await security.run(repository, {
+  onLifecycle(scan) {
+    console.log(scan.scanId, scan.status, scan.hasReportableFindings);
+  },
+});
+```
+
+Group observations by `scanId`. A completed scan with
+`hasReportableFindings: false` finished with zero reportable findings.
+The field is `null` until that outcome is known. Saved scan history retains
+the lifecycle snapshot after the originating process exits. The snapshot
+includes the launch surface, package and plugin versions when available,
+and whether the scan used a mock. Offline imports appear in history with
+lifecycle mode `import`. Exclude imports and mock scans when counting executed
+scans. For older records, saved recipes identify known imports, mock scans,
+and the plugin version used at launch. Missing fields stay unknown.
+
+If `run()` rejects before you receive a registration, record the error separately
+from saved scan outcomes. The caller may have missed the registration receipt.
+
 Use `onProgress` for scan progress and `onCost` for cost updates.
 Use `onUsageObservation` for the last reported token measurement time
 (`tokensUpdatedAt`) and account-wide allowance readings (`accountRateLimits`).
@@ -860,8 +884,14 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
+[capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
 Semgrep Web API responses. See the [Semgrep SDK example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-semgrep-platform-sast-findings-with-the-sdk).
+Use `selectSemgrepPlatformFindings` to [save a selection for the local CLI](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Use `collectSemgrepPlatformFindings` to [collect one project at an explicit ref](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch) for a single product (default `sast`).
+Use `import snyk` to [collect existing Open Source or Code issues](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk) for local import or Cloud publication.
+For a private repository with a verified SCM, pass its URL and `platform: "gitlab"` or `"github"` in `sourceRepositories` to match standard SSH clone URLs.
 This does not affect scan publishing or the existing GitHub alert collector.
 
 The SDK also exposes `prepareExternalPublication(file, options)` for supported

@@ -178,13 +178,10 @@ export async function savedScanWorkbench(
   });
 }
 
-async function readTargets(
-  requestedId: string | { workflowId: string },
+function openSavedScanDatabase(
   environment: ProcessEnvironment,
-  stateDirectory: string,
-  currentDirectory: string,
-  signal?: AbortSignal,
-): Promise<ScanTarget[]> {
+  stateDirectory = codexSecurityStateDirectory(environment),
+): BootstrapDatabase {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
   const Database = (
@@ -198,20 +195,50 @@ async function readTargets(
       create?: boolean;
     },
   ) => BootstrapDatabase;
+  return new Database(
+    join(stateDirectory, "workbench.sqlite3"),
+    // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
+    // Open only an existing file there; query_only still prevents SQL data/schema writes.
+    bun
+      ? {
+          readonly: process.platform !== "darwin",
+          readwrite: process.platform === "darwin",
+          create: false,
+        }
+      : { readOnly: true },
+  );
+}
+
+export function readSavedScanLifecycle(
+  environment: ProcessEnvironment,
+  scanId: string,
+  stateDirectory?: string,
+): unknown {
+  const database = openSavedScanDatabase(environment, stateDirectory);
+  try {
+    database.exec("PRAGMA busy_timeout = 0");
+    database.exec("PRAGMA query_only = ON");
+    const [row] = readRows<{ snapshot: string }>(
+      database,
+      "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?",
+      scanId,
+    );
+    return row && JSON.parse(row.snapshot);
+  } finally {
+    database.close();
+  }
+}
+
+async function readTargets(
+  requestedId: string | { workflowId: string },
+  environment: ProcessEnvironment,
+  stateDirectory: string,
+  currentDirectory: string,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
   let database: BootstrapDatabase | undefined;
   try {
-    database = new Database(
-      join(stateDirectory, "workbench.sqlite3"),
-      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
-      // Open only an existing file there; query_only still prevents SQL data/schema writes.
-      bun
-        ? {
-            readonly: process.platform !== "darwin",
-            readwrite: process.platform === "darwin",
-            create: false,
-          }
-        : { readOnly: true },
-    );
+    database = openSavedScanDatabase(environment, stateDirectory);
     database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
     if (typeof requestedId !== "string") {

@@ -543,6 +543,10 @@ describe("scan knowledge bases", () => {
       docx("User", "Permission", "<w:tab/>"),
     );
     await writeFile(
+      join(root, "non-breaking-hyphen.docx"),
+      docx("X", "Frame-Options", "<w:noBreakHyphen/>"),
+    );
+    await writeFile(
       join(root, "tracked-change.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
@@ -577,6 +581,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
@@ -1163,6 +1168,24 @@ describe("scan knowledge bases", () => {
 
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "Access policy.\n",
+    ]);
+  });
+
+  test("skips macOS metadata files copied next to documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
+    await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    const appleDouble = Buffer.alloc(82);
+    appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
+    await writeFile(join(root, "._guide.md"), appleDouble);
+    await writeFile(join(root, "._policy.pdf"), appleDouble);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "Access policy.",
+      "Rotate admin keys monthly.",
     ]);
   });
 

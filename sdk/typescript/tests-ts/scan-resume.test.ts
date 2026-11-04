@@ -791,6 +791,7 @@ test("CLI resumes with current permissions and retains accepted ordinary scans, 
     },
   );
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).not.toContain("debug: scan.lifecycle ");
   expect(stderr.text()).toContain(`scans show ${f.scanId}`);
   expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);

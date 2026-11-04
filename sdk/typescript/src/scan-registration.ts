@@ -1,3 +1,4 @@
+import { VERSION } from "./version.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanExpectation } from "./contract.js";
@@ -19,6 +20,7 @@ export async function registerScan(options: {
     | "scanPrompt"
     | "workflowId"
   >;
+  surface: "sdk" | "cli" | "plugin";
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
   resolveModelInstructionsFile?: () => Promise<string | undefined>;
@@ -77,6 +79,8 @@ export async function registerScan(options: {
           }),
           JSON.stringify({
             recipe,
+            surface: options.surface,
+            packageVersion: VERSION,
             ...(options.parentScanRole === undefined
               ? {}
               : { parentScanRole: options.parentScanRole }),

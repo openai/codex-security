@@ -218,6 +218,7 @@ def list_repositories(
             AND scans.parent_scan_role IS NOT 'deep_pass'
             AND scans.id IN (SELECT scan_id FROM scan_progress)
         LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        LEFT JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
         ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC, targets.id
         """
     ).fetchall():

@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
 import {
@@ -688,6 +689,7 @@ export function createCodexSecurityServer(): McpServer {
           handoffClaimToken,
         },
         `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, follow references/scan-runtime.md, then advance to threat_model before reviewing the target. Use available workers or parent fallback. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+        scanId,
       );
     },
   );
@@ -956,7 +958,7 @@ export function createCodexSecurityServer(): McpServer {
         "--scan-root",
         await scanRoot(),
       ])) as WorkspaceState;
-      return workspaceResult(workspace);
+      return workspaceResult(workspace, workspace.results?.scanId);
     },
   );
 
@@ -1120,7 +1122,7 @@ export function createCodexSecurityServer(): McpServer {
           });
         }
         const terminal = await nativeScanTerminalResult(scan, nativeScans);
-        if (terminal) return terminal;
+        if (terminal) return withScanTarget(terminal, scan.scanId);
         await nativeScans.run(
           {
             scan,
@@ -1152,7 +1154,7 @@ export function createCodexSecurityServer(): McpServer {
           },
           abortSignalFromExtra(extra),
         );
-        return nativeScanCompletedResult(scan, "get-scan");
+        return withScanTarget(await nativeScanCompletedResult(scan, "get-scan"), scan.scanId);
       } catch (error: unknown) {
         if (startedScan) {
           const current = await runWorkbench([
@@ -1172,21 +1174,21 @@ export function createCodexSecurityServer(): McpServer {
               nativeScans,
             );
             if (terminal)
-              return error instanceof ScanPermissionError
+              return withScanTarget(error instanceof ScanPermissionError
                 ? {
                     ...terminal,
                     ...toolErrorResult(deepScanInvocationFailureMessage(error)),
                   }
-                : terminal;
+                : terminal, startedScan.scanId);
           }
         }
-        return toolErrorResult(deepScanInvocationFailureMessage(error));
+        return withScanTarget(toolErrorResult(deepScanInvocationFailureMessage(error)), startedScan?.scanId);
       }
     },
   );
 
   const cancelSecurityScan = async (scanId: string, threadId?: string) => {
-    await runWorkbench(
+    const canceled = await runWorkbench(
       workbenchArgs("cancel-scan", {
         scanId,
         deferPublication: true,
@@ -1196,7 +1198,7 @@ export function createCodexSecurityServer(): McpServer {
     const retained = await finalizeNativeStoppedScan(scanId, nativeScans, {
       threadId,
     });
-    return workspaceResult(retained.workspace as unknown as WorkspaceState);
+    return workspaceResult(retained.workspace as unknown as WorkspaceState, canceled.canceledScanId);
   };
 
   server.registerTool(
@@ -1262,16 +1264,22 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ scanId, occurrenceId }) =>
-      scanActionResult(
-        await runWorkbench([
-          "get-scan",
-          "--scan-id",
-          scanId,
-          ...optionalArg("--occurrence-id", occurrenceId),
-        ]),
+    async ({ scanId, occurrenceId }) => {
+      const context = await runWorkbench([
+        "get-scan",
+        "--scan-id",
+        scanId,
+        ...optionalArg("--occurrence-id", occurrenceId),
+      ]);
+      const loadedId = isJsonObject(context.scan)
+        ? context.scan.scanId
+        : undefined;
+      return scanActionResult(
+        context,
         "Loaded Codex Security scan state.",
-      ),
+        loadedId === scanId.toLowerCase() ? loadedId : undefined,
+      );
+    },
   );
 
   server.registerTool(
@@ -1601,19 +1609,21 @@ export function createCodexSecurityServer(): McpServer {
           ? turnMetadata.turn_id
           : undefined;
       try {
+        const completed = await runWorkbench([
+          "complete-scan",
+          "--scan-id",
+          scanId,
+          ...optionalArg("--claim-token", handoffClaimToken),
+          ...optionalArg("--thread-id", threadIdFromExtra(extra)),
+          ...optionalArg(
+            "--turn-id",
+            typeof turnId === "string" ? turnId : undefined,
+          ),
+        ]);
         return scanActionResult(
-          await runWorkbench([
-            "complete-scan",
-            "--scan-id",
-            scanId,
-            ...optionalArg("--claim-token", handoffClaimToken),
-            ...optionalArg("--thread-id", threadIdFromExtra(extra)),
-            ...optionalArg(
-              "--turn-id",
-              typeof turnId === "string" ? turnId : undefined,
-            ),
-          ]),
+          completed,
           "Validated and indexed the completed Codex Security scan.",
+          isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );
       } catch (error) {
         throw new Error(completionFailureMessage(error));
@@ -1675,6 +1685,7 @@ export function createCodexSecurityServer(): McpServer {
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",
+        isJsonObject(failed.scan) ? failed.scan.scanId : undefined,
       );
     },
   );
@@ -2092,7 +2103,7 @@ function redactHandoffClaimToken(result: JsonObject) {
   return result;
 }
 
-function workspaceResult(workspace: WorkspaceState) {
+function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
   const results = workspace.results;
   const setupSummary = workspace.setup.submitted
     ? "Codex Security setup is saved."
@@ -2101,7 +2112,11 @@ function workspaceResult(workspace: WorkspaceState) {
     results && typeof results.scanDir === "string"
       ? ` Scan state is attached at ${results.scanDir}.`
       : "";
-  return scanActionResult({ workspace }, `${setupSummary}${resultsSummary}`);
+  return scanActionResult(
+    { workspace },
+    `${setupSummary}${resultsSummary}`,
+    scanId,
+  );
 }
 
 function promptOnlyScanResult(promptOnly: JsonObject) {
@@ -2130,6 +2145,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
   return scanActionResult(
     promptOnly,
     `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
+    scanId,
   );
 }
 
@@ -2138,11 +2154,31 @@ function scanResponseContext(result: JsonObject) {
   return context;
 }
 
-function scanActionResult<T extends JsonObject>(result: T, summary: string) {
+function withScanTarget<T extends CallToolResult>(result: T, scanId: unknown) {
+  if (scanId === undefined) return result;
+  const id = scanSchema.scanId.safeParse(scanId);
+  if (!id.success) return result;
   return {
-    content: [{ type: "text" as const, text: summary }],
-    structuredContent: scanResponseContext(result),
+    ...result,
+    _meta: {
+      ...result._meta,
+      "codex/telemetry": { span: { target_id: id.data } },
+    },
   };
+}
+
+function scanActionResult<T extends JsonObject>(
+  result: T,
+  summary: string,
+  scanId?: unknown,
+) {
+  return withScanTarget(
+    {
+      content: [{ type: "text" as const, text: summary }],
+      structuredContent: scanResponseContext(result),
+    },
+    scanId,
+  );
 }
 
 function toolErrorResult(message: string) {

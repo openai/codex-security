@@ -841,7 +841,10 @@ test("repairs pre-release numbering and shadowed migrations without repeating da
   database.exec(
     "INSERT INTO schema_migrations VALUES (5, 'scan target snapshot digests', 'original')",
   );
-  applyMigrations(database);
+  applyMigrations(
+    database,
+    migrations.filter((item) => item.version <= 22),
+  );
   insertScan(database);
   database.exec(`UPDATE scans SET handoff_status = 'delivered', handoff_claimed_at = 'old', handoff_claim_token = 'old';
     UPDATE schema_migrations SET name = 'scan target summaries' WHERE version = 18;
@@ -943,11 +946,25 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60])
+  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  const launch = database
+    .prepare(
+      "SELECT launch_surface, launch_package_version, launch_plugin_version, launch_kind FROM scans",
+    )
+    .get();
+  assert.deepEqual(
+    { ...launch },
+    {
+      launch_surface: null,
+      launch_package_version: null,
+      launch_plugin_version: null,
+      launch_kind: null,
+    },
+  );
   assert.ok(
     database
       .prepare("PRAGMA table_info(scan_severity_classifications)")
