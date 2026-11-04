@@ -67,7 +67,9 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
 path_within_scope = finalizer.path_within_scope
 
 
-def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | None:
+def latest_publication_reference(
+    db: Any, connection: Any, scan_id: str
+) -> tuple[str | None, str | None]:
     # Publication follows the durable reducer sequence, not completion timestamps.
     def reducer_order(worker: Any) -> tuple[int, str]:
         directory = Path(worker["prompt_path"]).parent
@@ -75,7 +77,7 @@ def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | 
         match = re.fullmatch(r"dedup-([0-9]+)", label)
         return (int(match[1]) if match else 0, worker["id"])
 
-    return max(
+    reducer = max(
         (
             worker
             for worker in db.saved_results._saved_workers(connection, scan_id)
@@ -86,10 +88,23 @@ def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | 
         key=reducer_order,
         default=None,
     )
+    if reducer is None:
+        return None, None
+    if reducer["accepted_result_path"] and reducer["accepted_result_sha256"]:
+        return reducer["accepted_result_path"], reducer["accepted_result_sha256"]
+
+    # A migrated reducer can have its only frozen reference in a successor's merge claim.
+    claim = connection.execute(
+        "SELECT previous_result_path, previous_result_sha256 FROM deep_scan_merge_claims "
+        "WHERE scan_id = ? AND previous_worker_id = ? "
+        "AND previous_result_path <> '' AND previous_result_sha256 <> '' ORDER BY rowid LIMIT 1",
+        (scan_id, reducer["id"]),
+    ).fetchone()
+    return (claim[0], claim[1]) if claim else (reducer["result_manifest_path"], None)
 
 
 def has_verified_selected_result(
-    db: Any, connection: Any, scan: Any, *, reducer: Any = None
+    db: Any, connection: Any, scan: Any, *, reference: tuple[str | None, str | None] | None = None
 ) -> bool:
     """Verify persisted Deep publication authority before using the artifact read contract."""
     if scan["mode"] != "deep":
@@ -97,31 +112,23 @@ def has_verified_selected_result(
     run = db.deep_scan.find_supported_deep_scan_run(connection, scan["id"])
     selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
     try:
-        if selection is not None:
-            db.saved_results._require_selected_result(scan, selection)
-            return selection["resultPath"] is not None
-        if run is None or run["workflow_version"] not in {
-            "deep-scan-mcp/v1",
-            "deep-security-scan/v1",
-        }:
-            return False
-        if reducer is None:
-            reducer = latest_publication_reducer(db, connection, scan["id"])
-        accepted = reducer["accepted_result_path"] if reducer is not None else None
-        digests = db.saved_results._accepted_source_digests(connection, scan["id"])
-        if accepted is None or accepted not in digests:
-            return False
-        scan_dir = Path(scan["scan_dir"])
-        db.saved_results._read_saved_result(
-            scan_dir,
-            Path(accepted).relative_to(scan_dir).as_posix(),
-            scan["id"],
-            kind="dedup",
-            accepted_source_digests=digests,
-        )
+        if selection is None:
+            if run is None or run["workflow_version"] not in {
+                "deep-scan-mcp/v1",
+                "deep-security-scan/v1",
+            }:
+                return False
+            path, digest = reference or latest_publication_reference(db, connection, scan["id"])
+            if not path or not digest:
+                return False
+            selection = {
+                "resultPath": Path(path).relative_to(scan["scan_dir"]).as_posix(),
+                "resultSha256": digest,
+            }
+        db.saved_results._require_selected_result(scan, selection)
+        return selection["resultPath"] is not None
     except (finalizer.ContractError, ValueError) as exc:
         raise finalizer.RecoverableContractError(str(exc)) from exc
-    return True
 
 
 def validate_completed_scan_artifacts(db: Any, scan: sqlite3.Row) -> None:

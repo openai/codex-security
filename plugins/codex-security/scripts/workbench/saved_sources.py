@@ -28,7 +28,7 @@ from finalize_scan_contract import (
 )
 from review_state import checkpoint_review_state, review_state, uses_legacy_review
 from workbench_coverage_receipts import capture_receipt_checkpoints, clear_scan_receipt_refs
-from workbench_validation import has_verified_selected_result, latest_publication_reducer
+from workbench_validation import has_verified_selected_result, latest_publication_reference
 
 
 class _CheckpointSnapshotError(ContractError):
@@ -916,12 +916,12 @@ def _require_current_deep_publication(
                 raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
             return False
 
-        reducer = latest_publication_reducer(db, connection, scan_id)
-        selected_result = reducer["result_manifest_path"] if reducer is not None else None
+        reference = latest_publication_reference(db, connection, scan_id)
+        selected_result = reference[0]
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
     if selection is None:
-        accepted_findings = has_verified_selected_result(db, connection, scan, reducer=reducer)
+        accepted_findings = has_verified_selected_result(db, connection, scan, reference=reference)
     return accepted_findings
 
 
@@ -931,7 +931,8 @@ if __name__ == "__main__":
 
 def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
     rows = connection.execute(
-        "SELECT worker.*, attempt.accepted_result_path FROM deep_scan_workers AS worker "
+        "SELECT worker.*, attempt.accepted_result_path, attempt.accepted_result_sha256 "
+        "FROM deep_scan_workers AS worker "
         "LEFT JOIN deep_scan_attempts AS attempt "
         "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
         "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",

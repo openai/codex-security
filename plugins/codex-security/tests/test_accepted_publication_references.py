@@ -51,26 +51,51 @@ def accept_reducer(connection, scan):
     return result, accepted, coverage
 
 
+@pytest.mark.parametrize("claim_only", [False, True], ids=["attempt", "historical-claim"])
 @pytest.mark.parametrize("selected", [True, False], ids=["accepted", "replaceable-output"])
 def test_legacy_publication_compares_registered_accepted_reference(
-    workbench_api, workbench_db, publication_scan, selected
+    workbench_api, workbench_db, publication_scan, selected, claim_only
 ):
     scan = publication_scan()
     result, accepted, _ = accept_reducer(workbench_db, scan)
+    if claim_only:
+        # This reducer predates attempt receipts. A later interrupted reducer froze its input.
+        successor = scan.add_worker(workbench_db, status="canceled").parent.name
+        with workbench_db:
+            workbench_db.execute(
+                "DELETE FROM deep_scan_attempts WHERE worker_id = ?", (result.parent.name,)
+            )
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET kind = 'dedup' WHERE id = ?", (successor,)
+            )
+            workbench_db.execute(
+                "INSERT INTO deep_scan_merge_claims "
+                "(worker_id, scan_id, previous_worker_id, previous_result_path, previous_result_sha256) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (successor, scan.scan_id, result.parent.name, str(accepted), accepted.stem),
+            )
     staged = stage_publication(
         scan, generation=3, result_path=accepted if selected else result, title="Accepted aggregate"
     )
     before = {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")}
 
-    if selected:
-        workbench_api["saved_results"].write_scan_draft(
+    def publish():
+        return workbench_api["saved_results"].write_scan_draft(
             workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
         )
+
+    if selected:
+        publish()
+        accepted.write_bytes(accepted.read_bytes() + b" ")
+        with pytest.raises(
+            workbench_api["RecoverableContractError"], match="changed after acceptance"
+        ):
+            publish()
+        with pytest.raises(SystemExit, match="changed after acceptance"):
+            scan.complete()
     else:
         with pytest.raises(SystemExit, match="aggregate"):
-            workbench_api["saved_results"].write_scan_draft(
-                workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
-            )
+            publish()
         assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
 
 
