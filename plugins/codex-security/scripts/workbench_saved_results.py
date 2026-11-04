@@ -1315,11 +1315,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?,
-                cost_json = COALESCE(?, cost_json)
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, cost_json, scan["id"]),
+            (timestamp, timestamp, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")

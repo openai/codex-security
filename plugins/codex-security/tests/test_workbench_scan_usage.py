@@ -2960,6 +2960,18 @@ def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
 
 def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
+    cost = {
+        "model": "fixture-model",
+        "inputTokens": 40,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 5,
+        "estimatedUsd": 0.01,
+    }
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
+        )
     runtime = {
         "coverage": "complete",
         "source": "codex_runtime",
@@ -2980,6 +2992,7 @@ def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Pa
         )["scan"]
         assert saved["progress"]["status"] == "canceled"
         assert saved["usage"] == runtime
+        assert saved["cost"] == cost
 
 
 @pytest.mark.parametrize(
