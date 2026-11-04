@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { collectSelectedSemgrepGuardianFindings } from "../src/semgrep-guardian-findings.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
@@ -202,7 +203,7 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
       ...normalized,
       report: { ...normalized.report, repositoryUrl: otherUrl },
     }),
-  ).rejects.toThrow(/Guardian repository/);
+  ).rejects.toThrow(/recorded selection/);
   await expect(
     source.prepareNormalized({
       ...normalized,
@@ -288,7 +289,7 @@ test("normalized Guardian repository claims use the checkout's HTTP port identit
       .counts.created,
   ).toBe(1);
   await expect(fixture.prepareNormalized(withReportPort(8443))).rejects.toThrow(
-    /Guardian repository/,
+    /recorded selection/,
   );
 });
 
@@ -355,4 +356,81 @@ test("empty selections and disabled imports do not call Guardian; tool errors re
       environment,
     }),
   ).rejects.toThrow("Guardian login expired");
+});
+
+test("Guardian binds the collection, saved selection and normalized replay to the same custom Git repository", async () => {
+  const url = "https://git.example.test/example/service";
+  const collected = await collectSelectedSemgrepGuardianFindings(
+    { ...selection, sourceRepositoryUrl: url },
+    {
+      callTool: async () => ({ structuredContent: { findings: [row] } }),
+      environment,
+    },
+  );
+  const other = url + ".git";
+  for (const options of [
+    { sourceRepositoryUrl: other },
+    { sourceRepositories: [{ url: other }] },
+  ]) {
+    expect(() => normalizeSemgrepFindings(collected, options, "local")).toThrow(
+      /does not match/,
+    );
+  }
+  const normalized = normalizeSemgrepFindings(collected, {}, "local");
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "example/topic" },
+    { remote: other },
+  );
+  await fixture.writeJson(collected);
+  await expect(fixture.prepare()).rejects.toThrow(/configured remote/);
+  await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+    /configured remote/,
+  );
+  expect(await fixture.read()).toEqual([]);
+  fixture.git("remote", "set-url", "origin", url);
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  expect(
+    (await (await fixture.prepareNormalized(normalized)).import()).counts
+      .unchanged,
+  ).toBe(1);
+
+  await expect(
+    prepareNormalizedLocalImport(
+      normalized,
+      {
+        repository: fixture.repository,
+        sourceKey: fixture.sourceKey,
+        provider: "github",
+      },
+      { environment: fixture.environment },
+    ),
+  ).rejects.toThrow(/semgrep provider/);
+
+  // Multiple configured remotes cannot justify substituting a different retained mapping.
+  fixture.git("remote", "add", "second", other);
+  const changed = structuredClone(normalized);
+  changed.findings[0]!.evidence.source_data!["sourceRepositoryUrl"] = other;
+  await expect(fixture.prepareNormalized(changed)).rejects.toThrow(
+    /recorded selection/,
+  );
+  const wrongProjection = structuredClone(normalized);
+  wrongProjection.findings[0]!.evidence.details!.repository!.url = other;
+  await expect(fixture.prepareNormalized(wrongProjection)).rejects.toThrow(
+    /recorded selection/,
+  );
+});
+
+test("Guardian accepts the clone URL of an independently identified self-managed GitLab project", () => {
+  const url = "https://git.example.test/example/service";
+  const result = normalizeSemgrepFindings(
+    { ...capture, sourceRepositoryUrl: url },
+    {
+      sourceRepositoryUrl: url + ".git",
+      sourceRepositories: [{ url, platform: "gitlab" }],
+    },
+    "local",
+  );
+  expect(result.excluded).toEqual([]);
+  expect(result.findings[0]!.evidence.details?.repository?.url).toBe(url);
 });

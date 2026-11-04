@@ -1,9 +1,9 @@
-import {
-  repositoryUrlKey,
-  validateExternalEvidence,
-} from "./external-import-contract.js";
+import { validateExternalEvidence } from "./external-import-contract.js";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalFinding } from "./external-findings.js";
+import type {
+  ExternalFinding,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import { requireExternalImports } from "./external-imports-feature.js";
 import { isRecord } from "./record.js";
 import {
@@ -19,6 +19,7 @@ import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import {
   platformLocationPath,
   requireSemgrepFullRef,
+  selectionRepository,
 } from "./semgrep-platform-findings.js";
 
 export const guardianSelectionFormat = "semgrep-guardian-selection/v1";
@@ -35,24 +36,13 @@ function guardianId(scope: Record<string, unknown>, id: unknown) {
   ]);
 }
 
-export function guardianImportRepository(value: unknown, provider: string) {
-  if (provider !== "semgrep")
-    throw new CodexSecurityError(
-      "Use the semgrep provider for Guardian findings.",
-    );
-  return declaredScannerRepositoryUrl(value, "Guardian", "local");
-}
-
-export function guardianFindingRepository(
-  { source_finding_id, evidence }: ExternalFinding,
-  provider: string,
-  reportUrl: string | undefined,
-  sameRepositories: (urls: string[]) => boolean,
-) {
+export function guardianFindingSourceData({
+  source_finding_id,
+  evidence,
+}: ExternalFinding) {
   const data = evidence.source_data ?? {};
   const generated = guardianFindingId.test(source_finding_id);
   if (data["format"] !== guardianSelectionFormat && !generated) return;
-  const url = guardianImportRepository(data["sourceRepositoryUrl"], provider);
   if (generated) {
     const row = record(data["finding"], "Original Guardian finding");
     requireGuardianRowScope(data, row);
@@ -61,13 +51,7 @@ export function guardianFindingRepository(
         "The normalized finding ID does not match the original Guardian finding.",
       );
   }
-  for (const claim of [reportUrl, evidence.details?.repository?.url]) {
-    if (claim && claim !== url && !sameRepositories([claim, url]))
-      throw new CodexSecurityError(
-        "Guardian repository does not match the normalized finding or report.",
-      );
-  }
-  return url;
+  return data;
 }
 
 type GuardianTool =
@@ -218,6 +202,7 @@ export async function collectSelectedSemgrepGuardianFindings(
 export function normalizeGuardianSelection(
   document: Record<string, unknown>,
   declaredUrl?: string,
+  references: readonly ExternalSourceRepository[] = [],
 ) {
   // Guardian returns a repository name. The caller supplies its verified SCM mapping.
   const url = declaredScannerRepositoryUrl(
@@ -225,11 +210,12 @@ export function normalizeGuardianSelection(
     "Guardian",
     "local",
   );
+  const repositoryBinding = selectionRepository(url, references);
   if (
     declaredUrl !== undefined &&
-    repositoryUrlKey(
+    repositoryBinding.key(
       declaredScannerRepositoryUrl(declaredUrl, "Guardian", "local"),
-    ) !== repositoryUrlKey(url)
+    ) !== repositoryBinding.key(url)
   )
     throw new Error(
       "Guardian selection does not match the declared source repository URL.",
