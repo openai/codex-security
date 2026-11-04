@@ -21,6 +21,8 @@
 - avoid repeated repository and Snyk project checks ([#2187](https://github.com/openai/codex-security/pull/2187))
 - bump taiki-e/install-action from 2.87.32 to 2.88.0 ([#2283](https://github.com/openai/codex-security/pull/2283))
 - bump the triage eval OpenCode SDK to 1.19.5 ([#2281](https://github.com/openai/codex-security/pull/2281))
+- refresh the Node 26.12.1 container digest ([#2282](https://github.com/openai/codex-security/pull/2282))
+- bump pytest from 9.1.1 to 9.2.0 in /plugins/codex-security ([#2280](https://github.com/openai/codex-security/pull/2280))
 
 <!-- release-section: highlights:end -->
 
