@@ -2396,8 +2396,7 @@ function deepScanTerminalResult(
     if (!run.manifestPath) return undefined;
     // Both a newly published result and a rejoin can contain full workspace history.
     const scan = completion?.scan as
-      | { progress: { status: string }; reportAvailable: boolean }
-      | undefined;
+      { progress: { status: string }; reportAvailable: boolean } | undefined;
     const instructions = run.sdkOwnsCompletion
       ? `Deep Scan ${run.scanId} aggregated its validated findings under ${run.scanDir}. End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
       : !completion && !run.parentComplete
