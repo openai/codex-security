@@ -1396,8 +1396,8 @@ def _recover_unsealed_findings(
 
         if "writeup" in finding:
             writeup_paths.add(finding["writeup"]["reportPath"])
-        warnings.extend(evidence_warnings)
             writeup_directories.add(finding["writeup"]["reportPath"].rsplit("/", 1)[0])
+        warnings.extend(evidence_warnings)
         if normalized_fields:
             warnings.append(
                 f"Recovered finding {index + 1}: normalized {', '.join(normalized_fields)}."

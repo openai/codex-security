@@ -4081,7 +4081,6 @@ if __name__ == "__main__":
               },
             };
           }
-          if (args[0] === "fail-scan") savedFailure = args[3];
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -4115,6 +4114,7 @@ if __name__ == "__main__":
             input?: string,
           ): Promise<JsonObject> => {
             commands.push(args[0]!);
+            if (args[0] === "fail-scan") savedFailure = args[3];
             return mockWorkbench(args, input);
           },
           createCodex: completedCodex(root),
