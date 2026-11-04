@@ -30,11 +30,13 @@ import {
 } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
-  WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
+  WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
+  DeepScanNonRetryableError,
   AsyncLock,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   iterationInputs,
   recordSleeps,
@@ -97,6 +99,48 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
     ),
     { code: "ENOENT" },
   );
+}
+
+async function testDiscoveryAllocatesUniqueLabelsAfterRecovery() {
+  const { fixture, store } = await coordinatorFixture({
+    maxDiscoveryRuns: 12,
+    stopAfterNoNew: 1,
+  });
+  const root = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  Object.assign(store.run, {
+    dispatchedCount: 1,
+    persistedWorkers: [
+      {
+        id: randomUUID(),
+        kind: "discovery",
+        status: "canceled",
+        attempt: 1,
+        mergeState: "none",
+        artifactDir: path.join(root, "discovery-0010", "output"),
+        promptPath: path.join(root, "discovery-0010", "prompt.md"),
+      },
+    ],
+  });
+  // A stale coordinator writes its final prompt after the new coordinator's listing.
+  const occupied = path.join(root, "discovery-0011", "prompt.md");
+  const updateProgress = store.updateProgress.bind(store);
+  store.updateProgress = async (input) => {
+    await mkdir(path.dirname(occupied), { recursive: true });
+    await writeFile(occupied, "old coordinator");
+    await updateProgress(input);
+  };
+  const executor = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: store.run,
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.deepEqual([...executor.discoveryAttempts.keys()], ["discovery-0012"]);
+  assert.equal(await readFile(occupied, "utf8"), "old coordinator");
 }
 
 async function testConcurrentCheckpointKeepsExistingIteration() {
@@ -383,41 +427,10 @@ async function testExhaustedRetryFailsScan() {
   assert.equal(terminal.manifestPath, undefined);
 }
 
-async function testPolicyRefusalReplacesDiscoveryImmediately() {
-  const { fixture, store } = await coordinatorFixture({
-    stopAfterNoNew: 4,
-    stopAfterConsecutiveErrors: 3,
-    maxDiscoveryRuns: 3,
-  });
-  const executor = new FakeExecutor({
-    discoveryFailureMessages: {
-      "discovery-0001": "Request blocked by cyberPolicy.",
-    },
-    discoveryCandidateId: "candidate-1",
-  });
-  const sleeps: number[] = [];
-  const terminal = await runCoordinator(fixture, store, executor, {
-    random: () => 0,
-    retryDelaysMs: [1, 3, 9],
-    clock: recordingClock(sleeps),
-  });
-
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(terminal?.terminalReason, "capped");
-  assert.equal(executor.discoveryAttempts.size, 3);
-  assert.equal(executor.discoveryAttempts.get("discovery-0001"), 1);
-  assert.deepEqual(sleeps, [], "a refused conversation must not be resumed");
-  assert.equal(store.run.consecutiveErrors, 0);
-  const refusal = [...store.workers.values()].find(
-    (worker) =>
-      path.basename(path.dirname(worker.promptPath)) === "discovery-0001",
-  );
-  assert.equal(refusal?.replaceableFailureKind, "policy_refusal");
-  assert.equal(refusal?.status, "canceled");
-}
-
 async function testTransientDiscoveryErrorsRetainRecovery() {
+  // Unclassified executor failures are distinct from a native turn.failed event.
   for (const message of [
+    "Request blocked by cyberPolicy.",
     "RateLimitExhaustedError: request rate limit reached; " +
       "This content was flagged for possible cybersecurity risk.",
     "429 Too Many Requests: flagged for potentially high-risk cyber activity.",
@@ -458,7 +471,7 @@ async function testTransientDiscoveryErrorsRetainRecovery() {
   }
 }
 
-async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
+async function testConsecutiveTransientErrorsFailAtConfiguredThreshold() {
   const { fixture, store } = await coordinatorFixture({
     stopAfterNoNew: 6,
     stopAfterConsecutiveErrors: 2,
@@ -466,8 +479,8 @@ async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Request blocked by cyberPolicy.",
-      "discovery-0002": "Request blocked by cyberPolicy.",
+      "discovery-0001": "transient worker failure",
+      "discovery-0002": "transient worker failure",
     },
   });
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -479,15 +492,15 @@ async function testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold() {
     terminal?.error ?? "",
     /2 consecutive unsuccessful discovery workers/,
   );
-  assert.match(terminal?.error ?? "", /policy_refusal/);
+  assert.match(terminal?.error ?? "", /transient_error/);
   assert.equal(executor.discoveryAttempts.size, 2);
-  assert.equal(executor.discoveryCalls, 2);
+  assert.equal(executor.discoveryCalls, 8);
   assert.equal(store.run.consecutiveErrors, 2);
   assert.equal(store.finishCalls.length, 0);
   assert.equal(terminal.manifestPath, undefined);
   assert.deepEqual(
     [...store.workers.values()].map((worker) => worker.replaceableFailureKind),
-    ["policy_refusal", "policy_refusal"],
+    ["transient_error", "transient_error"],
   );
 }
 
@@ -499,8 +512,8 @@ async function testSuccessfulDiscoveryResetsConsecutiveFailureThreshold() {
   });
   const executor = new FakeExecutor({
     discoveryFailureMessages: {
-      "discovery-0001": "Request blocked by cyberPolicy.",
-      "discovery-0003": "Request blocked by cyberPolicy.",
+      "discovery-0001": "transient worker failure",
+      "discovery-0003": "transient worker failure",
     },
     discoveryCandidateId: "candidate-1",
   });
@@ -513,7 +526,7 @@ async function testSuccessfulDiscoveryResetsConsecutiveFailureThreshold() {
   assert.equal(store.run.consecutiveErrors, 0);
   assert.equal(
     [...store.workers.values()].filter(
-      (worker) => worker.replaceableFailureKind === "policy_refusal",
+      (worker) => worker.replaceableFailureKind === "transient_error",
     ).length,
     2,
   );
@@ -712,15 +725,15 @@ async function testCancellationClearsRetryWait() {
     failFirstDiscoveryAttempt: true,
     blockDiscoveryAfterCalls: 1,
   });
-  const sleepStarted = Promise.withResolvers<void>();
+  const sleepStarted = Promise.withResolvers<DeepScanLogEvent>();
   const coordinator = createCoordinator(fixture, store, executor, {
     clock: undefined,
     log: (event) => {
-      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve(event);
     },
   });
   coordinator.start();
-  await sleepStarted.promise;
+  assert.equal((await sleepStarted.promise).reason, "transient worker failure");
   const callsAtCancellation = executor.discoveryCalls;
   coordinator.cancel("cancel retry wait");
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -1085,7 +1098,11 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
     events.some((event) => event.event === "coordinator_cleanup_settled"),
   );
   assert.equal(
-    events.some((event) => event.event === "discovery_accepted"),
+    events.some(
+      (event) =>
+        event.event === "discovery_accepted" ||
+        event.event === "worker_succeeded",
+    ),
     false,
   );
   const worker = [...store.workers.values()].find(
@@ -2269,11 +2286,13 @@ async function testPersistedErrorLimitStopsBeforeRescheduling() {
   }
 }
 
-async function testRestartRestoresDispatchOrderAfterMixedResults() {
+async function testRestartRestoresDispatchOrderAfterMixedResults(
+  limit: number,
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     maxDiscoveryRuns: 2,
-    stopAfterConsecutiveErrors: 1,
+    stopAfterConsecutiveErrors: limit,
   });
   const workers = path.join(
     fixture.run.scanDir,
@@ -2313,10 +2332,82 @@ async function testRestartRestoresDispatchOrderAfterMixedResults() {
   const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
   });
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(terminal.consecutiveErrors, 0);
+  assert.equal(
+    terminal?.status,
+    limit === 1 ? "failed" : "succeeded",
+    terminal?.error,
+  );
+  assert.equal(store.iterations[0].consecutiveErrors, limit === 1 ? 1 : 0);
   assert.deepEqual(store.iterations[0].workerIds, [second.id]);
   assert.equal(executor.discoveryCalls, 0);
+}
+
+async function testComparisonStopCondition(mode: "quota" | "deadline") {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    stopAfterNoNew: 3,
+    maxDiscoveryRuns: 6,
+  });
+  const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const deadline = Promise.withResolvers<void>();
+  let comparisons = 0;
+  const terminal = await runCoordinator(
+    fixture,
+    store,
+    {
+      async run(request) {
+        const result = await worker.run(request);
+        const resultPath = path.join(
+          request.artifactContext!.root,
+          "result.json",
+        );
+        const draft = await readJson(resultPath);
+        draft.findings[0].title = (
+          await promptContext(request.promptPath)
+        ).workerLabel;
+        await writeJson(resultPath, draft);
+        return result;
+      },
+      async compareFindings(_prompt, _cwd, signal) {
+        comparisons++;
+        if (mode === "quota")
+          throw codexWorkerTurnError(
+            "Quota exceeded. Check your plan and billing details.",
+          );
+        await deadline.promise;
+        signal.throwIfAborted();
+        return JSON.stringify({
+          uncertain: [],
+          defects: [
+            {
+              path: "fixture.py",
+              operation: "query",
+              failure: "check",
+              reports: [0, 1].map((id) => ({ id, evidence: 0 })),
+            },
+          ],
+        });
+      },
+    },
+    {
+      ...(mode === "deadline" && { discoveryTimeoutMs: 500 }),
+      log: (event) => {
+        if (event.event === "discovery_deadline_reached") deadline.resolve();
+      },
+    },
+  );
+  assert.equal(comparisons, 1);
+  assert.equal(worker.discoveryCalls, 2);
+  assert.equal(store.iterations.length, 1);
+  assert.equal(store.iterations[0].workerIds.length, 2);
+  assert.equal(
+    terminal?.status,
+    mode === "quota" ? "failed" : "succeeded",
+    terminal?.error,
+  );
+  const checkpoint = await readJson(store.iterations[0].resultPath);
+  assert.equal(checkpoint.findings.length, mode === "quota" ? 2 : 1);
+  if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
 }
 
 async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
@@ -2438,17 +2529,42 @@ async function testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence
   });
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
   const completedDrafts: ScanDraftInput[] = [];
-  const coordinator = createCoordinator(fixture, store, executor, {
-    discoveryTimeoutMs: 500,
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
+  let lateRefusal = false;
+  const coordinator = createCoordinator(
+    fixture,
+    store,
+    {
+      run(request) {
+        request.signal.addEventListener(
+          "abort",
+          () => {
+            lateRefusal = true;
+            request.onNonRetryableError?.(
+              codexWorkerTurnError("Request blocked by cyberPolicy."),
+            );
+          },
+          { once: true },
+        );
+        return executor.run(request);
+      },
+    },
+    {
+      discoveryTimeoutMs: 500,
+      onComplete: async (draft) =>
+        void completedDrafts.push(structuredClone(draft)),
+    },
+  );
   coordinator.start();
   await executor.discoveryStarted.promise;
 
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal?.terminalReason, "capped");
+  assert.equal(lateRefusal, true);
+  assert.equal(
+    store.workerUpdates.some((update) => update.terminalFailure),
+    false,
+  );
   assert.equal(store.failureMessages.length, 0);
   assert.equal(store.finishCalls.length, 1);
   assert.equal(executor.runningDiscovery, 0);
@@ -2606,7 +2722,9 @@ async function testRecoverableWorkerErrorsCannotFailScan() {
   }
 }
 
-async function testQuotaFailureStopsDispatchBeforeWorkerShutdown() {
+async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
+  resumed: boolean,
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 10,
@@ -2614,43 +2732,91 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown() {
     maxDiscoveryRuns: 10,
   });
   const normal = new FakeExecutor({
-    blockDiscoveryAfterCalls: 0,
+    blockDiscoveryAfterCalls: 2,
+    discoveryCandidateId: "accepted-before-refusal",
   });
   const notified = Promise.withResolvers<void>();
   const shutdown = Promise.withResolvers<void>();
   const signals: AbortSignal[] = [];
   const sleeps: number[] = [];
-  let discoveryCalls = 0;
+  const message = resumed
+    ? "Request blocked by cyberPolicy."
+    : "Quota exceeded. Check your plan and billing details.";
+  const attempts: (string | undefined)[] = [];
   const terminal = runCoordinator(
     fixture,
     store,
     {
       async run(request) {
         signals.push(request.signal);
-        if (++discoveryCalls === 2) {
-          const error = new DeepScanNonRetryableError(
-            "Synthetic usage limit reached",
-          );
+        // The first batch commits results. In the second batch the sibling waits for abort.
+        if (signals.length >= 4) {
+          attempts.push(request.resumeThreadId);
+          await request.onThreadStarted?.("fixture-terminal-thread");
+          if (resumed && attempts.length === 1)
+            throw new Error("transient worker failure");
+          const error = codexWorkerTurnError(message);
           request.onNonRetryableError?.(error);
           notified.resolve();
           await shutdown.promise;
-          throw error;
+          throw new Error("later cleanup failure");
         }
         return normal.run(request);
       },
     },
-    { clock: recordingClock(sleeps) },
+    { clock: recordingClock(sleeps), retryDelaysMs: [1], random: () => 0 },
   );
   try {
-    await notified.promise;
-    assert.ok(signals.every((signal) => signal.aborted));
+    await Promise.race([
+      notified.promise,
+      terminal.then(() => assert.fail("terminal failure was not reported")),
+    ]);
+    assert.ok(signals.slice(2).every((signal) => signal.aborted));
     const callsAtFailure = signals.length;
+    assert.equal(store.iterations.length, 1);
+    const checkpoint = store.iterations[0].resultPath;
+    const committed = await readFile(checkpoint, "utf8");
+    assert.match(committed, /accepted-before-refusal/);
+    const [source] = store.workerUpdates.filter(
+      (update) => update.terminalFailure,
+    );
+    assert.equal(source?.error, message);
+    assert.equal(source.threadId, "fixture-terminal-thread");
+    assert.equal(source.attempt, resumed ? 2 : 1);
+    assert.deepEqual(
+      attempts,
+      resumed ? [undefined, "fixture-terminal-thread"] : [undefined],
+    );
+
+    if (resumed) {
+      const snapshot = await store.get();
+      assert.equal(snapshot.error, message);
+      const replacement = new FakeExecutor();
+      const adopted = await runCoordinator(fixture, store, replacement, {
+        run: snapshot,
+      });
+      assert.equal(adopted?.status, "failed");
+      assert.equal(adopted.error, message);
+      assert.equal(replacement.discoveryCalls, 0);
+    }
     shutdown.resolve();
     const result = await terminal;
     assert.equal(result?.status, "failed");
-    assert.equal(result?.error, "Synthetic usage limit reached");
+    assert.equal(result?.error, message);
     assert.equal(signals.length, callsAtFailure);
-    assert.deepEqual(sleeps, []);
+    assert.equal(store.workers.get(source.id)?.status, "failed");
+    assert.deepEqual(
+      store.workerUpdates.filter((update) => update.terminalFailure),
+      [source],
+    );
+    assert.ok(
+      [...store.workers.values()].some(
+        (worker) => worker.status === "canceled",
+      ),
+    );
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(await readFile(checkpoint, "utf8"), committed);
+    assert.deepEqual(sleeps, resumed ? [1] : []);
   } finally {
     shutdown.resolve();
     await terminal;
@@ -2667,24 +2833,28 @@ function registerCases<T extends unknown[]>(
 
 after(() => temporaryDirectories.cleanup());
 test("Deep Scan lifecycle", testDeepScanLifecycle);
-test(testQuotaFailureStopsDispatchBeforeWorkerShutdown);
+registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
+  [false],
+  [true],
+]);
 test(testStandardWorkersReceiveExistingFalsePositiveFeedback);
 test(testConcurrentCheckpointKeepsExistingIteration);
+test(testDiscoveryAllocatesUniqueLabelsAfterRecovery);
 test(testDiscoveryWorkersKeepOneContextAfterPersistedUpdate);
 test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
 test(testWorkerScopedCandidateSourceAggregation);
 test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
+registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
 test(testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
 test(testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence);
 test(testSingletonHardCapReduction);
 test(testExhaustedRetryFailsScan);
-test(testPolicyRefusalReplacesDiscoveryImmediately);
 test(testTransientDiscoveryErrorsRetainRecovery);
-test(testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold);
+test(testConsecutiveTransientErrorsFailAtConfiguredThreshold);
 test(testRecoverableWorkerErrorsCannotFailScan);
 test(testSuccessfulDiscoveryResetsConsecutiveFailureThreshold);
 test(testExhaustedInvalidDiscoveryArtifactsAreReplaced);
@@ -2737,4 +2907,4 @@ registerCases(testResumedManifestPreservesCompletedReducer, [
   [false, true, ["api", "background jobs"]],
 ]);
 test(testPersistedErrorLimitStopsBeforeRescheduling);
-test(testRestartRestoresDispatchOrderAfterMixedResults);
+registerCases(testRestartRestoresDispatchOrderAfterMixedResults, [[1], [2]]);

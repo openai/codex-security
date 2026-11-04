@@ -544,18 +544,11 @@ describe("multiscan", () => {
       expect(await createCliTest(main).runCli(args, configured)).toBe(0);
       const ledger = join(paths.output, "results.jsonl");
       const valid = await readFile(ledger, "utf8");
-      const report = join(
-        paths.output,
-        "artifacts",
-        "receipt",
-        "attempt-1",
-        "report.md",
-      );
+      const receipt = JSON.parse(valid);
+      const report = join(receipt.outputDir, "report.md");
       const originalReport = await readFile(report);
       const record =
-        typeof bad === "string"
-          ? bad
-          : JSON.stringify({ ...JSON.parse(valid), attempt: 2, ...bad });
+        typeof bad === "string" ? bad : JSON.stringify({ ...receipt, ...bad });
       const damaged = Buffer.concat([
         Buffer.from(`${valid}\n${record}\n`),
         ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),

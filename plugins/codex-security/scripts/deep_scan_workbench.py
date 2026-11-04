@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from workbench.handoff import require_current_continuation
-from workbench.storage import create_private_directory
+from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
+from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -280,15 +281,7 @@ def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
     run = require_deep_scan_run(connection, scan_id)
     scan = dependencies().require_scan(connection, run["scan_id"])
-    worker_rows = connection.execute(
-        """
-        SELECT *
-        FROM deep_scan_workers
-        WHERE scan_id = ?
-        ORDER BY created_at, id
-        """,
-        (run["scan_id"],),
-    )
+    worker_rows = saved_deep_workers(connection, scan)
     input_rows = connection.execute(
         """
         SELECT dedup_worker_id, discovery_worker_id, input_order
@@ -298,12 +291,13 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         """,
         (run["scan_id"],),
     )
+    manifest_path = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
     canonical_artifacts = None
     if (
         run["canonical_inventory_path"] is None
         and run["status"] == "succeeded"
-        and run["manifest_path"] is not None
-        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        and manifest_path is not None
+        and manifest_path != str(Path(scan["scan_dir"]) / "scan-manifest.json")
         and (Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "in_scope_files.txt").exists()
     ):
         canonical_artifacts = canonical_discovery_artifacts(scan)
@@ -338,6 +332,11 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "coordinatorGeneration": run["coordinator_generation"],
         "status": run["status"],
         "phase": run["phase"],
+        # Older coordinators could persist discovery on the parent before dispatching.
+        "discoveryStarted": (
+            PHASES.index(scan["phase"]) >= PHASES.index("discovery")
+            or run["phase"] in {"discovery", "reducing"}
+        ),
         "config": {
             "workers": run["workers"],
             "subagents": run["subagents"],
@@ -352,7 +351,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "consecutiveErrors": run["consecutive_errors"],
         "cancelRequested": bool(run["cancel_requested"]),
         "canonicalArtifacts": canonical_artifacts,
-        "manifestPath": run["manifest_path"],
+        "manifestPath": manifest_path,
         "terminalReason": run["terminal_reason"],
         "error": deep_scan_error(run),
         "createdAt": run["created_at"],
@@ -383,21 +382,20 @@ def independent_review_progress(
     ).fetchone()
     if run is None:
         return None
-    active = connection.execute(
+    active, buffered = connection.execute(
         """
-        SELECT COUNT(*)
+        SELECT COUNT(*) FILTER (WHERE status IN ('queued', 'running')),
+               COUNT(*) FILTER (WHERE status = 'succeeded' AND merge_state = 'buffered')
         FROM deep_scan_workers
-        WHERE scan_id = ?
-            AND kind = 'discovery'
-            AND status IN ('queued', 'running')
+        WHERE scan_id = ? AND kind = 'discovery'
         """,
         (scan_id,),
-    ).fetchone()[0]
+    ).fetchone()
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] in {"reducing", "terminal"},
+        "consolidating": run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0),
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -1118,6 +1116,12 @@ def upsert_deep_scan_worker(
         existing = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
         ).fetchone()
+        if args.terminal_failure and (
+            args.status != "failed" or not optional_text(args.error_message)
+        ):
+            raise SystemExit(
+                "A terminal worker failure requires failed status and an error message."
+            )
         replaceable_failure_kind = args.replaceable_failure_kind
         if replaceable_failure_kind is not None and (
             args.kind != "discovery"
@@ -1334,6 +1338,13 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
+        if args.terminal_failure:
+            # Persist the first terminal cause with its worker. An adopting coordinator
+            # completes the normal failure path after active workers have settled.
+            connection.execute(
+                "UPDATE deep_scan_runs SET error_message = ? WHERE scan_id = ? AND error_message IS NULL",
+                (error_message, scan_id),
+            )
     return deep_scan_result(connection, scan_id)
 
 
@@ -1452,7 +1463,8 @@ def finish_deep_scan_locked(
         if run["status"] == "succeeded":
             if (
                 run["terminal_reason"] != args.terminal_reason
-                or run["manifest_path"] not in {None, manifest_path}
+                or archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
+                not in {None, manifest_path}
                 or not omissions_match
             ):
                 raise SystemExit(
@@ -1467,6 +1479,8 @@ def finish_deep_scan_locked(
             connection.commit()
             return deep_scan_result(connection, scan_id)
         require_running_deep_scan(connection, scan_id)
+        if run["error_message"] is not None:
+            raise SystemExit(run["error_message"])
         if (
             args.terminal_reason == "saturated"
             and run["consecutive_no_new"] < run["stop_after_no_new"]
@@ -1597,6 +1611,7 @@ def fail_deep_scan_locked(
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
+        recorded_manifest = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
         manifest_path = None
         if args.manifest_path:
             manifest_path = (
@@ -1609,14 +1624,14 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
-        elif run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
-            manifest_path = run["manifest_path"]
+        elif recorded_manifest == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+            manifest_path = recorded_manifest
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
                 run["status"] == args.deep_status
                 and scan["status"] == "failed"
                 and run["error_message"] == message
-                and run["manifest_path"] == manifest_path
+                and recorded_manifest == manifest_path
                 and scan["failure_message"] == message
             ):
                 connection.commit()
@@ -1635,6 +1650,9 @@ def fail_deep_scan_locked(
             "status"
         ] != "running":
             raise SystemExit("Only a running Deep Scan can be failed or interrupted.")
+        # Cleanup can report a later error after a worker committed the terminal cause.
+        if run["status"] == "running" and run["error_message"] is not None:
+            message = run["error_message"]
         if run["manifest_path"] not in {None, manifest_path}:
             raise SystemExit("Deep Scan coordinator manifest path is immutable.")
         if args.staged_manifest_path and manifest_path:
@@ -1754,7 +1772,7 @@ def cancel_from_parent_scan(connection: sqlite3.Connection, scan_id: str, timest
     connection.execute(
         """
         UPDATE deep_scan_runs
-        SET status = 'canceled', phase = 'terminal', cancel_requested = 1,
+        SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = NULL,
             terminal_reviewed_surface_count = NULL, completed_at = ?, updated_at = ?
         WHERE scan_id = ? AND status IN ('running', 'succeeded')
         """,

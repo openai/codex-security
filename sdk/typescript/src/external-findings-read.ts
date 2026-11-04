@@ -4,22 +4,34 @@ import type {
   ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
+import { hasNoExternalRecords } from "./external-findings.js";
+import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
-import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { dependabotRepository } from "./github-dependabot-findings.js";
+import {
+  normalizeSnykFile,
+  readSnykReport,
+  emptySnykReportRepositories,
+  snykRepositoryUrls,
+} from "./snyk-findings.js";
 import {
   isSemgrepSarifDriver,
-  readSemgrepFindings,
+  normalizeSemgrepFindings,
+  readSemgrepReport,
 } from "./semgrep-findings.js";
 import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
-import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
-import { dependabotRepository } from "./github-dependabot-findings.js";
+import {
+  normalizeEndorFindings,
+  endorRepositoryUrls,
+} from "./endor-findings.js";
 import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
 import { readContinuumFindings } from "./continuum-findings.js";
+import { readCheckmarxFindings } from "./checkmarx-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
@@ -42,6 +54,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   veracode: "veracode",
   sonar: "sonar",
   continuum: "continuum",
+  checkmarx: "checkmarx",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -128,6 +141,19 @@ export function semgrepSarifRepositories(
     : [];
 }
 
+/** A run may name a repository even when it produces no findings. */
+function sarifFileRepositories(
+  input: unknown,
+  producer: "Endor" | "Semgrep" | "Snyk",
+) {
+  if (
+    isRecord(input) &&
+    input["version"] === "2.1.0" &&
+    Array.isArray(input["runs"])
+  )
+    return input["runs"].flatMap((run) => sarifRunRepositories(run, producer));
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
@@ -135,7 +161,8 @@ export async function readExternalFindings(
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
-  if (options.provider === "sonar") {
+  const { provider } = options;
+  if (provider === "sonar") {
     const url = options.sourceRepositoryUrl;
     const findings = await readSonarFindings(path, url ?? "", target);
     const binding = findings.report?.["repositoryUrl"];
@@ -144,7 +171,7 @@ export async function readExternalFindings(
       sourceRepositories: typeof binding === "string" ? [{ url: binding }] : [],
     };
   }
-  if (options.provider === "opengrep") {
+  if (provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
     return {
       findings: await readOpenGrepFindings(
@@ -155,22 +182,26 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  if (options.provider === "snyk" || options.provider === "endor") {
-    const provider = options.provider;
-    const findings =
-      provider === "snyk"
-        ? await readSnykFindings(path, target, references)
-        : await readEndorFindings(path, target);
-    return {
-      findings,
-      sourceRepositories: findings.findings.flatMap((finding) =>
-        localFindingRepositories(provider, finding),
-      ),
-    };
+  if (provider === "snyk" || provider === "endor") {
+    const snyk = provider === "snyk";
+    const input = await (snyk ? readSnykReport : readScannerJson)(path);
+    const findings = snyk
+      ? await normalizeSnykFile(input, target, references)
+      : normalizeEndorFindings(input, target);
+    const header = sarifFileRepositories(input, snyk ? "Snyk" : "Endor");
+    const sourceRepositories =
+      header ??
+      (snyk && hasNoExternalRecords(findings)
+        ? emptySnykReportRepositories(input)
+        : findings.findings.flatMap((row) =>
+            localFindingRepositories(provider, row),
+          ));
+    return { findings, sourceRepositories };
   }
-  if (options.provider === "semgrep") {
-    const findings = await readSemgrepFindings(
-      path,
+  if (provider === "semgrep") {
+    const input = await readSemgrepReport(path);
+    const findings = normalizeSemgrepFindings(
+      input,
       {
         sourceRepositoryUrl: options.sourceRepositoryUrl,
         sourceRepositories: references,
@@ -178,33 +209,35 @@ export async function readExternalFindings(
       target,
     );
     if (semgrepPlatformReportRepository(findings)) return { findings };
-    const sourceRepositories = findings.findings.flatMap((finding) =>
-      semgrepSarifRepositories(finding),
-    );
+    const sourceRepositories = sarifFileRepositories(input, "Semgrep") ?? [];
+    if (!sourceRepositories.length && options.sourceRepositoryUrl)
+      sourceRepositories.push({ url: options.sourceRepositoryUrl });
     return { findings, sourceRepositories };
   }
-  if (options.provider === "github")
+  if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (
-    options.provider === "inspector" ||
-    options.provider === "continuum" ||
-    options.provider === "blackduck" ||
-    options.provider === "veracode"
+    provider === "inspector" ||
+    provider === "continuum" ||
+    provider === "checkmarx" ||
+    provider === "blackduck" ||
+    provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
       inspector: readInspectorFindings,
       continuum: readContinuumFindings,
+      checkmarx: readCheckmarxFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
-    }[options.provider];
+    }[provider];
     return {
       findings: await read(path, url, target, options.inspectorProjectMap),
       sourceRepositories: [{ url }],
     };
   }
   // A new reader must choose its parser before reaching the Wiz replay path.
-  options.provider satisfies "wiz";
+  provider satisfies "wiz";
   const wiz =
     target === "local"
       ? await readLocalWizFindings(path)

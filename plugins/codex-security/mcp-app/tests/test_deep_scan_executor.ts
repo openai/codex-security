@@ -3,7 +3,6 @@ import {
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
   temporaryDirectories,
   fakeCodexFixture,
@@ -61,7 +60,6 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
-import { importModule } from "./import-module.ts";
 
 import type {
   CodexWorkerDiagnostic,
@@ -73,6 +71,12 @@ import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
+const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+const nativeLauncher = path.join(
+  path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
+  "bin",
+  "codex.js",
+);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
@@ -120,6 +124,7 @@ try {
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
+    await check(t, testRuntimeSnapshotReadRetry);
     if (process.platform !== "win32") {
       await check(
         t,
@@ -187,9 +192,7 @@ try {
       await check(t, testOwnedArtifactToolFailureDiagnosticIsPreserved);
       await check(t, testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
       await check(t, testSetupExitDiagnosticsRemainRetryable);
-      await check(t, testPolicyFailuresRemainWorkerErrors);
       await check(t, testMalformedCommandEventsRemainRetryable);
-      await check(t, testRateLimitPolicyFailureRemainsRetryable);
       await check(t, testArtifactStartupTimeoutRemainsRetryable);
     }
   });
@@ -979,7 +982,7 @@ async function testSdkInvocationAndThreadCapture() {
     assertFlagPair(invocation.argv, "--model", "gpt-5.6-luna");
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: "xhigh",
-      "mcp_servers.codex-security.command": "node",
+      "mcp_servers.codex-security.command": undefined,
       "mcp_servers.codex-security.enabled": false,
     });
     assertReadOnlyWorkerPolicy(invocation.argv);
@@ -995,12 +998,37 @@ async function testSdkInvocationAndThreadCapture() {
     const preflight = await readJson(fixture.preflightMarkerPath);
     assert.deepEqual(
       nativeConfigOverrides(preflight.argv),
-      nativeConfigOverrides(invocation.argv),
+      nativeConfigOverrides(invocation.argv).filter(
+        (arg) => !arg.startsWith("mcp_servers="),
+      ),
     );
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assertFlagPair(invocation.argv, "--cd", workingDirectory);
     assert.equal(invocation.argv.includes("--skip-git-repo-check"), true);
   }, deniedWorkerPermissionProfile);
+}
+
+async function testRuntimeSnapshotReadRetry() {
+  await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    const configPath = path.join(fixture.root, "runtime.toml");
+    const savedPath = process.env.CODEX_SECURITY_CONFIG_PATH;
+    process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+    try {
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+      });
+      const request = workerRequest(promptPath, workingDirectory);
+      await writeFile(promptPath, "fixture worker");
+      await assert.rejects(executor.run(request), { code: "ENOENT" });
+      await writeFile(configPath, 'model_reasoning_effort = "low"');
+      await executor.run(request);
+      assertConfigOverrides((await readJson(fixture.markerPath)).argv, {
+        model_reasoning_effort: "low",
+      });
+    } finally {
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", savedPath);
+    }
+  });
 }
 
 async function testReportOnlyComparison() {
@@ -1032,12 +1060,51 @@ async function testReportOnlyComparison() {
       "responses_api_metadata.codex_security_worker_role": "compare",
       "mcp_servers.cs_artifacts": undefined,
       "features.shell_tool": false,
+      "features.image_generation": false,
+      "features.view_image": false,
+      "features.computer_use": false,
       "features.multi_agent_v2": false,
       web_search: "disabled",
     });
-    assert.ok(
-      invocation.argv.includes('mcp_servers."fixture.catalog".enabled=false'),
+    const preflight = await readJson(fixture.preflightMarkerPath);
+    assertConfigOverrides(preflight.argv, {
+      "mcp_servers.codex-security.command": undefined,
+    });
+    const overrides = nativeConfigOverrides(invocation.argv);
+    const servers = overrides
+      .map((arg) => parseToml(arg).mcp_servers)
+      .findLast(Boolean);
+    assert.deepEqual(JSON.parse(JSON.stringify(servers)), {
+      "fixture.catalog": { enabled: false },
+      "codex-security": { enabled: false },
+    });
+    // Check the actual CLI parser. A TOML parser alone accepts quoted dotted
+    // override paths that the pinned native executable splits literally.
+    await writeFile(
+      path.join(fixture.root, "config.toml"),
+      '[mcp_servers."fixture.catalog"]\ncommand = "fixture-command"\n' +
+        '[mcp_servers.codex-security]\nurl = "https://example.invalid/mcp"\n',
     );
+    const effective = spawnSync(
+      process.execPath,
+      [
+        nativeLauncher,
+        "mcp",
+        "get",
+        "fixture.catalog",
+        "--json",
+        ...overrides.flatMap((override) => ["--config", override]),
+      ],
+      {
+        encoding: "utf8",
+        cwd: fixture.root,
+        env: { ...process.env, CODEX_HOME: fixture.root },
+      },
+    );
+    assert.equal(effective.status, 0, effective.stderr);
+    const server = JSON.parse(effective.stdout);
+    assert.equal(server.enabled, false);
+    assert.equal(server.transport.command, "fixture-command");
   });
 }
 
@@ -1062,12 +1129,6 @@ async function testOpenAiCredentialsReachWorker() {
     );
     assert.equal(created.status, 0, created.stderr);
   }
-  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
-  const nativeLauncher = path.join(
-    path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
-    "bin",
-    "codex.js",
-  );
   const cases: {
     openai?: string;
     codex?: string;
@@ -2005,6 +2066,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 artifactContext: {
                   root: fixture.root,
                   layout: "worker",
+                  discoveryBoard: {
+                    root: path.join(fixture.root, `board-${index}`),
+                    author: `discovery-${index}`,
+                  },
                 },
               }),
             );
@@ -2366,6 +2431,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               path.join(fixture.root, `plugin-${index}`),
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
               "worker",
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_BOARD_ROOT":
+              path.join(fixture.root, `board-${index}`),
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_WORKER": `discovery-${index}`,
           });
           const servers = nativeConfigOverrides(invocation.argv)
             .map((value) => parseToml(value))
@@ -2549,7 +2617,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeConfigOverrides(launch.args).filter(
               (override) => !override.startsWith("model_providers="),
             ),
-            nativeConfigOverrides(execution.args),
+            nativeConfigOverrides(execution.args).filter(
+              (override) => !override.startsWith("mcp_servers="),
+            ),
           );
         }
         await Promise.all(
@@ -2610,6 +2680,9 @@ async function testBedrockCredentialsReachWorker(
   await writeFile(
     path.join(codexHome, `${nativeProfile}.config.toml`),
     stringifyToml({
+      mcp_servers: {
+        "profile.catalog": { url: "https://fixture.invalid/mcp" },
+      },
       model_providers: { "amazon-bedrock": providerConfig },
     }),
   );
@@ -2688,6 +2761,19 @@ async function testBedrockCredentialsReachWorker(
         model_reasoning_summary: "none",
       });
     }
+    await executor.compareFindings(
+      "Compare the supplied reports.",
+      workingDirectory,
+      new AbortController().signal,
+      { type: "object", properties: { reviews: { type: "array" } } },
+    );
+    const comparison = await readJson(fixture.markerPath);
+    const servers = nativeConfigOverrides(comparison.argv)
+      .map((arg) => parseToml(arg).mcp_servers)
+      .findLast(Boolean);
+    assert.deepEqual(JSON.parse(JSON.stringify(servers))["profile.catalog"], {
+      enabled: false,
+    });
   } finally {
     for (const [name, value] of previousEnvironment) {
       restoreEnv(name, value);
@@ -2696,19 +2782,28 @@ async function testBedrockCredentialsReachWorker(
 }
 
 async function testExternalProviderCredentialsReachWorker() {
-  for (const [provider, key] of [
+  for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
-  ]) {
-    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
+    ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
+  ] as const) {
+    const verifyCredentials: Parameters<typeof withWorkerFixture>[0] = async (
+      fixture,
+      promptPath,
+      workingDirectory,
+    ) => {
       const configPath = path.join(fixture.root, "provider.toml");
       const deepPath = path.join(fixture.root, "workers.toml");
       const profile = `scan-${provider}`;
       const selectedKey = `synthetic-${provider}-scan-key`;
+      const accountHeaders = headerKey
+        ? { [headerKey]: "private-scan-header" }
+        : {};
       const settings = {
         model_provider: provider,
         native_profile: profile,
-        environment: { [key]: selectedKey },
+        environment: { [key]: selectedKey, ...accountHeaders },
       };
       await writeFile(configPath, stringifyToml({ model_provider: provider }));
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
@@ -2722,11 +2817,18 @@ async function testExternalProviderCredentialsReachWorker() {
               base_url: `https://${provider}.example.test/v1`,
               wire_api: "responses",
               env_key: key,
+              ...(headerKey === "OPENAI_API_KEY"
+                ? { requires_openai_auth: true }
+                : {}),
+              ...(headerKey
+                ? { env_http_headers: { "X-Scan-Header": headerKey } }
+                : {}),
             },
           },
         }),
       );
-      await writeFile(promptPath, "synthetic provider credential fixture");
+      const prompt = "CAPTURE_SYNTHETIC_OPENAI_AUTH";
+      await writeFile(promptPath, prompt);
       const environment = {
         CODEX_HOME: fixture.root,
         CODEX_SECURITY_CONFIG_PATH: configPath,
@@ -2735,53 +2837,49 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
         (name) => [name, process.env[name]] as const,
       );
-      const originalSpawn = childProcess.spawn;
-      const launches: {
-        args: readonly string[];
-        environment: NodeJS.ProcessEnv;
-      }[] = [];
       try {
         for (const [name, value] of Object.entries(environment))
           restoreEnv(name, value);
-        childProcess.spawn = ((
-          command: string,
-          args: readonly string[],
-          options: SpawnOptions,
-        ) => {
-          if (args[0] === "exec")
-            launches.push({ args, environment: { ...options.env } });
-          return originalSpawn(command, args, options);
-        }) as typeof childProcess.spawn;
-        syncBuiltinESMExports();
         const executor = new CodexSdkWorkerExecutor({
           parentSandbox: trustedParentSandbox,
         });
-        for (const resumeThreadId of [undefined, "fixture-provider-resume"]) {
-          launches.length = 0;
+        for (const turn of ["fresh", "resume", "compare"]) {
           process.env[key] = "changed-ambient-key";
-          await executor.run(
-            workerRequest(promptPath, workingDirectory, {
-              resumeThreadId,
-            }),
+          if (headerKey) process.env[headerKey] = "changed-ambient-header";
+          if (turn === "compare") {
+            await executor.compareFindings(
+              prompt,
+              workingDirectory,
+              new AbortController().signal,
+              { type: "object" },
+            );
+          } else {
+            await executor.run(
+              workerRequest(promptPath, workingDirectory, {
+                resumeThreadId:
+                  turn === "resume" ? "fixture-provider-resume" : undefined,
+              }),
+            );
+          }
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(
+            invocation.providerKey ?? invocation.providerHeaders[key],
+            selectedKey,
           );
-          assert.equal(launches.length, 1);
-          const launch = launches[0];
-          assert.equal(launch.environment[key], selectedKey);
-          assert.equal(launch.environment.OPENAI_API_KEY, undefined);
-          assert.equal(launch.environment.CODEX_API_KEY, undefined);
-          assertFlagPair(launch.args, "--profile", profile);
-          assertConfigOverrides(launch.args, {
+          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          assertFlagPair(invocation.argv, "--profile", profile);
+          assertConfigOverrides(invocation.argv, {
             model_provider: provider,
             "mcp_servers.codex-security.enabled": false,
+            "responses_api_metadata.codex_security_worker_role":
+              turn === "compare" ? "compare" : "discovery",
           });
-          assert.equal(
-            launch.args.includes("resume"),
-            resumeThreadId !== undefined,
-          );
+          assert.equal(invocation.argv.includes("resume"), turn === "resume");
           await writeFile(
             deepPath,
             stringifyToml({
@@ -2793,10 +2891,12 @@ async function testExternalProviderCredentialsReachWorker() {
           );
         }
       } finally {
-        childProcess.spawn = originalSpawn;
-        syncBuiltinESMExports();
         for (const [name, value] of saved) restoreEnv(name, value);
       }
+    };
+    await withWorkerFixture(verifyCredentials, undefined, true, {
+      account: null,
+      requiresOpenaiAuth: headerKey === "OPENAI_API_KEY",
     });
   }
 }
@@ -3382,8 +3482,7 @@ async function testArtifactStartupTimeoutRemainsRetryable() {
     runFixtureWorker("ARTIFACT_MCP_STARTUP_TIMEOUT"),
     (error: Error) =>
       error.name === "Error" &&
-      error.message.includes("cs_artifacts: request timed out") &&
-      !isCodexCybersecurityPolicyRefusal(error),
+      error.message.includes("cs_artifacts: request timed out"),
   );
 }
 
@@ -3400,32 +3499,6 @@ async function testSetupExitDiagnosticsRemainRetryable() {
       prompt,
     );
   }
-}
-
-async function testPolicyFailuresRemainWorkerErrors() {
-  for (const prompt of [
-    "CYBER_POLICY_ERROR",
-    "SAFETY_POLICY_ERROR",
-    "CYBERSECURITY_RISK_ERROR",
-    "HIGH_RISK_CYBER_ACTIVITY_ERROR",
-    "UPSTREAM_CYBERSECURITY_RISK_ERROR",
-    "UPSTREAM_HIGH_RISK_CYBER_ACTIVITY_ERROR",
-  ]) {
-    await assert.rejects(
-      runFixtureWorker(prompt),
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" && isCodexCybersecurityPolicyRefusal(error),
-    );
-  }
-}
-
-async function testRateLimitPolicyFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("RATE_LIMIT_CYBER_POLICY_ERROR"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      /429 Too Many Requests/.test(error?.message ?? ""),
-  );
 }
 
 async function testMalformedCommandEventsRemainRetryable() {
@@ -3573,7 +3646,10 @@ async function withWorkerFixture<Result>(
 async function testWorkerTerminalEvents() {
   await withWorkerFixture(async (_fixture, promptPath, workingDirectory) => {
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const policyMessage =
+      "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
     const wrappedQuota = `Error running remote compact task: ${quotaMessage}`;
+    const terminalMessages = [quotaMessage, wrappedQuota, policyMessage];
     const disconnect =
       "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
@@ -3581,8 +3657,24 @@ async function testWorkerTerminalEvents() {
       { type: "turn.failed", error: { message: quotaMessage } },
       { type: "turn.failed", error: { message: wrappedQuota } },
       { type: "turn.failed", error: { message: disconnect } },
+      { type: "turn.failed", error: { message: policyMessage } },
+      {
+        type: "turn.failed",
+        error: {
+          message: "429 Too Many Requests: Request blocked by cyberPolicy.",
+        },
+      },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
+      { type: "error", message: policyMessage },
+      {
+        type: "item.completed",
+        item: {
+          id: "refusal-text",
+          type: "agent_message",
+          text: policyMessage,
+        },
+      },
       {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
@@ -3601,18 +3693,16 @@ async function testWorkerTerminalEvents() {
           onNonRetryableError,
         });
         if (event?.type === "turn.failed") {
-          const isQuota = [quotaMessage, wrappedQuota].includes(
-            event.error.message,
-          );
+          const permanent = terminalMessages.includes(event.error.message);
           await assert.rejects(execution, {
-            name: isQuota ? "DeepScanNonRetryableError" : "Error",
+            name: permanent ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
           });
           assert.deepEqual(
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,
             ),
-            isQuota ? [event.error.message] : [],
+            permanent ? [event.error.message] : [],
           );
           continue;
         }

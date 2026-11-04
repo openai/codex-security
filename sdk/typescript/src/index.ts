@@ -233,10 +233,11 @@ export type {
   LocalExternalImportResult,
   PreparedLocalExternalImport,
 } from "./external-findings-local.js";
-export type {
-  ExternalFinding,
-  ExternalFindings,
-  ExternalSourceRepository,
+export {
+  NoPublishableFindingsError,
+  type ExternalFinding,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
   ExternalFindingEvidence,
@@ -342,6 +343,7 @@ export {
   normalizeVeracodeFindings,
   readVeracodeFindings,
 } from "./veracode-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
 export {
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
@@ -350,6 +352,7 @@ export {
   normalizeContinuumFindings,
   readContinuumFindings,
 } from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,
