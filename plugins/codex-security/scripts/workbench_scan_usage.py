@@ -269,10 +269,10 @@ def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row
 def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
     if scan["mode"] != "deep":
         return set()
-    return {
-        row["artifact_dir"]
-        if row["kind"] == "discovery"
-        else str(Path(scan["scan_dir"]) / "artifacts")
+    artifacts = Path(scan["scan_dir"]) / "artifacts"
+    # Finding comparisons start independent sessions before the batch checkpoint is saved.
+    return {str(artifacts / "deep_discovery")} | {
+        row["artifact_dir"] if row["kind"] == "discovery" else str(artifacts)
         for row in connection.execute(
             "SELECT kind, artifact_dir FROM deep_scan_workers "
             "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",

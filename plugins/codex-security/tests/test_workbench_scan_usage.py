@@ -1805,6 +1805,9 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
                 [_token_event(counted, 20, 5), _token_event(counted, 30, 8)],
                 session_started_at=before_scan,
             ),
+            "finding-comparison": _rollout(
+                tmp_path, "finding-comparison", [_token_event(counted, 12, 4)]
+            ),
             "other-scan-worker": _rollout(
                 tmp_path, "other-scan-worker", [_token_event(counted, 80_000, 20_000)]
             ),
@@ -1834,6 +1837,11 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
         connection.executemany(
             "UPDATE threads SET cwd = ?, created_at = ? WHERE id = ?",
             [
+                (
+                    str(fixture.scan_dir / "artifacts" / "deep_discovery"),
+                    int(counted.timestamp()),
+                    "finding-comparison",
+                ),
                 (str(working_directory), int(counted.timestamp()), "sdk-first-attempt"),
                 (str(working_directory), int(counted.timestamp()), "sdk-first-child"),
                 (str(working_directory), int(counted.timestamp()), "sdk-current-attempt"),
@@ -1859,8 +1867,8 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
         >= {
             "coverage": "complete",
             "source": "codex_rollout",
-            **_counts(67, 0, 18),
-            "threadCount": 4,
+            **_counts(79, 0, 22),
+            "threadCount": 5,
         }.items()
     )
 

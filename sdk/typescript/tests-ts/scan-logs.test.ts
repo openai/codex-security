@@ -165,6 +165,46 @@ describe("saved scan logs", () => {
     expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
   });
 
+  test("collects parentless comparisons inside a shared Desktop scan window", async () => {
+    const home = await temporaryHome();
+    const scanDir = join(home, "scan");
+    const cwd = join(scanDir, "artifacts", "deep_discovery");
+    await writeSession(home, "owner", [], undefined, "2026-08-01T00:00:00Z");
+    await writeSession(home, "other-task", [], "owner");
+    await writeSession(
+      home,
+      "older-comparison",
+      [],
+      undefined,
+      "2026-08-01T01:00:00Z",
+      cwd,
+    );
+    await writeSession(
+      home,
+      "comparison",
+      [],
+      undefined,
+      "2026-08-02T01:00:00Z",
+      cwd,
+    );
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        scanDir,
+        mode: "deep",
+        continuationThreadId: "owner",
+        lifecycle: { startedAt: "2026-08-02T00:00:00Z" },
+        progress: { status: "running" },
+        executionThreadIds: [],
+      },
+      home,
+    );
+    expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+      "comparison",
+      "owner",
+    ]);
+  });
+
   test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
     const desktop = await temporaryHome();
     const cli = await temporaryHome();
