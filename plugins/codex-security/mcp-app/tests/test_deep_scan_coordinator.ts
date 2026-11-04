@@ -2324,7 +2324,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
       async compareFindings(_prompt, _cwd, signal) {
         comparisons++;
         if (mode === "quota")
-          throw codexWorkerTurnError(
+          throw new DeepScanNonRetryableError(
             "Quota exceeded. Check your plan and billing details.",
           );
         await deadline.promise;

@@ -47,7 +47,7 @@ function entry(id: string): Findings.EmbeddedFinding {
 
 function pythonUpsert(path: string, finding: Findings.Finding | string): void {
   execFileSync(
-    process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3"),
+    process.env.PYTHON ?? "python",
     [
       "-I",
       "-X",

@@ -3,7 +3,6 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
-import type { ProjectProviderRouting } from "./project-provider-routing.js";
 import { ConfigurationError } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -16,8 +15,6 @@ export interface CodexSecurityConfig {
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
-  /** @internal Source of provider routing loaded from a project file. */
-  projectProviderRouting?: ProjectProviderRouting;
 }
 
 export interface ScanModelConfiguration {

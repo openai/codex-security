@@ -3095,8 +3095,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      if (stickyParent !== join(root, "shared"))
-        temporaryDirectories.track(stateDirectory);
+      temporaryDirectories.track(stateDirectory);
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -5972,7 +5971,7 @@ describe("runtime directories and plugin Python boundary", () => {
         stickyParent,
         `codex-security-sticky-${process.pid}-${Date.now()}`,
       );
-      if (stickyParent !== shared) temporaryDirectories.track(output);
+      temporaryDirectories.track(output);
 
       await expect(
         requireSecureOutputAncestry(output),

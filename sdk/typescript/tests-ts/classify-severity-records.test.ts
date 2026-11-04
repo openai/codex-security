@@ -240,9 +240,6 @@ test.each([
   "default-rubric",
   "one-run",
   "ten-runs",
-  "persistent-effort",
-  "provider-effort",
-  "provider-effort-host-error",
   "host-error",
   "wrong-response",
   "disconnect",
@@ -250,20 +247,13 @@ test.each([
 ])(
   "CLI records protocol handles %s without local execution",
   async (scenario) => {
-    const effort =
-      scenario === "persistent-effort"
-        ? "persistent"
-        : scenario.startsWith("provider-effort")
-          ? "provider-defined-effort"
-          : "none";
     const stream = new PassThrough();
     const messages: any[] = [];
     const output = new Writable({
       write(chunk, _encoding, callback) {
         const message = JSON.parse(chunk.toString());
         messages.push(message);
-        if (message.method === "review.run") {
-          expect(message.params.effort).toBe(effort);
+        if (message.method === "review.run")
           queueMicrotask(() => {
             if (scenario === "disconnect") {
               stream.end();
@@ -276,8 +266,7 @@ test.each([
                     method: "cancel",
                     params: { id: "run-one" },
                   }
-                : scenario === "host-error" ||
-                    scenario === "provider-effort-host-error"
+                : scenario === "host-error"
                   ? {
                       jsonrpc: "2.0",
                       id: message.id,
@@ -290,7 +279,6 @@ test.each([
                     };
             stream.write(`${JSON.stringify(response)}\n`);
           });
-        }
         callback();
       },
     });
@@ -313,25 +301,19 @@ test.each([
       capture().stream,
       deps,
     );
-    const params: ClassifySeverityRecordsInput = input(effort);
+    const params: ClassifySeverityRecordsInput = input("none");
     if (scenario === "default-rubric") delete params.rubric;
     const completed = [
       "completed",
       "default-rubric",
       "one-run",
       "ten-runs",
-      "persistent-effort",
-      "provider-effort",
     ].includes(scenario);
     stream.write(
       `${JSON.stringify({ jsonrpc: "2.0", id: "run-one", method: "run", params })}\n`,
     );
     expect(await result).toBe(
-      completed
-        ? 0
-        : scenario === "host-error" || scenario === "provider-effort-host-error"
-          ? 1
-          : 2,
+      completed ? 0 : scenario === "host-error" ? 1 : 2,
     );
     expect(
       messages.filter((message) => message.method === "review.run"),
@@ -348,10 +330,7 @@ test.each([
     expect(final.id).toBe("run-one");
     if (completed)
       expect(final.result.assessments[0]).toHaveProperty("id", "canonical-one");
-    else if (
-      scenario === "host-error" ||
-      scenario === "provider-effort-host-error"
-    )
+    else if (scenario === "host-error")
       expect(final.result).toMatchObject({
         status: "unresolved",
         assessments: [],

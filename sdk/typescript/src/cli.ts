@@ -388,7 +388,6 @@ import {
   type ScopeProvenanceKey,
   type ProjectConfigProvenance,
 } from "./project-config.js";
-import { requireTrustedProjectProvider } from "./project-provider-routing.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
@@ -4970,10 +4969,6 @@ export async function main(
             options.config,
             dependencies,
           );
-          await requireTrustedProjectProvider(
-            project?.projectProviderRouting,
-            resolveCliPath(directory, args.repository ?? "."),
-          );
           const scope = resolveCliScope(project?.input.scan?.scope, {
             paths: options.path,
             diff: options.diff,
@@ -5962,7 +5957,6 @@ export async function main(
             validationPromptFile: settings.validationPromptFile,
             postScanPromptFile: settings.postScanPromptFile,
             config: {
-              ...resolved.config,
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
                 await parseScanCodexOverrides(

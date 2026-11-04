@@ -2174,7 +2174,9 @@ When two scans reviewed identical content, a comparison groups unique findings
 with the same vulnerability class, primary source location, and instance. Saved
 confirmed and related decisions take precedence. Uncertain pairs remain eligible
 for this match. Git scans require the same saved target position. Older scans
-without a saved position use saved decisions.
+without a saved position use saved decisions. Two recorded, different Git origins
+are treated as distinct repositories, even when the checkout path and inode match.
+A remote rename therefore starts a new comparison history.
 
 ```bash
 codex-security scans match --all --force --model gpt-6.1-sol --effort high

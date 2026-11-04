@@ -2267,6 +2267,30 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     assert saved["summary"]["persisting"] == 1
 
 
+def test_conflicting_origins_do_not_link_history_through_reused_directory_identity() -> None:
+    history = load_script("workbench_db").scan_history
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+
+        def saved(origin: str, inode: int) -> sqlite3.Row:
+            identity = {
+                "origin": origin,
+                "commonDirectory": "/fixture/.git",
+                "commonDirectoryIdentity": [1, inode],
+            }
+            return connection.execute(
+                "SELECT 'target' AS target_id, ? AS target_git_identity_json",
+                (json.dumps(identity),),
+            ).fetchone()
+
+        first = saved("https://example.test/first", 123)
+        replaced = saved("https://example.test/second", 123)
+        clone = saved("https://example.test/second", 456)
+        assert not history._same_repository(first, replaced)
+        assert history._same_repository(replaced, clone)
+        assert not history._same_repository(first, clone)
+
+
 def replace_history_repository(repository: Path, origin: str) -> None:
     previous_identity = (repository / ".git").stat()
     retained = repository.with_name("retained-repository")
@@ -2361,7 +2385,7 @@ def test_finding_history_scopes_saved_aliases_to_repository_identity(
     if change == "legacy":
         with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
             connection.execute("UPDATE scans SET target_git_identity_json = NULL")
-    eligible = change != "replacement"
+    eligible = change not in {"replacement", "remote-edit"}
     direct = compare_scan_pair(state_dir, old[0], current[0], check=False)
     assert (direct["returncode"] == 0) == eligible
     if not eligible:
@@ -2562,7 +2586,8 @@ def test_scan_comparison_checks_saved_identity_when_target_path_is_reused(
         else:
             repository.rename(saved_repository)
         subprocess.run(["git", "clone", "-q", str(saved_repository), str(repository)], check=True)
-    origin = "first" if change == "same-origin" else "second"
+    same_origin = change in {"same-origin", "recreated-subdirectory"}
+    origin = "first" if same_origin else "second"
     subprocess.run(
         [
             "git",
@@ -2598,7 +2623,7 @@ def test_scan_comparison_checks_saved_identity_when_target_path_is_reused(
         assert saved[0][field] == saved[1][field]
     identities = [json.loads(scan["target_git_identity_json"]) for scan in saved]
     assert identities[0]["commonDirectory"] == identities[1]["commonDirectory"]
-    assert (identities[0]["origin"] == identities[1]["origin"]) == (change == "same-origin")
+    assert (identities[0]["origin"] == identities[1]["origin"]) == same_origin
     assert (saved[0]["target_inode"] == saved[1]["target_inode"]) == (
         change in {"remote-edit", "retained-directory"}
     )
@@ -2606,7 +2631,7 @@ def test_scan_comparison_checks_saved_identity_when_target_path_is_reused(
         change in {"remote-edit", "recreated-subdirectory"}
     )
 
-    if change in {"different-origin", "retained-directory"}:
+    if change in {"different-origin", "retained-directory", "remote-edit"}:
         compared = compare_scan_pair(state_dir, before, after, check=False)
         assert compared["returncode"] != 0, compared
         assert "same repository target" in compared["stderr"]

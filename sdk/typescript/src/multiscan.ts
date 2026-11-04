@@ -38,11 +38,6 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
-  requireOperatorProviderSource,
-  requireTrustedProjectProvider,
-} from "./project-provider-routing.js";
-import {
-  canonicalConfigPath,
   requireSecureOutputAncestry,
   resolvePluginPath,
   validateOutputDir,
@@ -172,7 +167,6 @@ export async function runMultiscan(
   }
   const repositories: string[] = [];
   if (
-    options.config.projectProviderRouting ||
     [
       [options.scanPrompt, options.scanPromptFile],
       [options.validationPrompt, options.validationPromptFile],
@@ -192,23 +186,6 @@ export async function runMultiscan(
   }
   // Shared inputs use actual local CSV sources as directory-link boundaries,
   // not the invocation directory, and are read once before any scan starts.
-  if (options.config.projectProviderRouting) {
-    // A recovery may select its file through an already materialized remote checkout.
-    const output = await canonicalConfigPath(options.outputDir);
-    for (const directory of ["checkouts", "recovery-checkouts"]) {
-      requireOperatorProviderSource(
-        options.config.projectProviderRouting,
-        join(output, directory),
-      );
-    }
-  }
-  for (const repository of repositories) {
-    await requireTrustedProjectProvider(
-      options.config.projectProviderRouting,
-      repository,
-      options.signal,
-    );
-  }
   const prompts = await resolveScanPrompts(options, repositories);
   const resolvedOptions: MultiscanOptions = {
     ...options,
