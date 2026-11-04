@@ -91,6 +91,8 @@
 - preserve worker configuration, retry and failure diagnostics ([#2309](https://github.com/openai/codex-security/pull/2309))
 - run report comparisons without interactive tools ([#2304](https://github.com/openai/codex-security/pull/2304))
 - pin Deep Scan worker executable ([#764](https://github.com/openai/codex-security/pull/764))
+- clarify Python contracts and simplify scan recovery and reporting ([#2340](https://github.com/openai/codex-security/pull/2340))
+- guide recovery when a refresh token was already used ([#2289](https://github.com/openai/codex-security/pull/2289))
 
 <!-- release-section: highlights:end -->
 
