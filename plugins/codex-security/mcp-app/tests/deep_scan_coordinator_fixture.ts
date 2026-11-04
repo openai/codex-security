@@ -28,6 +28,7 @@ export const {
   DeepScanRemoteCoordinator,
   AsyncLock,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   recordCodexSecurityWorkerScanDraft,
 } = await importModule({
@@ -35,7 +36,7 @@ export const {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
-      export { classifyCodexWorkerError } from "./errors.ts";
+      export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
@@ -93,6 +94,19 @@ export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
   DeepScanStore[Method]
 >[0];
 
+export function pausePoint() {
+  const entered = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  return {
+    entered: entered.promise,
+    release: released.resolve,
+    pause() {
+      entered.resolve();
+      return released.promise;
+    },
+  };
+}
+
 export class FakeStore {
   run: DeepScanRunState;
   declare failProgressAt: number | undefined;
@@ -112,8 +126,7 @@ export class FakeStore {
   replacementManifestBeforeFinishRejection: string | undefined = undefined;
   iterationResponseGate?: PromiseWithResolvers<void>;
   blockDiscoveryUpdate?: "failed" | "succeeded";
-  discoveryBlocked = Promise.withResolvers<void>();
-  discoveryGate = Promise.withResolvers<void>();
+  discoveryUpdate = pausePoint();
   iterationCommitted = Promise.withResolvers<void>();
   failNextTerminalGet = false;
   publicationFailureMessages: string[] = [];
@@ -145,8 +158,7 @@ export class FakeStore {
       update.kind === "discovery" &&
       update.status === this.blockDiscoveryUpdate
     ) {
-      this.discoveryBlocked.resolve();
-      await this.discoveryGate.promise;
+      await this.discoveryUpdate.pause();
       if (update.status === "succeeded" && this.run.status !== "running") {
         throw new Error(
           "Only a running Deep Scan can update orchestration state.",
@@ -186,6 +198,11 @@ export class FakeStore {
     }
     persisted.consecutiveErrors = this.run.consecutiveErrors;
     this.workers.set(update.id, persisted);
+    if (update.terminalFailure) {
+      assert.equal(update.status, "failed");
+      assert.ok(update.error);
+      this.run.error ??= update.error;
+    }
     return structuredClone(persisted);
   }
 
@@ -529,10 +546,16 @@ type CoordinatorFinding = ReturnType<
   provenance: { sourceFindingIds?: string[] };
 };
 
-export function runCoordinator(...args: Parameters<typeof createCoordinator>) {
+export function startCoordinator(
+  ...args: Parameters<typeof createCoordinator>
+) {
   const coordinator = createCoordinator(...args);
   coordinator.start();
-  return coordinator.wait(undefined, 5_000);
+  return coordinator;
+}
+
+export function runCoordinator(...args: Parameters<typeof createCoordinator>) {
+  return startCoordinator(...args).wait(undefined, 5_000);
 }
 
 export function recordingClock(sleeps: number[]): DeepScanClock {

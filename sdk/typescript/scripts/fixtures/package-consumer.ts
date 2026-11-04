@@ -11,6 +11,7 @@ import {
   type NormalizedLocalImportOptions,
   type StoredExternalFinding,
   normalizeSnykFindingsExport,
+  normalizeTrivyFindings,
   prepareNormalizedExternalPublication,
   type ExternalFindings,
   type FindingImportRequest,
@@ -436,4 +437,8 @@ export async function importLocalFile(
 
 export function snykPluginFindings(bundle: unknown): ExternalFindings {
   return normalizeSnykFindingsExport(bundle);
+}
+
+export function trivyFindings(report: unknown): ExternalFindings {
+  return normalizeTrivyFindings(report, "local", ".");
 }

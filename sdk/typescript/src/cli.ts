@@ -111,7 +111,10 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
-import type { DeepScanProgress } from "./scan-progress.js";
+import {
+  formatDeepScanReviews,
+  type DeepScanProgress,
+} from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -302,6 +305,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
@@ -342,6 +346,7 @@ import {
   type PolicySecurity,
 } from "./security-policy-cli.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -355,6 +360,7 @@ import {
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
   normalizeRepository,
+  trustedGitCommand,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
@@ -1694,7 +1700,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          providerEnvKey,
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -4761,11 +4766,10 @@ export async function main(
                     config,
                     scanCodexHome(dependencies.environment),
                   );
-                  if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider(effectiveConfig),
+                      config: effectiveConfig,
                       command: "policy",
                       signal,
                     },
@@ -5113,20 +5117,31 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
+          const cwd = dependencies.currentDirectory();
+          const repository = resolveCliPath(cwd, args.repository ?? ".");
+          const environment = dependencies.environment;
+          const git = await trustedGitCommand(
+            repository,
+            true,
+            environment,
+            await commandGitProtectionRoots(
+              repository,
+              environment,
+              undefined,
+              cwd,
+            ),
+          );
           const hook = execFileSync(
-            "git",
+            git.executable,
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
-                args.repository ?? ".",
-              ),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
               "hooks/pre-commit",
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", env: git.environment },
           ).trim();
           const command = [
             realpathSync(process.execPath),
@@ -8535,6 +8550,7 @@ async function matchAllScans(
     const input: ScanComparisonInput = {
       before,
       after: afterFindings,
+      ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
     const matching =
@@ -10231,7 +10247,7 @@ function diagnosticValue(value: unknown): string {
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
-    provider: unknown;
+    config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
     beforePrompt?: () => void;
@@ -10239,17 +10255,18 @@ async function chooseInteractiveAuthentication(
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanAuthMode | undefined> {
-  const { auth, provider, signal } = options;
+  const { auth, config, signal } = options;
   if (
     errorOutput.isTTY !== true ||
-    isExternalModelProvider(provider) ||
+    hasCommandAuth(config) ||
+    scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
   const authentication = scanAuthentication(
     dependencies.environment,
     auth,
-    provider,
+    scanModelProvider(config),
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -10508,7 +10525,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              config: effectiveConfiguration,
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -10604,9 +10621,7 @@ async function executeScan(
         );
       }
       if (deepProgress !== null) {
-        details.push(
-          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
-        );
+        details.push(formatDeepScanReviews(deepProgress));
       } else if (fileProgress !== null) {
         details.push(formatScanProgressCount(fileProgress, "status"));
       }
@@ -10917,7 +10932,7 @@ async function executeScan(
           update.consolidating === true ||
           (deepConsolidating && update.active === 0);
         phase = deepConsolidating ? "consolidating results" : "discovery";
-        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        const message = `Scan phase: ${phase} | ${formatDeepScanReviews(update)}`;
         if (dashboard !== null) {
           dashboard.setStage(phase);
           dashboard.note(message);
@@ -11267,6 +11282,12 @@ async function executeScan(
       data: {
         dryRun: true,
         ...effectivePreflight,
+        ...(effectivePreflight.maxCostUsd === undefined
+          ? {}
+          : {
+              costLimitNote:
+                "The limit uses reported token usage at short-context API prices. In-flight requests can push the estimate above the limit. Actual charges and ChatGPT allowance depend on your account.",
+            }),
         ...(arguments_.projectConfig === undefined
           ? {}
           : {
@@ -11946,6 +11967,12 @@ function componentScanEventLine(
     const progress = event.value;
     const count = formatScanProgressCount(progress, "status");
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
+  }
+  if (event.type === "deep-progress") {
+    const phase = event.value.consolidating
+      ? "consolidating results"
+      : "discovery";
+    return `codex-security: ${componentName} ${phase} | ${formatDeepScanReviews(event.value)}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);
