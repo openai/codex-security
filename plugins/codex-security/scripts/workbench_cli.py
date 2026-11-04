@@ -149,6 +149,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
     upsert_deep_worker.add_argument("--sdk-thread-id")
     upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
     upsert_deep_worker.add_argument(
         "--replaceable-failure-kind",
         choices=("policy_refusal", "transient_error", "invalid_discovery_artifacts"),
@@ -320,6 +321,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--cost-json")
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")
