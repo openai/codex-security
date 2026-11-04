@@ -2058,8 +2058,11 @@ the original custom prompt files for reruns. Structured history and log output
 and command selection defaults are unchanged.
 
 Recipes save settings and authentication choice, not credentials. Reruns use the
-current checkout/context files and do not reload project files. Supply replacement
-scan and custom-validation prompts when the original used them:
+current checkout/context files and do not reload project files. New scans save
+an explicit `openai_base_url` privately for rerun and resume. If an older scan
+omitted your endpoint, start a new scan with the original `--codex` override.
+
+Supply replacement scan and custom-validation prompts when the original used them:
 
 ```bash
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md

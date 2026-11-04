@@ -2623,24 +2623,28 @@ export class CodexSecurity {
           };
         }
       }
+      const openaiBaseUrl = workerRuntimeConfig["openai_base_url"];
+      let replayOverrides: JsonObject = {};
       if (fileProfile) {
         recipeConfig["profile"] = profileName;
         delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
-        const replayOverrides = privateReplayOverrides(overrides, recipeConfig);
+        replayOverrides = privateReplayOverrides(overrides, recipeConfig);
         resolveNestedConfigPaths(replayOverrides, scanDir);
-        if (
-          options.resumeScanId === undefined &&
-          Object.keys(replayOverrides).length > 0
-        ) {
-          savedProviderProfile = await createProviderProfile(
-            codexSecurityCredentialHome(this.#dependencies.environment),
-            replayOverrides,
-            { replay: true },
-          );
-        }
+      } else if (openaiBaseUrl !== undefined) {
+        replayOverrides["openai_base_url"] = openaiBaseUrl;
+      }
+      if (
+        options.resumeScanId === undefined &&
+        Object.keys(replayOverrides).length > 0
+      ) {
+        savedProviderProfile = await createProviderProfile(
+          codexSecurityCredentialHome(this.#dependencies.environment),
+          replayOverrides,
+          { replay: true },
+        );
       }
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;

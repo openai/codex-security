@@ -1,7 +1,10 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import { main } from "../src/cli.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -11,7 +14,7 @@ import { createInterface } from "node:readline";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { copyCredentialTestPlugin, PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
-import { TestClient } from "./support/api-client.js";
+import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -1046,7 +1049,7 @@ test("standard scans do not require Deep Scan plugin capabilities", async () => 
 });
 
 test.each(["root", "profile"])(
-  "current Deep workers inherit the %s endpoint",
+  "Deep workers, rerun and resume inherit the %s endpoint",
   async (selection) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1054,6 +1057,11 @@ test.each(["root", "profile"])(
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
     const endpoint = "https://endpoint.example.test/v1";
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-openai-key",
+    };
+    let recipe: JsonObject;
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
@@ -1061,6 +1069,7 @@ test.each(["root", "profile"])(
           selection === "root"
             ? { openai_base_url: endpoint }
             : {
+                openai_base_url: "https://unused.example.test/v1",
                 profile: "selected",
                 profiles: {
                   selected: {
@@ -1071,9 +1080,11 @@ test.each(["root", "profile"])(
               },
       },
       {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
+        environment,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan")
+            recipe = JSON.parse(input!).recipe;
+          return mockWorkbench(args, input);
         },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
@@ -1098,6 +1109,24 @@ test.each(["root", "profile"])(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic endpoint inherited",
       );
+      expect(JSON.stringify(recipe!)).not.toContain(endpoint);
+      for (const command of ["rerun", "resume"]) {
+        const { runCli, stderr } = createCliTest(main);
+        const status = await runCli(
+          ["scans", command, "saved", "--json"],
+          dependencies({
+            currentDirectory: repository,
+            environment,
+            onWorkbench: () => ({ scanId: "saved", scanDir: scan, recipe }),
+            onConfig: ({ codexOverrides }) => {
+              expect(
+                resolveCodexProfile(codexOverrides!)["openai_base_url"],
+              ).toBe(endpoint);
+            },
+          }),
+        );
+        expect(status, stderr.text()).toBe(0);
+      }
     } finally {
       await client.close();
     }
