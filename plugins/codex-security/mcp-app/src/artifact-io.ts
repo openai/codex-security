@@ -4,25 +4,13 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-  attempt?: number;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
-}
-
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
  */
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
+  layout: "scan" | "worker";
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -34,7 +22,6 @@ export interface ArtifactContext {
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
