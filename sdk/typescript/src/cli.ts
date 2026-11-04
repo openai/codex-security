@@ -1215,6 +1215,7 @@ interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
   readonly environment: NodeJS.ProcessEnv;
   readonly providerKeyVariable?: string;
+  readonly stripAwsCredentials?: boolean;
   readonly directory: string;
   readonly configuration?: JsonObject;
   readonly gitEnvironment?: NodeJS.ProcessEnv;
@@ -1442,11 +1443,17 @@ if (process.platform === "win32") {
       nativeGitOptions.push("-c", "safe.directory=" + value);
   }
 }
-for (const [name, value] of JSON.parse(header.toString())) {
+const { bindings, stripAwsCredentials } = JSON.parse(header.toString());
+for (const [name, value] of bindings) {
   if (value === null) delete process.env[name];
   else process.env[name] = value;
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
+if (stripAwsCredentials) {
+  for (const name of Object.keys(process.env)) {
+    if (/^AWS_/i.test(name)) delete process.env[name];
+  }
+}
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
@@ -1552,6 +1559,7 @@ export async function runRepositoryCommand(
       for (const name of Object.keys(environment)) {
         if (
           name.toUpperCase() === "CODEX_HOME" ||
+          (sandbox.stripAwsCredentials && /^AWS_/i.test(name)) ||
           credentialVariables.some(
             (key) => key.toUpperCase() === name.toUpperCase(),
           )
@@ -1564,16 +1572,16 @@ export async function runRepositoryCommand(
       sandbox === undefined
         ? undefined
         : Buffer.from(
-            JSON.stringify(
-              // Native shell policy can set variables again. Remove model keys
-              // from Git and its filters after applying that policy as well.
-              Object.entries({
+            JSON.stringify({
+              // Reapply credential exclusions after the native shell policy.
+              stripAwsCredentials: sandbox.stripAwsCredentials,
+              bindings: Object.entries({
                 ...sandbox.gitEnvironment,
                 ...Object.fromEntries(
                   credentialVariables.map((key) => [key, null]),
                 ),
               }).map(([key, value]) => [key, value ?? null]),
-            ),
+            }),
           );
     const execution = spawn(
       codex === undefined
@@ -2168,6 +2176,8 @@ export async function runCodexSkillCommand(
                           profile,
                           directory: output.appServer!.directory,
                           environment,
+                          stripAwsCredentials:
+                            authentication?.method === "aws_credentials",
                           ...(authentication?.method === "api_key"
                             ? { providerKeyVariable: authentication.source }
                             : {}),
@@ -11455,8 +11465,20 @@ async function retainPatchTrees(
     repository,
     { trim: false },
   );
-  const pack = join(objects.replace(/\n$/u, ""), "pack");
-  await mkdir(pack, { recursive: true });
+  // A linked worktree shares its selected object database. Resolve that root
+  // before appending the pack child so a checkout cannot redirect our output.
+  const objectDirectory = await realpath(objects.replace(/\n$/u, ""));
+  const pack = join(objectDirectory, "pack");
+  await mkdir(pack).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+  });
+  if (
+    !(await lstat(pack)).isDirectory() ||
+    relative(pack, await realpath(pack)) !== ""
+  )
+    throw new CodexSecurityError(
+      `Git pack output must be a directory inside the selected object database: ${pack}`,
+    );
   const nested = await nestedPatchGitDependencies(
     repository,
     dependencies,
@@ -11468,6 +11490,8 @@ async function retainPatchTrees(
     ["pack-objects", "--revs", join(pack, "pack")],
     checkout,
     {
+      // Grant the selected database, never a path resolved through the pack child.
+      patchSnapshot: [objectDirectory],
       input: trees.join("\n") + "\n",
     },
   );
