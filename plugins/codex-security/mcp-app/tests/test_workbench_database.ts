@@ -10,6 +10,7 @@ import { after, test, type TestContext } from "node:test";
 import { Worker } from "node:worker_threads";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
+import workbenchMigrations from "../../shared/workbench-migrations.json" with { type: "json" };
 import type * as Database from "../src/workbench/database.ts";
 import type * as Migrations from "../src/workbench/migrations.ts";
 
@@ -1322,7 +1323,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? migrations.length),
+      String(through ?? workbenchMigrations.at(-1)!.version),
     ],
     { encoding: "utf8" },
   );
@@ -1508,7 +1509,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          migrations.length,
+          workbenchMigrations.at(-1)!.version,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1761,7 +1762,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 67
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == workbench.MIGRATIONS[-1][0]
 `,
       scripts,
       databasePath,
