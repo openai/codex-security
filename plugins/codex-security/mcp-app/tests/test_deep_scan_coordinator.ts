@@ -1078,6 +1078,29 @@ async function testCancellationDropsUnvalidatedDiscoveryResult(
   );
 }
 
+async function testDiscoveryAcceptanceFailureFinishesWorkerAsFailed() {
+  const { fixture, store } = await coordinatorFixture();
+  const updateWorker = store.updateWorker.bind(store);
+  store.updateWorker = async (update) => {
+    if (update.kind === "discovery" && update.status === "succeeded") {
+      throw new Error("Synthetic acceptance write failed");
+    }
+    return updateWorker(update);
+  };
+  const events: DeepScanLogEvent[] = [];
+  const terminal = await runCoordinator(fixture, store, new FakeExecutor(), {
+    log: (event) => events.push(event),
+  });
+  assert.equal(terminal?.status, "failed");
+  const finished = events.filter((event) => event.event === "worker_finished");
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0].outcome, "failed");
+  const directory = fixture.run.workerUsageDirectory!;
+  const names = await readdir(directory);
+  assert.equal(names.length, 1);
+  assert.equal((await readJson(directory, names[0])).outcome, "failed");
+}
+
 async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
   const { fixture, store } = await coordinatorFixture();
   store.blockDiscoveryUpdate = "succeeded";
@@ -1133,6 +1156,11 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
         event.event === "discovery_accepted" ||
         event.event === "worker_succeeded",
     ),
+    false,
+  );
+  await assertCanceledWorkerReceipts(
+    fixture.run.workerUsageDirectory!,
+    events,
     false,
   );
   const worker = [...store.workers.values()].find(
@@ -2908,6 +2936,7 @@ test(testCancellationAfterCommittedAggregateRemainsCanceled);
 test(testRejectedFinishDoesNotOverwriteReplacementManifest);
 test(testWaiterDetachAndCancellation);
 registerCases(testCancellationDropsUnvalidatedDiscoveryResult, [[], [true]]);
+test(testDiscoveryAcceptanceFailureFinishesWorkerAsFailed);
 test(testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess);
 test(testRegistryEvictionAndExternalFailure);
 test(testStoppedPublicationFailurePreservesOriginalDiagnostic);
