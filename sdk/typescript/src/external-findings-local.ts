@@ -56,6 +56,7 @@ import {
   isGitSsh,
   parseGitRemote,
 } from "./git-remote.js";
+import { checkmarxSelection } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -275,7 +276,8 @@ function remoteRepository(
   const name = gitPathToHttpPath(gitPath.slice(0, suffix?.index));
   // Azure's generated SCP clone URL spells spaces as %20, even though Git sends SCP paths literally.
   const azure =
-    provider === "sonar" && !(scpStyle && path.startsWith("/"))
+    (provider === "sonar" || provider === "checkmarx") &&
+    !(scpStyle && path.startsWith("/"))
       ? azureReposHttpsUrl(
           url,
           scpStyle ? name.replace(/%2520/gu, "%20") : name,
@@ -530,8 +532,9 @@ export async function configuredFetchRemotes(
     throw error;
   }
   const remotes: ConfiguredFetchRemote[] = [];
+  const firstUrlOnly = provider === "sonar" || provider === "checkmarx";
   for (const name of remoteNames.split(/\r?\n/u).filter(Boolean)) {
-    if (provider === "sonar") {
+    if (firstUrlOnly) {
       // Git fetches from only the first URL, after insteadOf rewrites.
       const url = await readGit(["remote", "get-url", "--", name]);
       if (/[\r\n]/u.test(url))
@@ -560,6 +563,7 @@ async function requireMatchingRepository(
   signal?: AbortSignal,
   possibleSshHost?: string,
   fetchRemotes?: readonly ConfiguredFetchRemote[],
+  isCheckmarxSource?: (url: string) => boolean,
 ): Promise<boolean> {
   if (!snyk && sources.length === 0 && hostedSources.length === 0) return false;
   let allSourcesMatched = true;
@@ -594,17 +598,20 @@ async function requireMatchingRepository(
     }
     if (!sources.length) return allSourcesMatched;
   }
+  const remoteProvider = (checkmarx?: boolean) =>
+    checkmarx && provider !== "sonar" ? "checkmarx" : provider;
   const remotes =
     fetchRemotes ??
     (await configuredFetchRemotes(
       repository,
-      provider,
+      remoteProvider(Boolean(isCheckmarxSource)),
       protectedRoots,
       environment,
       signal,
     ));
   const boundProvider =
     provider === "sonar" ||
+    provider === "checkmarx" ||
     provider === "continuum" ||
     provider === "inspector" ||
     provider === "blackduck" ||
@@ -621,8 +628,9 @@ async function requireMatchingRepository(
     const bound = boundProvider || strictSources.has(source.url);
     const platform =
       strictSources.get(source.url) ?? platformFor(source, bound);
-    const identity = (url: string) =>
-      remoteRepository(url, provider, bound, platform);
+    const sourceProvider = remoteProvider(isCheckmarxSource?.(source.url));
+    const identity = (url: string, fallbackHost?: string) =>
+      remoteRepository(url, sourceProvider, bound, platform, fallbackHost);
     const targets = comparable.flatMap((remote) => identity(remote) ?? []);
     const target = identity(source.url);
     if (target && targets.some((remote) => matchingRemote(remote, target)))
@@ -631,9 +639,7 @@ async function requireMatchingRepository(
     // A custom SSH upstream can agree with a manual mapping even when a
     // recognized HTTPS remote points at a fork. It cannot prove a Cloud binding.
     const configured = unverified.flatMap(
-      (remote) =>
-        remoteRepository(remote, provider, bound, platform, possibleSshHost) ??
-        [],
+      (remote) => identity(remote, possibleSshHost) ?? [],
     );
     if (target && configured.some((remote) => matchingRemote(remote, target)))
       continue;
@@ -818,12 +824,18 @@ export async function prepareLocalImport(
     "local",
     options.inspectorProjectMap,
   );
-  const projected =
-    options.provider === "blackduck"
-      ? []
-      : current.findings.filter((finding) =>
-          projectedBlackDuckRepositoryUrl(finding, "local"),
-        );
+  const checkmarx = checkmarxSelection(
+    options.provider,
+    current.findings,
+    current.report,
+    "local",
+  );
+  const projected = current.findings.filter(
+    (finding) =>
+      (options.provider !== "blackduck" &&
+        projectedBlackDuckRepositoryUrl(finding, "local")) ||
+      checkmarx.projections.has(finding),
+  );
   const mixed = projected.length > 0 && readerSources.length > 0;
   const nativeSources = new Map(
     (mixed ? current.findings : projected)
@@ -870,6 +882,7 @@ export async function prepareLocalImport(
     "local",
     sameRepositories,
   );
+  const checkmarxRepository = checkmarx.repositories(sameRepositories);
   for (const repositories of [
     veracodeReportRepositories,
     continuumReportRepositories,
@@ -884,6 +897,7 @@ export async function prepareLocalImport(
     }
   }
   const strictSources = new Map<string, Provider>();
+  const checkmarxKeys = new Set<string>();
   const hostedSources = new Map<string, ExternalSourceRepository>();
   const semgrepReportScope = semgrepPlatformReportScope(
     current,
@@ -924,7 +938,8 @@ export async function prepareLocalImport(
   let hasOrdinaryRows = false;
   let ordinaryRowNeedsReferences = false;
   for (const finding of current.findings) {
-    const retained = bound.get(finding.source_finding_id);
+    const retained =
+      bound.get(finding.source_finding_id) ?? checkmarxRepository(finding);
     const native = nativeSources.get(finding) ?? [];
     const sarif = hasPlatformEvidence ? semgrepSarifRepositories(finding) : [];
     const semgrep = semgrepPlatformFindingBinding(
@@ -970,11 +985,12 @@ export async function prepareLocalImport(
         }
       }
     }
-    if (retained) {
+    const projectedCheckmarx = checkmarx.projections.has(finding);
+    if (retained || (projectedCheckmarx && native.length)) {
+      const rowSources = retained ? [retained, ...native] : native;
       const claims = [
-        retained.url,
+        ...rowSources.map((ref) => ref.url),
         ...(url ? [url] : []),
-        ...native.map((ref) => ref.url),
       ];
       const rowPlatform = (claim: string) =>
         options.provider !== "wiz"
@@ -1000,9 +1016,9 @@ export async function prepareLocalImport(
         throw new CodexSecurityError(
           "The retained scanner repository does not match the original provider finding.",
         );
-      for (const source of [retained, ...native])
-        sources.set(source.url, source);
+      for (const source of rowSources) sources.set(source.url, source);
       for (const claim of claims) {
+        if (projectedCheckmarx) checkmarxKeys.add(identify(claim).key);
         const platform = rowPlatform(claim);
         if (!strictSources.has(claim) || platform !== "github")
           strictSources.set(claim, platform);
@@ -1152,6 +1168,23 @@ export async function prepareLocalImport(
         options.inspectorProjectMap ? { url: source.url } : source,
       );
   }
+  const reportUrl = checkmarx.reportUrl;
+  if (reportUrl) {
+    const source = sources.get(reportUrl) ?? { url: reportUrl };
+    sources.set(reportUrl, source);
+    checkmarxKeys.add(identify(reportUrl).key);
+    if (!strictSources.has(reportUrl))
+      strictSources.set(reportUrl, platformFor(source));
+  }
+  if (
+    ((options.provider === "checkmarx" || reportUrl) &&
+      !sameRepositories(sources.keys())) ||
+    (reportUrl &&
+      hosted.some((source) => !semgrepReferenceMatches(source, reportUrl)))
+  )
+    throw new Error(
+      "The retained Checkmarx report repository does not match the finding repository.",
+    );
   const sonarSources = sonarRepositoryUrls(
     options.provider,
     current.findings,
@@ -1240,6 +1273,9 @@ export async function prepareLocalImport(
     dependencies.signal,
     selected?.protocol === "https:" ? selected.hostname : undefined,
     fetchRemotes,
+    checkmarx.projections.size
+      ? (url) => checkmarxKeys.has(identify(url).key)
+      : undefined,
   );
   dependencies.signal?.throwIfAborted();
   const preview = {
