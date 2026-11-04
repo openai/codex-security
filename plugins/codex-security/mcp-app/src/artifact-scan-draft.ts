@@ -548,13 +548,17 @@ export async function retainRecordedReceiptOwnership(
   context: ArtifactContext,
   input: JsonObject,
 ): Promise<void> {
-  if (await hasScanDraftCheckpoint(context, input)) return;
   const coverage = input.reviewState ?? input.coverage;
   if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
-  for (const surface of coverage.surfaces) {
-    if (isObject(surface) && isObject(surface.provenance))
-      delete surface.provenance.scanReceiptRefs;
-  }
+  const owners = coverage.surfaces.flatMap((surface) =>
+    isObject(surface) &&
+    isObject(surface.provenance) &&
+    "scanReceiptRefs" in surface.provenance
+      ? [surface.provenance]
+      : [],
+  );
+  if (!owners.length || (await hasScanDraftCheckpoint(context, input))) return;
+  for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
 export function workerCoverageReceiptLocation(
@@ -565,13 +569,14 @@ export function workerCoverageReceiptLocation(
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const normalized = components.join("/");
   const shared =
     isObject(surface.provenance) &&
     (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
   if (
     shared ||
-    ref.startsWith(`${workerPrefix}output/`) ||
-    ref.startsWith(`${workerPrefix}attempts/`)
+    normalized.startsWith(`${workerPrefix}output/`) ||
+    normalized.startsWith(`${workerPrefix}attempts/`)
   ) {
     return {
       context: {
@@ -1132,6 +1137,7 @@ async function preserveScanDraft(
           raw,
           assignFindingIdentities(raw, context.mode),
           raw,
+          previousState.input?.findings,
         );
     }
   }
@@ -3327,6 +3333,7 @@ function coalesceCandidateObservations(
   raw: DraftFinding[],
   identified: DraftFinding[],
   unchanged = identified,
+  published: DraftFinding[] = [],
 ): DraftFinding[] {
   type Observation = { owner?: string; candidate?: string; indexes: number[] };
   const scopes = new Map<string, Observation[]>();
@@ -3447,6 +3454,24 @@ function coalesceCandidateObservations(
             first
         ]!.identity,
       );
+      // A saved singleton can acquire siblings during a retry. Its published
+      // identity still belongs to the same raw observation in this batch.
+      if (!explicit.length) {
+        const matches = published.filter(
+          (prior) =>
+            prior.identity !== undefined &&
+            selected.some((index) => containsSavedFinding(prior, raw[index]!)),
+        );
+        if (
+          matches.length === 1 &&
+          !raw.some(
+            (other) =>
+              other.identity !== undefined &&
+              sameSavedFinding(other, matches[0]!),
+          )
+        )
+          finding.identity = structuredClone(matches[0]!.identity);
+      }
       const provenance = finding.provenance;
       if (candidate && !findingIdentityCandidate(finding))
         provenance.candidateId = candidate;

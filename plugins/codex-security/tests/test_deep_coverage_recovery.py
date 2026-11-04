@@ -1279,7 +1279,8 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, reverse):
+@pytest.mark.parametrize("invalid", ["missing", "directory", "symlink"])
+def test_invalid_historical_receipt_does_not_hide_valid_case_variant(tmp_path, reverse, invalid):
     refs = ["artifacts/review.md", "artifacts/Review.md"]
     if reverse:
         refs.reverse()
@@ -1291,6 +1292,10 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
     (output / "artifacts/Review.md").write_text("Retained historical evidence.\n")
     if (output / "artifacts/review.md").exists():
         pytest.skip("This regression requires case-sensitive receipt paths.")
+    if invalid == "directory":
+        (output / "artifacts/review.md").mkdir()
+    elif invalid == "symlink":
+        (output / "artifacts/review.md").symlink_to("Review.md")
     (output / "artifacts/replacement.md").write_text("Current review evidence.\n")
     prefix = output.relative_to(tmp_path).as_posix() + "/"
     parent = copy.deepcopy(old)

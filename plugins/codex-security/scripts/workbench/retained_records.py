@@ -7,7 +7,6 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +17,6 @@ from finalize_scan_contract import (
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _require_safe_json_value,
-    _validate_current_findings,
     _validate_schema_node,
     finding_candidate_id,
 )
@@ -44,39 +42,6 @@ def _finding_identity(finding: dict[str, Any]) -> Any:
         else:
             return provenance["preservedIdentity"]
     return finding.get("identity")
-
-
-def _finding_key(finding: dict[str, Any], owner: str | None = None) -> str:
-    # Wording and evidence may improve between checkpoints; distinct source locations
-    # must not collide merely because two workers chose the same semantic identity.
-    provenance = finding.get("provenance")
-    identity = _finding_identity(finding)
-    if not isinstance(identity, dict):
-        normalized = dict(finding)
-        normalized.pop("identity", None)
-        _ensure_finding_identity(normalized)
-        identity = normalized["identity"]
-    owner = provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
-    parts = [finding.get("ruleId"), identity, _finding_locations(finding)]
-    if owner is not None and finding_candidate_id(finding):
-        parts.append(owner)
-    return _digest(parts)
-
-
-def _finding_locations(finding: dict[str, Any]) -> list[tuple[Any, Any, Any]]:
-    locations = finding.get("locations", [])
-    return sorted(
-        (
-            (
-                location.get("path"),
-                location.get("startLine"),
-                location.get("endLine", location.get("startLine")),
-            )
-            for location in (locations if isinstance(locations, list) else [])
-            if isinstance(location, dict)
-        ),
-        key=_encoded,
-    )
 
 
 def _worker_candidate_key(
@@ -159,16 +124,7 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
         if "identity" in finding:
             continue
         identity = {"anchor": anchor}
-        extensions = finding.get("extensions")
-        sibling = next(
-            (
-                value
-                for field in ("reportId", "ledgerRowId")
-                if isinstance(extensions, dict)
-                and _has_identity_text(value := extensions.get(field))
-            ),
-            None,
-        )
+        sibling = next((value for value in _report_ids(finding) if value is not None), None)
         if sibling or counts[_digest([finding.get("ruleId"), anchor])] > 1:
             identity["instance"] = _semantic_identifier(
                 sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
@@ -199,47 +155,6 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
                     break
                 suffix += 1
         used.add(key)
-
-
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield current
-        provenance = current.get("provenance")
-        if not isinstance(provenance, dict):
-            continue
-        previous = provenance.get("previousFindings")
-        if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
-        sources = provenance.get("sourceFindings")
-        if isinstance(sources, list):
-            pending.extend(
-                source["finding"]
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
-
-
-def _append_previous_finding(
-    item: dict[str, Any], finding: dict[str, Any], *, clone: bool = False
-) -> None:
-    if not isinstance(item.get("previousFindings"), list):
-        item["previousFindings"] = []
-    history = item["previousFindings"]
-    if not any(
-        isinstance(previous, dict)
-        and _finding_key(previous) == _finding_key(finding)
-        and _finding_content(previous) == _finding_content(finding)
-        for previous in history
-    ):
-        history.append(copy.deepcopy(finding) if clone else finding)
 
 
 def _recover_preserved_worker_source(
@@ -282,15 +197,8 @@ def _recover_preserved_worker_source(
             schema_dir,
             scan_dir / directory,
             source_warnings,
+            current_contract=True,
         )
-        if recovered["findings"]:
-            try:
-                _validate_current_findings(recovered, schema_dir)
-            except ContractError as exc:
-                warning = f"Skipped malformed finding: {exc}."
-                source_warnings.append(warning)
-                discarded.append(warning)
-                recovered["findings"] = []
         if discarded:
             discarded_findings.extend(discarded)
         for recovered_finding in recovered["findings"]:
@@ -361,24 +269,13 @@ def _recover_preserved_worker_coverage(
     return discarded_coverage
 
 
-def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
+def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
     extensions = value.get("extensions")
     return tuple(
         identifier if _has_identity_text(identifier) else None
         for identifier in (
             extensions.get(field) if isinstance(extensions, dict) else None
             for field in ("reportId", "ledgerRowId")
-        )
-    )
-
-
-def distinct_reports(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
-    return (
-        left is not None
-        and right is not None
-        and any(
-            a is not None and b is not None and a != b
-            for a, b in zip(identifiers(left["latest"]), identifiers(right["latest"]), strict=True)
         )
     )
 
@@ -400,23 +297,6 @@ def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
         location["startLine"],
         location.get("endLine"),
     )
-
-
-def same_raw_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    if isinstance(left.get("identity"), dict) and isinstance(right.get("identity"), dict):
-        return _semantic_identity_key(left, _finding_identity(left)) == _semantic_identity_key(
-            right, _finding_identity(right)
-        )
-    candidates = (_identity_candidate(left), _identity_candidate(right))
-    if all(candidates) and candidates[0] != candidates[1]:
-        return False
-    pairs = list(zip(identifiers(left), identifiers(right), strict=True))
-    if any(a is not None for a, _ in pairs) and any(b is not None for _, b in pairs):
-        if not any(a is not None and b is not None for a, b in pairs) or any(
-            a is not None and b is not None and a != b for a, b in pairs
-        ):
-            return False
-    return True
 
 
 def same_raw_value(left: Any, right: Any) -> bool:

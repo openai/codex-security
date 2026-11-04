@@ -3276,6 +3276,20 @@ for (const layout of ["standard", "diff"] as const) {
       }
     });
   }
+  test(`${layout}: retrying a published singleton with a revision preserves its identity`, async (t) => {
+    const f = await fixture(t, layout);
+    const original = findingFor("candidate-a");
+    await f.write({ ...f.draft({}, true), findings: [original] });
+    const before = await readJson(f.root, "findings.json");
+    await f.write({
+      ...f.draft({}, true),
+      findings: [original, { ...original, severity: { level: "high" } }],
+    });
+    const after = await readJson(f.root, "findings.json");
+    assert.equal(after.findings.length, 1);
+    assert.equal(after.findings[0].severity.level, "high");
+    assert.deepEqual(after.findings[0].identity, before.findings[0].identity);
+  });
   for (const sibling of [false, true]) {
     test(`${layout}: a stronger successor reuses retained candidate identity, sibling=${sibling}`, async (t) => {
       const f = await fixture(t, layout);

@@ -23,13 +23,11 @@ from review_state import uses_legacy_review
 from workbench.finding_identity import (
     _append_previous_finding,
     _distinct_report_rows,
-    _ensure_finding_identities,
     _finding_content,
     _finding_key,
     _historical_content,
     _identity_candidate,
     _legacy_identity_key,
-    _report_ids,
     _retained_findings,
     _retained_source_findings,
     _same_published_finding,
@@ -42,12 +40,14 @@ from workbench.retained_records import (
     _competing_rejection_receipts,
     _conflicting_outcome_receipts,
     _coverage_row_is_retained,
+    _ensure_finding_identities,
     _ensure_finding_identity,
     _finding_identity,
     _project_missing_record,
     _recover_preserved_worker_coverage,
     _recover_preserved_worker_source,
     _recovered_model,
+    _report_ids,
     _saved_candidate_outcomes,
     _worker_candidate_key,
     contains_raw_value,
@@ -79,6 +79,7 @@ from workbench.saved_sources import (
     _frozen_checkpoint_heads,
     _frozen_source_times,
     _is_source_order_snapshot,
+    _iteration_order,
     _latest_iteration,
     _model_capture,
     _parent_publication_ancestors,
@@ -599,7 +600,7 @@ def merge_saved_results(
 
     workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
-        (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
+        (_iteration_order(reducer), int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
         else None
     )
@@ -612,7 +613,7 @@ def merge_saved_results(
         ):
             continue
         current_results.add(result_path)
-        candidate_key = (worker["completed_at"] or "", worker["id"], attempt)
+        candidate_key = (_iteration_order(worker), attempt)
         if latest_reducer_key is None or candidate_key > latest_reducer_key:
             latest_reducer_key = candidate_key
             latest_reducer = result_path

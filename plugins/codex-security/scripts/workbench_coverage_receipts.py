@@ -397,9 +397,7 @@ def _generic_surface_updates(
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             failure = receipt_error(ref) if repaired else None
-                            replaceable = failure is not None and isinstance(
-                                failure.__cause__, FileNotFoundError
-                            )
+                            replaceable = failure is not None
                             if repaired and isinstance(ref, str):
                                 try:
                                     normalized = _require_portable_relative_path(

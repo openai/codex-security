@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
@@ -13,6 +12,7 @@ from workbench.retained_records import (
     _finding_content,
     _finding_identity,
     _identity_candidate,
+    _report_ids,
     _semantic_identifier,
     _semantic_identity_key,
     raw_scope,
@@ -99,17 +99,6 @@ def _finding_locations(
     )
 
 
-def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
-    extensions = value.get("extensions")
-    return tuple(
-        identifier if _has_identity_text(identifier) else None
-        for identifier in (
-            extensions.get(field) if isinstance(extensions, dict) else None
-            for field in ("reportId", "ledgerRowId")
-        )
-    )
-
-
 def _distinct_report_rows(first: dict[str, Any], second: dict[str, Any]) -> bool:
     return (
         isinstance(first.get("identity"), dict)
@@ -119,68 +108,6 @@ def _distinct_report_rows(first: dict[str, Any], second: dict[str, Any]) -> bool
         a is not None and b is not None and a != b
         for a, b in zip(_report_ids(first), _report_ids(second), strict=True)
     )
-
-
-def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> None:
-    """Use the same candidate, anchor and sibling rules as draft publication."""
-    anchors: dict[int, Any] = {}
-    for index, finding in enumerate(findings):
-        if not isinstance(finding, dict):
-            continue
-        identity = finding.get("identity")
-        if "identity" in finding:
-            anchors[index] = identity.get("anchor") if isinstance(identity, dict) else None
-            continue
-        candidate = _identity_candidate(finding)
-        anchors[index] = _semantic_identifier(
-            candidate or str(finding.get("title") or "finding"), f"finding-{index + 1}"
-        )
-    counts = Counter(
-        _digest([findings[index].get("ruleId"), anchor]) for index, anchor in anchors.items()
-    )
-
-    authored = {
-        _semantic_identity_key(finding)
-        for finding in findings
-        if isinstance(finding, dict) and "identity" in finding
-    }
-    generated = []
-    for index, anchor in anchors.items():
-        finding = findings[index]
-        if "identity" in finding:
-            continue
-        identity = {"anchor": anchor}
-        sibling = next((value for value in _report_ids(finding) if value is not None), None)
-        if sibling or counts[_digest([finding.get("ruleId"), anchor])] > 1:
-            identity["instance"] = _semantic_identifier(
-                sibling or str(finding.get("title") or "finding"), f"finding-{index + 1}"
-            )
-        finding["identity"] = identity
-        generated.append(finding)
-
-    reserved = {
-        _semantic_identity_key(finding) for finding in findings if isinstance(finding, dict)
-    }
-    used = set() if deep else authored.copy()
-    generated_ids = {id(finding) for finding in generated}
-    for finding in findings if deep else generated:
-        key = _semantic_identity_key(finding)
-        if key in used or (id(finding) in generated_ids and key in authored):
-            identity = finding["identity"]
-            if id(finding) not in generated_ids:
-                finding.setdefault("provenance", {}).setdefault(
-                    "preservedIdentity", copy.deepcopy(identity)
-                )
-            base_instance = identity.get("instance", "saved")
-            suffix = 2
-            while True:
-                identity["instance"] = f"{base_instance}-{suffix}"
-                key = _semantic_identity_key(finding)
-                if key not in reserved:
-                    reserved.add(key)
-                    break
-                suffix += 1
-        used.add(key)
 
 
 def bind_saved_candidate_identities(

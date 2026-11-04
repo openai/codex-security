@@ -40,14 +40,17 @@ dependencies when a private repository uses an SSH target. The offline reader
 The collector writes v2 and preserves the original project and issue evidence.
 For open Snyk Code issues from an SCM integration, both versions import
 repository-relative paths from open coordinates. V2 also imports each
-coordinate's reported start line when available. For resolved issues, closed
+coordinate's reported start line when available. V2 keeps URI and SSH addresses
+in the original evidence and uses only repository file paths for code locations
+and package manifests. For resolved issues, closed
 coordinates, and projects monitored through the CLI or API, read the original
 location from `evidence.source_data.issue` in v1 or from the JSON text in
 `evidence.source_data.issueJson` in v2.
 
 On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
 a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
-past date triggers an immediate retry. Cancellation stops the wait.
+past date triggers an immediate retry. Cancellation stops the wait. Failed requests report
+the HTTP status and up to 64 KiB of the vendor response.
 
 Use the same source key on later imports. The issue key within the API
 origin, organization, project and product identifies the finding. Replaying the
