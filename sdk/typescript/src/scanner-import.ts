@@ -6,7 +6,7 @@ import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { SCAN_SEVERITIES } from "./scan-settings.js";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 import { previousAdmission } from "./external-import-contract.js";
 import { rememberPreviousSelection } from "./reader-selection.js";
 
@@ -25,132 +25,122 @@ export function optionalArray(value: unknown, label: string): unknown[] {
   return value === undefined ? [] : array(value, label);
 }
 
-// A notification may omit its level and refer to a descriptor by index, GUID or ID.
-function sarifDescriptorIndex(entries: unknown[], firstIndex = 0) {
-  const byRef = new Map<string | number, Record<string, unknown>>();
-  entries.forEach((item, index) => {
-    if (!isRecord(item)) return;
-    byRef.set(firstIndex + index, item);
-    if (typeof item["guid"] === "string")
-      byRef.set("guid:" + item["guid"].toLowerCase(), item);
-    if (typeof item["id"] === "string") byRef.set("id:" + item["id"], item);
+// SARIF uses the same index/GUID/ID references for components and descriptors.
+function sarifReferences<T>(
+  entries: unknown[],
+  select: (entry: Record<string, unknown>) => T,
+  first = 0,
+) {
+  const refs = new Map<string | number, T>();
+  entries.forEach((entry, index) => {
+    if (!isRecord(entry)) return;
+    const item = select(entry);
+    refs.set(index + first, item);
+    if (typeof entry["guid"] === "string")
+      refs.set("guid:" + entry["guid"].toLowerCase(), item);
+    if (typeof entry["id"] === "string") refs.set("id:" + entry["id"], item);
   });
-  return (ref: Record<string, unknown>) => {
-    if (typeof ref["index"] === "number" && ref["index"] >= 0)
-      return byRef.get(ref["index"]);
-    if (typeof ref["guid"] === "string")
-      return byRef.get("guid:" + ref["guid"].toLowerCase());
-    if (typeof ref["id"] === "string") return byRef.get("id:" + ref["id"]);
-    if (firstIndex === -1) return byRef.get(-1);
+  return (ref: unknown) => {
+    const { index, guid, id } = asRecord(ref) ?? {};
+    if (typeof index === "number" && index >= 0) return refs.get(index);
+    if (typeof guid === "string") return refs.get("guid:" + guid.toLowerCase());
+    return typeof id === "string" ? refs.get("id:" + id) : refs.get(-1);
   };
 }
 
-function notificationDescriptors(tool: unknown) {
-  const metadata = isRecord(tool) ? tool : {};
-  const extensions = optionalArray(
-    metadata["extensions"],
-    "SARIF tool extensions",
-  );
-  // The driver is the default component (index -1); extension indexes start at 0.
-  const component = sarifDescriptorIndex(
-    [metadata["driver"], ...extensions],
+function notificationDescriptors(value: unknown) {
+  const tool = asRecord(value);
+  // The driver is the default component (-1); extension indexes start at 0.
+  const component = sarifReferences(
+    [
+      tool?.["driver"],
+      ...optionalArray(tool?.["extensions"], "SARIF tool extensions"),
+    ],
+    (owner) =>
+      sarifReferences(
+        optionalArray(owner["notifications"], "SARIF notification descriptors"),
+        (entry) => entry,
+      ),
     -1,
   );
-  const descriptors = new Map<
-    Record<string, unknown>,
-    ReturnType<typeof sarifDescriptorIndex>
-  >();
-  return (ref: unknown) => {
-    if (!isRecord(ref)) return;
-    const target = ref["toolComponent"];
-    const owner = component(isRecord(target) ? target : {});
-    if (!owner) return;
-    let lookup = descriptors.get(owner);
-    if (!lookup) {
-      lookup = sarifDescriptorIndex(
-        optionalArray(owner["notifications"], "SARIF notification descriptors"),
-      );
-      descriptors.set(owner, lookup);
-    }
-    return lookup(ref);
-  };
+  return (ref: unknown) => component(asRecord(ref)?.["toolComponent"])?.(ref);
 }
 
-export function successfulSarifInvocations(
+export function validateSarifRun(
   run: Record<string, unknown>,
   producer: string,
-  notifications?: unknown[],
-): Record<string, unknown>[] {
+): void {
+  if (hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"]))
+    throw new Error(`Use a self-contained ${producer} SARIF report.`);
   function validate(
-    value: unknown,
-    resolve: ReturnType<typeof notificationDescriptors>,
+    values: unknown[],
+    tool: unknown,
+    strictExecution: boolean,
   ) {
-    const invocation = record(value, `${producer} invocation`);
-    if (typeof invocation["executionSuccessful"] !== "boolean")
-      throw new Error(
-        `${producer} SARIF executionSuccessful must be a boolean.`,
-      );
-    if (!invocation["executionSuccessful"]) {
-      const details = [
-        "processStartFailureMessage",
-        "exitCodeDescription",
-        "exitCode",
-        "exitSignalName",
-        "toolExecutionNotifications",
-        "toolConfigurationNotifications",
-      ].flatMap((key) =>
-        invocation[key] === undefined ? [] : [invocation[key]],
-      );
-      throw new Error(
-        `${producer} SARIF contains an unsuccessful invocation.${details.length ? " " + JSON.stringify(details) : ""}`,
-      );
-    }
-    const levels = new Map<Record<string, unknown>, unknown>();
-    for (const override of optionalArray(
-      invocation["notificationConfigurationOverrides"],
-      "SARIF notification overrides",
-    )) {
-      if (!isRecord(override) || !isRecord(override["configuration"])) continue;
-      const descriptor = resolve(override["descriptor"]);
-      if (descriptor && override["configuration"]["level"] !== undefined)
-        levels.set(descriptor, override["configuration"]["level"]);
-    }
-    for (const property of [
-      "toolExecutionNotifications",
-      "toolConfigurationNotifications",
-    ]) {
-      for (const entry of optionalArray(
-        invocation[property],
-        `${producer} ${property}`,
-      )) {
-        const notice = record(entry, `${producer} notification`);
+    let descriptors: ReturnType<typeof notificationDescriptors> | undefined;
+    const resolve = (ref: unknown) =>
+      isRecord(ref)
+        ? (descriptors ??= notificationDescriptors(tool))(ref)
+        : undefined;
+    for (const value of values) {
+      const invocation = record(value, `${producer} invocation`);
+      const successful = invocation["executionSuccessful"];
+      if (typeof successful !== "boolean")
+        throw new Error(
+          `${producer} SARIF executionSuccessful must be a boolean.`,
+        );
+      const list = (key: string) =>
+        optionalArray(invocation[key], `${producer} ${key}`);
+      const execution = list("toolExecutionNotifications");
+      const notices = execution.concat(list("toolConfigurationNotifications"));
+      if (!successful) {
+        const details = [
+          invocation["processStartFailureMessage"],
+          invocation["exitCodeDescription"],
+          invocation["exitCode"],
+          invocation["exitSignalName"],
+          ...notices,
+        ].filter((value) => value !== undefined);
+        throw new Error(
+          `${producer} SARIF contains an unsuccessful invocation.${details.length ? " " + JSON.stringify(details) : ""}`,
+        );
+      }
+      if (strictExecution && execution.length)
+        throw new Error(
+          `${producer} SARIF contains scan error notifications: ${JSON.stringify(execution)}`,
+        );
+      const levels = new Map<Record<string, unknown>, unknown>();
+      for (const value of list("notificationConfigurationOverrides")) {
+        const override = asRecord(value);
+        const descriptor = resolve(override?.["descriptor"]);
+        const level = asRecord(override?.["configuration"])?.["level"];
+        if (descriptor && level !== undefined) levels.set(descriptor, level);
+      }
+      for (const value of notices) {
+        const notice = record(value, `${producer} notification`);
         const descriptor = resolve(notice["descriptor"]);
-        const defaults = descriptor?.["defaultConfiguration"];
         const level =
           notice["level"] ??
           (descriptor && levels.get(descriptor)) ??
-          (isRecord(defaults) ? defaults["level"] : undefined);
+          asRecord(descriptor?.["defaultConfiguration"])?.["level"];
         if (level === "error")
           throw new Error(
             `${producer} SARIF contains scan error notifications: ${JSON.stringify(notice)}`,
           );
-        notifications?.push(notice);
       }
     }
-    return invocation;
   }
+  // Semgrep reports scanner errors as execution notices even below error level.
+  validate(
+    optionalArray(run["invocations"], `${producer} invocations`),
+    run["tool"],
+    producer === "Semgrep",
+  );
   if (run["conversion"] !== undefined) {
     const conversion = record(run["conversion"], `${producer} conversion`);
     if (conversion["invocation"] !== undefined)
-      validate(
-        conversion["invocation"],
-        notificationDescriptors(conversion["tool"]),
-      );
+      validate([conversion["invocation"]], conversion["tool"], false);
   }
-  const resolve = notificationDescriptors(run["tool"]);
-  return optionalArray(run["invocations"], `${producer} invocations`).map(
-    (value) => validate(value, resolve),
-  );
 }
 
 export function text(value: unknown): string | null {
@@ -178,15 +168,14 @@ export function sarifRunRepositories(
       producer === "Semgrep"
         ? text(ref["repositoryUri"])
         : requiredText(ref["repositoryUri"], `${producer} repository URI`);
-    return url === null
-      ? []
-      : [
-          {
-            url,
-            ...(producer === "Semgrep" &&
-              typeof ref["branch"] === "string" && { branch: ref["branch"] }),
-          },
-        ];
+    if (url === null) return [];
+    const branch = ref["branch"];
+    return [
+      {
+        url,
+        ...(producer === "Semgrep" && typeof branch === "string" && { branch }),
+      },
+    ];
   });
 }
 
@@ -248,18 +237,24 @@ async function readScannerBytes(path: string | FileHandle) {
 export async function readScannerText(path: string): Promise<string> {
   const { bytes, gzip } = await readScannerBytes(path);
   const contents = strictUtf8.decode(bytes);
-  if (!gzip && /\.gz$/iu.test(path) && !contents.trim())
-    throw new Error("The report is blank and contains no gzip stream.");
+  // Empty JSONL is a valid stream of zero records; a blank JSON or CSV document isn't.
+  if (!contents.trim()) {
+    if (!gzip && /\.gz$/iu.test(path))
+      throw new Error("The report is blank and contains no gzip stream.");
+    if (/\.(?:json|csv)(?:\.gz)?$/iu.test(path))
+      throw new Error("The report is blank.");
+  }
   return contents;
 }
 
-export function parseJsonOrJsonl(contents: string, path: string): unknown {
+export function parseJsonOrJsonl(contents: string): unknown {
   try {
     return JSON.parse(contents);
-  } catch (error) {
-    const lines = contents.split(/\r?\n/u).filter((line) => line.trim());
-    if (!lines.length && /\.(?:json|csv)(?:\.gz)?$/iu.test(path)) throw error;
-    return lines.map((line) => JSON.parse(line));
+  } catch {
+    return contents
+      .split(/\r?\n/u)
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
   }
 }
 
@@ -403,14 +398,34 @@ export function indexSarifRules(
   return byId;
 }
 
+type SarifRun = Record<
+  "document" | "run" | "tool" | "driver",
+  Record<string, unknown>
+>;
+
+/** Unpack the common SARIF envelope; each reader qualifies its own producer. */
+export function readSarifRuns<T>(
+  input: unknown,
+  producer: "Semgrep" | "Snyk" | "Endor",
+  read: (context: SarifRun) => T[],
+): T[] {
+  const document = record(input, `${producer} SARIF`);
+  if (document["version"] !== "2.1.0")
+    throw new Error(`Expected ${producer} SARIF 2.1.0.`);
+  return array(document["runs"], "SARIF runs").flatMap((value) => {
+    const run = record(value, "SARIF run");
+    const tool = record(run["tool"], "SARIF tool");
+    const driver = record(tool["driver"], "SARIF driver");
+    return read({ document, run, tool, driver });
+  });
+}
+
 /** Pair each result with its shared run context and original evidence. */
 export function sarifRunResults(
-  document: Record<string, unknown>,
-  run: Record<string, unknown>,
-  tool: Record<string, unknown>,
-  driver: Record<string, unknown>,
+  { document, run, tool, driver }: SarifRun,
   producer: "Endor" | "Semgrep",
 ) {
+  validateSarifRun(run, producer);
   const rules = array(driver["rules"] ?? [], `${producer} rules`).map((rule) =>
     record(rule, `${producer} rule`),
   );
@@ -596,7 +611,6 @@ export function normalizeRecords<T>(
   target: "local" | "cloud" = "cloud",
   options: {
     report?: ExternalFindings["report"];
-    notifications?: unknown[];
     filter?: SelectionFilter;
   } = {},
 ): ExternalFindings {
@@ -645,7 +659,5 @@ export function normalizeRecords<T>(
     selection.append(position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  if (!records.length && options.notifications?.length)
-    result.report = { ...result.report, notifications: options.notifications };
   return selection.finish(options.filter);
 }

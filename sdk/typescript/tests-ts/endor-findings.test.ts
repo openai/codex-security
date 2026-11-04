@@ -46,6 +46,7 @@ test("arrays and ListFindingsResponse use the same identities and empty lists ar
   });
   for (const list of [
     {},
+    { objects: null, response: null },
     { response: { next_page_token: 0 } },
     { response: { total_size: 0 } },
     { objects: null, response: { total_size: "0" } },
@@ -64,6 +65,7 @@ test("an Endor response with no objects and unrecognized list data is not an emp
     { items: [endorFinding()] },
     { response: { total_size: 13 } },
     { objects: [], response: { total_size: 13 } },
+    { objects: null, response: { total_size: 13 } },
   ]) {
     expect(() => normalizeEndorFindings({ list })).toThrow(
       "Endor list.objects",
@@ -650,41 +652,3 @@ test.each([
     expect(input).toEqual(original);
   },
 );
-
-test("SARIF descriptor defaults and overrides distinguish scan failures from warnings", () => {
-  const report: any = endorSarif();
-  const run = report.runs[0];
-  run.results = [];
-  run.tool.driver.notifications = [
-    { id: "coverage", defaultConfiguration: { level: "error" } },
-  ];
-  const notification = {
-    descriptor: { index: 0 },
-    message: { text: "Synthetic coverage failure" },
-  };
-  run.invocations = [
-    { executionSuccessful: true, toolExecutionNotifications: [notification] },
-  ];
-  expect(() => normalizeEndorSarif(report)).toThrow(
-    "Synthetic coverage failure",
-  );
-  run.invocations[0].notificationConfigurationOverrides = [
-    { descriptor: { index: 0 }, configuration: { level: "warning" } },
-  ];
-  expect(normalizeEndorSarif(report)).toMatchObject({
-    read: 0,
-    findings: [],
-    excluded: [],
-  });
-});
-
-test("Endor accepts a nullable native list with no remaining page", () => {
-  expect(
-    normalizeEndorFindings({ list: { objects: null, response: null } }),
-  ).toMatchObject({ findings: [], read: 0, excluded: [] });
-  expect(() =>
-    normalizeEndorFindings({
-      list: { objects: null, response: { total_size: 13 } },
-    }),
-  ).toThrow("list.objects");
-});

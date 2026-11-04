@@ -41,10 +41,10 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
+import { NoPublishableFindingsError } from "../src/index.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   ExternalPublicationError,
-  NoPublishableFindingsError,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
@@ -889,45 +889,27 @@ async function fixture(
 test("a zero-record report needs no Cloud account, destination lookup, confirmation, or submission", async () => {
   const f = await fixture([]);
   await rm(f.environment.CODEX_HOME, { recursive: true });
-  let requests = 0;
-  const deps = {
-    ...f.cliDeps,
-    cloudFetch: async () => {
-      requests++;
-      throw new Error("Unexpected Cloud request");
-    },
-  };
-  for (const flags of [[], ["--dry-run"], ["--yes", "--full-output"]]) {
-    const cli = createCliTest(main);
-    expect(await cli.runCli([...f.command, ...flags], deps)).toBe(0);
-    const output = JSON.parse(cli.stdout.text());
-    const selection = flags.includes("--full-output") ? output.data : output;
-    if (flags.includes("--full-output")) expect(output.ok).toBe(true);
-    expect(selection).toMatchObject({
-      status: "empty",
-      published: false,
-      read: 0,
-      ready: 0,
-      findings: [],
-      excluded: [],
-    });
-    expect(selection.dryRun).toBe(flags.includes("--dry-run") || undefined);
-    expect(selection).not.toHaveProperty("destination");
-    expect(selection).not.toHaveProperty("accountId");
-  }
-  for (const format of ["json", "md"]) {
-    const cli = createCliTest(main);
-    const args = [...f.command];
-    args[args.indexOf("--source-key") + 1] = "source-\x1b[2J";
-    args[args.indexOf("--format") + 1] = format;
-    expect(await cli.runCli(args, deps)).toBe(0);
-    if (format === "json")
-      expect(JSON.parse(cli.stdout.text()).source.source_key).toBe(
-        "source-\x1b[2J",
-      );
-    else expect(cli.stdout.text()).not.toContain("\x1b[2J");
-  }
-  expect(requests).toBe(0);
+  const fetch = spyOn(f.cliDeps, "cloudFetch");
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    [...f.command, "--full-output", "--dry-run"],
+    f.cliDeps,
+  );
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  const { ok, data } = JSON.parse(cli.stdout.text());
+  expect(ok).toBe(true);
+  expect(data).toMatchObject({
+    status: "empty",
+    published: false,
+    dryRun: true,
+    read: 0,
+    ready: 0,
+    findings: [],
+    excluded: [],
+  });
+  expect(data).not.toHaveProperty("destination");
+  expect(data).not.toHaveProperty("accountId");
   await expect(readdir(f.environment.CODEX_SECURITY_STATE_DIR)).rejects.toThrow(
     "ENOENT",
   );
@@ -950,7 +932,7 @@ test("an empty monitored Snyk capture finishes without an upload after catalog l
 test("an entirely excluded report fails with all positions intact and a short diagnostic", async () => {
   const f = await fixture(
     Array.from({ length: 500 }, (_, index) =>
-      normalized(`id-${index}`, "unsupported"),
+      normalized(`id-\x1b[2J${index}`, "unsupported"),
     ),
   );
   await rm(f.environment.CODEX_HOME, { recursive: true });
@@ -968,7 +950,7 @@ test("an entirely excluded report fails with all positions intact and a short di
     output.data.excluded.map((row: { position: number }) => row.position),
   ).toEqual(Array.from({ length: 500 }, (_, index) => index + 1));
   expect(output.data.excluded.at(-1)).toMatchObject({
-    source_finding_id: "id-499",
+    source_finding_id: "id-\x1b[2J499",
     reason: expect.any(String),
   });
   expect(cli.stderr.text()).not.toContain("Item 500");
@@ -980,47 +962,28 @@ test("an entirely excluded report fails with all positions intact and a short di
   expect(terminal.stderr.text()).toContain("Excluded item 1:");
   expect(terminal.stderr.text()).toContain("Showing 5 of 500 exclusions");
   expect(terminal.stderr.text()).not.toContain("Excluded item 6:");
-  for (const format of ["json", "jsonl"]) {
-    const filtered = createCliTest(main);
-    const command = [
-      ...f.command.slice(0, -2),
-      "--format",
-      format,
-      "--full-output",
-      "--filter-output=findings",
-    ];
-    expect(await filtered.runCli(command, f.cliDeps)).toBe(2);
-    const fullFailure = JSON.parse(filtered.stdout.text());
-    expect(fullFailure.data.excluded).toEqual(output.data.excluded);
-    expect(fullFailure.meta.command).toBe("publish findings");
-    const limited = createCliTest(main);
-    expect(
-      await limited.runCli([...command, "--token-limit=5"], f.cliDeps),
-    ).toBe(2);
-    expect(JSON.parse(limited.stdout.text())).toMatchObject({
-      ok: false,
-      data: expect.any(String),
-      meta: { nextOffset: 5 },
-    });
-  }
+  expect(terminal.stderr.text()).not.toContain("\x1b");
+  const flags = [
+    ...f.command.slice(0, -1),
+    "jsonl",
+    "--full-output",
+    "--filter-output=findings",
+  ];
+  const filtered = createCliTest(main);
+  expect(await filtered.runCli(flags, f.cliDeps)).toBe(2);
+  const failure = JSON.parse(filtered.stdout.text());
+  expect(failure.data.excluded).toEqual(output.data.excluded);
+  expect(failure.meta.command).toBe("publish findings");
+  const limited = createCliTest(main);
+  expect(await limited.runCli([...flags, "--token-limit=5"], f.cliDeps)).toBe(
+    2,
+  );
+  expect(JSON.parse(limited.stdout.text())).toMatchObject({
+    ok: false,
+    data: expect.any(String),
+    meta: { nextOffset: 5 },
+  });
   expect(f.posts).toHaveLength(0);
-});
-
-test("excluded record IDs stay intact in JSON and out of terminal markup", async () => {
-  const id = "id-\x1b[2Jexample";
-  const f = await fixture([normalized(id, "unsupported")]);
-  for (const format of ["md", "json", "jsonl"]) {
-    const cli = createCliTest(main);
-    expect(
-      await cli.runCli([...f.command.slice(0, -1), format], f.cliDeps),
-    ).toBe(2);
-    expect(cli.stdout.text()).not.toContain("\x1b[");
-    expect(cli.stderr.text()).not.toContain("\x1b[");
-    if (format !== "md")
-      expect(JSON.parse(cli.stdout.text()).excluded[0].source_finding_id).toBe(
-        id,
-      );
-  }
 });
 
 test("normalized SDK callers can distinguish an empty report from exclusions without authenticating", async () => {

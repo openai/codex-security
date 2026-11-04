@@ -133,8 +133,6 @@ import type {
   SourceReportSummary,
 } from "./external-import-models.js";
 
-export { NoPublishableFindingsError } from "./external-findings.js";
-
 const MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 
 /** Source and destination for evidence already normalized to the Cloud contract. */

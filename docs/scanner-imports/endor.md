@@ -50,10 +50,6 @@ out=$(mktemp -d) &&
 Keep `--list-all` to fetch every page. Omit `--field-mask` to keep every field.
 [Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
 
-A complete empty `ListFindingsResponse` may omit `list.objects`. The importer
-rejects unfinished pagination and summaries that claim findings without their
-objects. Keep the scanner's exit status alongside the export.
-
 **Preview the report.**
 
 ```sh

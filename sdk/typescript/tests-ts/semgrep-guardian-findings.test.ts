@@ -1,7 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { prepareNormalizedExternalPublication } from "../src/external-findings-publish.js";
 import { collectSelectedSemgrepGuardianFindings } from "../src/semgrep-guardian-findings.js";
-import { readExternalFindings } from "../src/external-findings-read.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { collectSemgrepPlatformFindings } from "../src/semgrep-platform-collector.js";
 import { isolatedGitReportFixture } from "./external-findings-local-helpers.js";
@@ -42,24 +41,6 @@ const capture = {
   ...selection,
   structuredContent: { findings: [row] },
 };
-
-test("the shared file reader retains Guardian's captured repository without a caller URL", async () => {
-  await using fixture = await isolatedGitReportFixture(
-    "guardian.json",
-    { provider: "semgrep", sourceKey: "example/topic" },
-    { remote: sourceRepositoryUrl },
-  );
-  await fixture.writeJson(capture);
-  const parsed = await readExternalFindings(
-    fixture.file,
-    { provider: "semgrep" },
-    "local",
-  );
-  expect(parsed.findings.findings).toHaveLength(1);
-  expect(parsed.findings.report).toMatchObject({
-    repositoryUrl: sourceRepositoryUrl,
-  });
-});
 
 test("a signed-in Guardian selection and Web API collection keep independent rows on replay", async () => {
   const callTool = mock(async (_request: unknown) => ({

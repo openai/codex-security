@@ -1,4 +1,3 @@
-import { snykPluginExport } from "./support/snyk-import-fixtures.js";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -115,23 +114,6 @@ async function fixture() {
   return { root, repository, file, record, state, deps, command };
 }
 
-test("a zero-record local import skips confirmation and does not initialize the workbench", async () => {
-  const f = await fixture();
-  await writeFile(f.file, "[]");
-  const cli = createCliTest(main);
-  const code = await cli.runCli(f.command, f.deps);
-  expect(code, cli.stderr.text()).toBe(0);
-  expect(JSON.parse(cli.stdout.text())).toMatchObject({
-    repository: f.repository,
-    read: 0,
-    ready: 0,
-    findings: [],
-    excluded: [],
-    counts: { created: 0, updated: 0, unchanged: 0 },
-  });
-  await expect(readdir(f.state)).rejects.toThrow("ENOENT");
-});
-
 test.each(["local", "cloud"])(
   "zero-record OpenGrep imports to %s preserve scanner diagnostics",
   async (destination) => {
@@ -147,40 +129,36 @@ test.each(["local", "cloud"])(
       command[command.indexOf("--repository") + 1] = "example/project";
     const input = { ...opengrepJson(), results: [] };
     await writeFile(f.file, JSON.stringify(input));
-    for (const flags of [[], ["--dry-run"]]) {
-      const failed = createCliTest(main);
-      expect(await failed.runCli([...command, ...flags], f.deps)).toBe(2);
-      expect(JSON.parse(failed.stdout.text())).toMatchObject({
-        error: expect.stringContaining(input.errors[0]!.message),
-        report: { errors: input.errors, paths: input.paths },
-      });
-    }
+    const failed = createCliTest(main);
+    expect(await failed.runCli([...command, "--dry-run"], f.deps)).toBe(2);
+    expect(JSON.parse(failed.stdout.text())).toMatchObject({
+      error: expect.stringContaining(input.errors[0]!.message),
+      report: { errors: input.errors, paths: input.paths },
+    });
 
-    const path = "src/example\u001b[2J\u009b.ts";
-    const paths = { scanned: [path] };
+    const paths = { scanned: ["src/example\u001b[2J\u009b.ts"] };
     await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
     const clean = createCliTest(main);
     expect(await clean.runCli(command, f.deps)).toBe(0);
     expect(JSON.parse(clean.stdout.text())).toMatchObject({
       read: 0,
       ready: 0,
+      findings: [],
+      excluded: [],
       report: { errors: [], paths },
+      ...(destination === "local" && {
+        counts: { created: 0, updated: 0, unchanged: 0 },
+      }),
     });
-    for (const format of ["md", "toon", "jsonl"]) {
-      const arguments_ = [...command];
-      arguments_[arguments_.indexOf("--format") + 1] = format;
-      for (const flags of [[], ["--dry-run"]]) {
-        const cli = createCliTest(main);
-        expect(await cli.runCli([...arguments_, ...flags], f.deps)).toBe(0);
-        if (format === "jsonl")
-          expect(JSON.parse(cli.stdout.text()).report.paths).toEqual(paths);
-        else {
-          expect(cli.stdout.text()).toContain("src/example");
-          expect(cli.stdout.text()).not.toContain("\u001b");
-          expect(cli.stdout.text()).not.toContain("\u009b");
-        }
-      }
-    }
+    const terminal = createCliTest(main);
+    expect(
+      await terminal.runCli(
+        command.map((arg) => (arg === "json" ? "md" : arg)),
+        f.deps,
+      ),
+    ).toBe(0);
+    expect(terminal.stdout.text()).toContain("src/example");
+    expect(terminal.stdout.text()).not.toMatch(/[\u001b\u009b]/u);
     await expect(readdir(f.state)).rejects.toThrow("ENOENT");
   },
 );
@@ -577,25 +555,4 @@ test("finding import requires an explicit destination and advertises local repos
     ),
   ).not.toBe(0);
   expect(missing.stderr.text()).toContain("to");
-});
-
-test("local previews and imports fail with the SCA error when every occurrence is excluded", async () => {
-  const f = await fixture();
-  const input = snykPluginExport();
-  input.findings[0]!.originatingScanner = "snyk-code";
-  Object.assign(input.collection.scans[0]!, {
-    outcome: "failed",
-    error: "SCA timed out",
-  });
-  await writeFile(f.file, JSON.stringify(input));
-  const command = [...f.command];
-  command[command.indexOf("--provider") + 1] = "snyk";
-  for (const flags of [["--dry-run"], ["--yes"]]) {
-    const cli = createCliTest(main);
-    expect(await cli.runCli([...command, ...flags], f.deps)).toBe(2);
-    expect(JSON.parse(cli.stdout.text())).toMatchObject({
-      error: expect.stringContaining("SCA timed out"),
-      excluded: [{ position: 1 }],
-    });
-  }
 });

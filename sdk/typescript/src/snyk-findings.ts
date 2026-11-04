@@ -14,7 +14,6 @@ import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   indexSarifRules,
   normalizeRecords,
   optionalArray,
@@ -25,8 +24,9 @@ import {
   sarifRunContextSelector,
   stableId,
   strings,
-  successfulSarifInvocations,
+  readSarifRuns,
   text,
+  validateSarifRun,
   validateSarifRuleReference,
 } from "./scanner-import.js";
 
@@ -321,53 +321,39 @@ export function normalizeSnykSarif(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  const document = record(input, "Snyk SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Snyk Open Source SARIF 2.1.0.");
-  const notifications: unknown[] = [];
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    successfulSarifInvocations(run, "Snyk", notifications);
-    const driver = record(
-      record(run["tool"], "SARIF tool")["driver"],
-      "SARIF driver",
-    );
-    if (driver["name"] !== "Snyk Open Source")
-      throw new Error(
-        "Only Snyk Open Source SARIF is supported; Code, Container, and IaC need separate mappings.",
+  const entries = readSarifRuns(
+    input,
+    "Snyk",
+    ({ document, run, tool, driver }) => {
+      if (driver["name"] !== "Snyk Open Source")
+        throw new Error(
+          "Only Snyk Open Source SARIF is supported; Code, Container, and IaC need separate mappings.",
+        );
+      validateSarifRun(run, "Snyk");
+      const rules = array(driver["rules"], "SARIF rules").map((rule) =>
+        record(rule, "SARIF rule"),
       );
-    if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error(
-        "External SARIF property files are unsupported; use a self-contained report.",
+      // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
+      const rulesById = indexSarifRules(
+        rules.entries().filter(([index]) => index in rules),
       );
-    const rules = array(driver["rules"], "SARIF rules").map((rule) =>
-      record(rule, "SARIF rule"),
-    );
-    // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
-    const rulesById = indexSarifRules(
-      rules.entries().filter(([index]) => index in rules),
-    );
-    const project = snykSarifProject(run);
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = record(
-      run["tool"],
-      "SARIF tool",
-    );
-    runContext["tool"] = toolContext;
-    const { runs: _runs, ...documentContext } = document;
-    const selectRunContext = sarifRunContextSelector(runContext);
-    return optionalArray(run["results"], "SARIF results").map((result) => ({
-      result,
-      rulesById,
-      project,
-      selectRunContext,
-      driverContext,
-      documentContext,
-    }));
-  });
+      const project = snykSarifProject(run);
+      const { results: _results, tool: _tool, ...runContext } = run;
+      const { rules: _rules, ...driverContext } = driver;
+      const { driver: _driver, ...toolContext } = tool;
+      runContext["tool"] = toolContext;
+      const { runs: _runs, ...documentContext } = document;
+      const selectRunContext = sarifRunContextSelector(runContext);
+      return optionalArray(run["results"], "SARIF results").map((result) => ({
+        result,
+        rulesById,
+        project,
+        selectRunContext,
+        driverContext,
+        documentContext,
+      }));
+    },
+  );
   return normalizeRecords(
     entries,
     ({
@@ -470,7 +456,6 @@ export function normalizeSnykSarif(
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
-    { notifications },
   );
 }
 

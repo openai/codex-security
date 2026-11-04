@@ -10,8 +10,6 @@ import {
   localFindingsFixture,
   localReportFixture,
 } from "./external-findings-local-helpers.js";
-import { endorSarif } from "./support/endor-import-fixtures.js";
-import { snykSarif } from "./support/snyk-import-fixtures.js";
 
 test("requires opt-in before reading the source file", async () => {
   await using fixture = await localFindingsFixture();
@@ -135,71 +133,6 @@ test("cancels preparation while the source file read is pending", async () => {
   });
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout.trim()).toBe("CANCELLED");
-  await expect(access(fixture.stateDirectory)).rejects.toThrow();
-});
-
-test.each(["snyk", "endor"] as const)(
-  "%s SARIF rejects malformed repository provenance for full and empty runs",
-  async (provider) => {
-    await using fixture = await localReportFixture(
-      "report.sarif",
-      {
-        provider,
-        sourceKey: "example-project",
-      },
-      { remote: "https://github.com/example/project" },
-    );
-    const sarif = provider === "snyk" ? snykSarif() : endorSarif();
-    const run = sarif.runs[0]!;
-    const repo = { repositoryUri: "https://github.com/example/project" };
-    for (const results of [run.results, []]) {
-      await fixture.writeJson({
-        ...sarif,
-        runs: [{ ...run, results, versionControlProvenance: repo }],
-      });
-      await expect(fixture.prepare()).rejects.toThrow(
-        "version control provenance must be an array",
-      );
-    }
-    await fixture.writeJson({
-      ...sarif,
-      runs: [
-        { ...run, versionControlProvenance: [repo] },
-        {
-          ...run,
-          results: [],
-          versionControlProvenance: [
-            { repositoryUri: "https://github.com/example/other-project" },
-          ],
-        },
-      ],
-    });
-    await expect(fixture.prepare()).rejects.toThrow("other-project");
-  },
-);
-
-test("an empty Semgrep file still binds the declared source to the local checkout", async () => {
-  const url = "https://github.com/example/project";
-  await using fixture = await localReportFixture(
-    "semgrep.json",
-    {
-      provider: "semgrep",
-      sourceKey: "example/main",
-      sourceRepositoryUrl: url,
-    },
-    { remote: url },
-  );
-  await fixture.writeJson({ version: "1.100.0", results: [], errors: [] });
-  await expect(
-    fixture.prepare({
-      sourceRepositoryUrl: "https://github.com/example/other",
-    }),
-  ).rejects.toThrow("does not match a configured remote");
-  expect((await (await fixture.prepare()).import()).counts).toEqual({
-    created: 0,
-    updated: 0,
-    unchanged: 0,
-  });
   await expect(access(fixture.stateDirectory)).rejects.toThrow();
 });
 

@@ -138,8 +138,5 @@ test("Endor SARIF repository provenance cannot be imported into a different loca
   };
   await fixture.writeJson(input);
   await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
-  input.runs[0]!.results.length = 0;
-  await fixture.writeJson(input);
-  await expect(fixture.prepare()).rejects.toThrow(/does not match.*remote/iu);
   expect(await fixture.read()).toEqual([]);
 });

@@ -30,7 +30,6 @@ import {
 } from "./native-json-findings.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   normalizeRecords,
   optionalArray,
   readScannerJson,
@@ -40,7 +39,7 @@ import {
   sarifRunRepositories,
   sarifRunResults,
   stableId,
-  successfulSarifInvocations,
+  readSarifRuns,
   text,
   validateSarifRuleReference,
 } from "./scanner-import.js";
@@ -225,13 +224,11 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
-  const document = record(input, "Semgrep SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Semgrep SARIF 2.1.0.");
-  const notifications: unknown[] = [];
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    for (const { url: declared } of sarifRunRepositories(run, "Semgrep")) {
+  const entries = readSarifRuns(input, "Semgrep", (context) => {
+    for (const { url: declared } of sarifRunRepositories(
+      context.run,
+      "Semgrep",
+    )) {
       if (
         cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
       )
@@ -239,28 +236,13 @@ export function normalizeSemgrepSarif(
           "SARIF source repository does not match the declared source repository URL.",
         );
     }
-    const tool = record(run["tool"], "SARIF tool");
-    const driver = record(tool["driver"], "SARIF driver");
-    if (!isSemgrepSarifDriver(requiredText(driver["name"], "SARIF producer")))
-      throw new Error("Expected a Semgrep SARIF producer.");
     if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const details of successfulSarifInvocations(
-      run,
-      "Semgrep",
-      notifications,
-    )) {
-      if (
-        optionalArray(
-          details["toolExecutionNotifications"],
-          "Semgrep scan notifications",
-        ).length
+      !isSemgrepSarifDriver(
+        requiredText(context.driver["name"], "SARIF producer"),
       )
-        throw new Error("Semgrep SARIF contains scan error notifications.");
-    }
-    return sarifRunResults(document, run, tool, driver, "Semgrep");
+    )
+      throw new Error("Expected a Semgrep SARIF producer.");
+    return sarifRunResults(context, "Semgrep");
   });
   return normalizeRecords(
     entries,
@@ -354,7 +336,6 @@ export function normalizeSemgrepSarif(
     },
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
-    { notifications },
   );
 }
 

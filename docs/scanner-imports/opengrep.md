@@ -25,11 +25,6 @@ report_dir=$(mktemp -d) &&
   opengrep_report="$report_dir/opengrep.json"
 ```
 
-A zero-result report succeeds only when its `errors` array is empty. Parse
-errors or timeouts in an otherwise empty report fail the import. Keep the
-scanner's exit status and original JSON; an empty export alone does not prove
-complete scan coverage.
-
 **Preview the report.** Replace the example URL with the checkout's
 credential-free HTTP(S) URL. Choose a distinct OpenGrep source key for your
 organization, project and branch.
@@ -41,7 +36,7 @@ codex-security publish findings "$opengrep_report" --to local --repository . \
 ```
 
 Check the findings, exclusions and `report.errors`, even if the findings list
-is empty. Keep `--provider opengrep`
+is empty. A zero-result report with scanner errors fails the import. Keep `--provider opengrep`
 when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence

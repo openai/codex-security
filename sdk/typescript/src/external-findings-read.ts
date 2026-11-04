@@ -139,7 +139,7 @@ export function semgrepSarifRepositories(
     : [];
 }
 
-/** A run can name a repository even when none of its results produce a row. */
+/** A run may name a repository even when it produces no findings. */
 function sarifFileRepositories(
   input: unknown,
   producer: "Endor" | "Semgrep" | "Snyk",
@@ -179,32 +179,22 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  if (options.provider === "snyk") {
-    const input = await readSnykReport(path);
-    const findings = await normalizeSnykFile(input, target, references);
-    let sourceRepositories = sarifFileRepositories(input, "Snyk");
-    if (!sourceRepositories && hasNoExternalRecords(findings))
-      sourceRepositories = emptySnykReportRepositories(input);
-    return {
-      findings,
-      sourceRepositories:
-        sourceRepositories ??
-        findings.findings.flatMap((row) =>
-          localFindingRepositories("snyk", row),
-        ),
-    };
-  }
-  if (options.provider === "endor") {
-    const input = await readScannerJson(path);
-    const findings = normalizeEndorFindings(input, target);
-    return {
-      findings,
-      sourceRepositories:
-        sarifFileRepositories(input, "Endor") ??
-        findings.findings.flatMap((row) =>
-          localFindingRepositories("endor", row),
-        ),
-    };
+  const provider = options.provider;
+  if (provider === "snyk" || provider === "endor") {
+    const snyk = provider === "snyk";
+    const input = await (snyk ? readSnykReport : readScannerJson)(path);
+    const findings = snyk
+      ? await normalizeSnykFile(input, target, references)
+      : normalizeEndorFindings(input, target);
+    const header = sarifFileRepositories(input, snyk ? "Snyk" : "Endor");
+    const sourceRepositories =
+      header ??
+      (snyk && hasNoExternalRecords(findings)
+        ? emptySnykReportRepositories(input)
+        : findings.findings.flatMap((row) =>
+            localFindingRepositories(provider, row),
+          ));
+    return { findings, sourceRepositories };
   }
   if (options.provider === "semgrep") {
     const input = await readSemgrepReport(path);
@@ -217,12 +207,10 @@ export async function readExternalFindings(
       target,
     );
     if (semgrepPlatformReportRepository(findings)) return { findings };
-    return {
-      findings,
-      sourceRepositories:
-        sarifFileRepositories(input, "Semgrep") ??
-        findings.findings.flatMap((row) => semgrepSarifRepositories(row)),
-    };
+    const sourceRepositories = sarifFileRepositories(input, "Semgrep") ?? [];
+    if (!sourceRepositories.length && options.sourceRepositoryUrl)
+      sourceRepositories.push({ url: options.sourceRepositoryUrl });
+    return { findings, sourceRepositories };
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };

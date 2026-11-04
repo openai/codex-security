@@ -114,7 +114,6 @@ import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import {
   ExternalPublicationError,
-  NoPublishableFindingsError,
   prepareExternalPublication,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
@@ -134,6 +133,7 @@ import {
 } from "./external-findings-read.js";
 import {
   externalImportDisposition,
+  NoPublishableFindingsError,
   type ExternalFindings,
 } from "./external-findings.js";
 import {
@@ -423,7 +423,6 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
-const TOKEN_OUTPUT_OPTION = /^--token-(?:count|limit|offset)(?:=|$)/u;
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -2174,8 +2173,7 @@ export async function main(
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
         const data = { status: "failed", code, message };
-        if (argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument)))
-          filteredScanFailure = { format, data };
+        if (frameworkFlags.filterOutput) filteredScanFailure = { format, data };
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
@@ -3947,10 +3945,9 @@ export async function main(
               writeDiagnostic(renderExternalPublicationSummary(result));
             return { ...result };
           } catch (error) {
-            const selection =
-              error instanceof NoPublishableFindingsError
-                ? error.selection
-                : undefined;
+            const noFindings =
+              error instanceof NoPublishableFindingsError ? error : undefined;
+            const selection = noFindings?.selection;
             if (
               selection &&
               externalImportDisposition(selection) === "empty" &&
@@ -3973,11 +3970,7 @@ export async function main(
                 ...(options.dryRun ? { dryRun: true } : {}),
               };
             }
-            const message = diagnosticValue(
-              error instanceof NoPublishableFindingsError
-                ? error.summary
-                : error,
-            );
+            const message = diagnosticValue(noFindings?.summary ?? error);
             if (argv.includes("--full-output") && machineFormat)
               failedResultOutput = {
                 format,
@@ -4002,13 +3995,13 @@ export async function main(
                   read: selection.read,
                   ready: 0,
                   excluded: selection.excluded,
-                  ...(selection.report && { report: selection.report }),
+                  report: selection.report,
                 }),
             };
             if (
               machineFormat &&
               (!argv.includes("--full-output") || selection !== undefined) &&
-              argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
+              frameworkFlags.filterOutput
             )
               filteredScanFailure = { format, data: failure };
             return structured ? failure : undefined;
@@ -6406,7 +6399,7 @@ export async function main(
         const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = async (chunk: string): Promise<void> => {
           if (structured) {
-            if (!batchedVerification || frameworkFlags.tokenOutput)
+            if (!batchedVerification || frameworkFlags.tokenArguments.length)
               deferredVerificationDiagnostic = chunk;
           } else {
             await writeCliOutput(errorOutput, chunk).catch(() => {});
@@ -7643,22 +7636,13 @@ export async function main(
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
     // and token controls without running the saved scan a second time.
     const failureOutput = captureOutput();
-    const failureArguments = ["render", "--format", filteredScanFailure.format];
+    const failureArguments = [
+      "render",
+      "--format",
+      filteredScanFailure.format,
+      ...frameworkFlags.tokenArguments,
+    ];
     if (failedResultOutput) failureArguments.push("--full-output");
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (!TOKEN_OUTPUT_OPTION.test(argument)) continue;
-      const separator = argument.indexOf("=");
-      if (separator !== -1)
-        failureArguments.push(
-          argument.slice(0, separator),
-          argument.slice(separator + 1),
-        );
-      else {
-        failureArguments.push(argument);
-        if (argument !== "--token-count") failureArguments.push(argv[++index]!);
-      }
-    }
     const failure = filteredScanFailure.data;
     await Cli.create("codex-security-scan-error")
       .command("render", { run: () => failure })
@@ -7666,25 +7650,8 @@ export async function main(
         stdout: failureOutput.stream.write,
         exit: () => undefined,
       });
-    if (failedResultOutput) {
-      const previous: JsonValue = JSON.parse(frameworkOutput);
-      frameworkOutput = failureOutput.text();
-      const unfiltered: JsonValue = JSON.parse(frameworkOutput);
-      if (
-        isJsonObject(previous) &&
-        isJsonObject(previous["meta"]) &&
-        isJsonObject(unfiltered) &&
-        isJsonObject(unfiltered["meta"])
-      )
-        frameworkOutput = JSON.stringify({
-          ...previous,
-          data: unfiltered["data"],
-          meta: {
-            ...previous["meta"],
-            nextOffset: unfiltered["meta"]["nextOffset"],
-          },
-        });
-    } else renderedOutput = failureOutput.text();
+    if (failedResultOutput) frameworkOutput = failureOutput.text();
+    else renderedOutput = failureOutput.text();
   }
   if (escapeFrameworkOutput)
     frameworkOutput = escapeTerminalText(frameworkOutput, true);
@@ -7731,9 +7698,19 @@ export async function main(
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
+        // Re-rendered failures carry the unfiltered page, but the command's
+        // original metadata describes the actual invocation.
+        const meta =
+          filteredScanFailure && isJsonObject(envelope["meta"])
+            ? {
+                ...JSON.parse(frameworkCapture.text()).meta,
+                nextOffset: envelope["meta"]["nextOffset"],
+              }
+            : envelope["meta"];
         frameworkOutput = `${JSON.stringify(
           {
             ...envelope,
+            meta,
             ok: false,
             error: {
               code: failedResultOutput.code ?? "SCAN_FAILED",
@@ -7759,7 +7736,7 @@ export async function main(
     if (deferredVerificationDiagnostic !== undefined) {
       // Token output can omit the diagnostic. Otherwise a buffered stderr
       // write is optional once the complete structured failure is on stdout.
-      if (frameworkFlags.tokenOutput) {
+      if (frameworkFlags.tokenArguments.length) {
         await writeCliOutput(errorOutput, deferredVerificationDiagnostic).catch(
           () => {},
         );
@@ -8063,7 +8040,8 @@ function frameworkOutputFlags(argv: readonly string[]) {
   let hideDisabledRoute = false;
   let fullOutput = false;
   let rawCollector = false;
-  let tokenOutput = false;
+  const tokenArguments: string[] = [];
+  let filterOutput = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
     if (
@@ -8075,9 +8053,15 @@ function frameworkOutputFlags(argv: readonly string[]) {
       hideDisabledRoute = true;
     if (value === "--full-output") fullOutput = true;
     if (value === "--json") rawCollector = true;
-    if (TOKEN_OUTPUT_OPTION.test(value)) tokenOutput = true;
+    if (value === "--token-count") tokenArguments.push(value);
     if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
       const operand = argv[++index];
+      if (value === "--filter-output") filterOutput = true;
+      if (
+        (value === "--token-limit" || value === "--token-offset") &&
+        operand !== undefined
+      )
+        tokenArguments.push(value, operand);
       if (value === "--format")
         rawCollector =
           operand === "json" || operand === "jsonl" || operand === "yaml";
@@ -8086,7 +8070,8 @@ function frameworkOutputFlags(argv: readonly string[]) {
   return {
     hideDisabledRoute,
     rawCollector: rawCollector && !fullOutput,
-    tokenOutput,
+    filterOutput,
+    tokenArguments,
   };
 }
 

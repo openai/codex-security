@@ -8,7 +8,7 @@ import {
   readScannerText,
   relativePath,
   sarifRunContextSelector,
-  successfulSarifInvocations,
+  validateSarifRun,
 } from "../src/scanner-import.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -91,7 +91,7 @@ test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
       ],
     };
     const run = { invocations: [invocation], conversion: { invocation } };
-    expect(successfulSarifInvocations(run, "Example")).toEqual([invocation]);
+    expect(() => validateSarifRun(run, "Example")).not.toThrow();
   },
 );
 
@@ -120,20 +120,29 @@ test("SARIF extension descriptors retain error severity across index, ID and GUI
       },
       message: { text: "Synthetic descriptor failure" },
     };
-    expect(() =>
-      successfulSarifInvocations(
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: [notification],
+    };
+    const validate = (overrides = {}) =>
+      validateSarifRun(
         {
           tool,
-          invocations: [
-            {
-              executionSuccessful: true,
-              toolConfigurationNotifications: [notification],
-            },
-          ],
+          invocations: [{ ...invocation, ...overrides }],
         },
         "Example",
-      ),
-    ).toThrow("Synthetic descriptor failure");
+      );
+    expect(() => validate()).toThrow("Synthetic descriptor failure");
+    expect(() =>
+      validate({
+        notificationConfigurationOverrides: [
+          {
+            descriptor: notification.descriptor,
+            configuration: { level: "warning" },
+          },
+        ],
+      }),
+    ).not.toThrow();
   }
 });
 
@@ -147,13 +156,13 @@ test("malformed SARIF notifications cannot hide a scanner error", () => {
       toolConfigurationNotifications: notifications,
     };
     const run = { invocations: [invocation] };
-    expect(() => successfulSarifInvocations(run, "Example")).toThrow(message);
+    expect(() => validateSarifRun(run, "Example")).toThrow(message);
   }
 });
 
 test("SARIF validates converter failures separately from scanner invocations", () => {
   const converted = (invocation: unknown) =>
-    successfulSarifInvocations({ conversion: { invocation } }, "Example");
+    validateSarifRun({ conversion: { invocation } }, "Example");
   expect(() => converted({ executionSuccessful: false })).toThrow(
     "unsuccessful invocation",
   );

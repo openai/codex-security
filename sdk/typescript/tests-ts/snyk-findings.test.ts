@@ -433,19 +433,6 @@ test("plugin finding identity ignores scan timestamps and preserves separate occ
   expect(duplicate.excluded).toHaveLength(2);
 });
 
-test("empty plugin bundles cannot omit issues counted by another successful scan", () => {
-  const input = snykPluginExport();
-  input.findings = [];
-  input.collection.scans[0]!.issueCount = 0;
-  input.collection.scans.push({
-    category: "code",
-    tool: "snyk_code_scan",
-    outcome: "succeeded",
-    issueCount: 2,
-  });
-  expect(() => normalizeSnykFindingsExport(input)).toThrow("reported issues");
-});
-
 test("empty plugin reports require a successful zero-issue SCA scan", () => {
   const input: any = snykPluginExport();
   input.findings = [];
@@ -473,6 +460,13 @@ test("empty plugin reports require a successful zero-issue SCA scan", () => {
   expect(normalizeSnykFindingsExport(input).report).toMatchObject({
     collection: input.collection,
   });
+  input.collection.scans.push({
+    category: "code",
+    tool: "snyk_code_scan",
+    outcome: "succeeded",
+    issueCount: 2,
+  });
+  expect(() => normalizeSnykFindingsExport(input)).toThrow("reported issues");
   input.collection.scans = [];
   expect(() => normalizeSnykFindingsExport(input)).toThrow(
     "successful SCA scan",
@@ -928,13 +922,14 @@ test.each(snykRepositoryContexts)(
   },
 );
 
-test("an excluded Snyk Code occurrence retains the failed SCA scan diagnostic", () => {
+test("failed SCA scans reject valid rows and retain diagnostics for excluded rows", () => {
   const input = snykPluginExport();
-  input.findings[0]!.originatingScanner = "snyk-code";
   Object.assign(input.collection.scans[0]!, {
     outcome: "failed",
     error: "SCA timed out",
   });
+  expect(() => normalizeSnykFindingsExport(input)).toThrow("SCA timed out");
+  input.findings[0]!.originatingScanner = "snyk-code";
   expect(normalizeSnykFindingsExport(input)).toMatchObject({
     read: 1,
     findings: [],

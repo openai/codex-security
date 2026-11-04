@@ -272,7 +272,7 @@ test("overlapping vendor IDs and advisories stay distinct on SQLite replay", asy
   );
 });
 
-test.each([
+const sarifCases = [
   ["endor", endorSarif, normalizeEndorSarif],
   [
     "semgrep",
@@ -281,53 +281,93 @@ test.each([
       normalizeSemgrepSarif(input, { sourceRepositoryUrl: repositoryUrl }),
   ],
   ["snyk", snykSarif, normalizeSnykSarif],
-] as const)(
+] as const;
+const emptySelection = { read: 0, findings: [], excluded: [] };
+
+test.each(sarifCases)(
   "%s SARIF accepts no-data exports and rejects failed or malformed reports",
   (_provider, fixture, normalize) => {
-    const report: any = fixture();
-    expect(normalize({ ...report, runs: [] })).toMatchObject({
-      read: 0,
-      findings: [],
-      excluded: [],
-    });
-    const run = report.runs[0];
-    run.results = [];
-    expect(normalize(report)).toMatchObject({
-      read: 0,
-      findings: [],
-      excluded: [],
-    });
-    delete run.results;
-    expect(normalize(report)).toMatchObject({
-      read: 0,
-      findings: [],
-      excluded: [],
-    });
-    for (const results of [null, {}, "invalid"]) {
-      run.results = results;
-      expect(() => normalize(report)).toThrow("must be an array");
+    const report = fixture();
+    const { results: _results, ...emptyRun } = report.runs[0]!;
+    const normalizeRun = (run: unknown) =>
+      normalize({ ...report, runs: [run] });
+    expect(normalize({ ...report, runs: [] })).toMatchObject(emptySelection);
+    for (const run of [emptyRun, { ...emptyRun, results: [] }])
+      expect(normalizeRun(run)).toMatchObject(emptySelection);
+    for (const invalid of [null, {}, "invalid"]) {
+      expect(() => normalizeRun({ ...emptyRun, results: invalid })).toThrow(
+        "must be an array",
+      );
+      expect(() => normalize({ ...report, runs: invalid })).toThrow(
+        "must be an array",
+      );
     }
-    delete run.results;
-    run.invocations = [{ executionSuccessful: false }];
-    expect(() => normalize(report)).toThrow("unsuccessful invocation");
-    run.invocations = [
-      {
-        executionSuccessful: true,
-        toolExecutionNotifications: [
-          { level: "error", message: { text: "Synthetic scan failure" } },
-        ],
-      },
-    ];
-    expect(() => normalize(report)).toThrow("Synthetic scan failure");
-    run.invocations = [];
-    run.conversion = {
-      invocation: {
-        executionSuccessful: false,
-        processStartFailureMessage: "Synthetic converter failure",
-      },
-    };
-    expect(() => normalize(report)).toThrow("Synthetic converter failure");
-    for (const runs of [null, {}, "invalid"])
-      expect(() => normalize({ ...report, runs })).toThrow("must be an array");
+    for (const [invocation, message] of [
+      [{ executionSuccessful: false }, "unsuccessful invocation"],
+      [
+        {
+          executionSuccessful: true,
+          toolExecutionNotifications: [
+            { level: "error", message: { text: "Synthetic scan failure" } },
+          ],
+        },
+        "Synthetic scan failure",
+      ],
+    ] as const)
+      expect(() =>
+        normalizeRun({ ...emptyRun, invocations: [invocation] }),
+      ).toThrow(message);
+    expect(() =>
+      normalizeRun({
+        ...emptyRun,
+        conversion: {
+          invocation: {
+            executionSuccessful: false,
+            processStartFailureMessage: "Synthetic converter failure",
+          },
+        },
+      }),
+    ).toThrow("Synthetic converter failure");
+  },
+);
+
+test.each(sarifCases)(
+  "%s SARIF validates provenance even in empty runs",
+  async (provider, fixture) => {
+    const root = await temporaryDirectory("scanner-import-contract-");
+    try {
+      const path = join(root, "report.sarif");
+      const report = fixture();
+      const run = report.runs[0]!;
+      const read = async (runs: unknown) => {
+        await writeFile(path, JSON.stringify({ ...report, runs }));
+        return readExternalFindings(path, readerOptions(provider), "local");
+      };
+      const repository = { repositoryUri: repositoryUrl };
+      for (const results of [run.results, []])
+        await expect(
+          read([{ ...run, results, versionControlProvenance: repository }]),
+        ).rejects.toThrow("version control provenance must be an array");
+      const foreignUrl = "https://github.com/example/other";
+      const foreignRun = {
+        ...run,
+        results: [],
+        versionControlProvenance: [{ repositoryUri: foreignUrl }],
+      };
+      for (const runs of [
+        [foreignRun],
+        [{ ...run, versionControlProvenance: [repository] }, foreignRun],
+      ]) {
+        const parsed = read(runs);
+        if (provider === "semgrep")
+          await expect(parsed).rejects.toThrow("does not match");
+        else
+          expect((await parsed).sourceRepositories).toContainEqual({
+            url: foreignUrl,
+          });
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
   },
 );
