@@ -1664,6 +1664,53 @@ def test_canceled_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path)
     assert coverage["surfaces"][0]["notes"] == "Reducer-validated merged evidence."
 
 
+def test_stopped_scan_recovers_latest_numbered_iteration_after_upgrade(tmp_path: Path) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    first_id, first = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    legacy_id, legacy = running_standard_reducer(
+        state_dir, codex_home, scan_dir, scan_id, first_id, name="dedup-0001"
+    )
+    legacy.write_text(first.read_text())
+    write_checkpoint(legacy.parent / "checkpoints", json.loads(legacy.read_text()))
+    seal_legacy_reducer(state_dir, scan_id, legacy_id, str(legacy), "0")
+
+    worker_id, _ = accepted_standard_worker(
+        state_dir, codex_home, scan_dir, scan_id, name="second-worker"
+    )
+    finding = standard_finding(tmp_path, scan_id, target)
+    finding["provenance"]["deepScanRepairGroups"] = [{"order": 0, "sources": [f"{worker_id}:1"]}]
+    _, _, result = worker_paths(scan_dir, "dedup-0002")
+    model = {"summary": "The most recent scan found another trust boundary."}
+    result.write_text(json.dumps({"scanId": scan_id, "findings": [finding], "threatModel": model}))
+    scan_command(
+        state_dir,
+        "record-deep-scan-iteration",
+        scan_id,
+        "--worker-id",
+        str(uuid.UUID(int=1)),
+        "--result-manifest-path",
+        str(result),
+        "--input-worker-id",
+        worker_id,
+        "--no-new-streak",
+        "0",
+        "--consecutive-errors",
+        "0",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_workers SET completed_at = ? WHERE scan_id = ? AND kind = 'dedup'",
+            ("2026-10-27T00:00:00Z", scan_id),
+        )
+    fail_deep_scan(state_dir, codex_home, scan_id)
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"] == model
+    retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 1
+    assert retained[0]["summary"] == finding["summary"]
+    assert "deepScanRepairGroups" not in retained[0]["provenance"]
+    assert json.loads(result.read_text())["findings"] == [finding]
+
+
 def test_archived_reducer_checkpoint_supersedes_discovery_result(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     worker_id, worker_result = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)

@@ -36,7 +36,10 @@ import {
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
-import type { DeepScanRunState } from "./src/deep-scan/types.js";
+import type {
+  DeepScanLogEvent,
+  DeepScanRunState,
+} from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
@@ -2360,20 +2363,7 @@ function deepScanTerminalResult(
   return undefined;
 }
 
-function logDeepScanEvent(event: {
-  event: string;
-  scanId: string;
-  workerId?: string;
-  kind?: string;
-  attempt?: number;
-  count?: number;
-  completed?: number;
-  newFindings?: number;
-  pass?: number;
-  reason?: string;
-  threadId?: string;
-  total?: number;
-}): void {
+function logDeepScanEvent(event: DeepScanLogEvent): void {
   console.error(
     JSON.stringify({ component: "codex_security_deep_scan", ...event }),
   );

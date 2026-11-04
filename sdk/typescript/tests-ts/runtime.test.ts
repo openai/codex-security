@@ -188,6 +188,35 @@ function inspectWindowsTestAcl(
   );
 }
 
+function grantReadToEveryone(...credentials: string[]) {
+  const sid = windowsUserSid();
+  for (const credential of credentials) {
+    const grant = windowsTestCommand("icacls.exe", [
+      credential,
+      "/inheritance:r",
+      "/grant:r",
+      `*${sid}:F`,
+      "*S-1-1-0:R",
+    ]);
+    expect(grant.status, grant.stderr).toBe(0);
+  }
+}
+
+function expectNoEveryoneGrant(credential: string) {
+  const inspection = inspectWindowsTestAcl(
+    [
+      "$ErrorActionPreference = 'Stop'",
+      '$env:PSModulePath = "$PSHOME\\Modules"',
+      "$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+      "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+      "$everyone.Count",
+    ],
+    { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: credential },
+  );
+  expect(inspection.status, inspection.stderr).toBe(0);
+  expect(inspection.stdout.trim()).toBe("0");
+}
+
 function windowsCredentialAclOutput(descriptors: readonly string[]): string {
   return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
 }
@@ -3684,7 +3713,9 @@ describe("runtime directories and plugin Python boundary", () => {
         : missing && !pathNotFound
           ? "NotSpecified"
           : "ObjectNotFound";
-    const failurePath = kind.endsWith("home") ? home : descendant;
+    const failurePath = kind.endsWith("home")
+      ? home
+      : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
     const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     const marker = "function Write-CredentialAcl($path) {";
@@ -5171,18 +5202,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(auth, '{"token":"synthetic-root"}\n');
       await writeFile(nestedAuth, '{"token":"synthetic-nested"}\n');
 
-      const sid = windowsUserSid();
-
-      for (const credential of [auth, nestedAuth]) {
-        const unsafe = windowsTestCommand("icacls.exe", [
-          credential,
-          "/inheritance:r",
-          "/grant:r",
-          `*${sid}:F`,
-          "*S-1-1-0:R",
-        ]);
-        expect(unsafe.status).toBe(0);
-      }
+      grantReadToEveryone(auth, nestedAuth);
 
       expect(
         await prepareCodexSecurityCredentialHome({
@@ -5190,22 +5210,29 @@ describe("runtime directories and plugin Python boundary", () => {
         }),
       ).toBe(await realpath(home));
 
-      const inspection = inspectWindowsTestAcl(
-        [
-          "$paths = @($env:CODEX_SECURITY_TEST_AUTH_PATH, $env:CODEX_SECURITY_TEST_NESTED_AUTH_PATH)",
-          "$unexpected = @($paths | ForEach-Object { $acl = Get-Acl -LiteralPath $_; $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' } })",
-          "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
-        ],
-        {
-          ...process.env,
-          CODEX_SECURITY_TEST_AUTH_PATH: auth,
-          CODEX_SECURITY_TEST_NESTED_AUTH_PATH: nestedAuth,
-        },
-      );
-      expect(inspection.status).toBe(0);
-      expect(JSON.parse(inspection.stdout)).toEqual({ unexpected: 0 });
+      expectNoEveryoneGrant(auth);
+      expectNoEveryoneGrant(nestedAuth);
       expect(await readFile(auth, "utf8")).toContain("synthetic-root");
       expect(await readFile(nestedAuth, "utf8")).toContain("synthetic-nested");
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "repairs an unsafe ACL on a Windows credential file beyond MAX_PATH",
+    async () => {
+      const { home } = await credentialHome(true);
+      const nested = win32.toNamespacedPath(
+        join(home, "sessions", "a".repeat(130), "b".repeat(130)),
+      );
+      await mkdir(nested, { recursive: true });
+      const credential = join(nested, "credentials.json");
+      await writeFile(credential, '{"token":"synthetic-nested"}\n');
+
+      grantReadToEveryone(credential);
+      await requireSecureCredentialHome(home);
+
+      expectNoEveryoneGrant(credential);
+      expect(await readFile(credential, "utf8")).toContain("synthetic-nested");
     },
   );
 
