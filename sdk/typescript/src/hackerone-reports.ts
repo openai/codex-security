@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
   link,
   mkdir,
   open,
@@ -97,7 +98,6 @@ function project(raw: unknown, program: string, report: string) {
   };
 }
 
-// Report detail may include free text and attachment metadata. Bound it before decoding.
 async function readDetail(
   response: Response,
   report: string,
@@ -108,25 +108,9 @@ async function readDetail(
       `HackerOne could not read report ${report} (HTTP ${response.status}).`,
     );
   }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
+  const contents = await response.text();
   try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > 2 * 1024 * 1024) {
-        await reader.cancel();
-        throw new Error(`Report ${report} exceeds the 2 MiB detail limit.`);
-      }
-      chunks.push(chunk.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(contents);
   } catch {
     throw new Error(`Report ${report} did not contain a JSON response.`);
   }
@@ -193,7 +177,10 @@ export async function exportHackerOneReports(options: {
   const staging = join(parent, `.hackerone-${randomUUID()}`);
   if (process.platform === "win32")
     await createWindowsOutputDirectory(staging, false);
-  else await mkdir(staging, { mode: 0o700 });
+  else {
+    await mkdir(staging, { mode: 0o700 });
+    if ((process.umask() & 0o700) !== 0) await chmod(staging, 0o700);
+  }
   const temp = join(staging, "reports.json");
   let createdFile = false;
   let warning: string | undefined;
@@ -203,6 +190,8 @@ export async function exportHackerOneReports(options: {
     const file = await open(temp, "wx", 0o600);
     createdFile = true;
     try {
+      if (process.platform !== "win32" && (process.umask() & 0o600) !== 0)
+        await file.chmod(0o600);
       await file.writeFile(JSON.stringify(contents) + "\n");
     } finally {
       await file.close();

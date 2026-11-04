@@ -112,6 +112,7 @@ test("an invalid or inaccessible second report leaves no partial export", async 
       report("7102", "11", "a".repeat(513)),
       report("7102", "11", "bad\0title"),
       new Response(null, { status: 403 }),
+      new Response("invalid JSON"),
     ]) {
       await expect(
         exportHackerOneReports({
@@ -153,6 +154,59 @@ test.skipIf(process.platform === "win32")(
       expect(await readdir(dir)).toEqual([]);
     } finally {
       await chmod(dir, 0o700);
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("projects a report with a large activity history without exporting it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "h1-export-"));
+  try {
+    const data = await report("7101", "11").json();
+    data.data.relationships.activities = {
+      data: Array.from({ length: 260 }, () => ({
+        attributes: { message: "x".repeat(8 * 1024) },
+      })),
+    };
+    const output = join(dir, "reports.json");
+    await exportHackerOneReports({
+      programId: "11",
+      reportIds: "7101",
+      output,
+      environment: credentials,
+      fetch: async () => Response.json(data),
+    });
+    const contents = await readFile(output, "utf8");
+    expect(JSON.parse(contents).reports).toHaveLength(1);
+    expect(JSON.parse(contents).reports[0].title).toBe("Example title");
+    expect(contents).not.toContain("activities");
+    expect(contents).not.toContain("x".repeat(1024));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32").each([0o400, 0o700])(
+  "keeps private exports readable and staging traversable under umask %i",
+  async (umask) => {
+    const dir = await mkdtemp(join(tmpdir(), "h1-export-"));
+    const previousUmask = process.umask(umask);
+    try {
+      const output = join(dir, "reports.json");
+      await exportHackerOneReports({
+        programId: "11",
+        reportIds: "7101",
+        output,
+        environment: credentials,
+        fetch: async () => report("7101", "11"),
+      });
+      expect((await stat(output)).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await readFile(output, "utf8")).reports).toHaveLength(
+        1,
+      );
+      expect(await readdir(dir)).toEqual(["reports.json"]);
+    } finally {
+      process.umask(previousUmask);
       await rm(dir, { recursive: true, force: true });
     }
   },

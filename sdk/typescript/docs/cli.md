@@ -2258,13 +2258,13 @@ Export saved findings and threat models without rerunning a scan or signing in.
 
 ### Export selected HackerOne reports
 
-With the existing external-imports setting enabled, `hackerone export` saves report fields to a new local file. Set `HACKERONE_API_USERNAME` to the Customer API token identifier and `HACKERONE_API_TOKEN` to its value in the command environment. Use a token authorized for the selected program. Keep credentials out of command arguments.
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `hackerone export`, which saves report fields to a new local file. Set `HACKERONE_API_USERNAME` to the Customer API token identifier and `HACKERONE_API_TOKEN` to its value in the command environment. Use a token authorized for the selected program. Keep credentials out of command arguments.
 
 ```sh
 codex-security hackerone export --program-id 11 --report-ids 7101,7102 --output reports.json
 ```
 
-Supply 1–100 distinct report IDs from one program. The file includes the source IDs, title, state and available severity, timestamps, CVEs and scope metadata. It excludes report bodies, identities, attachments and credentials. If any report is unavailable or belongs to another program, the command writes no file. It preserves existing files. If your import UI provided a capture ticket before collection, pass its text file with `--capture PATH` to bind the export to that capture. This command only creates the local file.
+Supply 1–100 distinct report IDs from one program. The file includes the source IDs, title, state and available severity, timestamps, CVEs and scope metadata. It excludes report bodies, reporter identity fields, attachments and credentials. Titles are retained verbatim and may contain personal or sensitive information; review the file before sharing it. If any report is unavailable or belongs to another program, the command writes no file. It preserves existing files. If your import UI provided a capture ticket before collection, pass its text file with `--capture PATH` to bind the export to that capture. This command only creates the local file.
 
 ### Export findings
 
