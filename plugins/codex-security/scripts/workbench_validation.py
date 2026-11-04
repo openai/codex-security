@@ -27,6 +27,7 @@ reject_non_finite_json = finalizer._reject_non_finite_json
 
 
 def read_json_object(path: Path) -> dict[str, Any]:
+    """Read a UTF-8 JSON object from path, raising SystemExit on read errors, malformed JSON, or another top-level type."""
     try:
         payload = json.loads(
             path.read_text(encoding="utf-8"),
@@ -53,6 +54,7 @@ def timestamp_key(value: str) -> datetime:
 
 
 def require_uuid(value: str, label: str) -> str:
+    """Return the standard hyphenated UUID text or raise SystemExit using label to identify the invalid argument."""
     try:
         return str(uuid.UUID(value))
     except ValueError as exc:
@@ -67,6 +69,7 @@ path_within_scope = finalizer.path_within_scope
 
 
 def require_close_note(close_reason: str | None, note: str | None) -> None:
+    """Require a note when closing a finding as a false positive or when declining a fix."""
     if note is None and close_reason == "false_positive":
         raise SystemExit("Explain why this finding is a false positive.")
     if note is None and close_reason == "wont_fix":
@@ -218,6 +221,11 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 
 
 def parse_scan_cost(value: str | None) -> str | None:
+    """Return compact JSON for valid measured usage or a legacy cost estimate.
+
+    None means cost data was omitted. Invalid JSON, nonfinite numbers, or an
+    unsupported cost record raise SystemExit.
+    """
     if value is None:
         return None
     try:
@@ -240,11 +248,13 @@ def parse_scan_cost(value: str | None) -> str | None:
 
 
 def bounded_output_text(value: Any, maximum_bytes: int) -> str:
+    """Return the prefix of the stringified value that fits in maximum_bytes of UTF-8 without splitting a character."""
     encoded = str(value).encode("utf-8")[:maximum_bytes]
     return encoded.decode("utf-8", errors="ignore")
 
 
 def require_occurrence(connection: sqlite3.Connection, occurrence_id: str) -> sqlite3.Row:
+    """Return the finding occurrence row or raise SystemExit if its ID is missing or unknown."""
     occurrence_id = optional_text(occurrence_id, maximum=256)
     if occurrence_id is None:
         raise SystemExit("occurrence-id is required.")

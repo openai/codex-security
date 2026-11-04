@@ -11463,17 +11463,19 @@ function scanFailureMessage(
       : nativeRefreshRecovery;
   const detail =
     error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
-  if (
-    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
-      message,
-    )
-  ) {
+  const refreshFailure = message.match(
+    /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu,
+  );
+  if (refreshFailure) {
+    const recovery =
+      refreshFailure[1]?.toLowerCase() === "was already used"
+        ? "The refresh token was already used. Run"
+        : "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. Otherwise run";
     return (
       detail +
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
       "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
-      "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
-      "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
+      `${recovery} 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'.`
     );
   }
   switch (classification) {

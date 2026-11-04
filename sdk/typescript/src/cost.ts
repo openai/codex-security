@@ -1,4 +1,6 @@
-import { parseJson } from "./value.js";
+import { isSafeNonNegativeInteger, parseJson } from "./value.js";
+import type { JsonObject } from "./config.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 import { createHash } from "node:crypto";
 import {
   lstat,
@@ -38,6 +40,67 @@ import {
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
+
+export async function readScanBudgetUsage(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanId: string,
+  threadId: string,
+  validationThreadId?: string,
+  requireWorkerUsage = false,
+) {
+  const result = await workbench(
+    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
+  );
+  const counts = {
+    input_tokens: result["inputTokens"],
+    cached_input_tokens: result["cachedInputTokens"],
+    cache_write_input_tokens: result["cacheWriteInputTokens"],
+    output_tokens: result["outputTokens"],
+    reasoning_output_tokens: result["reasoningOutputTokens"],
+  };
+  const usage = Object.values(counts).every(Number.isSafeInteger)
+    ? tokenUsage(counts)
+    : null;
+  const scope = result["coverageScope"];
+  const ownership = {
+    ...(isSafeNonNegativeInteger(result["threadCount"])
+      ? { threadCount: result["threadCount"] }
+      : {}),
+    ...(isSafeNonNegativeInteger(result["missingThreadCount"])
+      ? { missingThreadCount: result["missingThreadCount"] }
+      : {}),
+    ...(Array.isArray(scope) &&
+    scope.every((item): item is string => typeof item === "string")
+      ? { coverageScope: scope }
+      : {}),
+  };
+  const roles = result["byRole"];
+  const workers = isRecord(roles) ? roles["workers"] : undefined;
+  const coverage = result["coverage"];
+  if (
+    (coverage !== "complete" && coverage !== "partial") ||
+    usage === null ||
+    usage.total_tokens !== result["totalTokens"]
+  )
+    return { ...ownership, usage: null, complete: false };
+
+  const hasWorkers =
+    isRecord(workers) &&
+    typeof workers["threadCount"] === "number" &&
+    workers["threadCount"] > 0;
+  return {
+    ...ownership,
+    // Older workbenches sum cache writes without tracking omitted counters.
+    usage:
+      result["cacheWriteInputTokensReported"] === true
+        ? usage
+        : { ...usage, cache_write_input_tokens_reported: false },
+    complete: coverage === "complete" && (!requireWorkerUsage || hasWorkers),
+    ...(requireWorkerUsage && !hasWorkers
+      ? { missingThreadCount: Math.max(1, ownership.missingThreadCount ?? 0) }
+      : {}),
+  };
+}
 
 export interface ScanAccountRateLimitWindow {
   readonly usedPercent: number;
@@ -269,6 +332,9 @@ interface ScanCostTrackerOptions {
   /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
   workerReceipts?: { directory: string; scanId: string };
   maxCostUsd?: number;
+  readBudgetUsage?: (
+    threadId: string,
+  ) => ReturnType<typeof readScanBudgetUsage>;
   expectedFilesTotal?: number;
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
   onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
@@ -280,6 +346,7 @@ interface ScanCostTrackerOptions {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
+  onObservationError?: (error: unknown) => void;
 }
 
 export interface ScanUsageMeasurement {
@@ -356,6 +423,7 @@ function createSessionUsage(observeUsage: boolean) {
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
+  #lastBudgetPoll = -Infinity;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workerReceipts = new Map<string, WorkerReceipt>();
@@ -2284,7 +2352,7 @@ export class ScanCostTracker {
         return;
       }
       polling = true;
-      void this.refresh()
+      void this.refresh(true)
         .catch((error: unknown) => {
           this.#options.onError?.(error);
         })
@@ -2301,10 +2369,10 @@ export class ScanCostTracker {
     poll();
   }
 
-  public async refresh(): Promise<ScanCostSnapshot> {
+  public async refresh(polling = false): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
       try {
-        await this.#readSessions();
+        await this.#refreshUsage(polling);
       } catch (error) {
         const previous = this.#snapshot.measurement;
         this.#setSnapshot(
@@ -2323,6 +2391,36 @@ export class ScanCostTracker {
     return this.#snapshot;
   }
 
+  async #refreshUsage(polling: boolean): Promise<void> {
+    const { readBudgetUsage } = this.#options;
+    if (readBudgetUsage === undefined) return this.#readSessions();
+    if (this.#threadId === null) return;
+    if (
+      this.#options.onActivity ||
+      this.#options.onProgress ||
+      this.#options.onWorkerEvent ||
+      this.#options.onSessionEvent ||
+      this.#options.onUsageObservation
+    ) {
+      await this.#readSessions().catch((error) =>
+        this.#options.onObservationError?.(error),
+      );
+    }
+    // Reading the indexed graph is more expensive than tailing session activity.
+    // Always get fresh usage when stopping, even after a recent live poll.
+    if (polling && performance.now() - this.#lastBudgetPoll < 1_000) return;
+    const measured = await readBudgetUsage(this.#threadId);
+    this.#lastBudgetPoll = performance.now();
+    this.#updateCost(
+      measured.usage,
+      measured.complete,
+      measured.threadCount ?? (measured.usage === null ? 0 : 1),
+      measured.missingThreadCount ??
+        (measured.complete || measured.coverageScope !== undefined ? 0 : 1),
+      measured.coverageScope,
+    );
+  }
+
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
@@ -2333,6 +2431,7 @@ export class ScanCostTracker {
       this.#observingWorkers = false;
     }
     if (
+      this.#options.readBudgetUsage ||
       this.#receipts.size > 0 ||
       this.#snapshot.measurement.usage !== null ||
       this.#snapshot.measurement.missingThreadCount > 0
@@ -2689,32 +2788,25 @@ export class ScanCostTracker {
       missingThreadCount = Math.max(1, missingThreadCount);
     const complete = missingThreadCount === 0 && usage !== null;
     if (observeUsage) this.#reportUsageObservation(usages, complete);
-    const cost = estimateScanCost(this.#options.model, usage);
-    this.#setSnapshot(
-      usage,
-      cost,
-      complete,
-      threadCount,
-      missingThreadCount,
-      collectionErrors.length === 0
-        ? [
-            ...[...included].map((id) => `thread:${id}`),
-            ...[...workerReceipts.attemptIds].map(
-              (id) => `worker-attempt:${id}`,
-            ),
-          ].sort()
-        : undefined,
-    );
-    if (complete) {
-      this.#reportUsage(usage);
-    }
-    // A blocking read leaves a native-only subtotal unconfirmed until the retry.
-    if (
-      blockingReadError === undefined ||
-      this.#receipts.size > 0 ||
-      workerReceipts.usages.size > 0
-    )
-      this.#reportCost(cost, complete);
+    if (this.#options.readBudgetUsage === undefined)
+      this.#updateCost(
+        usage,
+        complete,
+        threadCount,
+        missingThreadCount,
+        collectionErrors.length === 0
+          ? [
+              ...[...included].map((id) => `thread:${id}`),
+              ...[...workerReceipts.attemptIds].map(
+                (id) => `worker-attempt:${id}`,
+              ),
+            ].sort()
+          : undefined,
+        // A blocking read leaves a native-only subtotal unconfirmed until the retry.
+        blockingReadError === undefined ||
+          this.#receipts.size > 0 ||
+          workerReceipts.usages.size > 0,
+      );
     // Preserve measured usage and every diagnostic when several logs fail together.
     if (collectionErrors.length === 1) throw collectionErrors[0];
     if (collectionErrors.length > 1)
@@ -2722,6 +2814,27 @@ export class ScanCostTracker {
         collectionErrors,
         collectionErrors.map(errorMessage).join("\n"),
       );
+  }
+
+  #updateCost(
+    usage: ScanTokenUsage | null,
+    complete: boolean,
+    threadCount: number,
+    missingThreadCount: number,
+    coverageScope?: string[],
+    reportCost = true,
+  ): void {
+    const cost = estimateScanCost(this.#options.model, usage);
+    this.#setSnapshot(
+      usage,
+      cost,
+      complete,
+      threadCount,
+      missingThreadCount,
+      coverageScope,
+    );
+    if (complete) this.#reportUsage(usage);
+    if (reportCost) this.#reportCost(cost, complete);
   }
 
   #setSnapshot(

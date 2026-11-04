@@ -11,6 +11,8 @@ from typing import NamedTuple
 
 
 class SourceCase(NamedTuple):
+    """Pair the original and modified contents of one repository-relative file for inventory and ranking tests."""
+
     path: str
     before: str
     after: str

@@ -1,3 +1,5 @@
+"""Exercise filtering, pagination, and latest-scan selection in finding and repository indexes."""
+
 from __future__ import annotations
 
 import ntpath

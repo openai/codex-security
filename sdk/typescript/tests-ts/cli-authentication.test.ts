@@ -1045,9 +1045,14 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain(
           "API key is selected for model authentication",
         );
-        expect(stderr.text()).toContain(
-          "npx @openai/codex-security login status",
-        );
+        if (detail.includes("was already used")) {
+          expect(stderr.text()).toContain("refresh token was already used");
+          expect(stderr.text()).not.toContain("login status");
+        } else {
+          expect(stderr.text()).toContain(
+            "npx @openai/codex-security login status",
+          );
+        }
         expect(stderr.text()).toContain(
           "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
         );
