@@ -877,10 +877,13 @@ describe("patch change tracking", () => {
           ? `--upload-pack=${commandPath(process.execPath)} ${commandPath(script)} ${commandPath(marker)}`
           : secondary,
       );
+      const environment: NodeJS.ProcessEnv = {};
       const uploadTrace = join(directory, ".git", "transport-trace");
       if (destination === "uploadpack") {
         const transportDirectory = await fixtures.create("patch-transport-");
         const transport = join(transportDirectory, "transport.cjs");
+        const config = join(transportDirectory, "operator.gitconfig");
+        environment["GIT_CONFIG_GLOBAL"] = config;
         await writeFile(
           transport,
           `
@@ -894,14 +897,17 @@ process.exit(result.status ?? 1);
         for (const operation of ["upload", "receive"])
           git(
             "config",
+            "--file",
+            config,
             `remote.origin.${operation}pack`,
             `${commandPath(process.execPath)} ${commandPath(transport)} ${operation}-pack`,
           );
         git("config", "--unset-all", "remote.origin.pushurl");
         git("config", "--add", "remote.origin.pushurl", `${remote}.logical`);
         git("config", "--add", "remote.origin.pushurl", `${secondary}.logical`);
-        git("push", "origin", "HEAD:refs/heads/native-control");
-        git("ls-remote", "origin");
+        const include = `include.path=${config}`;
+        git("-c", include, "push", "origin", "HEAD:refs/heads/native-control");
+        git("-c", include, "ls-remote", "origin");
         await writeFile(uploadTrace, "");
       }
       if (destination.startsWith("legacy-")) {
@@ -931,6 +937,7 @@ process.exit(result.status ?? 1);
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
+          environment,
           result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
@@ -938,7 +945,11 @@ process.exit(result.status ?? 1);
             if (command === "git") {
               const execution = promisify(execFile)("git", [...args], {
                 cwd: options?.directory ?? cwd,
-                env: { ...process.env, ...options?.environment },
+                env: {
+                  ...process.env,
+                  ...environment,
+                  ...options?.environment,
+                },
                 maxBuffer: options?.maxBuffer,
                 encoding: options?.encoding === "base64" ? "buffer" : "utf8",
               });
