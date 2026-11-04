@@ -235,6 +235,15 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
+### Hugging Face compatibility
+
+The bundled Codex 0.166.0 scanner sends its scan-completion tool inside a
+`namespace` and can request `web_search`. Hugging Face's published Responses
+implementation accepts `function` and remote `mcp` tool declarations. A named
+Hugging Face scan provider is deferred until the scanner and router can exchange
+the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
+and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469a9f59ad16e2eb3a0d6f1c4de637a7b/src/schemas.ts#L219-L232).
+
 ### Amazon Bedrock
 
 Use AWS credentials and a region with access to the exact Bedrock model ID:
@@ -2354,8 +2363,9 @@ this repository and contains only the generated commands. Rerun `install-hook`
 with `--fail-on-severity` set to its original threshold. It recognizes the legacy
 `npx` hook and supported earlier templates with matching absolute Node and CLI
 paths. If it refuses to overwrite the verified hook, back it up, remove it and
-reinstall with the same threshold. Restore the backup if installation fails. The installer
-respects `core.hooksPath`.
+reinstall with the same threshold. Restore the backup if installation fails.
+The installer uses host Git for the selected repository and respects
+`core.hooksPath`.
 
 ## Import SonarQube Cloud issues
 

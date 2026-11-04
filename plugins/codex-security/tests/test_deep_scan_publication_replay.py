@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 _CRASH_PUBLICATION = """
 import json, os, runpy, sqlite3, sys
