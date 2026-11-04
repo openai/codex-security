@@ -19,10 +19,13 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     fail_deep_scan,
     preserve_scan_results,
+    read_review_state,
     run_workbench,
     saved_discovery_worker,
     saved_draft,
+    select_checkpoint,
     write_checkpoint,
+    write_result_draft,
 )
 
 
@@ -55,6 +58,21 @@ def setup_workbench(monkeypatch, workbench_api):
     return run
 
 
+def saved_finding(title, **fields):
+    return {
+        "ruleId": "fixture.review",
+        "title": title,
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+        **fields,
+    }
+
+
 def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: dict):
     output = root / worker_id
     checkpoints = output / "checkpoints"
@@ -63,9 +81,7 @@ def save_worker(root: Path, module, worker_id: str, drafts: list[dict], result: 
         path = checkpoints / f"{module._digest(draft)}.json"
         path.write_text(json.dumps(draft))
         os.utime(path, ns=(index * 100, index * 100))
-    result_path = output / "result.json"
-    result_path.write_text(json.dumps(result))
-    os.utime(result_path, ns=(1000, 1000))
+    write_result_draft(output / "result.json", result, mtime_ns=1000)
     return saved_discovery_worker(output, worker_id, 1)
 
 
@@ -105,18 +121,11 @@ def test_repeated_colliding_variant_keeps_its_assigned_identity(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "shared-review"},
-        "title": "First independent review",
-        "summary": "Synthetic evidence at the first location.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    first = saved_finding(
+        "First independent review",
+        identity={"anchor": "shared-review"},
+        summary="Synthetic evidence at the first location.",
+    )
     second = {
         **copy.deepcopy(first),
         "title": "Second independent review",
@@ -165,18 +174,10 @@ def test_repeated_colliding_variant_keeps_its_assigned_identity(
 def test_legacy_frozen_source_order_parent_context_remains_readable(
     tmp_path, saved_results, retain_roles
 ):
-    finding = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "review"},
-        "title": "Review",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    finding = saved_finding(
+        "Review",
+        identity={"anchor": "review"},
+    )
     write_saved_parent(tmp_path, saved_draft("identity-scan", findings=[finding]), 100)
     first = recover(tmp_path, saved_results, [])
     legacy_sources = dict(first[0]["scan"]["preservedSources"])
@@ -217,17 +218,10 @@ def test_malformed_coverage_does_not_interrupt_saved_evidence(
 
 
 def test_missing_parent_identity_is_identical_on_frozen_replay(tmp_path: Path, saved_results):
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review finding",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    finding = saved_finding(
+        "Synthetic review finding",
+        summary="Retain the saved result.",
+    )
     draft = saved_draft("identity-scan", findings=[finding])
     write_saved_parent(tmp_path, draft, 100)
     first = recover(tmp_path, saved_results, [])
@@ -247,26 +241,19 @@ def test_missing_parent_identity_reuses_established_checkpoint(
     from finalize_scan_contract import _recover_unsealed_findings
     from workbench_test_support import saved_binding
 
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review finding",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
-    checkpoint = write_checkpoint(
+    finding = saved_finding(
+        "Synthetic review finding",
+        summary="Retain the saved result.",
+    )
+    write_checkpoint(
         tmp_path / "checkpoints",
         saved_draft(
             "identity-scan",
             complete=True,
             findings=[{**finding, "identity": {"anchor": saved_anchor}}],
         ),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     if explicit_end_line:
         finding["locations"][0]["endLine"] = 1
     write_saved_parent(
@@ -298,9 +285,11 @@ def test_missing_parent_identity_reuses_established_checkpoint(
 
 @pytest.mark.parametrize("artifacts", ["omitted", None, []])
 @pytest.mark.parametrize("outcome", ["failed", "canceled"])
-def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, artifacts, outcome):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+def test_empty_artifact_envelope_remains_a_recoverable_draft(
+    tmp_path: Path, setup_workbench, artifacts, outcome
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     write_saved_parent(
         scan_dir,
         saved_draft(scan_id, deferred=[{"id": "review", "reason": "Review remains."}]),
@@ -359,28 +348,25 @@ def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, art
     assert manifest_path.read_bytes() == original
 
 
-def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(tmp_path: Path):
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    first = {
-        "ruleId": "fixture.review",
-        "identity": {"anchor": "first-review"},
-        "title": "First review",
-        "summary": "Earlier synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "app.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(
+    tmp_path: Path, setup_workbench
+):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
+    first = saved_finding(
+        "First review",
+        identity={"anchor": "first-review"},
+        summary="Earlier synthetic evidence.",
+        locations=[{"path": "app.py", "startLine": 1}],
+    )
     write_saved_parent(scan_dir, saved_draft(scan_id, findings=[first], complete=True), 100)
     revised = {**first, "title": "Revised review", "summary": "Revised synthetic evidence."}
     del revised["identity"]
-    checkpoint = write_checkpoint(
-        scan_dir / "checkpoints", saved_draft(scan_id, findings=[revised], complete=True)
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[revised], complete=True),
+        mtime_ns=200,
     )
-    os.utime(checkpoint, ns=(200, 200))
     fail_deep_scan(state, codex_home, scan_id)
     findings_path = scan_dir / "findings.json"
     findings = json.loads(findings_path.read_text())["findings"]
@@ -440,11 +426,9 @@ def test_torn_worker_closure_reuses_observed_legacy_identity(
             closures=[{"id": identity, "reason": "Review completed."}],
             complete=True,
         ),
+        mtime_ns=1100,
     )
-    os.utime(checkpoint, ns=(1100, 1100))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
-    os.utime(head, ns=(1200, 1200))
+    select_checkpoint(output, checkpoint, mtime_ns=1200)
     originals = {path: path.read_bytes() for path in output.rglob("*.json")}
     result = recover(tmp_path, saved_results, [worker, other])
     replay = recover(
@@ -474,7 +458,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     preserve_scan_results(
         state, scan_id, "standard-worker-thread", environment={"CODEX_HOME": str(codex_home)}
     )
-    return prepared_coverage[0], json.loads((scan_dir / "coverage.json").read_text())
+    return prepared_coverage[0], read_review_state(state, scan_dir)
 
 
 @pytest.mark.parametrize("named_history", [False, True])
@@ -575,21 +559,23 @@ def test_accepted_generic_update_keeps_its_id_in_frozen_recovery(tmp_path: Path,
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-def test_unsafe_deferred_update_keeps_the_earlier_valid_path(tmp_path: Path) -> None:
-    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+def test_unsafe_deferred_update_keeps_the_earlier_valid_path(
+    tmp_path: Path, setup_workbench
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
-    checkpoint = write_checkpoint(
-        result.parent / "checkpoints", saved_draft(scan_id, deferred=[original])
+    write_checkpoint(
+        result.parent / "checkpoints",
+        saved_draft(scan_id, deferred=[original]),
+        mtime_ns=100,
     )
-    os.utime(checkpoint, ns=(100, 100))
     update = {**original, "paths": ["../outside.py"]}
-    result.write_text(json.dumps(saved_draft(scan_id, deferred=[update])))
-    os.utime(result, ns=(200, 200))
+    write_result_draft(result, saved_draft(scan_id, deferred=[update]), mtime_ns=200)
 
     fail_deep_scan(state, codex_home, scan_id, deep_status="failed")
 
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state, scan_dir)
     assert [row["paths"] for row in coverage["deferred"] if "paths" in row] == [["app.py"]]
     warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
     assert any("expected a safe repository-relative POSIX path" in warning for warning in warnings)
@@ -667,9 +653,7 @@ def test_new_work_survives_accepted_candidate_rejection(
         for index, checkpoint in enumerate(checkpoints, 1):
             os.utime(checkpoint, ns=(index * 100, index * 100))
     os.utime(checkpoints[2], ns=(raw_modified, raw_modified))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[1].name}))
-    os.utime(head, ns=(200, 200))
+    select_checkpoint(output, checkpoints[1], mtime_ns=200)
     documents = recover(tmp_path, saved_results, workers)
     replay = recover(tmp_path, saved_results, workers, documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
@@ -746,21 +730,18 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     ]
     for index, checkpoint in enumerate(checkpoints, 1):
         os.utime(checkpoint, ns=(index * 100, index * 100))
-    result_path.write_text(json.dumps(accepted))
-    os.utime(result_path, ns=(200, 200))
+    write_result_draft(result_path, accepted, mtime_ns=200)
     # The terminal checkpoint survives a failed replacement of result.json.
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[2 if rejected_here else 1].name}))
+    head = select_checkpoint(result_path.parent, checkpoints[2 if rejected_here else 1])
     observed = 300 if rejected_here else 200
     os.utime(head, ns=(observed, observed))
     if outcome == "other_worker":
         other_worker_id, other_result = accepted_standard_worker(
             state, codex_home, scan_dir, scan_id, name="other-worker", run=setup_workbench
         )
-        other_result.write_text(
-            json.dumps(saved_draft(scan_id, surfaces=[rejection], complete=True))
+        write_result_draft(
+            other_result, saved_draft(scan_id, surfaces=[rejection], complete=True), mtime_ns=200
         )
-        os.utime(other_result, ns=(200, 200))
 
     first_coverage, recovered = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
@@ -855,11 +836,8 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     ]
     for index, checkpoint in enumerate(checkpoints, 1):
         os.utime(checkpoint, ns=(index * 100, index * 100))
-    result_path.write_text(json.dumps(initial))
-    os.utime(result_path, ns=(100, 100))
-    head = result_path.parent / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[0].name}))
-    os.utime(head, ns=(100, 100))
+    write_result_draft(result_path, initial, mtime_ns=100)
+    select_checkpoint(result_path.parent, checkpoints[0], mtime_ns=100)
     if close_first:
         first_id = split[0]["id"] if explicit_ids else saved_results._saved_coverage_id(split[0])
         terminal = saved_draft(
@@ -867,10 +845,10 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
             closures=[{"id": first_id, "reason": "First path reviewed."}],
             complete=True,
         )
-        terminal_checkpoint = write_checkpoint(result_path.parent / "checkpoints", terminal)
-        os.utime(terminal_checkpoint, ns=(300, 300))
-        head.write_text(json.dumps({"checkpoint": terminal_checkpoint.name}))
-        os.utime(head, ns=(300, 300))
+        terminal_checkpoint = write_checkpoint(
+            result_path.parent / "checkpoints", terminal, mtime_ns=300
+        )
+        select_checkpoint(result_path.parent, terminal_checkpoint, mtime_ns=300)
         if explicit_ids:
             expected_ids.remove(first_id)
     first_coverage, replay = cancel_and_preserve(
@@ -938,11 +916,8 @@ def test_unnamed_observation_does_not_replace_saved_context(
     accepted_index = 1 if observation == "explicit-update" else 0
     observed = (accepted_index + 1) * 100
     if layout == "worker":
-        result_path.write_text(json.dumps(accepted))
-        os.utime(result_path, ns=(observed, observed))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": checkpoints[accepted_index].name}))
-    os.utime(head, ns=(observed, observed))
+        write_result_draft(result_path, accepted, mtime_ns=observed)
+    select_checkpoint(output, checkpoints[accepted_index], mtime_ns=observed)
     first_coverage, replay = cancel_and_preserve(
         monkeypatch, saved_results, state, codex_home, scan_dir, scan_id
     )
@@ -1010,17 +985,11 @@ def test_legacy_summary_stays_pending_after_an_explicit_closure(
 def test_worker_local_candidates_remain_distinct_on_frozen_recovery(
     tmp_path, saved_results, same_title
 ):
-    finding = {
-        "ruleId": "fixture.review",
-        "title": "First review",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-    }
+    finding = saved_finding(
+        "First review",
+        summary="Retain the saved result.",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+    )
     workers = [
         save_worker(
             tmp_path,
@@ -1051,19 +1020,12 @@ def test_recovery_finalization_coalesces_repeated_authored_reports(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Existing report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "shared"},
-        "extensions": {"reportId": "report-1"},
-    }
+    first = saved_finding(
+        "Existing report",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "shared"},
+        extensions={"reportId": "report-1"},
+    )
     latest = (
         {
             **first,
@@ -1094,18 +1056,12 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Existing report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 2}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "shared"},
-    }
+    first = saved_finding(
+        "Existing report",
+        locations=[{"path": "src/example.py", "startLine": 2}],
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "shared"},
+    )
     independent = {
         **first,
         "title": "Independent report",
@@ -1125,12 +1081,9 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
     ]
     output = tmp_path / "reviewer"
     for sequence, draft in enumerate(drafts, 1):
-        path = write_checkpoint(output / "checkpoints", draft)
-        os.utime(path, ns=(sequence * 1_000_000_000, sequence * 1_000_000_000))
+        write_checkpoint(output / "checkpoints", draft, mtime_ns=sequence * 1_000_000_000)
     if saved_result:
-        result = output / "result.json"
-        result.write_text(json.dumps(drafts[-1]))
-        os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+        write_result_draft(output / "result.json", drafts[-1], mtime_ns=3_000_000_000)
     worker = saved_discovery_worker(output, "reviewer")
     sources = {path: path.read_bytes() for path in output.rglob("*.json")}
     documents = recover(tmp_path, saved_results, [worker])
@@ -1167,18 +1120,11 @@ def test_recovery_finalization_preserves_distinct_reports_at_a_revised_location(
 def test_worker_report_metadata_enrichment_matches_published_identity(
     tmp_path, saved_results, metadata, identifier
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic report",
-        "summary": "Retain the saved result.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-        "extensions": {identifier: "report-1"},
-    }
+    first = saved_finding(
+        "Synthetic report",
+        summary="Retain the saved result.",
+        extensions={identifier: "report-1"},
+    )
     second = {**first, metadata: {**first[metadata], "candidateId": "candidate-1"}}
     drafts = [saved_draft("identity-scan", findings=[value]) for value in (first, second)]
     worker = save_worker(tmp_path, saved_results, "reviewer", drafts, drafts[1])
@@ -1197,17 +1143,7 @@ def test_worker_report_metadata_enrichment_matches_published_identity(
 def test_parent_represents_worker_versions_before_candidate_enrichment(
     tmp_path, saved_results, metadata
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-    }
+    first = saved_finding("Synthetic review")
     latest = {**first, metadata: {**first.get(metadata, {}), "candidateId": "candidate-1"}}
     reduced = {
         **latest,
@@ -1233,10 +1169,8 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
     output.mkdir()
     draft = {"scanId": "identity-scan", "complete": True, "findings": [reduced]}
     result = output / "result.json"
-    result.write_text(json.dumps(draft))
-    os.utime(result, ns=(1500, 1500))
-    checkpoint = write_checkpoint(output / "checkpoints", draft)
-    os.utime(checkpoint, ns=(1500, 1500))
+    write_result_draft(result, draft, mtime_ns=1500)
+    write_checkpoint(output / "checkpoints", draft, mtime_ns=1500)
     reducer = {
         "id": "reducer",
         "kind": "dedup",
@@ -1264,18 +1198,12 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
 def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     tmp_path, saved_results, reversed_rows, revised_identity, preserve_reduction
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic first review",
-        "summary": "Original first evidence.",
-        "identity": {"anchor": "shared-review", "instance": "first"},
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-    }
+    first = saved_finding(
+        "Synthetic first review",
+        summary="Original first evidence.",
+        identity={"anchor": "shared-review", "instance": "first"},
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+    )
     sibling = {
         **{key: value for key, value in first.items() if key != "identity"},
         "title": "Independent review",
@@ -1336,18 +1264,10 @@ def test_claimed_report_does_not_resolve_an_independent_recovery_match(
 ):
     from finalize_scan_contract import _recover_unsealed_findings
 
-    first = {
-        "ruleId": "fixture.review",
-        "title": "First independent report",
-        "summary": "Synthetic evidence.",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete the review.",
-        "provenance": {"source": "local_plugin"},
-        "extensions": {identifier: "report-1"},
-    }
+    first = saved_finding(
+        "First independent report",
+        extensions={identifier: "report-1"},
+    )
     independent = {
         **{key: value for key, value in first.items() if key != "extensions"},
         "title": "Second independent report",
@@ -1399,18 +1319,14 @@ def test_claimed_report_does_not_resolve_an_independent_recovery_match(
 def test_latest_eligible_worker_revision_survives_out_of_scope_result(
     tmp_path, saved_results, monkeypatch, reverse_checkpoints
 ):
-    first = {
-        "ruleId": "fixture.review",
-        "title": "Synthetic review",
-        "summary": "Older assessment 0",
-        "severity": {"level": "low"},
-        "confidence": {"level": "high", "rationale": "Synthetic fixture."},
-        "taxonomy": {"category": "other", "cwe": []},
-        "locations": [{"path": "src/example.py", "startLine": 1}],
-        "remediation": "Complete review.",
-        "provenance": {"source": "local_plugin", "candidateId": "candidate-1"},
-        "identity": {"anchor": "stable"},
-    }
+    first = saved_finding(
+        "Synthetic review",
+        summary="Older assessment 0",
+        confidence={"level": "high", "rationale": "Synthetic fixture."},
+        remediation="Complete review.",
+        provenance={"source": "local_plugin", "candidateId": "candidate-1"},
+        identity={"anchor": "stable"},
+    )
     latest = {
         **first,
         "summary": "Confirmed newer high severity assessment",

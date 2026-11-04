@@ -226,6 +226,10 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
+      // macOS writes "._" metadata files when copying to other filesystems.
+      if (entry.name.startsWith("._")) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -271,23 +275,33 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
         signal?.throwIfAborted();
-        pages.push(
-          content.items
-            .map((item) => ("str" in item ? item.str : ""))
-            .join(" "),
-        );
+        const content = await page.getTextContent();
+        signal?.throwIfAborted();
+        const parts: string[] = [];
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          // Separate runs when the PDF supplies no whitespace, including across forms.
+          if (/^\S/u.test(item.str) && /\S$/u.test(parts.at(-1) ?? "")) {
+            parts.push(" ");
+          }
+          if (item.str) parts.push(item.str);
+          if (item.hasEOL) parts.push("\n");
+        }
+        pages.push(parts.join(""));
       }
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });
@@ -338,7 +352,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth++;
       }
@@ -363,6 +378,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         else if (type === "end") finishField(true);
       } else if (localName === "br" || localName === "cr") append("\n");
       else if (localName === "tab") append("\t");
+      else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, isSelfClosing }) => {
       const localName = name.split(":").at(-1);
@@ -377,7 +393,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth--;
       }

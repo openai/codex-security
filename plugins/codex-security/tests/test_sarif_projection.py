@@ -16,7 +16,7 @@ import pytest
 from workbench_test_support import load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-EXAMPLE_DIR = PLUGIN_ROOT / "examples" / "completed-scan"
+EXAMPLE_DIR = PLUGIN_ROOT / "examples" / "legacy-completed-scan"
 FINALIZER = load_script("finalize_scan_contract", module_name="sarif_finalizer")
 
 

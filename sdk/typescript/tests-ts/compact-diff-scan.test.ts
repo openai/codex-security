@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readReviewState } from "./support/review-state.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -572,7 +573,7 @@ describe("compact diff scan", () => {
               },
             },
           ],
-          coverage: {
+          reviewState: {
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -603,7 +604,7 @@ describe("compact diff scan", () => {
             },
           },
         ],
-        coverage: {
+        reviewState: {
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -675,7 +676,7 @@ describe("compact diff scan", () => {
           },
         ],
         threatModel,
-        coverage: {
+        reviewState: {
           surfaces: [
             {
               label: "Changed files",
@@ -726,9 +727,8 @@ describe("compact diff scan", () => {
       expect(target["snapshotDigest"]).toBe(
         `codex-security-snapshot/v1:sha256:${digest}`,
       );
-      expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
-        "diff",
-      );
+      expect(completed).not.toHaveProperty("coverage");
+      expect(completed["review"]).toEqual({ excludedPaths: [] });
       const completedIdentities = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       ).map((completedFinding) => completedFinding["identity"]);
@@ -751,13 +751,11 @@ describe("compact diff scan", () => {
           "threatModel"
         ],
       ).toEqual(threatModel);
-      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
-        openQuestions,
-      );
+      const reviewState = await readReviewState(scanDir);
+      expect(reviewState).toMatchObject({ openQuestions });
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.threatModel).toEqual(threatModel);
-      expect(contract.coverage.openQuestions).toEqual(openQuestions);
-      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      expect(contract.review).toEqual({ excludedPaths: [] });
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
       const modelFacts =
         format === "Markdown"
@@ -778,9 +776,7 @@ describe("compact diff scan", () => {
       else
         for (const fact of modelFacts)
           expect(completedThreatModel).toContain(fact);
-      expect(report).toContain(openQuestions[0]!.question);
-      expect(report).toContain(openQuestions[0]!.followUpPrompt);
-      expect(report).toContain(coverageNote);
+      expect(reviewState.surfaces[0]?.notes).toBe(coverageNote);
 
       const terminalDir = join(root, "terminal-scan");
       mkdirSync(terminalDir, { mode: 0o700 });
@@ -790,12 +786,12 @@ describe("compact diff scan", () => {
       ) as JsonObject;
       const terminalScan = terminalManifest["scan"] as JsonObject;
       terminalScan["threatModel"] = { summary: markdownModel };
+      terminalScan["reviewState"] = reviewState;
       delete terminalScan["sealedAt"];
       delete terminalScan["artifacts"];
       for (const [name, document] of [
         ["scan-manifest.json", terminalManifest],
         ["findings.json", completed["findings"]],
-        ["coverage.json", completed["coverage"]],
       ] as const) {
         writeFileSync(join(terminalDir, name), JSON.stringify(document));
       }

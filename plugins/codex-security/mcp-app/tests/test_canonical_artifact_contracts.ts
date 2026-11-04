@@ -14,7 +14,7 @@ const canonical = Object.fromEntries(
       );
       const example = await readJson(
         import.meta.dirname,
-        `../../examples/completed-scan/${name}.json`,
+        `../../examples/${name === "coverage" ? "legacy-completed-scan" : "completed-scan"}/${name}.json`,
       );
       const validate = ajv.compile(schema);
       assert.equal(validate(example), true, JSON.stringify(validate.errors));
@@ -128,16 +128,33 @@ for (const kind of [
     document.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
   assert.equal(manifest.validate(document), true);
 }
-for (const path of ["findings.json", "coverage.json"]) {
+for (const example of [
+  manifest.example,
+  await readJson(
+    import.meta.dirname,
+    "../../examples/legacy-completed-scan/scan-manifest.json",
+  ),
+]) {
+  assert.equal(manifest.validate(example), true);
+  for (const path of [
+    "findings.json",
+    ...(example.scan.coverageRef ? ["coverage.json"] : []),
+  ]) {
+    const document = structuredClone(example);
+    const artifact = document.scan.artifacts.find(
+      (entry: { path: string }) => entry.path === path,
+    );
+    document.scan.artifacts = document.scan.artifacts.filter(
+      (entry: { path: string }) => entry.path !== path,
+    );
+    assert.equal(manifest.validate(document), false);
+    document.scan.artifacts.push(artifact, artifact);
+    assert.equal(manifest.validate(document), false);
+  }
+}
+for (const field of ["mode", "review"]) {
   const document = structuredClone(manifest.example);
-  const artifact = document.scan.artifacts.find(
-    (entry: { path: string }) => entry.path === path,
-  );
-  document.scan.artifacts = document.scan.artifacts.filter(
-    (entry: { path: string }) => entry.path !== path,
-  );
-  assert.equal(manifest.validate(document), false);
-  document.scan.artifacts.push(artifact, artifact);
+  delete document.scan[field];
   assert.equal(manifest.validate(document), false);
 }
 const coverage = canonical.coverage;

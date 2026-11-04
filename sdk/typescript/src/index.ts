@@ -46,6 +46,7 @@ export type {
   ProjectScope,
 } from "./project-config-schema.js";
 export type { ScanSettings } from "./scan-settings.js";
+export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
@@ -111,6 +112,7 @@ export type {
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
+  ScanLifecycle,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
@@ -249,6 +251,7 @@ export {
   readGitHubFindings,
 } from "./github-findings.js";
 export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
 export type {
   GitHubAdvisoryImportOptions,
   ImportedGitHubAdvisory,
@@ -326,17 +329,65 @@ export type {
 
 export { prepareLocalExternalImport } from "./external-findings-import.js";
 export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export { readSonarFindings, type SonarCapture } from "./sonar-findings.js";
+export {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "./sonar-collector.js";
+export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
+  normalizeContinuumFindings,
+  readContinuumFindings,
+} from "./continuum-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
+export {
   normalizeSnykFindingsExport,
   normalizeSnykJson,
   normalizeSnykSarif,
   readSnykFindings,
 } from "./snyk-findings.js";
 export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesFindings,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
+export {
   normalizeSemgrepFindings,
   normalizeSemgrepSarif,
   readSemgrepFindings,
   type SemgrepImportOptions,
 } from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export { collectSelectedSemgrepGuardianFindings } from "./semgrep-guardian-findings.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
+export {
+  normalizeSelectedSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
+  type SemgrepPlatformSelection,
+} from "./semgrep-platform-findings.js";
 export {
   normalizeEndorFindings,
   normalizeEndorSarif,

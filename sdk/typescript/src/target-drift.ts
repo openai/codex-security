@@ -1,4 +1,4 @@
-export interface HeadDriftMonitorOptions {
+interface HeadDriftMonitorOptions {
   expectedRevision: string;
   readRevision: (signal: AbortSignal) => Promise<string | null>;
   signal: AbortSignal;
@@ -47,10 +47,7 @@ export function startHeadDriftMonitor(
     void check();
   }, options.intervalMs ?? DEFAULT_HEAD_DRIFT_INTERVAL_MS);
   timer.unref();
-  const stop = () => {
-    clearInterval(timer);
-    controller.abort();
-  };
+  const stop = () => controller.abort();
   signal.addEventListener("abort", () => clearInterval(timer), { once: true });
   if (signal.aborted) clearInterval(timer);
 

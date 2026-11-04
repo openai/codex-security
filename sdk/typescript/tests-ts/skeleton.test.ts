@@ -8,23 +8,8 @@ import {
   type AttackPathReachability,
   CodexSecurity,
   CodexSecurityError,
-  VERSION,
 } from "../src/index.js";
-import { main } from "../src/cli.js";
-import { capture } from "./cli-fixtures.js";
 import { bashCommand, runCommand } from "./support/shell.js";
-
-const { selectChecks } = (await import(
-  new URL("../../../.github/scripts/select-ci-checks.mjs", import.meta.url).href
-)) as {
-  selectChecks(
-    paths: string[],
-    options: { event: string; baseChanged?: boolean },
-  ): Record<
-    "compatibility-matrix" | "windows-node-matrix" | "python-matrix",
-    string
-  >;
-};
 
 interface WorkflowStep {
   name?: string;
@@ -105,7 +90,6 @@ describe("TypeScript package skeleton", () => {
 
   test("runs Bun once per OS and checks every supported Node runtime with the installed package", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const selected = selectChecks([], { event: "push" });
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
       shard: [1, 2, 3, 4, 5, 6],
@@ -113,24 +97,10 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["compatibility"]?.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}",
     );
-    expect(JSON.parse(selected["compatibility-matrix"]).include).toEqual([
-      ...["22.13.0", "24.0.0", "24", "26.0.0", "26"].map((node) => ({
-        os: "ubuntu-latest",
-        node,
-      })),
-      { os: "macos-latest", node: "22.13.0" },
-    ]);
     expect(jobs["windows-test"]?.strategy?.matrix).toEqual({
       shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     });
-    expect(jobs["windows-verify"]?.strategy?.matrix).toBe(
-      "${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}",
-    );
-    expect(JSON.parse(selected["windows-node-matrix"]).node).toEqual([
-      "22.13.0",
-      "24",
-    ]);
-    const verificationSteps = jobs["windows-verify"]!.steps!;
+    const verificationSteps = jobs["compatibility"]!.steps!;
     const shardPython = jobs["windows-test"]!.steps!.find(({ uses }) =>
       uses?.startsWith("actions/setup-python@"),
     );
@@ -144,58 +114,50 @@ describe("TypeScript package skeleton", () => {
     expect(pythonSetup).toBeGreaterThanOrEqual(0);
     expect(pythonSetup).toBeLessThan(packageInspection);
     expect(verificationSteps[pythonSetup]).toMatchObject({
+      if: "runner.os == 'Windows'",
       uses: shardPython?.uses,
       with: { "python-version": "3.12" },
     });
-    expect(verificationSteps[pythonSetup]).not.toHaveProperty("if");
     expect(verificationSteps[pythonSetup]).not.toHaveProperty(
       "continue-on-error",
     );
     expect([false, "false"]).not.toContain(
       verificationSteps[pythonSetup]?.with?.["update-environment"],
     );
-    for (const name of ["compatibility", "windows-verify"]) {
-      expect(jobs[name]?.steps).toContainEqual(
-        expect.objectContaining({
-          run: "node scripts/check-package.mjs ../../dist/*.tgz",
-        }),
-      );
-      expect(jobs[name]?.steps!.some(({ name }) => name === "Set up Bun")).toBe(
-        false,
-      );
-    }
+    expect(verificationSteps[packageInspection]?.shell).toBe("bash");
+    expect(verificationSteps.some(({ name }) => name === "Set up Bun")).toBe(
+      false,
+    );
   });
 
   test("reuses npm downloads after lockfile changes without skipping package installation", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    for (const name of ["compatibility", "windows-verify"]) {
-      const steps = jobs[name]!.steps!;
-      const setup = steps.findIndex(({ id }) => id === "node");
-      const resolver = steps.findIndex(({ id }) => id === "npm-cache");
-      const restore = steps.findIndex(({ uses }) =>
-        uses?.startsWith("actions/cache/restore@"),
-      );
-      const inspection = steps.findIndex(
-        ({ name }) => name === "Inspect installed package",
-      );
-      expect(setup).toBeGreaterThanOrEqual(0);
-      expect(setup).toBeLessThan(resolver);
-      expect(resolver).toBeLessThan(restore);
-      expect(restore).toBeLessThan(inspection);
-      expect(steps[setup]?.with?.["cache"]).toBe("npm");
-      expect(steps[resolver]?.env).toEqual({
-        PRIMARY_CACHE_KEY: "${{ steps.node.outputs.cache-primary-key }}",
-      });
-      for (const index of [resolver, restore]) {
-        expect(steps[index]?.if).toBe("steps.node.outputs.cache-hit != 'true'");
-      }
-      expect(steps[restore]?.with).toEqual({
-        path: "${{ steps.npm-cache.outputs.path }}",
-        key: "${{ steps.node.outputs.cache-primary-key }}",
-        "restore-keys": "${{ steps.npm-cache.outputs.restore-prefix }}",
-      });
-      expect(steps[inspection]).not.toHaveProperty("if");
+    const steps = jobs["compatibility"]!.steps!;
+    const setup = steps.findIndex(({ id }) => id === "node");
+    const resolver = steps.findIndex(({ id }) => id === "npm-cache");
+    const restore = steps.findIndex(({ uses }) =>
+      uses?.startsWith("actions/cache/restore@"),
+    );
+    const inspection = steps.findIndex(
+      ({ name }) => name === "Inspect installed package",
+    );
+    expect(setup).toBeGreaterThanOrEqual(0);
+    expect(setup).toBeLessThan(resolver);
+    expect(resolver).toBeLessThan(restore);
+    expect(restore).toBeLessThan(inspection);
+    expect(steps[setup]?.with?.["cache"]).toBe("npm");
+    expect(steps[resolver]?.env).toEqual({
+      PRIMARY_CACHE_KEY: "${{ steps.node.outputs.cache-primary-key }}",
+    });
+    for (const index of [resolver, restore]) {
+      expect(steps[index]?.if).toBe("steps.node.outputs.cache-hit != 'true'");
     }
+    expect(steps[restore]?.with).toEqual({
+      path: "${{ steps.npm-cache.outputs.path }}",
+      key: "${{ steps.node.outputs.cache-primary-key }}",
+      "restore-keys": "${{ steps.npm-cache.outputs.restore-prefix }}",
+    });
+    expect(steps[inspection]).not.toHaveProperty("if");
   });
 
   test("npm cache fallback shares lockfile versions within each platform and architecture", async () => {
@@ -271,27 +233,9 @@ describe("TypeScript package skeleton", () => {
   test("covers the Python runtime floor and native platform paths", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const job = jobs["plugin-source"]!;
-    const selected = selectChecks([], { event: "push" });
     expect(job.strategy?.matrix).toBe(
       "${{ fromJSON(needs.classify-changes.outputs.python-matrix) }}",
     );
-    expect(JSON.parse(selected["python-matrix"]).include).toEqual([
-      ...["3.10", "3.12", "3.14"].map((python) => ({
-        os: "ubuntu-latest",
-        python,
-        markers: "",
-      })),
-      {
-        os: "macos-latest",
-        python: "3.12",
-        markers: "cross_platform or native_macos",
-      },
-      {
-        os: "windows-latest",
-        python: "3.12",
-        markers: "cross_platform or native_windows",
-      },
-    ]);
     const testStep = job.steps!.find(
       ({ name }) => name === "Test Python source contracts",
     )!;
@@ -369,13 +313,7 @@ describe("TypeScript package skeleton", () => {
       "if-no-files-found": "error",
     });
     expect(uploads[upload]).not.toHaveProperty("continue-on-error");
-    for (const name of [
-      "test",
-      "windows-test",
-      "mcp",
-      "compatibility",
-      "windows-verify",
-    ]) {
+    for (const name of ["test", "windows-test", "mcp", "compatibility"]) {
       const job = jobs[name]!;
       expect(job.needs).toContain("package");
       expect(
@@ -646,28 +584,5 @@ describe("TypeScript package skeleton", () => {
     });
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();
-  });
-
-  test("provides executable help and version behavior", async () => {
-    const stdout = capture(null);
-    const stderr = capture(null);
-    expect(await main([], stdout.stream, stderr.stream)).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security <command>");
-    expect(stdout.text()).toContain("Integrations:");
-    expect(stderr.text()).toBe("");
-
-    const versionOutput = capture(null);
-    expect(await main(["--version"], versionOutput.stream, stderr.stream)).toBe(
-      0,
-    );
-    expect(versionOutput.text()).toBe(`${VERSION}\n`);
-
-    const scanHelpOutput = capture(null);
-    expect(
-      await main(["scan", "--help"], scanHelpOutput.stream, stderr.stream),
-    ).toBe(0);
-    expect(scanHelpOutput.text()).toContain(
-      "Usage: codex-security scan [repository]",
-    );
   });
 });

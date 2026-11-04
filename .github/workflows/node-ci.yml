@@ -34,15 +34,14 @@ jobs:
       source-run: ${{ steps.proof.outputs.source-run }}
       edit-attempt: ${{ steps.proof.outputs.edit-attempt }}
       source-required: ${{ steps.scope.outputs.source-required }}
+      container-required: ${{ steps.scope.outputs.container-required }}
       plugin-tests-required: ${{ steps.scope.outputs.plugin-tests-required }}
       package-required: ${{ steps.scope.outputs.package-required }}
       action-ci: ${{ steps.scope.outputs.action-ci }}
       eval-contracts: ${{ steps.scope.outputs.eval-contracts }}
-      container-validate: ${{ steps.scope.outputs.container-validate }}
       workflow-quality: ${{ steps.scope.outputs.workflow-quality }}
       compatibility-matrix: ${{ steps.scope.outputs.compatibility-matrix }}
       python-matrix: ${{ steps.scope.outputs.python-matrix }}
-      windows-node-matrix: ${{ steps.scope.outputs.windows-node-matrix }}
     steps:
       - name: Checkout repository for change classification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,7 +139,7 @@ jobs:
 
   container-validate:
     needs: [classify-changes, native, static-checks]
-    if: needs.classify-changes.outputs.container-validate == 'true'
+    if: needs.classify-changes.outputs.container-required == 'true'
     uses: ./.github/workflows/container-validate.yml
 
   package:
@@ -212,6 +211,7 @@ jobs:
         run: |
           tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
           cp -R sdk/typescript/_bundled_plugin/mcp/native/. plugins/codex-security/native/prebuilt
+          python3 -I -m compileall -q --invalidation-mode checked-hash sdk/typescript/_bundled_plugin/scripts
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: .github/scripts/install-ripgrep.sh
@@ -249,16 +249,19 @@ jobs:
       matrix: ${{ fromJSON(needs.classify-changes.outputs.compatibility-matrix) }}
     steps:
       - *checkout-repository
-      - &set-up-node-js
-        name: Set up Node.js
+      - name: Set up Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node.js
         id: node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
-      - &resolve-npm-cache
-        name: Resolve npm download cache
+      - name: Resolve npm download cache
         id: npm-cache
         if: steps.node.outputs.cache-hit != 'true'
         shell: bash
@@ -267,8 +270,7 @@ jobs:
         run: |
           echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
           echo "restore-prefix=${PRIMARY_CACHE_KEY%-*}-" >> "$GITHUB_OUTPUT"
-      - &restore-npm-cache
-        name: Restore previous npm downloads
+      - name: Restore previous npm downloads
         if: steps.node.outputs.cache-hit != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -278,7 +280,8 @@ jobs:
       - *download-package-for-this-commit
       - name: Inspect installed package
         working-directory: sdk/typescript
-        env: &package-deep-retry
+        shell: bash
+        env:
           # A successful main push can be tagged for release. Only PRs sample retries by runtime.
           PACKAGE_DEEP_RETRY: ${{ github.event_name != 'pull_request' || matrix.node == '22.13.0' || strategy.job-total == 1 }}
         run: node scripts/check-package.mjs ../../dist/*.tgz
@@ -374,7 +377,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -446,11 +449,9 @@ jobs:
             evals/triage-finding/pnpm-lock.yaml
       - &set-up-python
         name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install ripgrep
-        run: .github/scripts/install-ripgrep.sh
       - name: Set up eval dependencies and host runtime
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
@@ -487,7 +488,6 @@ jobs:
         container-validate,
         workflow-quality,
         windows-test,
-        windows-verify,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -563,25 +563,3 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 360000 ./tests-ts/windows-machine-policy.test.ts
-
-  windows-verify:
-    if: needs.classify-changes.outputs.source-required == 'true'
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
-    needs: [classify-changes, package]
-    runs-on: windows-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.classify-changes.outputs.windows-node-matrix) }}
-    steps:
-      - *checkout-repository
-      - *set-up-python
-      - *set-up-node-js
-      - *resolve-npm-cache
-      - *restore-npm-cache
-      - *download-package-for-this-commit
-      - name: Inspect installed package
-        working-directory: sdk/typescript
-        shell: bash
-        env: *package-deep-retry
-        run: node scripts/check-package.mjs ../../dist/*.tgz

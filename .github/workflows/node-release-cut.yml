@@ -45,6 +45,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          sparse-checkout: |
+            .github
+            sdk/typescript/scripts
           persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
@@ -99,47 +102,45 @@ jobs:
           fi
 
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]] &&
-             previous_sha="$(git rev-parse "$RELEASE_SHA^" 2>/dev/null)"; then
-            if previous_manifest="$(git show "$previous_sha:sdk/typescript/package.json" 2>/dev/null)"; then
-              previous_version="$(
-                printf '%s\n' "$previous_manifest" |
-                  node --input-type=module --eval '
-                    import { readFileSync } from "node:fs";
-                    const manifest = JSON.parse(readFileSync(0, "utf8"));
-                    if (typeof manifest.version !== "string") {
-                      throw new Error("The previous package version is missing.");
-                    }
-                    process.stdout.write(manifest.version);
-                  '
+             previous_manifest_oid="$(git rev-parse --verify "$RELEASE_SHA^:sdk/typescript/package.json" 2>/dev/null)"; then
+            previous_version="$(
+              git cat-file blob "$previous_manifest_oid" |
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const manifest = JSON.parse(readFileSync(0, "utf8"));
+                  if (typeof manifest.version !== "string") {
+                    throw new Error("The previous package version is missing.");
+                  }
+                  process.stdout.write(manifest.version);
+                '
+            )"
+            if [[ "$version" == "$previous_version" ]]; then
+              release_mode="$(
+                printf '%s\n' "$published_versions" |
+                  node sdk/typescript/scripts/release-automation.mjs \
+                    release-mode "$version"
               )"
-              if [[ "$version" == "$previous_version" ]]; then
-                release_mode="$(
-                  printf '%s\n' "$published_versions" |
-                    node sdk/typescript/scripts/release-automation.mjs \
-                      release-mode "$version"
+              if [[ "$release_mode" == "recover" ]]; then
+                echo "Package version is unchanged and already published."
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              if tagged_sha="$(git rev-parse --verify "refs/tags/npm-v$version^{commit}" 2>/dev/null)" &&
+                 [[ "$tagged_sha" != "$RELEASE_SHA" ]] &&
+                 git merge-base --is-ancestor "$tagged_sha" "$RELEASE_SHA"; then
+                tagged_version="$(
+                  git show "$tagged_sha:sdk/typescript/package.json" |
+                    node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version'
                 )"
-                if [[ "$release_mode" == "recover" ]]; then
-                  echo "Package version is unchanged and already published."
+                if [[ "$tagged_version" == "$version" ]]; then
+                  echo "Package version is unchanged and already tagged at $tagged_sha."
                   echo "changed=false" >> "$GITHUB_OUTPUT"
                   exit 0
                 fi
-                if tagged_sha="$(git rev-parse --verify "refs/tags/npm-v$version^{commit}" 2>/dev/null)" &&
-                   [[ "$tagged_sha" != "$RELEASE_SHA" ]] &&
-                   git merge-base --is-ancestor "$tagged_sha" "$RELEASE_SHA"; then
-                  tagged_version="$(
-                    git show "$tagged_sha:sdk/typescript/package.json" |
-                      node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version'
-                  )"
-                  if [[ "$tagged_version" == "$version" ]]; then
-                    echo "Package version is unchanged and already tagged at $tagged_sha."
-                    echo "changed=false" >> "$GITHUB_OUTPUT"
-                    exit 0
-                  fi
-                fi
-              else
-                node sdk/typescript/scripts/release-automation.mjs \
-                  require-increase "$version" "$previous_version" >/dev/null
               fi
+            else
+              node sdk/typescript/scripts/release-automation.mjs \
+                require-increase "$version" "$previous_version" >/dev/null
             fi
           fi
 

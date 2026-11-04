@@ -18,6 +18,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildServer } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
+import { readJson } from "./support/json.ts";
+import { finding as sourceFinding } from "./scan-draft-fixture.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import type {
   DeepScanRunState,
@@ -42,12 +44,14 @@ type HostModule = Pick<
   > &
   Pick<
     typeof import("../src/artifact-scan-draft.ts"),
-    "recordCodexSecurityScanDraftViaWorkbench"
+    | "recordCodexSecurityScanDraftViaWorkbench"
+    | "recordCodexSecurityWorkerScanDraft"
   >;
 type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
 interface FixturePaths {
   target?: string;
   scanRoot?: string;
+  deepConfig?: string;
 }
 type Scenario = readonly [
   label: string,
@@ -66,7 +70,7 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
-const coverage: ScanDraftInput["coverage"] = {
+const reviewState: ScanDraftInput["reviewState"] = {
   surfaces: [],
   explicitExclusions: [],
   deferred: [],
@@ -91,7 +95,7 @@ const host = (await importModule({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
-      'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
+      'export { recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityWorkerScanDraft } from "./src/artifact-scan-draft.ts";',
     ].join("\n"),
     resolveDir: mcpAppRoot,
   },
@@ -102,7 +106,92 @@ const {
   DeepScanCoordinator,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  recordCodexSecurityWorkerScanDraft,
 } = host;
+
+test("three Standard scans publish two distinct findings with their original evidence", async (t) => {
+  const { run, store, call, runWorkbench } = await createFixture(t, {
+    deepConfig:
+      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 3\n",
+  });
+  const { run: claimed } = await store.claimCoordinator({
+    scanId: run.scanId,
+    threadId: owner,
+  });
+  const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+    requireRunning: true,
+  });
+  const coordinator = new DeepScanCoordinator({
+    run: claimed,
+    store,
+    pluginRoot,
+    executor: {
+      async run(request) {
+        const label = path.basename(path.dirname(request.workingDirectory));
+        const sink =
+          label === "discovery-0002"
+            ? "response.write(account)"
+            : "response.write(tenant)";
+        const finding = sourceFinding("query", "fixture.py");
+        await recordCodexSecurityWorkerScanDraft(
+          {
+            ...request.artifactContext!,
+            repoRoot: run.targetPath,
+            scanId: run.scanId,
+          },
+          {
+            scanId: run.scanId,
+            findings: [
+              {
+                ...finding,
+                identity: undefined,
+                title: sink,
+                codeEvidence: [
+                  {
+                    id: "sink",
+                    label: "Output",
+                    explanation: "Unescaped response",
+                    path: "fixture.py",
+                    startLine: 1,
+                    code: sink,
+                  },
+                ],
+              },
+            ],
+            reviewState,
+          },
+        );
+        return {};
+      },
+    },
+    onComplete: async (draft, signal, publication) => {
+      await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft,
+        runWorkbench,
+        signal,
+        publication,
+      );
+    },
+  });
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 30_000);
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal.dispatchedCount, 3);
+  assertSuccess(
+    await call("complete_codex_security_scan", { scanId: run.scanId }),
+  );
+  const saved = JSON.parse(
+    (await snapshot(run)).files["findings.json"]!,
+  ).findings;
+  assert.deepEqual(
+    saved.map(
+      (f: { provenance: { sourceFindingIds: string[] } }) =>
+        f.provenance.sourceFindingIds.length,
+    ),
+    [2, 1],
+  );
+});
 
 test("public partial drafts retain checkpoints after coordinator adoption", async (t) => {
   const fixture = await createFixture(t);
@@ -136,7 +225,7 @@ test("public partial drafts retain checkpoints after coordinator adoption", asyn
   assert.deepEqual(
     new Set(
       Object.values(retained).flatMap((bytes) =>
-        JSON.parse(bytes).coverage.deferred.map(
+        JSON.parse(bytes).reviewState.deferred.map(
           (item: { candidateId: string }) => item.candidateId,
         ),
       ),
@@ -264,7 +353,7 @@ for (const [
         context,
         {
           ...JSON.parse(await readFile(results[index], "utf8")),
-          coverage,
+          reviewState,
         },
         runWorkbench,
         undefined,
@@ -328,7 +417,8 @@ for (const [
     );
     assert.ok(manifest.scan.sealedAt);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
-    assert.deepEqual(JSON.parse(sealed.files["coverage.json"]).deferred, []);
+    assert.equal(manifest.scan.status, "completed");
+    assert.equal(sealed.files["coverage.json"], undefined);
     assert.ok(sealed.files["report.md"]);
     for (const [name, bytes] of Object.entries(parentCheckpoints)) {
       assert.equal(
@@ -408,7 +498,7 @@ for (const [claimed, outputFailure] of [
         scanId: run.scanId,
         complete: true,
         findings: [],
-        coverage,
+        reviewState,
       }),
     );
     if (outputFailure) {
@@ -456,7 +546,7 @@ test("legacy terminal aggregate rejects late public drafts with both complete fl
     scanId: run.scanId,
     complete: true,
     findings: [],
-    coverage,
+    reviewState,
     threatModel: { summary: "Selected aggregate" },
   };
   await assert.rejects(
@@ -502,8 +592,8 @@ test("legacy terminal aggregate rejects late public drafts with both complete fl
   );
   const completed = await snapshot(run);
   assert.deepEqual(
-    JSON.parse(completed.files["coverage.json"]),
-    JSON.parse(interrupted.files["coverage.json"]),
+    JSON.parse(completed.files["scan-manifest.json"]).scan.review,
+    JSON.parse(interrupted.files["scan-manifest.json"]).scan.review,
   );
   assert.equal(
     JSON.parse(completed.files["scan-manifest.json"]).scan.threatModel.summary,
@@ -579,8 +669,8 @@ for (const claimed of [false, true]) {
     const completed = await snapshot(run);
     assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
     assert.deepEqual(
-      JSON.parse(completed.files["coverage.json"]),
-      JSON.parse(interrupted.files["coverage.json"]),
+      JSON.parse(completed.files["scan-manifest.json"]).scan.review,
+      JSON.parse(interrupted.files["scan-manifest.json"]).scan.review,
     );
     assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
     assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
@@ -597,7 +687,7 @@ for (const status of ["failed", "interrupted"] as const) {
     const draft: ScanDraftInput = {
       scanId: run.scanId,
       findings: [],
-      coverage,
+      reviewState,
     };
     const publication = { coordinatorGeneration: 2, resultPath: null };
     await assert.rejects(
@@ -648,8 +738,8 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     scanId: run.scanId,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       deferred: [
         {
           id: "interleaved-progress",
@@ -683,9 +773,12 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
 
 async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "deep-publication-"));
-  let client: Client | undefined;
+  const client = new Client({
+    name: "publication-integration",
+    version: "1.0.0",
+  });
   t.after(async () => {
-    await client?.close();
+    await client.close();
     await rm(root, { recursive: true, force: true });
   });
   const targetPath = path.join(root, paths.target ?? "target");
@@ -703,6 +796,11 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     }).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
   delete environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+  if (paths.deepConfig) {
+    const configDir = path.join(environment.CODEX_HOME, "codex-security");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "config.toml"), paths.deepConfig);
+  }
   const instant = new Date().toISOString();
   let now = instant;
   const runWorkbench: RunArtifactWorkbench = async (args, input) => {
@@ -727,7 +825,6 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     threadId: owner,
     scanRoot: environment.CODEX_SECURITY_SCAN_ROOT,
   });
-  client = new Client({ name: "publication-integration", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath, "--stdio"],
@@ -736,7 +833,7 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     stderr: "pipe",
   });
   if (transport.stderr instanceof Readable) transport.stderr.resume();
-  await client.connect(transport);
+  let connected: Promise<void> | undefined;
   return {
     run,
     store,
@@ -745,9 +842,10 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     environment,
     setTime(offset: number) {
       now = new Date(Date.parse(instant) + offset * 1_000).toISOString();
+      return now;
     },
-    call(name: string, args: Record<string, unknown> | ScanDraftInput) {
-      assert.ok(client);
+    async call(name: string, args: Record<string, unknown> | ScanDraftInput) {
+      await (connected ??= client.connect(transport));
       return client.callTool({
         name,
         arguments: { ...args },
@@ -784,7 +882,7 @@ async function commitReducers(
       const resultManifestPath = path.join(artifact.artifactDir, "result.json");
       await writeFile(
         resultManifestPath,
-        JSON.stringify({ scanId: run.scanId, findings: [], coverage }),
+        JSON.stringify({ scanId: run.scanId, findings: [], reviewState }),
       );
       await store.updateWorker({
         ...update,
@@ -797,16 +895,6 @@ async function commitReducers(
       reducerLabels?.[batch] ?? `dedup-${String(batch + 1).padStart(4, "0")}`;
     const artifact = await workerArtifact(run, "dedup", label);
     const id = ids[batch];
-    await store.claimDedup({ id, scanId: run.scanId, workerIds, ...artifact });
-    await store.updateWorker({
-      id,
-      scanId: run.scanId,
-      kind: "dedup",
-      status: "running",
-      attempt: 1,
-      threadId: `session-${label}`,
-      ...artifact,
-    });
     const resultManifestPath = path.join(artifact.artifactDir, "result.json");
     await writeFile(
       resultManifestPath,
@@ -817,11 +905,13 @@ async function commitReducers(
       }),
     );
     fixture.setTime(offsets[batch]);
-    await store.commitDedup({
+    await store.recordIteration({
       id,
       scanId: run.scanId,
-      resultManifestPath,
-      newFindings: 0,
+      workerIds,
+      resultPath: resultManifestPath,
+      noNewStreak: (batch + 1) * workerIds.length,
+      consecutiveErrors: 0,
     });
     fixture.setTime(0);
     results.push(resultManifestPath);
@@ -840,9 +930,12 @@ async function workerArtifact(
     "deep_discovery",
     kind,
     label,
-    "output",
+    ...(kind === "workers" ? ["output"] : []),
   );
-  const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
+  const promptPath = path.join(
+    kind === "workers" ? path.dirname(artifactDir) : artifactDir,
+    "prompt.md",
+  );
   await mkdir(artifactDir, { recursive: true });
   await writeFile(promptPath, `Synthetic ${label}\n`);
   return { artifactDir, promptPath };
@@ -853,8 +946,8 @@ function partial(run: DeepScanRunState, candidateId: string): ScanDraftInput {
     scanId: run.scanId,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       deferred: [
         {
           candidateId,
@@ -936,7 +1029,7 @@ with sqlite3.connect(sys.argv[1]) as c:
   await mkdir(path.join(run.scanDir, "checkpoints"), { recursive: true });
   const draft: ScanDraftInput = {
     ...JSON.parse(await readFile(results[1], "utf8")),
-    coverage,
+    reviewState,
   };
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
@@ -1042,7 +1135,7 @@ for (const workflow of ["deep-scan-mcp/v1", "deep-security-scan/v1"]) {
       assert.equal(expectedReviews.length, 4);
       const expectedDraft = {
         ...f.draft,
-        coverage: { ...f.draft.coverage, reviews: expectedReviews },
+        reviewState: { ...f.draft.reviewState, reviews: expectedReviews },
       };
       const sources = await Promise.all(
         f.results.map((file) => readFile(file)),
@@ -1171,30 +1264,33 @@ test("accepted response recovery cannot replace a later publication from the sam
   assert.deepEqual(await snapshot(f.run), newer);
 });
 
-for (const code of ["EPERM", "EACCES", "EIO"]) {
-  test(`optional receipt cleanup ${code} preserves publication success`, async (t) => {
-    const f = await publicationFixture(t);
-    const filesystem = await import("node:fs");
-    const original = filesystem.promises.rm;
-    t.mock.method(
+test("receipt cleanup failures preserve publication success", async (t) => {
+  const f = await publicationFixture(t);
+  const filesystem = await import("node:fs");
+  const original = filesystem.promises.rm;
+  for (const [index, code] of ["EPERM", "EACCES", "EIO"].entries()) {
+    const completedAt = f.setTime(10 + index);
+    let attempted = false;
+    const remove = t.mock.method(
       filesystem.promises,
       "rm",
       async (...[file, options]: Parameters<typeof original>) => {
-        if (String(file).endsWith(".accepted.json"))
+        if (String(file).endsWith(".accepted.json")) {
+          attempted = true;
           throw Object.assign(new Error(`Synthetic receipt cleanup ${code}`), {
             code,
           });
+        }
         return original(file, options);
       },
     );
     assert.equal((await f.publish()).status, "draft_written");
-    assert.ok(
-      JSON.parse((await snapshot(f.run)).files["scan-manifest.json"]).scan
-        .completedAt,
-    );
-    t.mock.restoreAll();
-  });
-}
+    const manifest = await readJson(f.run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.completedAt, completedAt, code);
+    assert.ok(attempted, code);
+    remove.mock.restore();
+  }
+});
 
 test("receipt I/O failure cannot authorize replay after response loss", async (t) => {
   const f = await publicationFixture(t);
@@ -1220,13 +1316,13 @@ test("receipt I/O failure cannot authorize replay after response loss", async (t
   assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
 });
 
-for (const code of ["EACCES", "ECONNRESET"]) {
-  for (const matching of [false, true]) {
-    test(`publication ${code} before acceptance is one attempt (matching=${matching})`, async (t) => {
-      const f = await publicationFixture(t);
-      if (matching) await f.publish();
-      const before = await snapshot(f.run);
-      const workers = await f.workers();
+for (const matching of [false, true]) {
+  test(`failure before acceptance is one attempt (matching=${matching})`, async (t) => {
+    const f = await publicationFixture(t);
+    if (matching) await f.publish();
+    const before = await snapshot(f.run);
+    const workers = await f.workers();
+    for (const code of ["EACCES", "ECONNRESET"]) {
       const original = Object.assign(new Error(`Synthetic precommit ${code}`), {
         code,
       });
@@ -1244,8 +1340,8 @@ for (const code of ["EACCES", "ECONNRESET"]) {
       assert.deepEqual(await snapshot(f.run), before);
       assert.deepEqual(await f.workers(), workers);
       assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
-    });
-  }
+    }
+  });
 }
 
 for (const takeover of ["coordinator", "continuation"]) {

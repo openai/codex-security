@@ -10,14 +10,18 @@ import { failedChecks } from "./check-ci-results.mjs";
 const select = (paths, options = {}) =>
   selectChecks(paths, { event: "pull_request", ...options });
 
+const ubuntuNode24Install = JSON.stringify({
+  include: [{ os: "ubuntu-latest", node: "24" }],
+});
+
 const regularSource = {
   "source-required": "true",
+  "container-required": "true",
   "plugin-tests-required": "true",
   "package-required": "true",
   "action-ci": "false",
   "eval-contracts": "true",
   "workflow-quality": "false",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -25,6 +29,7 @@ const regularSource = {
       { os: "ubuntu-latest", node: "24" },
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -42,13 +47,11 @@ const regularSource = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0"] }),
 };
 const fullQualification = {
   ...regularSource,
   "action-ci": "true",
   "workflow-quality": "true",
-  "container-validate": "true",
   "compatibility-matrix": JSON.stringify({
     include: [
       { os: "ubuntu-latest", node: "22.13.0" },
@@ -57,6 +60,8 @@ const fullQualification = {
       { os: "ubuntu-latest", node: "26.0.0" },
       { os: "ubuntu-latest", node: "26" },
       { os: "macos-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "22.13.0" },
+      { os: "windows-latest", node: "24" },
     ],
   }),
   "python-matrix": JSON.stringify({
@@ -76,17 +81,26 @@ const fullQualification = {
       },
     ],
   }),
-  "windows-node-matrix": JSON.stringify({ node: ["22.13.0", "24"] }),
 };
 
 const docs = {
   ...regularSource,
   "source-required": "false",
+  "container-required": "false",
   "plugin-tests-required": "false",
   "package-required": "false",
   "eval-contracts": "false",
-  "container-validate": "false",
 };
+
+test("the Docker context excludes the test modules skipped by container CI", () => {
+  const ignore = ["Dockerfile.dockerignore", ".dockerignore"]
+    .map((file) => new URL(`../../${file}`, import.meta.url))
+    .find((file) => fs.existsSync(file));
+  const rules = fs.readFileSync(ignore, "utf8");
+  assert.match(rules, /^plugins\/codex-security\/tests\r?$/m);
+  assert.match(rules, /^sdk\/typescript\/tests-ts\/\*\.test\.ts\r?$/m);
+  assert.doesNotMatch(rules, /^\s*!/m);
+});
 
 test("only edits to existing direct pytest modules skip independent jobs", (t) => {
   const cwd = fs.mkdtempSync(resolve(tmpdir(), "ci-pytest-"));
@@ -120,7 +134,13 @@ test("only edits to existing direct pytest modules skip independent jobs", (t) =
   commit("test_2fa.py", "conftest.py");
   const reduced = {
     ...fullQualification,
+    "compatibility-matrix": JSON.stringify({
+      include: JSON.parse(
+        fullQualification["compatibility-matrix"],
+      ).include.filter(({ os }) => os !== "windows-latest"),
+    }),
     "source-required": "false",
+    "container-required": "false",
     "action-ci": "false",
     "eval-contracts": "false",
   };
@@ -181,9 +201,7 @@ test("Action-only changes require Action CI and integration against the built pa
     ...docs,
     "package-required": "true",
     "action-ci": "true",
-    "compatibility-matrix": JSON.stringify({
-      include: [{ os: "ubuntu-latest", node: "24" }],
-    }),
+    "compatibility-matrix": ubuntuNode24Install,
   };
   for (const paths of [
     ["action.yml", "github-action/README.md"],
@@ -263,9 +281,7 @@ test("packaged guides keep the archive and installed-package gates", () => {
   const expected = {
     ...docs,
     "package-required": "true",
-    "compatibility-matrix": JSON.stringify({
-      include: [{ os: "ubuntu-latest", node: "24" }],
-    }),
+    "compatibility-matrix": ubuntuNode24Install,
   };
   for (const paths of [
     ["sdk/typescript/README.md"],
@@ -306,7 +322,9 @@ test("ordinary TypeScript source and tests retain the reduced version matrices",
     "plugins/codex-security/mcp-app/tests/support/fixture.ts",
   ]) {
     assert.deepEqual(select([path]), regularSource, path);
-    assert.deepEqual(select(["README.md", path]), regularSource, path);
+    for (const guide of ["README.md", "sdk/typescript/docs/cli.md"]) {
+      assert.deepEqual(select([guide, path]), regularSource, path);
+    }
   }
 });
 
@@ -315,7 +333,12 @@ test("SDK test-only PRs skip independent suites and retain any changed eval inpu
     "sdk/typescript/tests-ts/skeleton.test.ts",
     "sdk/typescript/tests-ts/windows-machine-policy.test.ts",
   ];
-  const sdk = { ...regularSource, "plugin-tests-required": "false" };
+  const sdk = {
+    ...regularSource,
+    "container-required": "false",
+    "plugin-tests-required": "false",
+    "compatibility-matrix": ubuntuNode24Install,
+  };
   assert.deepEqual(select(paths), { ...sdk, "eval-contracts": "false" });
   assert.deepEqual(
     select([...paths, "sdk/typescript/tests-ts/codex-dependency-pins.test.ts"]),
@@ -352,7 +375,7 @@ test("unknown paths and dependency configuration receive full qualification", ()
     ["sdk/typescript/.npmrc"],
     ["sdk/typescript/docs/unlisted.md"],
     ["RELEASING.md", "sdk/typescript/src/api.ts"],
-    ["sdk/typescript/docs/cli.md", "sdk/typescript/src/api.ts"],
+    ["sdk/typescript/docs/cli.md", "sdk/typescript/docs/unlisted.md"],
     ["plugins/codex-security/mcp-app/src/.npmrc"],
     ["pnpm-workspace.yaml"],
     ["sdk/typescript/pnpm-workspace.yaml"],
@@ -435,7 +458,6 @@ function successfulFullRun() {
       "plugin-host",
       "plugin-source",
       "windows-test",
-      "windows-verify",
       "workflow-quality",
       "container-validate",
     ].map((name) => [name, { result: "success" }]),
@@ -466,29 +488,18 @@ test("the final gate distinguishes a failed check from a skipped dependent job",
       encoding: "utf8",
     });
   const needs = successfulFullRun();
-  for (const selected of [true, false]) {
-    const outputs = select([selected ? "Dockerfile" : "README.md"]);
-    for (const result of ["success", "failure", "cancelled", "skipped"]) {
-      const verdict = run({
-        ...needs,
-        "classify-changes": { result: "success", outputs },
-        "container-validate": { result },
-      });
-      const failed = selected && result !== "success";
-      assert.equal(verdict.status, failed ? 1 : 0, verdict.stderr);
-      if (failed) {
-        assert.ok(
-          verdict.stderr.includes(`container-validate (${result})`),
-          verdict.stderr,
-        );
-      } else {
-        assert.equal(
-          verdict.stdout.trim(),
-          "All selected required CI checks passed.",
-        );
-      }
-    }
-  }
+  const pythonTests = select(["plugins/codex-security/tests/test_workbench.py"], {
+    modifiedOnly: true,
+  });
+  const passed = run({
+    ...needs,
+    "classify-changes": { result: "success", outputs: pythonTests },
+    test: { result: "failure" },
+    "windows-test": { result: "cancelled" },
+    "container-validate": { result: "skipped" },
+  });
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.equal(passed.stdout.trim(), "All selected required CI checks passed.");
 
   needs["static-checks"].result = "failure";
   needs["container-validate"].result = "skipped";
@@ -513,12 +524,12 @@ test("documentation requires static checks and explicit selection, without skipp
   );
   for (const key of [
     "source-required",
+    "container-required",
     "plugin-tests-required",
     "package-required",
     "action-ci",
     "eval-contracts",
     "workflow-quality",
-    "container-validate",
   ]) {
     assert.deepEqual(
       failedChecks({

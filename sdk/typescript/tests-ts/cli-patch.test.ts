@@ -220,13 +220,17 @@ describe("scan and patch workflow", () => {
             configure: (current) => {
               current.createSecurity = () => ({
                 preflight: client.preflight.bind(client),
+                validate: client.validate.bind(client),
                 close: client.close.bind(client),
                 run: async (path, options) => {
                   await client.run(path, {
                     ...options,
                     onWarning: (message, details) => {
                       options?.onWarning?.(message, details);
-                      if (message.includes("results remain bound")) {
+                      if (
+                        message.startsWith("Repository HEAD changed") &&
+                        message !== completionWarning
+                      ) {
                         earlyDetails.push(details);
                         warned.resolve();
                       }
@@ -245,7 +249,10 @@ describe("scan and patch workflow", () => {
         expect(payload.warnings).toEqual(
           restored ? undefined : [completionWarning],
         );
-        expect(outcome.stderr).toContain("Repository HEAD changed");
+        expect(outcome.stderr).toContain(
+          "This scan remains bound to deadbeef.",
+        );
+        expect(outcome.stderr).toContain("stop this scan and restart it");
         if (restored)
           expect(payload.patches).toMatchObject([{ status: "verified" }]);
       } finally {
@@ -2152,11 +2159,9 @@ describe("scan and patch workflow", () => {
         ...expected,
       ]);
       if (argv[1] === "--patch") {
-        expect(outcome.stderr).not.toContain(
-          "Review and patch these findings?",
-        );
+        expect(outcome.stderr).not.toContain("Open findings for review?");
       } else {
-        expect(outcome.stderr).toContain("Review and patch these findings?");
+        expect(outcome.stderr).toContain("Open findings for review?");
       }
     }
   });
@@ -2189,7 +2194,7 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr.indexOf("FINDINGS")).toBeLessThan(
-        outcome.stderr.indexOf("Review and patch these findings? (y/N)"),
+        outcome.stderr.indexOf("Open findings for review? (y/N)"),
       );
       expect(opened).toBe(review);
       expect(patched).toBe(review);
@@ -2217,7 +2222,7 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr).toContain(`FINDINGS  ${severities.length}`);
-      expect(outcome.stderr).not.toContain("Review and patch these findings?");
+      expect(outcome.stderr).not.toContain("Open findings for review?");
       expect(confirmPatchReview).not.toHaveBeenCalled();
       expect(patchEditor).not.toHaveBeenCalled();
     }

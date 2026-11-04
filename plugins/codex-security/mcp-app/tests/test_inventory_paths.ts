@@ -8,6 +8,14 @@ import { join } from "node:path";
 import { importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
+const helperUrl = new URL(
+  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+  import.meta.url,
+);
+const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
+  define: { "import.meta.url": JSON.stringify(helperUrl.href) },
+});
+
 for (const [name, details] of [
   ["named", { code: "ENOEXEC" }],
   [
@@ -19,16 +27,6 @@ for (const [name, details] of [
     `POSIX tools run executable text after a ${name} exec-format launch error`,
     { skip: process.platform === "win32" },
     async () => {
-      const { runTool } = await importSource("src/helpers/inventory-git.ts", {
-        define: {
-          "import.meta.url": JSON.stringify(
-            new URL(
-              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-              import.meta.url,
-            ).href,
-          ),
-        },
-      });
       const root = fs.mkdtempSync(join(tmpdir(), "inventory-exec-format-"));
       const tool = join(root, "plain tool");
       const diagnostic =
@@ -96,16 +94,6 @@ test(
   "POSIX tools keep helper input separate from stdin and startup status",
   { skip: process.platform === "win32" },
   async () => {
-    const { runTool } = await importSource("src/helpers/inventory-git.ts", {
-      define: {
-        "import.meta.url": JSON.stringify(
-          new URL(
-            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-            import.meta.url,
-          ).href,
-        ),
-      },
-    });
     const root = fs.mkdtempSync(join(tmpdir(), "inventory-input-fds-"));
     const denied = join(root, "not-executable");
     fs.writeFileSync(denied, "#!/bin/sh\n", { mode: 0o600 });
@@ -180,16 +168,6 @@ test(
   "POSIX tools retain loader settings across the raw argument shell bridge",
   { skip: process.platform === "win32" },
   async () => {
-    const { runTool } = await importSource("src/helpers/inventory-git.ts", {
-      define: {
-        "import.meta.url": JSON.stringify(
-          new URL(
-            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-            import.meta.url,
-          ).href,
-        ),
-      },
-    });
     const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"];
     const saved = names.map((name) => [name, process.env[name]] as const);
     try {
@@ -226,16 +204,6 @@ test(
   "Windows inventory honors an explicit Git .com executable beside a .com.exe sibling",
   { skip: process.platform !== "win32" },
   async () => {
-    const helperUrl = new URL(
-      "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-      import.meta.url,
-    );
-    const { git, runTool } = await importSource(
-      "src/helpers/inventory-git.ts",
-      {
-        define: { "import.meta.url": JSON.stringify(helperUrl.href) },
-      },
-    );
     const binary = createRequire(helperUrl).resolve(
       `./native/win32-${process.arch}/windows.node`,
     );
@@ -325,16 +293,6 @@ test(
   "Windows tools preserve PATH selection and resolve relative PATH and cwd-only executables",
   { skip: process.platform !== "win32" },
   async () => {
-    const { runTool } = await importSource("src/helpers/inventory-git.ts", {
-      define: {
-        "import.meta.url": JSON.stringify(
-          new URL(
-            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-            import.meta.url,
-          ).href,
-        ),
-      },
-    });
     const root = fs.mkdtempSync(join(tmpdir(), "inventory-relative-path-"));
     const repo = join(root, "repo");
     const tools = join(repo, "tools");
@@ -401,12 +359,7 @@ for (const platform of ["linux", "win32"]) {
       {
         define: {
           "process.platform": JSON.stringify(platform),
-          "import.meta.url": JSON.stringify(
-            new URL(
-              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-              import.meta.url,
-            ).href,
-          ),
+          "import.meta.url": JSON.stringify(helperUrl.href),
         },
       },
     );
@@ -429,12 +382,7 @@ for (const platform of ["linux", "win32"]) {
 const { sampleFile, createSourceSampler, PREVIEW_READ_BYTES } =
   await importSource("src/helpers/source-preview.ts", {
     define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-          import.meta.url,
-        ).href,
-      ),
+      "import.meta.url": JSON.stringify(helperUrl.href),
     },
   });
 
@@ -477,12 +425,7 @@ test("POSIX file identities retain all 64 inode bits", async () => {
     const { sameFile } = await importSource("src/helpers/inventory-paths.ts", {
       define: {
         "process.platform": '"linux"',
-        "import.meta.url": JSON.stringify(
-          new URL(
-            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-            import.meta.url,
-          ).href,
-        ),
+        "import.meta.url": JSON.stringify(helperUrl.href),
       },
     });
     assert.equal(sameFile("left", "right"), false);

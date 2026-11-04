@@ -27,53 +27,59 @@ function pullRequest(overrides = {}) {
   };
 }
 
-test("selects the requested PR head rather than the trusted workflow commit", async () => {
-  assert.deepEqual(
-    await resolveScanTargets(context, async (number) => {
-      assert.equal(number, "7");
-      return pullRequest();
-    }),
-    [{ pr: 7, sha: sourceSha }],
-  );
-});
-
-test("includes fork and draft PRs without depending on a PR workflow run", async () => {
-  assert.deepEqual(
-    await resolveScanTargets(context, async () =>
-      pullRequest({
-        draft: true,
-        head: { sha: sourceSha, repo: { full_name: "contributor/invoices" } },
-      }),
-    ),
-    [{ pr: 7, sha: sourceSha }],
-  );
-});
-
-test("rechecking after approval excludes closed, retargeted, and superseded PRs", async () => {
-  assert.deepEqual(
-    await resolveScanTargets(context, async () => pullRequest()),
-    [{ pr: 7, sha: sourceSha }],
-  );
-  for (const changed of [
-    { state: "closed" },
-    { base: { ref: "release", repo: { full_name: repository } } },
-    { base: { ref: "main", repo: { full_name: "other/invoices" } } },
-    { head: { sha: "3".repeat(40) } },
-  ]) {
-    assert.deepEqual(
-      await resolveScanTargets(context, async () => pullRequest(changed)),
-      [],
-    );
+test("initial selection and approval recheck require the selected PR and revision to remain eligible", async () => {
+  const target = { pr: 7, sha: sourceSha };
+  // The approval step must use its matrix target even if dispatch inputs differ.
+  const recheck = {
+    ...context,
+    target: { ...target },
+    event: { inputs: { pr_number: "9", source_sha: mainSha } },
+  };
+  for (const request of [context, recheck]) {
+    for (const [overrides, expected] of [
+      [{}, [target]],
+      [
+        {
+          draft: true,
+          head: { sha: sourceSha, repo: { full_name: "contributor/invoices" } },
+        },
+        [target],
+      ],
+      [{ state: "closed" }, []],
+      [{ base: { ref: "release", repo: { full_name: repository } } }, []],
+      [{ base: { ref: "main", repo: { full_name: "other/invoices" } } }, []],
+      [{ head: { sha: mainSha } }, []],
+      [{ head: { sha: "3".repeat(40) } }, []],
+    ]) {
+      const actual = await resolveScanTargets(request, async (number) => {
+        assert.equal(number, "7");
+        return pullRequest(overrides);
+      });
+      assert.deepEqual(actual, expected);
+    }
   }
 });
 
-test("manual baseline scans use the trusted workflow commit", async () => {
-  assert.deepEqual(
-    await resolveScanTargets({ ...context, event: { inputs: {} } }, () =>
-      assert.fail("unexpected API call"),
-    ),
-    [{ pr: 0, sha: mainSha }],
-  );
+test("manual and scheduled baselines use the trusted workflow commit before and after approval", async () => {
+  const target = { pr: 0, sha: mainSha };
+  const scheduled = {
+    ...context,
+    eventName: "schedule",
+    event: { schedule: "17 3 * * 1" },
+  };
+  for (const request of [
+    { ...context, event: { inputs: {} } },
+    scheduled,
+    { ...context, target: { ...target } },
+    { ...scheduled, target: { ...target } },
+  ]) {
+    assert.deepEqual(
+      await resolveScanTargets(request, () =>
+        assert.fail("unexpected API call"),
+      ),
+      [target],
+    );
+  }
 });
 
 test("incomplete or invalid PR inputs fail instead of falling back to a baseline", async () => {
@@ -113,48 +119,6 @@ test("PR events and completed PR workflows do not queue inference or query GitHu
       ),
       [],
       trigger.eventName,
-    );
-  }
-});
-
-test("scheduled baseline scans use the trusted workflow commit", async () => {
-  assert.deepEqual(
-    await resolveScanTargets(
-      { ...context, eventName: "schedule", event: { schedule: "17 3 * * 1" } },
-      () => assert.fail("unexpected API call"),
-    ),
-    [{ pr: 0, sha: mainSha }],
-  );
-});
-
-test("approval recheck stays bound to its matrix PR and source revision", async () => {
-  const run = { ...context, target: { pr: 7, sha: sourceSha } };
-  for (const changed of [
-    { state: "closed" },
-    { base: { ref: "release", repo: { full_name: repository } } },
-    { head: { sha: mainSha } },
-  ]) {
-    assert.deepEqual(
-      await resolveScanTargets(run, async (number) => {
-        assert.equal(number, "7");
-        return pullRequest(changed);
-      }),
-      [],
-    );
-  }
-  assert.deepEqual(await resolveScanTargets(run, async () => pullRequest()), [
-    { pr: 7, sha: sourceSha },
-  ]);
-});
-
-test("baseline approval recheck retains the original trusted workflow commit", async () => {
-  for (const eventName of ["workflow_dispatch", "schedule"]) {
-    assert.deepEqual(
-      await resolveScanTargets(
-        { ...context, eventName, target: { pr: 0, sha: mainSha } },
-        () => assert.fail("unexpected API call"),
-      ),
-      [{ pr: 0, sha: mainSha }],
     );
   }
 });

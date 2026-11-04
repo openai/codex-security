@@ -1,18 +1,30 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  encodeSnykV1File,
+  isSnykRestFormat,
+  parseSnykReport,
+  SNYK_REST_ISSUES_V1,
+} from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
+  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
   stableId,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 function snykIdentity(value: unknown, project: string | null): string {
@@ -75,7 +87,7 @@ export function normalizeSnykFindingsExport(
   const { findings: _findings, ...context } = document;
   return normalizeRecords(
     array(document["findings"], "Snyk findings"),
-    (value, sourceFindingId) => {
+    (value) => {
       const finding = record(value, "Snyk plugin finding");
       const observation = record(finding["observation"], "Snyk observation");
       if (
@@ -99,46 +111,42 @@ export function normalizeSnykFindingsExport(
         record(finding["severity"], "Snyk severity")["value"],
       )?.toLowerCase();
       const revision = text(sourceTarget["revision"]);
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(finding["title"], "Snyk title"),
-            description: text(
-              record(finding["description"] ?? {}, "Snyk description")["text"],
-            ),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
-            advisory_ids: [
-              ...new Set([
-                requiredText(rule["id"], "Snyk advisory ID"),
-                ...strings(aliases["cve"]),
-              ]),
-            ],
-            packages: [
-              {
-                name: requiredText(pkg["name"], "Snyk package name"),
-                ecosystem: text(pkg["ecosystem"]),
-                installed_version: text(pkg["version"]),
-                // Plugin v1 manifests are target-relative, without a Git-root offset.
-                manifest_path: null,
-                fixed_versions: strings(remediation["fixedIn"]),
-              },
-            ],
-            locations: [],
-            code_revision:
-              sourceTarget["workingTreeDirty"] === false &&
-              revision !== "unknown"
-                ? revision
-                : null,
-            source_data: structuredClone({ ...context, finding }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(finding["title"], "Snyk title"),
+          description: text(
+            record(finding["description"] ?? {}, "Snyk description")["text"],
+          ),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
+          advisory_ids: [
+            ...new Set([
+              requiredText(rule["id"], "Snyk advisory ID"),
+              ...strings(aliases["cve"]),
+            ]),
+          ],
+          packages: [
+            {
+              name: requiredText(pkg["name"], "Snyk package name"),
+              ecosystem: text(pkg["ecosystem"]),
+              installed_version: text(pkg["version"]),
+              // Plugin v1 manifests are target-relative, without a Git-root offset.
+              manifest_path: null,
+              fixed_versions: strings(remediation["fixedIn"]),
+            },
+          ],
+          locations: [],
+          code_revision:
+            sourceTarget["workingTreeDirty"] === false && revision !== "unknown"
+              ? revision
+              : null,
+          source_data: structuredClone({ ...context, finding }),
+        },
+        target,
+      );
     },
     pluginIdentity,
     target,
@@ -214,6 +222,24 @@ export function snykRepositoryUrls(
         : repository,
     ];
   }
+  const project = source["project"];
+  if (
+    isRecord(project) &&
+    typeof project["ok"] === "boolean" &&
+    text(project["packageManager"]) &&
+    isRecord(source["vulnerability"])
+  ) {
+    // A remote Snyk test puts its GitHub URL and optional ref in the same
+    // path field that local scans use for a directory or npm package name.
+    const repository = text(project["path"])?.split("#", 1)[0];
+    if (
+      repository &&
+      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+        repository,
+      )
+    )
+      return [repository];
+  }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
   const driver = source["driver"];
@@ -267,14 +293,10 @@ export function normalizeSnykSarif(
     const rules = array(driver["rules"], "SARIF rules").map((rule) =>
       record(rule, "SARIF rule"),
     );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    rules.forEach((rule, index) => {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    });
+    // SDK inputs can leave descriptor slots empty. Keep the original rule indexes.
+    const rulesById = indexSarifRules(
+      rules.entries().filter(([index]) => index in rules),
+    );
     const project = snykSarifProject(run);
     const { results: _results, tool: _tool, ...runContext } = run;
     const { rules: _rules, ...driverContext } = driver;
@@ -284,41 +306,32 @@ export function normalizeSnykSarif(
     );
     runContext["tool"] = toolContext;
     const { runs: _runs, ...documentContext } = document;
+    const selectRunContext = sarifRunContextSelector(runContext);
     return array(run["results"], "SARIF results").map((result) => ({
       result,
       rulesById,
       project,
-      runContext,
+      selectRunContext,
       driverContext,
       documentContext,
     }));
   });
   return normalizeRecords(
     entries,
-    (
-      { result: value, rulesById, runContext, driverContext, documentContext },
-      sourceFindingId,
-    ) => {
+    ({
+      result: value,
+      rulesById,
+      selectRunContext,
+      driverContext,
+      documentContext,
+    }) => {
       const result = record(value, "SARIF result");
       const id = requiredText(result["ruleId"], "Snyk advisory ruleId");
       const match = rulesById.get(id);
       if (!match)
         throw new Error("Result must reference exactly one rule in its run.");
-      const { rule, index } = match;
-      if (result["ruleIndex"] !== undefined && result["ruleIndex"] !== index)
-        throw new Error("Result ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== id) ||
-          (ref["index"] !== undefined && ref["index"] !== index) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule["guid"])
-        )
-          throw new Error(
-            "Result uses an inconsistent or external rule reference.",
-          );
-      }
+      const { rule } = match;
+      validateSarifRuleReference(result, id, match, "Snyk");
       const help = requiredText(
         record(rule["help"], "Rule help")["markdown"],
         "Rule help markdown",
@@ -373,44 +386,35 @@ export function normalizeSnykSarif(
       }
       const description = [message, help].join("\n\n");
       // Use the project, advisory group, and literal manifest set within the caller's namespace.
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title,
-            description,
-            severity,
-            advisory_ids: [
-              ...new Set([
-                id,
-                ...(text(
-                  record(rule["fullDescription"] ?? {}, "Full description")[
-                    "text"
-                  ],
-                )?.match(/\bCVE-\d{4}-\d+\b/gu) ?? []),
-              ]),
-            ],
-            packages,
-            // Snyk emits target-relative paths without a Git-root offset and may
-            // synthesize startLine=1. Keep both only in the original evidence.
-            locations: [],
-            source_data: structuredClone({
-              document: documentContext,
-              run: sarifRunContextForResult(
-                runContext,
-                result,
-                rule,
-                driverContext,
-                documentContext,
-              ),
-              driver: driverContext,
-              rule,
-              result,
-            }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title,
+          description,
+          severity,
+          advisory_ids: [
+            ...new Set([
+              id,
+              ...(text(
+                record(rule["fullDescription"] ?? {}, "Full description")[
+                  "text"
+                ],
+              )?.match(/\bCVE-\d{4}-\d+\b/gu) ?? []),
+            ]),
+          ],
+          packages,
+          // Snyk emits target-relative paths without a Git-root offset and may
+          // synthesize startLine=1. Keep both only in the original evidence.
+          locations: [],
+          source_data: structuredClone({
+            document: documentContext,
+            run: selectRunContext(result, rule, driverContext, documentContext),
+            driver: driverContext,
+            rule,
+            result,
+          }),
+        },
+        target,
+      );
     },
     ({ result, project }) => snykIdentity(result, project),
     target,
@@ -449,7 +453,7 @@ export function normalizeSnykJson(
   });
   return normalizeRecords(
     entries,
-    ({ value, context, manager }, sourceFindingId) => {
+    ({ value, context, manager }) => {
       const vulnerability = record(value, "Snyk vulnerability");
       if (vulnerability["type"] === "license")
         throw new Error(
@@ -460,45 +464,42 @@ export function normalizeSnykJson(
         "Snyk identifiers",
       );
       const severity = text(vulnerability["severity"])?.toLowerCase();
-      return {
-        source_finding_id: sourceFindingId,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(
-              vulnerability["title"],
-              "Snyk vulnerability title",
-            ),
-            description: text(vulnerability["description"]),
-            severity: ["critical", "high", "medium", "low"].includes(
-              severity ?? "",
-            )
-              ? severity
-              : "unknown",
-            advisory_ids: [
-              ...new Set([
-                requiredText(vulnerability["id"], "Snyk advisory ID"),
-                ...strings(identifiers["CVE"]),
-              ]),
-            ],
-            packages: [
-              {
-                name: requiredText(
-                  vulnerability["name"] ?? vulnerability["packageName"],
-                  "Snyk package name",
-                ),
-                ecosystem: manager,
-                installed_version: text(vulnerability["version"]),
-                // Native test paths are scan-target-relative, without a Git-root offset.
-                manifest_path: null,
-                fixed_versions: strings(vulnerability["fixedIn"]),
-              },
-            ],
-            locations: [],
-            source_data: structuredClone({ project: context, vulnerability }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: requiredText(
+            vulnerability["title"],
+            "Snyk vulnerability title",
+          ),
+          description: text(vulnerability["description"]),
+          severity: ["critical", "high", "medium", "low"].includes(
+            severity ?? "",
+          )
+            ? severity
+            : "unknown",
+          advisory_ids: [
+            ...new Set([
+              requiredText(vulnerability["id"], "Snyk advisory ID"),
+              ...strings(identifiers["CVE"]),
+            ]),
+          ],
+          packages: [
+            {
+              name: requiredText(
+                vulnerability["name"] ?? vulnerability["packageName"],
+                "Snyk package name",
+              ),
+              ecosystem: manager,
+              installed_version: text(vulnerability["version"]),
+              // Native test paths are scan-target-relative, without a Git-root offset.
+              manifest_path: null,
+              fixed_versions: strings(vulnerability["fixedIn"]),
+            },
+          ],
+          locations: [],
+          source_data: structuredClone({ project: context, vulnerability }),
+        },
+        target,
+      );
     },
     ({ value, manager, manifest }) => {
       const vulnerability = record(value, "Snyk vulnerability");
@@ -520,13 +521,37 @@ export function normalizeSnykJson(
   );
 }
 
+/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
+export function readSnykReport(path: string): Promise<unknown> {
+  return readScannerJson(path, parseSnykReport);
+}
+
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+  references: readonly ExternalSourceRepository[] = [],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  return normalizeSnykFile(await readSnykReport(path), target, references);
+}
+
+/** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
+export async function normalizeSnykFile(
+  input: unknown,
+  target: ExternalImportTarget,
+  references: readonly ExternalSourceRepository[],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
+  if (isSnykRestFormat(document["format"])) {
+    const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
+    return normalizeSnykIssues(
+      document["format"] === SNYK_REST_ISSUES_V1
+        ? encodeSnykV1File(document)
+        : document,
+      target,
+      references,
+    );
+  }
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);
   if (document["version"] === "2.1.0")

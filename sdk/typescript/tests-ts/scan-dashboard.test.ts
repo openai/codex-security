@@ -32,6 +32,29 @@ function createDashboard(
   });
 }
 
+function budgetRequest(signal = new AbortController().signal) {
+  return {
+    maxCostUsd: 20,
+    cost: fakeResult([], "complete", {
+      input_tokens: 100,
+      output_tokens: 1,
+    }).cost!,
+    signal,
+  };
+}
+
+function recordActions(dashboard: ScanDashboard, count: number): void {
+  for (let index = 1; index <= count; index += 1) {
+    dashboard.record({
+      id: `action-${index}`,
+      kind: "command",
+      status: "completed",
+      description: `rg -n finding-${index} routes.ts`,
+      paths: [],
+    });
+  }
+}
+
 function lastFrame(stderr: ReturnType<typeof capture>): string {
   return stripVTControlCharacters(stderr.text())
     .split("CODEX SECURITY  ·  juice-shop")
@@ -57,6 +80,25 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("keeps activity while a terminal is backpressured and restores the screen", async () => {
+    const stderr = capture(true);
+    const stream = { ...stderr.stream, writableNeedDrain: true };
+    const dashboard = createDashboard(stream);
+    dashboard.start();
+    const initial = stderr.text();
+    dashboard.note("First event");
+    await Promise.resolve();
+    expect(stderr.text()).toBe(initial);
+    stream.writableNeedDrain = false;
+    dashboard.note("Second event");
+    await Promise.resolve();
+    expect(stderr.text()).toContain("First event");
+    expect(stderr.text()).toContain("Second event");
+    stream.writableNeedDrain = true;
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];
@@ -120,14 +162,7 @@ describe("live scan dashboard", () => {
     dashboard.start();
     try {
       input.emit("data", "d");
-      const answer = dashboard.requestBudgetIncrease({
-        maxCostUsd: 20,
-        cost: fakeResult([], "complete", {
-          input_tokens: 100,
-          output_tokens: 1,
-        }).cost!,
-        signal: new AbortController().signal,
-      });
+      const answer = dashboard.requestBudgetIncrease(budgetRequest());
       input.emit("data", "\u001BO");
       input.emit("data", "1;5P\u001B\u001B[A");
       await expect(answer).resolves.toBeUndefined();
@@ -150,14 +185,7 @@ describe("live scan dashboard", () => {
           onInterrupt: interrupted,
         });
         dashboard.start();
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         input.emit("data", prefix);
         expect(lastFrame(stderr)).toContain("Raise total USD limit");
         input.emit("data", key);
@@ -192,14 +220,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", "d");
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         for (const chunk of chunks) input.emit("data", chunk);
         expect(lastFrame(stderr)).not.toContain("Raise total USD limit");
         await expect(answer).resolves.toBeUndefined();
@@ -980,14 +1001,7 @@ describe("live scan dashboard", () => {
         const dashboard = createDashboard(capture(true).stream, { input });
         dashboard.start();
         try {
-          const answer = dashboard.requestBudgetIncrease({
-            maxCostUsd: 20,
-            cost: fakeResult([], "complete", {
-              input_tokens: 100,
-              output_tokens: 1,
-            }).cost!,
-            signal: new AbortController().signal,
-          });
+          const answer = dashboard.requestBudgetIncrease(budgetRequest());
           input.emit("data", "30");
           const prefix = "\u001B".repeat(escapes);
           const chunks = coalesced
@@ -1102,14 +1116,7 @@ describe("live scan dashboard", () => {
       dashboard.start();
       try {
         input.emit("data", sequence);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: new AbortController().signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(budgetRequest());
         await Promise.resolve();
         expect(jest.getTimerCount()).toBe(0);
         jest.runAllTimers();
@@ -1140,14 +1147,9 @@ describe("live scan dashboard", () => {
       try {
         for (let index = 0; index < 20; index++)
           dashboard.note(`Activity ${index}`);
-        const answer = dashboard.requestBudgetIncrease({
-          maxCostUsd: 20,
-          cost: fakeResult([], "complete", {
-            input_tokens: 100,
-            output_tokens: 1,
-          }).cost!,
-          signal: controller.signal,
-        });
+        const answer = dashboard.requestBudgetIncrease(
+          budgetRequest(controller.signal),
+        );
         input.emit("data", prefix);
         controller.abort();
         await expect(answer).resolves.toBeUndefined();
@@ -1264,14 +1266,7 @@ describe("live scan dashboard", () => {
           }
           if (mode === "budget")
             void dashboard
-              .requestBudgetIncrease({
-                maxCostUsd: 20,
-                cost: fakeResult([], "complete", {
-                  input_tokens: 100,
-                  output_tokens: 1,
-                }).cost!,
-                signal: controller.signal,
-              })
+              .requestBudgetIncrease(budgetRequest(controller.signal))
               .then((value) => {
                 answer = value;
               });
@@ -2003,15 +1998,7 @@ describe("live scan dashboard", () => {
 
     dashboard.start();
     expect(input.isRaw).toBe(true);
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     let frame = lastFrame(stderr);
     expect(frame).toContain("finding-16");
@@ -2066,15 +2053,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 30; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 30);
 
     const framesBefore = stderr.text().match(/\u001B\[H/gu)?.length ?? 0;
     input.emit("data", Buffer.from("\u001B[A".repeat(6)));
@@ -2094,6 +2073,33 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test("keeps scrolled history in place once the oldest activity is dropped", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 80, rows: 14 },
+      { input },
+    );
+    const visible = () => lastFrame(stderr).match(/finding-\d+/gu);
+
+    recordActions(dashboard, 2_000);
+    dashboard.start();
+    input.emit("data", "\u001B[A".repeat(6));
+    const before = visible();
+    expect(before).toContain("finding-1994");
+
+    dashboard.record({
+      id: "action-2001",
+      kind: "command",
+      status: "completed",
+      description: "rg -n finding-2001 routes.ts",
+      paths: [],
+    });
+    expect(visible()).toEqual(before);
+    expect(lastFrame(stderr)).toContain("7 lines above live");
+    dashboard.stop();
+  });
+
   test("scrolls half a page with Mac-friendly Ctrl+U and Ctrl+D", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
@@ -2103,15 +2109,7 @@ describe("live scan dashboard", () => {
     );
 
     dashboard.start();
-    for (let index = 1; index <= 20; index += 1) {
-      dashboard.record({
-        id: `action-${index}`,
-        kind: "command",
-        status: "completed",
-        description: `rg -n finding-${index} routes.ts`,
-        paths: [],
-      });
-    }
+    recordActions(dashboard, 20);
 
     input.emit("data", "\u0015");
     let frame = lastFrame(stderr);
@@ -2735,52 +2733,84 @@ function failingDashboardOutput(output: string[]) {
   };
 }
 
-test("aligns component columns by terminal width and retains trailing cost", async () => {
-  const stderr = capture(true);
-  const dashboard = createDashboard(
-    { ...stderr.stream, columns: 160, rows: 24 },
-    { presentation: "components", showCost: true },
-  );
-  const receipts: ComponentReceipt[] = [
-    "a".repeat(74),
-    "界".repeat(37),
-    "e\u0301".repeat(37),
-  ].map((name, index) => ({
-    id: String(index),
-    name,
-    paths: ["src"],
-    status: "pending",
-    outputDir: `/synthetic/results/${index}`,
-  }));
-  dashboard.start();
-  dashboard.setComponents(receipts);
-  for (const receipt of receipts)
-    dashboard.recordComponentEvent({
-      componentId: receipt.id,
-      type: "cost",
-      value: {
-        model: "synthetic-model",
-        inputTokens: 1,
-        cachedInputTokens: 0,
-        cacheWriteInputTokens: 0,
-        outputTokens: 1,
-        estimatedUsd: 1,
-        estimatedUsdRange: { min: 1, max: 1, context: "unknown" },
-      },
-    });
-  await Promise.resolve();
-  const frame = stripVTControlCharacters(
-    stderr.text().split("\u001B[H").at(-1)!,
-  );
-  const rows = frame.split("\n").filter((line) => line.includes("Queued"));
-  expect(rows).toHaveLength(3);
-  for (const row of rows) expect(row).toContain("$1.00");
-  expect(
-    new Set(rows.map((row) => stringWidth(row.slice(0, row.indexOf("$1.00")))))
-      .size,
-  ).toBe(1);
-  dashboard.stop();
-});
+test.each([80, 160])(
+  "fits component progress at %i columns",
+  async (columns) => {
+    const stderr = capture(true);
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns, rows: 24 },
+      { presentation: "components", showCost: true },
+    );
+    const receipts: ComponentReceipt[] = [
+      "a".repeat(74),
+      "界".repeat(37),
+      "e\u0301".repeat(37),
+      "unpriced",
+    ].map((name, index) => ({
+      id: String(index),
+      name,
+      paths: ["src"],
+      status: "pending",
+      outputDir: `/synthetic/results/${index}`,
+    }));
+    dashboard.start();
+    dashboard.setComponents(receipts);
+    for (const [index, receipt] of receipts.slice(0, -1).entries()) {
+      if (index < 2) {
+        dashboard.updateComponent({ ...receipt, status: "started" });
+        dashboard.recordComponentEvent({
+          componentId: receipt.id,
+          type: "progress",
+          value: {
+            phase: "attack_path",
+            filesCompleted: 2,
+            filesTotal: 8,
+            ...(index === 1 && {
+              reviewItems: { completed: 1_234, total: 12_345 },
+            }),
+          },
+        });
+      }
+      const max = index === 2 ? 1 : 12.34;
+      dashboard.recordComponentEvent({
+        componentId: receipt.id,
+        type: "cost",
+        value: {
+          model: "synthetic-model",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 1,
+          estimatedUsd: 1,
+          estimatedUsdRange: { min: 1, max, context: "unknown" },
+        },
+      });
+    }
+    await Promise.resolve();
+    const frame = stripVTControlCharacters(
+      stderr.text().split("\u001B[H").at(-1)!,
+    );
+    const lines = frame.split("\n");
+    const header = lines.findIndex((line) =>
+      /Status\s+Progress\s+Findings\s+Cost/u.test(line),
+    );
+    expect(header).toBeGreaterThanOrEqual(0);
+    const rows = lines.slice(header + 1, header + 1 + receipts.length);
+    expect(rows).toHaveLength(receipts.length);
+    expect(rows[0]).toContain("2/8 files");
+    expect(rows[1]).toContain("1,234/12,345 reviews");
+    expect(rows[2]).toMatch(/Queued\s+—\s+—\s+\$1\.00(?:\s|$)/u);
+    const column = (line: string, value: string) =>
+      stringWidth(line.slice(0, line.lastIndexOf(value)));
+    const costColumn = column(lines[header]!, "Cost");
+    for (const row of rows.slice(0, 2)) expect(row).toContain("$1.00–$12.34");
+    for (const row of rows.slice(0, -1)) {
+      expect(column(row, "$1.00")).toBe(costColumn);
+    }
+    expect(column(rows.at(-1)!, "—")).toBe(costColumn);
+    dashboard.stop();
+  },
+);
 
 test.each([16, 25, 120])(
   "preserves markup after clipped prefixes at width %i",
