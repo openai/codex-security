@@ -130,7 +130,10 @@ test("session batches bound handles, reuse buffers, and retain discovery-order w
   const paths: string[] = [];
   for await (const path of sessionFiles(join(home, "sessions")))
     paths.push(path);
-  const release = Promise.withResolvers<void>();
+  const cost = tracker(home);
+  // Discovery identifies each log before later polls can read known workers in batches.
+  expect((await cost.refresh()).cost?.inputTokens).toBe(250);
+  await Promise.all(paths.map((path) => fs.appendFile(path, usage(20))));
   const openOriginal = fs.open;
   const buffers = new Set<unknown>();
   let active = 0;
@@ -146,16 +149,13 @@ test("session batches bound handles, reuse buffers, and retain discovery-order w
     }) as typeof file.read;
     const close = file.close.bind(file);
     file.close = async () => {
-      if (args[0] === paths[0]) await release.promise;
       await close();
       active--;
-      if (args[0] !== paths[0]) release.resolve();
     };
     return file;
   });
-  const cost = tracker(home);
   try {
-    expect((await cost.stop()).cost?.inputTokens).toBe(250);
+    expect((await cost.stop()).cost?.inputTokens).toBe(500);
     expect(active).toBe(0);
     expect(maximum).toBeGreaterThan(1);
     expect(maximum).toBeLessThanOrEqual(8);
@@ -167,7 +167,6 @@ test("session batches bound handles, reuse buffers, and retain discovery-order w
       if (id !== "main") expect(cost.workerNumber(id)).toBe(++worker);
     }
   } finally {
-    release.resolve();
     open.mockRestore();
   }
 });
@@ -177,7 +176,12 @@ test.each([false, true])(
   async (directoryFailure) => {
     const home = await directory();
     const main = await session(home, "main");
-    await session(home, "second");
+    const second = await session(home, "second", "main");
+    const cost = tracker(home);
+    expect((await cost.refresh()).cost?.inputTokens).toBe(20);
+    await Promise.all(
+      [main, second].map((path) => fs.appendFile(path, usage(15))),
+    );
     const nested = join(home, "sessions", "nested");
     if (directoryFailure) await fs.mkdir(nested);
     const entered = Promise.withResolvers<void>();
@@ -214,7 +218,6 @@ test.each([false, true])(
       };
       return file;
     });
-    const cost = tracker(home);
     const result = cost
       .refresh()
       .then(
@@ -225,7 +228,7 @@ test.each([false, true])(
         finished = true;
       });
     try {
-      await entered.promise;
+      await Promise.race([entered.promise, result]);
       expect(active).toBeGreaterThan(0);
       expect(finished).toBe(false);
       release.resolve();
@@ -237,6 +240,6 @@ test.each([false, true])(
       open.mockRestore();
       await result;
     }
-    expect((await cost.stop()).cost?.inputTokens).toBe(10);
+    expect((await cost.stop()).cost?.inputTokens).toBe(30);
   },
 );
