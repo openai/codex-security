@@ -1203,6 +1203,7 @@ interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
+  readonly externalCachePaths?: readonly string[];
 }
 
 interface PatchSnapshotSandbox {
@@ -12069,6 +12070,11 @@ async function runSkill(
                     permissions: {
                       name: patchPermissions,
                       readOnlyPaths: gitControls!.readOnlyPaths,
+                      ...(gitControls!.externalCachePaths.length
+                        ? {
+                            externalCachePaths: gitControls!.externalCachePaths,
+                          }
+                        : {}),
                       ...(gitControls!.modelOnlyReadOnlyPaths.length === 0
                         ? {}
                         : {
@@ -12405,6 +12411,26 @@ export async function readSkillCommandOutput(
               ...config,
               ...workspaceOverride,
             });
+            // Never turn a checkout-selected cache outside the repository into
+            // a read grant. Narrow only the operator's explicit writable roots.
+            const modelReadOnlyPaths = new Set(
+              appServer.permissions.modelOnlyReadOnlyPaths,
+            );
+            if (appServer.permissions.externalCachePaths?.length) {
+              for (const root of Object.keys(profile.workspace_roots)) {
+                const canonical = await realpath(root).catch(
+                  (error: NodeJS.ErrnoException) => {
+                    if (error.code === "ENOENT" || error.code === "ENOTDIR")
+                      return undefined;
+                    throw error;
+                  },
+                );
+                if (canonical === undefined) continue;
+                for (const path of appServer.permissions.externalCachePaths)
+                  if (!isOutsidePath(relative(canonical, path)))
+                    modelReadOnlyPaths.add(path);
+              }
+            }
             // Cache restrictions for the model do not change snapshot access.
             startThread({
               ...workspaceOverride,
@@ -12415,9 +12441,10 @@ export async function readSkillCommandOutput(
                   filesystem: {
                     ...profile.filesystem,
                     ...Object.fromEntries(
-                      (appServer.permissions.modelOnlyReadOnlyPaths ?? []).map(
-                        (path) => [path, { ".": "read" }],
-                      ),
+                      [...modelReadOnlyPaths].map((path) => [
+                        path,
+                        { ".": "read" },
+                      ]),
                     ),
                   },
                 },

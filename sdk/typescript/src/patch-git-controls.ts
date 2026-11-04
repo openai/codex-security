@@ -136,6 +136,7 @@ export async function withPatchGitIndex<T>(
 export interface PatchGitControls {
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
+  readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   validate(): Promise<void>;
 }
@@ -633,6 +634,7 @@ export async function capturePatchGitControls(
   >();
   const snapshotStoragePaths = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
+  const externalCachePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
   const unreadableConfigurations = new Set<string>();
   const inaccessibleHooks = new Set<string>();
@@ -1560,6 +1562,7 @@ export async function capturePatchGitControls(
             await rememberControl(child, true, false, true);
             const target = controlPaths.get(child)!.canonical;
             if (insideSelectedRoots(target)) modelOnlyReadOnlyPaths.add(target);
+            else externalCachePaths.add(target);
           }
           continue;
         }
@@ -1707,6 +1710,7 @@ export async function capturePatchGitControls(
       ]),
     ],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
+    externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     validate: () => discover(false),
   };
