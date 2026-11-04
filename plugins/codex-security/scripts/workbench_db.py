@@ -2475,9 +2475,15 @@ def scan_context(
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "progress_only", False):
-        scan = scan_history.scan_with_progress(
-            connection, resolve_scan_id(connection, args.scan_id)
-        )
+        scan = connection.execute(
+            """
+            SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
+                   progress.*, progress.updated_at AS progress_updated_at
+            FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+            WHERE scans.id = ?
+            """,
+            (resolve_scan_id(connection, args.scan_id),),
+        ).fetchone()
         if scan is None:
             raise SystemExit("Codex Security scan not found.")
         progress, _ = scan_progress_result(connection, scan)
