@@ -203,7 +203,6 @@ import {
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import { standaloneValidationPrompt } from "./standalone-validation-prompt.js";
-import { readSkillRuntimeInstructions } from "./skill-runtime-instructions.js";
 import {
   prepareKnowledgeBase,
   readKnowledgeBaseSnapshot,
@@ -9201,6 +9200,9 @@ async function runSkill(
         ]),
   ].join("\n");
   if (assess) {
+    const { readSkillRuntimeInstructions } = await import(
+      pathToFileURL(join(plugin, "scripts", "skill_instructions.mjs")).href
+    );
     prompt = [
       "Follow the bundled $codex-security:assess-patch-risk instructions and rubric included below. Do not reload these instruction files.",
       await readFile(join(plugin, "skills", skill, "SKILL.md"), "utf8"),

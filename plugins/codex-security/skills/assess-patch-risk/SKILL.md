@@ -62,7 +62,7 @@ Return both a concise Markdown report and a JSON object conforming to [`../../sc
 7. top risk drivers, protective factors, and status-quo risk; and
 8. unknowns plus the bounded evidence plan when held.
 
-Validate the JSON before returning it. Use the `patch-risk-validation` instructions supplied by the caller or request that topic from `get_codex_security_skill_instructions`. For standalone file access, follow [the runtime instruction lookup](../../references/skill-runtime.md). The installed plugin root is two directories above this skill.
+Before returning the JSON, run the [`patch-risk-validation` command](../../references/skill-runtime.md) supplied for this invocation. The installed plugin root is two directories above this skill.
 
 Correct structural or invariant errors by revisiting the evidence; never change a recommendation merely to make validation pass. Return the validated JSON in the response. Write it to disk only when the caller requests an artifact, and keep every assessment-created file outside the subject checkout and its Git directories.
 

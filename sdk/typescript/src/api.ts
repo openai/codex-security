@@ -1388,7 +1388,6 @@ export class CodexSecurity {
       const verificationMode = VerificationModeSchema.optional().parse(
         options.verificationMode,
       );
-      const staticVerification = verificationMode === "static";
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
         options,
@@ -1473,15 +1472,9 @@ export class CodexSecurity {
       const prompt = [
         `Use the bundled $codex-security:fix-finding skill at ${jsonForPrompt(join(session.runtime.plugin.pluginRoot, "skills", "fix-finding", "SKILL.md"))}.`,
         `Fix and verify only the supplied finding in repository workspace ${jsonForPrompt(repository)}. The workspace is intentionally mutable; preserve unrelated changes and write nowhere else.`,
-        "Do not commit, push, publish, open a pull request, update remote finding state, or claim verification without " +
-          (staticVerification
-            ? "completing the required static assessment."
-            : "running the relevant checks."),
+        "Do not commit, push, publish, open a pull request, or update remote finding state.",
         'Return exactly one JSON object with all four keys: "status", "changedFiles", "verificationReport", and "reason". Status must be "verified", "no_change", "blocked", or "failed". changedFiles must contain repository-relative paths. verificationReport must be nonempty proof for verified or no_change and may be proof or null for blocked or failed. reason must be a nonempty reason for blocked or failed and null for verified or no_change.',
-        (staticVerification
-          ? 'Use "verified" only when source evidence establishes that the original attack path is closed and legitimate behavior is preserved.'
-          : 'Use "verified" only when the original issue no longer reproduces and legitimate behavior still passes.') +
-          ' Use "no_change" only when repository evidence proves the finding is already safe.',
+        'Use "verified" only when the supplied verification method establishes that the original attack path is closed and legitimate behavior is preserved. Use "no_change" only when repository evidence proves the finding is already safe.',
         await verificationMethod(
           session.runtime.plugin.pluginRoot,
           "patch",

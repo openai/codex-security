@@ -1,6 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { copyFileSync, cpSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readSkillRuntimeInstructions } from "../src/skill-runtime-instructions.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 
@@ -37,7 +37,11 @@ export function windowsHelperFixture(
       workingDirectory = root,
       pipelineInput?: string,
     ) {
-      const source = await readSkillRuntimeInstructions(PLUGIN_ROOT, topic);
+      const source = execFileSync(
+        Bun.which("node")!,
+        [join(PLUGIN_ROOT, "scripts", "skill_runtime.mjs"), topic],
+        { encoding: "utf8" },
+      );
       let command = /```powershell\r?\n([\s\S]*?)\r?\n```/u.exec(source)?.[1];
       if (command === undefined)
         throw new Error(`No PowerShell command for ${topic}`);

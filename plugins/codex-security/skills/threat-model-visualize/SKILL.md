@@ -68,7 +68,7 @@ After browser-driven JSON edits, repeat the affected source/selection checks and
 
 Start browser QA only with the current JSON's `PASS` receipt from phase 3.
 
-Run the bundled builder with the `build-explorer` command from `get_codex_security_skill_instructions` on the build host. Supply the model, assessment and output HTML paths. For standalone execution, or a shell on a different host, load the command on that executor using [skill-runtime.md](../../references/skill-runtime.md).
+Run the [`build-explorer` command](../../references/skill-runtime.md) on the build host with the model, assessment and output HTML paths.
 
 Use a permitted browser with interaction and screenshot support from the current tool surface or an installed local runtime such as Playwright with Chromium. Check the executor's installed browser tooling when no browser tool is exposed. Open the HTML using the browser's supported local transport. For browsers that require HTTP, serve only the output directory from your own server on `127.0.0.1` at an unused or OS-assigned port. Stop it after QA. Respect any policy denial. When no permitted browser is available, deliver the local files and mark browser QA incomplete.
 

@@ -1,25 +1,12 @@
 # Runtime instructions
 
-Use the instructions supplied for this invocation. For a command you will execute on the plugin host, request its topic from `get_codex_security_skill_instructions`. It returns the applicable installed instructions and leaves execution to the caller. Replace its placeholders with the selected arguments using the quoting rules shown.
+Use the instructions supplied by the caller. For a topic you need to resolve, call `get_codex_security_skill_instructions({ topic })` on the executor that will run the command. Run the returned command with the indicated placeholder quoting.
 
-For scan startup, pass `clientSurface: "desktop"` only when the host explicitly identifies itself as the Codex desktop app. Other callers use the default headless surface. A tool list or the operating system cannot establish that the client renders a desktop UI.
+For scans, pass `clientSurface: "desktop"` when the host explicitly identifies itself as the Codex desktop app. The default is headless.
 
-For a standalone skill without the instruction tool, or when the command runs on a different machine from the MCP server, use Node on the command executor to read the same instructions:
+For standalone use or a shell on another host, set the command’s working directory to the installed plugin root and run `node ./scripts/skill_runtime.mjs <topic>`. Append `desktop` for a desktop scan. Resolve `external-imports` in the import command’s environment before acquiring evidence. Only the running reader can confirm the opt-in.
 
-```text
-node "<plugin_root>/scripts/skill_runtime.mjs" <topic>
-```
+For file-only access, read the applicable sections under `<plugin_root>/templates/skill-runtime/`.
 
-For desktop scan lifecycle instructions, append `desktop`. The reader uses its own platform for command topics. Use the installed plugin root and the authorized target paths.
-
-When only file reads are available, start at `<plugin_root>/templates/skill-runtime/`. For a command, read `windows/<topic>.md` on a Windows executor or `posix/<topic>.md` on a Unix executor. For a native scan, read the following files in order:
-
-| Topic | Files |
-| --- | --- |
-| `standard-scan` | `<surface>/standard-scan.md`, then `native-scan.md` |
-| `diff-scan` | `diff-scan.md`, then `native-scan.md` |
-| `deep-scan` | `deep-scan.md` |
-
-Use the surface established above (`desktop` or `headless`). Desktop scans also read `desktop/review-comments.md` for the final response.
-
-Resolve `external-imports` with the running reader in the import command's environment before acquiring evidence. Static template files cannot establish that environment's opt-in.
+- For a shell command, read the quoting instructions and the named topic in `windows.md` (PowerShell) or `posix.md` (POSIX shell).
+- In `scans.md`, read the scan topic, using `standard-scan-<surface>` for Standard. Standard and Diff also use `checkpoints`. Desktop scans use `review-comments` for the final response.

@@ -128,7 +128,6 @@ const distModules = [
   "security-policy-cli",
   "security-policy-diff",
   "skill-authentication",
-  "skill-runtime-instructions",
   "standalone-validation-prompt",
   "validation-records",
   "suggest-owners",

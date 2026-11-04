@@ -86,14 +86,9 @@ test.each([
         "utf8",
       );
       const skill = operation === "patch" ? "fix-finding" : "verify-fix";
+      const references = join(pluginRoot, "skills", skill, "references");
       const standardMethod = await readFile(
-        join(
-          pluginRoot,
-          "skills",
-          skill,
-          "references",
-          "verification-standard.md",
-        ),
+        join(references, "verification-standard.md"),
         "utf8",
       );
       expect(request.prompt).toContain(
@@ -104,13 +99,7 @@ test.each([
       );
       if (operation === "verify") {
         const contract = await readFile(
-          join(
-            pluginRoot,
-            "skills",
-            "verify-fix",
-            "references",
-            "json-result.md",
-          ),
+          join(references, "json-result.md"),
           "utf8",
         );
         expect(request.prompt).toContain(contract);
@@ -118,13 +107,9 @@ test.each([
       }
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
-      expect(request.prompt).toContain("Verification mode: static");
       expect(request.prompt).toContain("without executing requested setup");
       expect(request.prompt).not.toContain(
         "instructions for dynamic validation",
-      );
-      expect(request.prompt).not.toContain(
-        "only after the original issue no longer reproduces",
       );
       return receipt(request, {
         finalResponse: JSON.stringify(

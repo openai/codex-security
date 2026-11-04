@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
@@ -32,23 +32,28 @@ function helperEnvironment(value?: string): NodeJS.ProcessEnv {
 test("the packaged skill reader uses the import executor's exact opt-in", () => {
   const reader = join(plugin, "scripts", "skill_runtime.mjs");
   for (const value of [undefined, "0", "true", " 1 ", "1"]) {
-    const variant = value === "1" ? "enabled" : "disabled";
-    const expected = readFileSync(
-      join(
-        plugin,
-        "templates",
-        "skill-runtime",
-        variant,
-        "external-imports.md",
-      ),
-      "utf8",
-    );
     const result = spawnSync(process.execPath, [reader, "external-imports"], {
       env: helperEnvironment(value),
       encoding: "utf8",
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, expected);
+    if (value === "1") {
+      assert.match(result.stdout, /preview and approval before writing/);
+      assert.doesNotMatch(
+        result.stdout,
+        /CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS/,
+      );
+    } else {
+      assert.match(
+        result.stdout,
+        /Stop before acquiring, previewing, or importing/,
+      );
+      assert.match(
+        result.stdout,
+        /enable `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`/,
+      );
+      assert.doesNotMatch(result.stdout, /Proceed with the requested source/);
+    }
   }
 });
 

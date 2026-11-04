@@ -43,7 +43,7 @@ Optional `scan.warnings` records run-level diagnostics available when the bundle
 
 ### Stopped Result Recovery
 
-To validate and republish retained checkpoints for a failed, non-canceled workbench scan, request `get_codex_security_skill_instructions({ topic: "recover-scan-results" })` and run its recovery command with the affected scan ID. Standalone callers without the tool can use [the same topic](skill-runtime.md).
+To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run the [`recover-scan-results` command](skill-runtime.md) with the affected scan ID.
 
 Recovery can add only checkpoints that pass the stopped-scan source-integrity checks. It is not available for running, completed, or canceled scans. After cancellation, the owning continuation may retry publication only from the source set frozen at cancellation through `preserve-scan-results`; it cannot admit later checkpoints.
 

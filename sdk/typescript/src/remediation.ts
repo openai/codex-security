@@ -106,28 +106,17 @@ export async function remediationPrompt(input: RemediationPromptInput) {
   const staticVerification = input.verificationMode === "static";
   const prompt: string[] = [];
   if (verify) {
+    const skillDir = join(input.pluginRoot, "skills", "verify-fix");
     prompt.push(
       "Follow the bundled $codex-security:verify-fix instructions and shared assessment reference included below. Do not reload these instruction files.",
-      await readFile(
-        join(input.pluginRoot, "skills", "verify-fix", "SKILL.md"),
-        "utf8",
-      ),
+      await readFile(join(skillDir, "SKILL.md"), "utf8"),
       "Shared static finding assessment reference:",
       await readFile(
         join(input.pluginRoot, "references", "static-finding-assessment.md"),
         "utf8",
       ),
       `Expected result identifiers (JSON array): ${JSON.stringify(input.verificationIds)}`,
-      await readFile(
-        join(
-          input.pluginRoot,
-          "skills",
-          "verify-fix",
-          "references",
-          "json-result.md",
-        ),
-        "utf8",
-      ),
+      await readFile(join(skillDir, "references", "json-result.md"), "utf8"),
     );
   } else {
     prompt.push(
@@ -136,14 +125,7 @@ export async function remediationPrompt(input: RemediationPromptInput) {
     if (input.structuredPatch) {
       prompt.push(
         'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. ' +
-          (staticVerification
-            ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
-            : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
-          "Preserve unrelated local changes.",
-      );
-    } else {
-      prompt.push(
-        `Use the fix summary at ${JSON.stringify(join(input.pluginRoot, "skills", "fix-finding", "references", "summary.md"))} as the output contract.`,
+          'Use "verified" only when the supplied verification method establishes that the original attack path is closed and legitimate behavior is preserved. Preserve unrelated local changes.',
       );
     }
   }

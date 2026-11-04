@@ -128,8 +128,8 @@ describe("bundled plugin build", () => {
       "codex_profile.d.mts",
       "codex_session.mjs",
       "codex_session.d.mts",
-      "skill_runtime.mjs",
-      "skill_runtime.d.mts",
+      "skill_instructions.mjs",
+      "skill_instructions.d.mts",
     ]) {
       await writeFixture(
         source,

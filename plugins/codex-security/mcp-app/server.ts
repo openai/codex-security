@@ -16,7 +16,7 @@ import { resolvePythonCommand } from "./src/python_command.js";
 import {
   readSkillRuntimeInstructions,
   skillRuntimeTopics,
-} from "../scripts/skill_runtime.mjs";
+} from "../scripts/skill_instructions.mjs";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
@@ -533,7 +533,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Read Codex Security workflow instructions",
       description:
-        "Return the installed plugin's instructions for a workflow operation on this execution host. For scan setup, pass the desktop surface only when the client explicitly identifies itself as the Codex desktop app. This tool reads the applicable installed instructions.",
+        "Read the installed instructions for a workflow on this host. For scan setup, pass desktop only when the client identifies itself as the Codex desktop app.",
       inputSchema: z.strictObject({
         topic: z.enum(skillRuntimeTopics),
         clientSurface: z.enum(["desktop", "headless"]).optional(),
@@ -541,16 +541,12 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ topic, clientSurface }) => ({
-      content: [
-        {
-          type: "text",
-          text: await readSkillRuntimeInstructions(PLUGIN_ROOT, topic, {
-            clientSurface,
-          }),
-        },
-      ],
-    }),
+    async ({ topic, clientSurface }) => {
+      const text = await readSkillRuntimeInstructions(PLUGIN_ROOT, topic, {
+        clientSurface,
+      });
+      return { content: [{ type: "text", text }] };
+    },
   );
   const destructiveAnnotations = {
     ...writingAnnotations,

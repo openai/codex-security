@@ -1,83 +1,73 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { assertNoError } from "./assertions.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const plugin = resolve(
   process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
     join(import.meta.dirname, "../../../../sdk/typescript/_bundled_plugin"),
 );
 
-test("packaged MCP and standalone reader select the same runtime instructions", async () => {
+test("packaged MCP and standalone reader select runtime instructions", async (t) => {
+  const root = await temporaryDirectory("skill-runtime-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const linked = join(root, "linked plugin");
+  await symlink(plugin, linked, "junction");
+  const reader = join(linked, "scripts", "skill_runtime.mjs");
   const server = startRpcServer({
     command: process.execPath,
     args: [join(plugin, "mcp", "server.mjs"), "--stdio"],
     env: { ...process.env, CODEX_SECURITY_PLUGIN_ROOT: plugin },
   });
-  try {
-    assertNoError(await server.initialize("codex-mcp-client"));
-    const name = "get_codex_security_skill_instructions";
-    let id = 2;
-    async function instructions(
-      topic: string,
-      clientSurface?: "desktop" | "headless",
-    ) {
-      const response = await server.callTool(id++, {
-        name,
-        arguments: { topic, clientSurface },
-      });
+  t.after(() => server.stop());
+  assertNoError(await server.initialize("codex-mcp-client"));
+
+  let id = 2;
+  const instructions = (topic: string, clientSurface?: "desktop") =>
+    server.callTool(id++, {
+      name: "get_codex_security_skill_instructions",
+      arguments: { topic, clientSurface },
+    });
+  for (const surface of [undefined, "desktop"] as const) {
+    for (const [topic, start] of [
+      ["standard-scan", surface ? "prompt_only" : "standard"],
+      ["diff-scan", "prompt_only"],
+      ["deep-scan", "deep"],
+    ] as const) {
+      const response = await instructions(topic, surface);
       assertNoError(response);
       const text: string = response.result.content[0].text;
-      const args = [join(plugin, "scripts", "skill_runtime.mjs"), topic];
-      if (clientSurface) args.push(clientSurface);
-      assert.equal(
-        execFileSync(process.execPath, args, { encoding: "utf8" }),
-        text,
+      assert.match(text, /get_codex_security_scan_context/);
+      assert.equal(text.includes("::code-comment"), surface === "desktop");
+      assert.deepEqual(
+        new Set(text.match(/\bstart_codex_security_\w+_scan\b/g)),
+        new Set([`start_codex_security_${start}_scan`]),
       );
-      return text;
-    }
-
-    for (const clientSurface of [undefined, "desktop"] as const) {
-      const desktop = clientSurface === "desktop";
-      for (const topic of ["standard-scan", "diff-scan", "deep-scan"]) {
-        const text = await instructions(topic, clientSurface);
-        assert.match(text, /get_codex_security_scan_context/);
-        assert.equal(text.includes("::code-comment"), desktop);
+      for (const tool of [
+        "record_codex_security_scan_draft",
+        "complete_codex_security_scan",
+      ])
+        assert.equal(text.includes(tool), topic !== "deep-scan", tool);
+      if (topic === "standard-scan") {
+        const args = surface ? [reader, topic, surface] : [reader, topic];
         assert.equal(
-          text.includes("complete_codex_security_scan"),
-          topic !== "deep-scan",
-        );
-        assert.equal(
-          text.includes("record_codex_security_scan_draft"),
-          topic !== "deep-scan",
-        );
-        assert.equal(
-          text.includes("start_codex_security_deep_scan"),
-          topic === "deep-scan",
-        );
-        assert.equal(
-          text.includes("start_codex_security_standard_scan"),
-          topic === "standard-scan" && !desktop,
-        );
-        assert.equal(
-          text.includes("start_codex_security_prompt_only_scan"),
-          topic === "diff-scan" || (topic === "standard-scan" && desktop),
+          execFileSync(process.execPath, args, { encoding: "utf8" }),
+          text,
         );
       }
     }
-    const command = await instructions("scope-binding", "desktop");
-    assert.match(command, /--helper bind-repo-scopes/);
-    assert.equal(command.includes("cmd.exe"), process.platform === "win32");
-    assert.doesNotMatch(command, /::code-comment/);
-
-    const invalid = await server.callTool(id, {
-      name,
-      arguments: { topic: "../plugin-files" },
-    });
-    assert.ok(invalid.result?.isError || invalid.error);
-  } finally {
-    await server.stop();
   }
+  const command = await instructions("scope-binding", "desktop");
+  assertNoError(command);
+  const text: string = command.result.content[0].text;
+  assert.match(text, /--helper bind-repo-scopes/);
+  assert.equal(text.includes("cmd.exe"), process.platform === "win32");
+  assert.doesNotMatch(text, /::code-comment/);
+
+  const invalid = await instructions("../plugin-files");
+  assert.ok(invalid.result?.isError || invalid.error);
 });

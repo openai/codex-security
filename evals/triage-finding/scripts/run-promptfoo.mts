@@ -57,9 +57,10 @@ function stageSkillRuntime() {
   for (const relativePath of [
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
+    "scripts/skill_instructions.mjs",
     "scripts/skill_runtime.mjs",
-    "templates/skill-runtime/posix/policy-resolve.md",
-    "templates/skill-runtime/windows/policy-resolve.md",
+    "templates/skill-runtime/posix.md",
+    "templates/skill-runtime/windows.md",
   ]) {
     const target = path.join(stagedPluginRoot, relativePath);
     fs.mkdirSync(path.dirname(target), { recursive: true });
