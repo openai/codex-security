@@ -246,7 +246,7 @@ export async function runRecords(
           }
         }, signal);
       } catch (error) {
-        // Legacy records mode discards the batch even after a refusal.
+        // The default records policy treats refusals as batch failures.
         if (
           error instanceof DeduplicationReviewError &&
           error.metadata.category === "refusal"
