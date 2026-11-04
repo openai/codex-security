@@ -145,7 +145,7 @@
     "win32": 60
   },
   "api.test.ts": {
-    "linux": 62.4,
+    "linux": 596.4,
     "darwin": 65.3,
     "win32": 390.9
   },
