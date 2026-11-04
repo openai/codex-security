@@ -6305,8 +6305,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const selection = {
       configuredPath: "python3",
       environment,
-      protectedRoot: roots[0]!,
-      additionalProtectedRoots: roots.slice(1),
+      protectedRoot: roots,
     };
     try {
       expect(await resolvePluginPythonCommand(selection)).toEqual({
@@ -6933,8 +6932,7 @@ testPosix(
     const command = await resolvePluginPythonCommand({
       configuredPath: alias,
       environment: { PATH: "" },
-      protectedRoot: repository,
-      additionalProtectedRoots: [additional],
+      protectedRoot: [repository, additional],
     });
     expect(command.executable).toBe(interpreter);
   },

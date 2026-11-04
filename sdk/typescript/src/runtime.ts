@@ -196,7 +196,6 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
-  additionalProtectedRoots?: readonly string[];
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -3134,10 +3133,8 @@ export async function resolvePluginPythonCommand(
 ): Promise<TrustedExecutable> {
   const environment = options.environment ?? process.env;
   const requestedRoots = options.protectedRoot ?? process.cwd();
-  const protectedRoot = [
-    ...(typeof requestedRoots === "string" ? [requestedRoots] : requestedRoots),
-    ...(options.additionalProtectedRoots ?? []),
-  ];
+  const protectedRoot =
+    typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
   const callerDirectories = [
     process.cwd(),
     options.currentDirectory ?? process.cwd(),

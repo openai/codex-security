@@ -297,7 +297,7 @@ function validateCanonicalContract(
   findings: FindingsDocument,
   coverage: CoverageDocument | undefined,
   profile: ContractProfile,
-  validateCoverageClosure: boolean,
+  validateRecoveryIdentities: boolean,
 ): void {
   const requireText = (value: string | undefined, context: string) => {
     if (profile === "sdk" && value === undefined) return;
@@ -408,7 +408,7 @@ function validateCanonicalContract(
     const context = `coverage.surfaces[${index}]`;
     requireText(surface.id, `${context}.id`);
     requireText(surface.label, `${context}.label`);
-    if (validateCoverageClosure && surfaceIds.has(surface.id)) {
+    if (validateRecoveryIdentities && surfaceIds.has(surface.id)) {
       throw new ContractValidationError(`${context}.id: duplicate surface id.`);
     }
     surfaceIds.add(surface.id);
@@ -431,7 +431,7 @@ function validateCanonicalContract(
       }
     }
   }
-  if (validateCoverageClosure) {
+  if (validateRecoveryIdentities) {
     const resolvedDeferredIds = new Set<string>();
     for (const [index, resolved] of (
       coverage?.resolvedDeferred ?? []
@@ -495,8 +495,9 @@ function validateCanonicalContract(
       finding.codeEvidence ?? []
     ).entries()) {
       const evidenceContext = `${context}.codeEvidence[${evidenceIndex}]`;
-      if (profile === "tracking") {
+      if (profile === "tracking")
         requireText(evidence.code, `${evidenceContext}.code`);
+      if (validateRecoveryIdentities) {
         if (evidenceIds.has(evidence.id)) {
           throw new ContractValidationError(
             `${evidenceContext}.id: duplicate code-evidence id.`,

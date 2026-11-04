@@ -580,7 +580,7 @@ describe("multiscan", () => {
     );
 
     await expect(runMultiscan(configured)).rejects.toThrow(
-      "results line 1 is not a valid receipt",
+      "results.jsonl:1: Invalid multiscan receipt",
     );
     expect(scans).toHaveBeenCalledTimes(1);
     expect(await readFile(preserved, "utf8")).toBe("preserved\n");

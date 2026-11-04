@@ -530,6 +530,7 @@ describe("multiscan", () => {
     ["non-object", "null", false],
     ["missing ID", "{}", false],
     ["non-string ID", '{"id":42}', false],
+    ["incomplete task identity", '{"id":"receipt","attempt":1}', true],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {
@@ -1744,19 +1745,20 @@ describe("multiscan", () => {
       const controller = new AbortController();
       const reason = new Error("Synthetic resume cancellation");
       const resolvePlugin = runtime.resolvePluginPath;
-      const load = contract.loadContract;
+      const load = contract.loadContractWithScanDirectory;
       const resolveSpy = spyOn(runtime, "resolvePluginPath").mockImplementation(
         async (...args) => {
           if (phase === "plugin resolution") controller.abort(reason);
           return await resolvePlugin(...args);
         },
       );
-      const loadSpy = spyOn(contract, "loadContract").mockImplementation(
-        async (...args) => {
-          if (phase === "contract validation") controller.abort(reason);
-          return await load(...args);
-        },
-      );
+      const loadSpy = spyOn(
+        contract,
+        "loadContractWithScanDirectory",
+      ).mockImplementation(async (...args) => {
+        if (phase === "contract validation") controller.abort(reason);
+        return await load(...args);
+      });
       try {
         await expect(
           runMultiscan({ ...configured, signal: controller.signal }),

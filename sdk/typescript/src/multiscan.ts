@@ -54,7 +54,7 @@ import {
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
-import type { FindingsDocument } from "./models.js";
+import { isRecord } from "./record.js";
 import {
   readKnowledgeBaseSnapshot,
   type KnowledgeBaseSnapshot,
@@ -78,7 +78,6 @@ import {
   UNSUPPORTED_GIT_ENVIRONMENT,
   relativePathIsOutside,
   type ScanMode,
-  type ScanTarget,
 } from "./targets.js";
 import {
   meetsSeverity,
@@ -425,19 +424,21 @@ async function runCampaign(
     const selectedOutputMatches =
       receipt.outputDir === artifactOutput ||
       receipt.outputDir === selectedArtifactOutput;
-    const artifactsPresent =
-      selectedOutputMatches &&
-      (await hasCompletedContract(
-        artifactOutput,
-        await resolveResumePluginRoot(),
-        options.signal,
-      ));
-    if (completedReceipt && selectedOutputMatches && !artifactsPresent) {
-      rejectedCompleted.add(artifactOutput);
-      pending.push(task);
-      continue;
-    }
     if (selectedOutputMatches) {
+      const schemaPluginRoot = await resolveResumePluginRoot();
+      const loaded = await readCampaignContract(
+        artifactOutput,
+        schemaPluginRoot,
+        options.signal,
+      );
+      if (
+        completedReceipt &&
+        loaded?.contract.manifest.scan.status !== "completed"
+      ) {
+        rejectedCompleted.add(artifactOutput);
+        pending.push(task);
+        continue;
+      }
       const canonicalArtifactOutput = await realpath(artifactOutput).catch(
         (error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT" || error.code === "ENOTDIR") {
@@ -462,13 +463,13 @@ async function runCampaign(
         );
       }
       const checkout = join(checkoutRoot, task.id);
-      const schemaPluginRoot = await resolveResumePluginRoot();
       const resumed = await loadResumableScan(
+        loaded,
+        options,
         artifactOutput,
         schemaPluginRoot,
         receipt,
         checkout,
-        options.scanOptionsByMode?.[task.mode]?.target,
         campaignRequestDigests(
           options,
           task,
@@ -476,9 +477,6 @@ async function runCampaign(
           checkout,
           knowledgeByMode[task.mode]?.snapshot,
         ),
-        environment,
-        options.signal,
-        options.githubHost,
         restoreReport,
         (warning) => {
           warnings.push({ repository: task.id, warnings: [warning] });
@@ -489,18 +487,9 @@ async function runCampaign(
             warning,
           });
         },
-        options.config.pythonPath ??
-          environmentValue(pluginHelperEnvironment(environment), "PYTHON"),
-        options.recoverScan === undefined
-          ? undefined
-          : (scanDir) => options.recoverScan!(scanDir, options),
       );
       if (resumed !== undefined) {
-        if (
-          receipt.status === "completed" &&
-          Number.isSafeInteger(receipt.attempt) &&
-          receipt.attempt > 0
-        ) {
+        if (receipt.status === "completed") {
           try {
             if (receipt.cleanupPending === "checkout") {
               await rm(join(output, "checkouts", task.id), {
@@ -536,7 +525,7 @@ async function runCampaign(
           options.scanOptionsByMode?.[task.mode]?.failureSeverity;
         policyFailed ||=
           failureSeverity !== undefined
-            ? resumed.findings.findings.some((finding) =>
+            ? resumed.findings.some((finding) =>
                 meetsSeverity(finding, failureSeverity),
               )
             : receipt.policyFailed === true;
@@ -627,10 +616,7 @@ async function runCampaign(
                 `attempt-${attempt}`,
               );
               const retained = await lstat(retainedCheckout).catch(
-                (error: NodeJS.ErrnoException) => {
-                  if (error.code !== "ENOENT") throw error;
-                  return undefined;
-                },
+                undefinedIfMissingFile,
               );
               if (retained !== undefined) protectedRoot = retainedCheckout;
               attemptedResume = true;
@@ -670,15 +656,20 @@ async function runCampaign(
                   ) &&
                     resolve(authority.target_path) !== resolve(normalCheckout),
                 );
+                const loadRegistered = async () =>
+                  loadRegisteredCampaignScan(
+                    await readCampaignContract(
+                      scanDir,
+                      await resolveResumePluginRoot(),
+                      options.signal,
+                    ),
+                    requestDigests,
+                    environment,
+                    options.signal,
+                  );
                 const before =
                   authority.status === "complete"
-                    ? await loadRegisteredCampaignScan(
-                        scanDir,
-                        await resolveResumePluginRoot(),
-                        requestDigests,
-                        environment,
-                        options.signal,
-                      )
+                    ? await loadRegistered()
                     : undefined;
                 if (before instanceof Error) throw before;
                 if (
@@ -694,13 +685,7 @@ async function runCampaign(
                     knowledgeBaseSnapshot: knowledge?.snapshot,
                   });
                   if (result !== undefined) {
-                    const accepted = await loadRegisteredCampaignScan(
-                      scanDir,
-                      await resolveResumePluginRoot(),
-                      requestDigests,
-                      environment,
-                      options.signal,
-                    );
+                    const accepted = await loadRegistered();
                     if (accepted instanceof Error) throw accepted;
                     result =
                       accepted === undefined ||
@@ -758,11 +743,7 @@ async function runCampaign(
             if (task.scope !== undefined) {
               const scoped = await realpath(join(checkout, task.scope));
               const outside = relative(await realpath(checkout), scoped);
-              if (
-                outside === ".." ||
-                outside.startsWith(`..${sep}`) ||
-                isAbsolute(outside)
-              ) {
+              if (relativePathIsOutside(outside)) {
                 throw new Error("Multiscan scope escapes its repository.");
               }
               resolvedScope = outside.split(sep).join("/") || ".";
@@ -1310,14 +1291,10 @@ function matchesTask(receipt: MultiscanReceipt, task: MultiscanTask): boolean {
   );
 }
 
-function isReceiptRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function parseReceipt(line: string): MultiscanReceipt {
   const value: unknown = JSON.parse(line);
   if (
-    !isReceiptRecord(value) ||
+    !isRecord(value) ||
     !["id", "repository", "revision", "outputDir"].every(
       (field) => typeof value[field] === "string",
     ) ||
@@ -1336,10 +1313,16 @@ function parseReceipt(line: string): MultiscanReceipt {
       "resolvedScope",
       "snapshotDigest",
       "error",
-      "warning",
     ].every(
       (field) => value[field] === undefined || typeof value[field] === "string",
     ) ||
+    (value["warnings"] !== undefined &&
+      !(
+        Array.isArray(value["warnings"]) &&
+        value["warnings"].every((warning) => typeof warning === "string")
+      )) ||
+    (value["knowledgeBaseFailure"] !== undefined &&
+      value["knowledgeBaseFailure"] !== true) ||
     (value["coverage"] !== undefined &&
       !["complete", "partial", "unknown"].includes(value["coverage"] as string))
   ) {
@@ -1429,22 +1412,6 @@ function campaignScanOptions(
   };
 }
 
-async function hasCompletedContract(
-  path: string,
-  pluginRoot: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  try {
-    signal?.throwIfAborted();
-    const contract = await loadContract(path, { pluginRoot, signal });
-    return contract.manifest.scan.status === "completed";
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (error instanceof ContractSchemaError) throw error;
-    return false;
-  }
-}
-
 function campaignRequestDigests(
   options: MultiscanOptions,
   task: MultiscanTask,
@@ -1494,14 +1461,12 @@ async function campaignCheckoutRoots(
   ];
 }
 
-async function loadRegisteredCampaignScan(
+function readCampaignContract(
   path: string,
   pluginRoot: string,
-  expectedRequestDigests: readonly string[],
-  environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ) {
-  const loaded = await loadContractWithScanDirectory(path, {
+  return loadContractWithScanDirectory(path, {
     validateRecoveryCoverage: true,
     pluginRoot,
     signal,
@@ -1510,6 +1475,16 @@ async function loadRegisteredCampaignScan(
     if (error instanceof ContractSchemaError) throw error;
     return undefined;
   });
+}
+
+type CampaignContract = Awaited<ReturnType<typeof readCampaignContract>>;
+
+async function loadRegisteredCampaignScan(
+  loaded: CampaignContract,
+  expectedRequestDigests: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+) {
   if (loaded === undefined) return undefined;
   const authority = await readRegisteredScanAuthority(
     loaded.scanDirectory,
@@ -1529,48 +1504,28 @@ async function loadRegisteredCampaignScan(
       `sha256:${validatedFileDigests.get(loaded.contract.manifest)!.get("scan-manifest.json")!}`
   )
     return undefined;
-  for (const finding of loaded.contract.findings.findings) {
-    const evidenceIds = new Set<string>();
-    for (const evidence of finding.codeEvidence ?? []) {
-      if (evidenceIds.has(evidence.id)) return undefined;
-      evidenceIds.add(evidence.id);
-    }
-  }
   return { contract: loaded.contract, authority };
 }
 
 async function loadResumableScan(
+  loaded: CampaignContract,
+  options: MultiscanOptions,
   path: string,
   pluginRoot: string,
   receipt: MultiscanReceipt,
   checkout: string,
-  configuredTarget: ScanTarget | undefined,
   expectedRequestDigests: readonly string[],
-  environment: NodeJS.ProcessEnv,
-  signal: AbortSignal | undefined,
-  githubHost: string | undefined,
   restoreReport: (
     scanDir: string,
     schemaRoot: string,
     protectedRoot: string,
   ) => Promise<void>,
   onWarning: (warning: string) => void,
-  configuredPythonPath: string | undefined,
-  recoverScan:
-    | ((
-        scanDir: string,
-      ) => ReturnType<NonNullable<MultiscanOptions["recoverScan"]>>)
-    | undefined,
-): Promise<
-  | {
-      checkout: string;
-      findings: FindingsDocument;
-    }
-  | undefined
-> {
+) {
+  const { signal, githubHost, recoverScan } = options;
+  const environment = options.environment ?? process.env;
   const accepted = await loadRegisteredCampaignScan(
-    path,
-    pluginRoot,
+    loaded,
     expectedRequestDigests,
     environment,
     signal,
@@ -1597,27 +1552,23 @@ async function loadResumableScan(
     receipt.id,
     `attempt-${receipt.attempt}`,
   );
-  const recoveryTarget =
-    receipt.scope === undefined ? configuredTarget : [receipt.scope];
-  const targetRoots = await campaignCheckoutRoots(
-    checkout,
-    recoveryCheckout,
-    Array.isArray(recoveryTarget) &&
-      target.targetId !==
-        `target_sha256_${createHash("sha256").update(`local-workspace\0${checkout}`).digest("hex")}`,
-  );
-  const matchedRoot = targetRoots.find(
-    (root) =>
-      target.targetId ===
-      `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`,
-  );
   const requestedTarget =
     receipt.scope === undefined
-      ? (configuredTarget ?? "repository")
+      ? options.scanOptionsByMode?.[receipt.mode]?.target
       : [receipt.scope];
   const requestedPaths = Array.isArray(requestedTarget)
     ? requestedTarget
     : undefined;
+  const targetIdFor = (root: string) =>
+    `target_sha256_${createHash("sha256").update(`local-workspace\0${root}`).digest("hex")}`;
+  const targetRoots = await campaignCheckoutRoots(
+    checkout,
+    recoveryCheckout,
+    requestedPaths !== undefined && target.targetId !== targetIdFor(checkout),
+  );
+  const matchedRoot = targetRoots.find(
+    (root) => target.targetId === targetIdFor(root),
+  );
   const expectedMode =
     requestedPaths !== undefined
       ? "scoped_path"
@@ -1654,7 +1605,7 @@ async function loadResumableScan(
   if (
     reportMissing &&
     recoverScan !== undefined &&
-    (await recoverScan(path)) === undefined
+    (await recoverScan(path, options)) === undefined
   )
     return undefined;
   if (
@@ -1666,6 +1617,9 @@ async function loadResumableScan(
     return undefined;
   let pythonPath: string | undefined;
   if (!reportSealed) {
+    const configuredPythonPath =
+      options.config.pythonPath ??
+      environmentValue(pluginHelperEnvironment(environment), "PYTHON");
     const automaticAvailable =
       configuredPythonPath === undefined
         ? await resolvePluginPythonCommand({
@@ -1738,14 +1692,10 @@ async function loadResumableScan(
     }
   }
 
-  const checkoutPython =
-    !reportSealed &&
-    pythonPath !== undefined &&
-    !relativePathIsOutside(pythonPath);
   let expectedPaths = ["."];
   let createdCheckout = false;
   try {
-    if (requestedPaths !== undefined || checkoutPython) {
+    if (requestedPaths !== undefined || pythonPath !== undefined) {
       // Scope spellings and tracked links are relative to the recorded checkout.
       if (matchedRoot !== checkout) {
         await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
@@ -1761,7 +1711,6 @@ async function loadResumableScan(
       if (createdCheckout) {
         await checkoutRevision(receipt, matchedRoot, signal, githubHost);
       } else if (
-        checkoutPython &&
         pythonPath !== undefined &&
         !(await realpath(join(matchedRoot, pythonPath)).catch(
           undefinedIfMissingFile,
@@ -1827,10 +1776,7 @@ async function loadResumableScan(
       return undefined;
     }
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
-    return {
-      checkout: matchedRoot,
-      findings,
-    };
+    return findings;
   } finally {
     if (createdCheckout) {
       const warning = await removeCheckout(matchedRoot);
@@ -1969,10 +1915,8 @@ async function checkoutRevision(
     task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
-    restoreIncomplete
-      ? (await inspectTrustedExecutable("git", environment, path)).environment
-      : environment,
-    resolve(process.cwd()),
+    environment,
+    restoreIncomplete ? [process.cwd(), path] : process.cwd(),
   );
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
@@ -2013,163 +1957,151 @@ async function checkoutRevision(
   };
   const git = async (...args: string[]): Promise<string> =>
     (await gitOutput(args)).toString("utf8").trim();
-  let retainedGit = false;
-  if (restoreIncomplete) {
-    const gitDirectory = join(path, ".git");
-    const metadata = await lstat(gitDirectory).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    });
-    if (metadata !== undefined) {
-      retainedGit = true;
-      const canonicalGit = await ensureOutputDirectory(gitDirectory, true);
-      const canonicalObjects = await ensureOutputDirectory(
-        join(gitDirectory, "objects"),
-        true,
-      );
-      for (const entry of await readdir(canonicalObjects)) {
-        if (/^[0-9a-f]{2}$/.test(entry))
-          await ensureOutputDirectory(join(canonicalObjects, entry), true);
-      }
-      if (
-        await lstat(join(canonicalObjects, "pack")).catch(
-          undefinedIfMissingFile,
-        )
-      )
-        await ensureOutputDirectory(join(canonicalObjects, "pack"), true);
-      for (const entry of [
-        "config",
-        "config.worktree",
-        "FETCH_HEAD",
-        "shallow",
-        "index",
-        "logs",
-        "logs/HEAD",
-      ]) {
-        const saved = await lstat(join(gitDirectory, entry)).catch(
-          undefinedIfMissingFile,
-        );
-        if (
-          saved?.isSymbolicLink() ||
-          ((entry === "FETCH_HEAD" || entry === "logs/HEAD") &&
-            saved !== undefined &&
-            saved.nlink > 1)
-        ) {
-          throw new Error(
-            "The retained campaign checkout has linked Git metadata write destinations.",
-          );
-        }
-      }
-      const refs = await lstat(join(gitDirectory, "refs")).catch(
+  const gitDirectory = join(path, ".git");
+  if (
+    restoreIncomplete &&
+    (await lstat(gitDirectory).catch(undefinedIfMissingFile))
+  ) {
+    const canonicalGit = await ensureOutputDirectory(gitDirectory, true);
+    const canonicalObjects = await ensureOutputDirectory(
+      join(gitDirectory, "objects"),
+      true,
+    );
+    for (const entry of await readdir(canonicalObjects)) {
+      if (/^[0-9a-f]{2}$/.test(entry))
+        await ensureOutputDirectory(join(canonicalObjects, entry), true);
+    }
+    if (
+      await lstat(join(canonicalObjects, "pack")).catch(undefinedIfMissingFile)
+    )
+      await ensureOutputDirectory(join(canonicalObjects, "pack"), true);
+    for (const entry of [
+      "config",
+      "config.worktree",
+      "FETCH_HEAD",
+      "shallow",
+      "index",
+      "logs",
+      "logs/HEAD",
+    ]) {
+      const saved = await lstat(join(gitDirectory, entry)).catch(
         undefinedIfMissingFile,
       );
-      if (refs !== undefined)
-        await ensureOutputDirectory(join(gitDirectory, "refs"), true);
-      const commonBinding = await readFile(
-        join(gitDirectory, "commondir"),
-        "utf8",
-      ).catch(undefinedIfMissingFile);
       if (
-        commonBinding !== undefined &&
-        (await realpath(resolve(gitDirectory, commonBinding.trim()))) !==
-          canonicalGit
-      )
-        throw new Error(
-          "The retained campaign checkout has Git bindings outside its own directory.",
-        );
-
-      // Retained repository configuration is data, not permission to run filters.
-      // Preserve it outside Git's active config filenames before the first command.
-      const savedConfig = new Map<string, string>();
-      for (const name of ["config", "config.worktree"]) {
-        const selected = join(gitDirectory, name);
-        if (await lstat(selected).catch(undefinedIfMissingFile)) {
-          const saved = `${selected}.retained-${randomUUID()}`;
-          await rename(selected, saved);
-          savedConfig.set(name, saved);
-        }
-      }
-      const configured = async (
-        file: string | undefined,
-        key: string,
-        type: "bool" | "path",
-      ): Promise<string | undefined> => {
-        if (file === undefined) return undefined;
-        try {
-          const value = await gitOutput([
-            "config",
-            "--null",
-            "--no-includes",
-            "--file",
-            file,
-            `--type=${type}`,
-            "--get",
-            key,
-          ]);
-          return value.subarray(0, -1).toString("utf8");
-        } catch (error) {
-          if ((error as { code?: number }).code === 1) return undefined;
-          throw error;
-        }
-      };
-      const local = savedConfig.get("config");
-      const layers = [
-        local,
-        ...((await configured(local, "extensions.worktreeConfig", "bool")) ===
-        "true"
-          ? [savedConfig.get("config.worktree")]
-          : []),
-      ];
-      const structural = new Map<string, string>();
-      for (const file of layers) {
-        const worktree = await configured(file, "core.worktree", "path");
-        if (
-          worktree !== undefined &&
-          (await realpath(
-            isAbsolute(worktree)
-              ? worktree
-              : `${gitDirectory}${sep}${worktree}`,
-          )) !== (await realpath(path))
-        )
-          throw new Error(
-            "The retained campaign checkout has Git bindings outside its own directory.",
-          );
-        for (const key of [
-          "core.ignorecase",
-          "core.filemode",
-          "core.symlinks",
-        ]) {
-          const value = await configured(file, key, "bool");
-          if (value !== undefined) structural.set(key, value);
-        }
-      }
-      await git("init", "--quiet", "--template=");
-      for (const [key, value] of structural)
-        await git(
-          "config",
-          "--file",
-          join(gitDirectory, "config"),
-          "--type=bool",
-          key,
-          value,
-        );
-      const [common, objects, worktree] = await Promise.all([
-        git("rev-parse", "--path-format=absolute", "--git-common-dir"),
-        git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
-        git("rev-parse", "--show-toplevel"),
-      ]);
-      if (
-        (await realpath(common)) !== canonicalGit ||
-        (await realpath(objects)) !== canonicalObjects ||
-        (await realpath(worktree)) !== (await realpath(path))
+        saved?.isSymbolicLink() ||
+        ((entry === "FETCH_HEAD" || entry === "logs/HEAD") &&
+          saved !== undefined &&
+          saved.nlink > 1)
       ) {
         throw new Error(
-          "The retained campaign checkout has Git bindings outside its own directory.",
+          "The retained campaign checkout has linked Git metadata write destinations.",
         );
       }
     }
+    const refs = await lstat(join(gitDirectory, "refs")).catch(
+      undefinedIfMissingFile,
+    );
+    if (refs !== undefined)
+      await ensureOutputDirectory(join(gitDirectory, "refs"), true);
+    const commonBinding = await readFile(
+      join(gitDirectory, "commondir"),
+      "utf8",
+    ).catch(undefinedIfMissingFile);
+    if (
+      commonBinding !== undefined &&
+      (await realpath(resolve(gitDirectory, commonBinding.trim()))) !==
+        canonicalGit
+    )
+      throw new Error(
+        "The retained campaign checkout has Git bindings outside its own directory.",
+      );
+
+    // Retained repository configuration is data, not permission to run filters.
+    // Preserve it outside Git's active config filenames before the first command.
+    const savedConfig = new Map<string, string>();
+    for (const name of ["config", "config.worktree"]) {
+      const selected = join(gitDirectory, name);
+      if (await lstat(selected).catch(undefinedIfMissingFile)) {
+        const saved = `${selected}.retained-${randomUUID()}`;
+        await rename(selected, saved);
+        savedConfig.set(name, saved);
+      }
+    }
+    const configured = async (
+      file: string | undefined,
+      key: string,
+      type: "bool" | "path",
+    ): Promise<string | undefined> => {
+      if (file === undefined) return undefined;
+      try {
+        const value = await gitOutput([
+          "config",
+          "--null",
+          "--no-includes",
+          "--file",
+          file,
+          `--type=${type}`,
+          "--get",
+          key,
+        ]);
+        return value.subarray(0, -1).toString("utf8");
+      } catch (error) {
+        if ((error as { code?: number }).code === 1) return undefined;
+        throw error;
+      }
+    };
+    const local = savedConfig.get("config");
+    const layers = [
+      local,
+      ...((await configured(local, "extensions.worktreeConfig", "bool")) ===
+      "true"
+        ? [savedConfig.get("config.worktree")]
+        : []),
+    ];
+    const structural = new Map<string, string>();
+    for (const file of layers) {
+      const worktree = await configured(file, "core.worktree", "path");
+      if (
+        worktree !== undefined &&
+        (await realpath(
+          isAbsolute(worktree) ? worktree : `${gitDirectory}${sep}${worktree}`,
+        )) !== (await realpath(path))
+      )
+        throw new Error(
+          "The retained campaign checkout has Git bindings outside its own directory.",
+        );
+      for (const key of ["core.ignorecase", "core.filemode", "core.symlinks"]) {
+        const value = await configured(file, key, "bool");
+        if (value !== undefined) structural.set(key, value);
+      }
+    }
+    await git("init", "--quiet", "--template=");
+    for (const [key, value] of structural)
+      await git(
+        "config",
+        "--file",
+        join(gitDirectory, "config"),
+        "--type=bool",
+        key,
+        value,
+      );
+    const [common, objects, worktree] = await Promise.all([
+      git("rev-parse", "--path-format=absolute", "--git-common-dir"),
+      git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
+      git("rev-parse", "--show-toplevel"),
+    ]);
+    if (
+      (await realpath(common)) !== canonicalGit ||
+      (await realpath(objects)) !== canonicalObjects ||
+      (await realpath(worktree)) !== (await realpath(path))
+    ) {
+      throw new Error(
+        "The retained campaign checkout has Git bindings outside its own directory.",
+      );
+    }
+  } else {
+    await git("init", "--quiet");
   }
-  if (!retainedGit) await git("init", "--quiet");
   let locallyPinned = false;
   let incompleteObjects = false;
   if (restoreIncomplete) {
@@ -2242,6 +2174,17 @@ async function checkoutRevision(
       .map((entry) => entry.slice(entry.indexOf("	") + 1));
     const aliases = new Set<string>();
     const requiredDirectories = new Set<string>();
+    const trackedLinkTarget = async (name: string, visited: Set<string>) => {
+      visited.add(name);
+      aliases.add(name);
+      const target = (
+        await gitOutput(["show", `${task.revision}:${name}`])
+      ).toString("utf8");
+      // Preserve ".." after links until the filesystem resolves the path.
+      return isAbsolute(target)
+        ? target
+        : `${path}${sep}${dirname(name)}${sep}${target}`;
+    };
     const canonicalTrackedPath = async (
       requested: string,
       visited: Set<string>,
@@ -2269,15 +2212,8 @@ async function checkoutRevision(
             comparisonPath(relative(path, ancestor).split(sep).join("/")),
         );
         if (name !== undefined && !visited.has(name)) {
-          visited.add(name);
-          aliases.add(name);
-          const target = (
-            await gitOutput(["show", `${task.revision}:${name}`])
-          ).toString("utf8");
           return canonicalTrackedPath(
-            (isAbsolute(target)
-              ? target
-              : `${path}${sep}${dirname(name)}${sep}${target}`) +
+            (await trackedLinkTarget(name, visited)) +
               requested.slice(ancestor.length),
             visited,
           );
@@ -2303,18 +2239,11 @@ async function checkoutRevision(
             comparisonPath(selected).startsWith(comparisonPath(link) + "/"),
         );
         if (name === undefined || visited.has(name)) break;
-        visited.add(name);
-        aliases.add(name);
-        const target = (
-          await gitOutput(["show", `${task.revision}:${name}`])
-        ).toString("utf8");
         selected = posix.join(
           relative(
             path,
             await canonicalTrackedPath(
-              isAbsolute(target)
-                ? target
-                : `${path}${sep}${dirname(name)}${sep}${target}`,
+              await trackedLinkTarget(name, visited),
               visited,
             ),
           )
@@ -2363,27 +2292,7 @@ async function checkoutRevision(
               comparisonName.subarray(0, scope.length).equals(scope)),
         )
       ) {
-        const existing = await lstat(
-          Buffer.concat([Buffer.from(path + sep), name]),
-        ).catch(async (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOTDIR") return null;
-          undefinedIfMissingFile(error);
-          for (
-            let end = name.lastIndexOf(47);
-            end !== -1;
-            end = name.lastIndexOf(47, end - 1)
-          ) {
-            const ancestor = await lstat(
-              Buffer.concat([Buffer.from(path + sep), name.subarray(0, end)]),
-            ).catch((error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOTDIR") return null;
-              return undefinedIfMissingFile(error);
-            });
-            if (ancestor !== undefined && !ancestor?.isDirectory()) return null;
-          }
-          return undefined;
-        });
-        if (existing === undefined)
+        if (await canRestoreDeletedPath(path, name))
           selectedDeleted.push(deletedPaths.subarray(start, end + 1));
       }
       start = end + 1;
@@ -2408,6 +2317,25 @@ async function checkoutRevision(
   if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }
+}
+
+// Git names are raw bytes. Restore missing entries only through real directories.
+async function canRestoreDeletedPath(
+  root: string,
+  name: Buffer,
+): Promise<boolean> {
+  const prefix = Buffer.from(root + sep);
+  for (let end = name.length; end !== -1; end = name.lastIndexOf(47, end - 1)) {
+    const candidate = Buffer.concat([prefix, name.subarray(0, end)]);
+    try {
+      const entry = await lstat(candidate);
+      if (end === name.length || !entry.isDirectory()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return false;
+      undefinedIfMissingFile(error as NodeJS.ErrnoException);
+    }
+  }
+  return true;
 }
 
 export function buildGitHubCredentialArgs(host: string | undefined): string[] {
