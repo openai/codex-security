@@ -9255,35 +9255,84 @@ async function operatorPatchConfig(
   );
 }
 
-// Git accumulates helpers (including URL-specific entries) until an empty helper resets them.
-// Replay only operator configuration in its original order, including conditional user includes.
-async function patchCredentialEnvironment(
+async function patchTransportConfig(
+  pattern: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  return (
+    await dependencies
+      .runRepositoryCommand(
+        "git",
+        [
+          "config",
+          "--null",
+          "--show-scope",
+          "--show-origin",
+          "--get-regexp",
+          pattern,
+        ],
+        repository,
+        { trim: false, environment: { GIT_CONFIG: undefined } },
+      )
+      .catch((error: unknown) => {
+        if (
+          isJsonObject(error) &&
+          (error["code"] === 1 || error["status"] === 1)
+        )
+          return "";
+        throw error;
+      })
+  ).split("\0");
+}
+
+// Read the active includes again on the patch branch, including on resume.
+async function patchTransportEnvironment(
   remotes: readonly string[],
   repository: string,
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv = {},
 ): Promise<NodeJS.ProcessEnv> {
+  if (remotes.some((remote) => remote.startsWith("git://"))) {
+    const override = environmentEntry(
+      dependencies.environment,
+      "GIT_PROXY_COMMAND",
+    );
+    if (override !== undefined) {
+      environment = { ...environment, GIT_PROXY_COMMAND: override };
+    } else {
+      const proxies = await patchTransportConfig(
+        "^core\\.gitproxy$",
+        repository,
+        dependencies,
+      );
+      let hasProxyCommand = false;
+      for (let i = 0; i + 2 < proxies.length; i += 3) {
+        const value = proxies[i + 2]!.slice("core.gitproxy\n".length);
+        const [command] = value.split(" for ", 1);
+        if (!command || command === "none") continue;
+        hasProxyCommand = true;
+        if (
+          !(await operatorPatchConfig(proxies[i]!, proxies[i + 1]!, repository))
+        ) {
+          throw new CodexSecurityError(
+            "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
+          );
+        }
+      }
+      // Git treats an explicitly empty proxy environment variable as a direct connection.
+      if (!hasProxyCommand)
+        environment = { ...environment, GIT_PROXY_COMMAND: "" };
+    }
+  }
   if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
     return environment;
-  const records = await dependencies
-    .runRepositoryCommand(
-      "git",
-      [
-        "config",
-        "--null",
-        "--show-scope",
-        "--show-origin",
-        "--get-regexp",
-        "^(credential(\\..*)?\\.helper|core\\.askpass)$",
-      ],
-      repository,
-      { trim: false, environment: { GIT_CONFIG: undefined } },
-    )
-    .catch((error: unknown) => {
-      if (isJsonObject(error) && (error["code"] === 1 || error["status"] === 1))
-        return "";
-      throw error;
-    });
+  // Git accumulates credential helpers until an empty helper resets them.
+  const entries = await patchTransportConfig(
+    "^(credential(\\..*)?\\.helper|core\\.askpass)$",
+    repository,
+    dependencies,
+  );
   const pinned = { ...environment };
   let count = Number(
     environment["GIT_CONFIG_COUNT"] ??
@@ -9296,7 +9345,6 @@ async function patchCredentialEnvironment(
   };
   set("credential.helper", "");
   set("core.askPass", "");
-  const entries = records.split("\0");
   for (let i = 0; i + 2 < entries.length; i += 3) {
     const entry = entries[i + 2]!;
     const newline = entry.indexOf("\n");
@@ -9602,7 +9650,7 @@ async function preparePatchPublication(
           repository,
           {
             maxBuffer: Infinity,
-            environment: await patchCredentialEnvironment(
+            environment: await patchTransportEnvironment(
               [remote],
               repository,
               dependencies,
@@ -9956,7 +10004,7 @@ async function publishPatchBranch(
         ],
         repository,
         {
-          environment: await patchCredentialEnvironment(
+          environment: await patchTransportEnvironment(
             pushRemotes,
             repository,
             dependencies,

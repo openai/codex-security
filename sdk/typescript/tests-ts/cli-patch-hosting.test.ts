@@ -22,6 +22,103 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
+  test.each([
+    { resume: false, source: "local", allowed: false },
+    { resume: true, source: "included checkout", allowed: false },
+    { resume: false, source: "operator", allowed: true },
+    { resume: true, source: "environment", allowed: true },
+    { resume: false, source: "none", allowed: true },
+  ])(
+    "native Git transport honors the $source proxy boundary, resume=$resume",
+    async ({ resume, source, allowed }) => {
+      const { directory, git } = await publicationRepository();
+      const branch = "codex-security/patch-scan-1";
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        "git://gitlab.com/example/repository.git",
+      );
+      if (resume) {
+        git("branch", branch);
+        git(
+          "config",
+          `branch.${branch}.codexSecurityPatchCommit`,
+          git("rev-parse", "HEAD"),
+        );
+      }
+      const external = await fixtures.create("patch-native-proxy-");
+      const globalConfig = join(external, "operator.gitconfig");
+      const included = join(directory, ".git", "proxy.gitconfig");
+      const environment: NodeJS.ProcessEnv = {
+        GIT_CONFIG_GLOBAL: globalConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
+      if (source === "included checkout") {
+        git("config", "--file", globalConfig, "include.path", included);
+        git(
+          "config",
+          "--file",
+          included,
+          "core.gitProxy",
+          "checkout-proxy-fixture",
+        );
+      } else if (source === "operator") {
+        git(
+          "config",
+          "--file",
+          globalConfig,
+          "core.gitProxy",
+          "operator-proxy-fixture for gitlab.com",
+        );
+      } else {
+        git(
+          "config",
+          "core.gitProxy",
+          source === "none" ? "none for gitlab.com" : "checkout-proxy-fixture",
+        );
+        if (source === "environment")
+          environment["GIT_PROXY_COMMAND"] = "operator-proxy-fixture";
+      }
+      let attempted = false;
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote") || args[0] === "push") {
+              attempted = true;
+              expect(options?.environment?.["GIT_PROXY_COMMAND"]).toBe(
+                source === "environment"
+                  ? "operator-proxy-fixture"
+                  : source === "none"
+                    ? ""
+                    : undefined,
+              );
+              throw new Error("Fixture stopped the native Git transport");
+            }
+            return runGitRepositoryCommand(tool, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            });
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        allowed ? "Fixture stopped the native Git transport" : "core.gitProxy",
+      );
+      expect(attempted).toBe(allowed);
+    },
+  );
+
   test.each(["preflight", "push"] as const)(
     "HTTP %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
