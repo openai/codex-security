@@ -11,13 +11,8 @@ import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
-import { stringifyJson } from "./json";
-import {
-  compare,
-  print,
-  reportCommandError,
-  ArgumentError,
-} from "./rank-worklists";
+import { compareCodePoints, stringifyJson } from "./json";
+import { print, reportCommandError, ArgumentError } from "./rank-worklists";
 import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
@@ -432,7 +427,7 @@ export async function generateInventory(
     return { count: unique.length, output };
   }
   const rows = [...rankRows.values()]
-    .sort((left, right) => compare(left.path, right.path))
+    .sort((left, right) => compareCodePoints(left.path, right.path))
     .map((row) =>
       Buffer.from(
         stringifyJson(row, 0).replace(

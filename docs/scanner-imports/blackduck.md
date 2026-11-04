@@ -1,28 +1,77 @@
-# Import Black Duck SCA repository vulnerabilities
+# Import Black Duck SCA findings
 
-Use `--provider blackduck` to import vulnerable BOM components from one Black Duck
-SCA project version. Check the scan configuration to confirm which Git repository
-the project version represents. Project names, API hosts and component download
-URLs cannot establish that mapping. Aggregate product BOMs, image-only scans,
-license violations and global advisory catalogs are outside this import.
+Use a BOM-6 export of vulnerable components from one Black Duck SCA project
+version. In the scan configuration, verify which Git repository that version
+represents. A project name or component download URL alone can't establish
+that link.
 
-## Export a complete collection
+## Quick start
 
-Use a read-only token and request the project version’s `vulnerable-components`
-relation with media type `application/vnd.blackducksoftware.bill-of-materials-6+json`.
-The importer requires BOM-6. If the deployment serves only BOM-8 or another
-inventory format, stop the export.
+[Enable external imports](README.md#preview-a-report), then open the matching
+checkout. Choose a saved report or export one.
 
-Install the vendor’s `blackduck` Python client in a trusted virtual environment
-outside the checkout. Set `BLACKDUCK_URL` to the deployment’s HTTPS URL,
-`BLACKDUCK_TOKEN` to the read-only token and `BLACKDUCK_PROJECT_ID` and
-`BLACKDUCK_VERSION_ID` to the two UUIDs. The client exchanges the token before
-reading the collection, so disable redirects for the entire session.
+**Saved report.** Set `report` to the complete BOM-6 collection. For a selection,
+use an array of native rows that each identify the same project version.
 
-Save the script outside the checkout and run it with
-`/path/to/venv/bin/python -I /private/path/export.py` to keep checkout modules
-and `PYTHONPATH` off the import path. Redirect stdout to a private temporary file
-and rename it after the script succeeds.
+```sh
+report=/private/path/blackduck.json
+```
+
+**Export from Black Duck.** Use a read-only token and the
+[BOM-6 export below](#export-the-bom-6-collection). Run it in the same shell
+to set `report`.
+
+**Preview the report.** Use the verified Git URL for `--source-repository-url`.
+It must match a comparable local remote when available, or the selected Cloud
+repository. Replace the source key with one for your deployment, project and
+version.
+
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider blackduck --source-repository-url https://github.com/example/project \
+  --source-key blackduck/deployment-alias/project-id/version-id \
+  --dry-run --format json
+```
+
+In each finding's `evidence`, check `source_data.projectVersionUrl`,
+`packages` and `advisory_ids`. Review any excluded rows. Reuse this key for
+later exports of the same project version.
+[Save locally or publish to Cloud and verify the result](README.md#save-or-publish-and-verify).
+
+## Identity and evidence
+
+The project version, component version, origin, advisory source and advisory
+name identify each occurrence. Package URLs and origin coordinates identify
+the package. `advisory_ids` keeps `vulnerabilityName` and any distinct
+`relatedVulnerability` verbatim, including Black Duck resource URLs.
+
+Look in the original row for CWE, matched-files links and remediation
+status. The reader leaves fix verification, Git revision and source location
+unknown.
+Aggregate product BOMs, image-only scans, license violations and global
+advisory catalogs fall outside this import.
+
+For SDK replay, use the `blackduck` provider and keep the repository reference
+from the reader. It must match the repository on local findings. An opaque ID
+or a description alone can't establish repository ownership.
+
+## Export the BOM-6 collection
+
+In the [Black Duck SCA MCP](https://github.com/blackducksoftware/sca-mcp#capabilities),
+`search_projects_versions` can locate the project version.
+`fetch_project_vulnerabilities` returns a summary and CSV, and `scan` starts
+a new scan. To export existing BOM rows, request the project version's
+`vulnerable-components` relation with the BOM-6 media type shown below.
+This reader requires BOM-6. BOM-8 inventories, Coverity reports and Polaris
+reports use other formats.
+
+Install the vendor's `blackduck` Python client in a trusted virtual environment
+outside the checkout. Set `BLACKDUCK_URL` to the deployment's HTTPS URL,
+`BLACKDUCK_TOKEN` to a read-only token, and `BLACKDUCK_PROJECT_ID` and
+`BLACKDUCK_VERSION_ID` to the project and version UUIDs. Keep redirects disabled
+for the client session, including the token exchange.
+
+Save this script outside the checkout as `export.py`.
 
 ```python
 import json
@@ -90,52 +139,17 @@ while True:
 print(json.dumps({"_meta": {"href": url}, "totalCount": total, "items": items}))
 ```
 
-Keep the original rows and collection total. If the BOM changes during offset
-pagination, export it again after the scan finishes. To import only selected
-occurrences, supply an array of native rows that each identify the same project
-version.
+Run the script in isolated mode so Python loads packages from the trusted
+environment. Point `TMPDIR` to a private directory outside the checkout.
 
-## Preview and repeat
-
-```bash
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-codex-security publish findings blackduck.json \
-  --to local --repository ./project --provider blackduck \
-  --source-repository-url https://github.com/example/project \
-  --source-key blackduck/deployment-alias/project-id/version-id \
-  --dry-run --format json
+```sh
+report=
+out=$(mktemp -d) &&
+  /path/to/venv/bin/python -I /private/path/export.py > "$out/blackduck.tmp" &&
+  mv "$out/blackduck.tmp" "$out/blackduck.json" &&
+  report="$out/blackduck.json"
 ```
 
-Check the source, destination and excluded rows before repeating the command
-without `--dry-run`. Reuse the source key for later exports from this deployment,
-project and version. For Cloud, select an authorized GitHub repository with
-`--to cloud` on a deployment that accepts `blackduck`. Reading a saved report
-requires no Black Duck login. Local imports also require no Cloud login.
-
-If an interrupted Cloud upload reports `result.savedSubmission`, keep its
-checkpoint and use the same build, state directory, account and import settings.
-Preview the original export with `--dry-run --format json`. Check `accountId`
-and `destination`. When `resumed` is false, review the new upload before approving it.
-For `prepareNormalizedExternalPublication`, pass your original normalized
-`ExternalFindings` and check `preview.resumed` before calling `publish()`.
-Different normalized findings prepare a new upload.
-
-Cloud checks retained and declared source repository URLs against the selected
-repository. For local SDK imports, reader-supplied repository references must
-agree with the repository on the findings. Local imports also check comparable
-Git remotes on the selected checkout. Select the `blackduck` provider for
-retained Black Duck BOM records. Caller-authored text and opaque IDs alone
-cannot establish repository ownership.
-
-Each occurrence is identified by its project version, component version, origin,
-advisory source and advisory name. Reimporting updates the occurrence when its
-evidence changes. Rows absent from a later export remain open.
-
-Supported package URLs and origin coordinates supply the package identity.
-`advisory_ids` preserves the vendor’s `vulnerabilityName` and any distinct
-`relatedVulnerability` value verbatim, including Black Duck resource URLs.
-The native row retains its CWE, matched-files link and remediation status.
-Findings start unassessed, with no inferred fix, Git revision or source location.
-
-References: [official Python REST client](https://github.com/blackducksoftware/hub-rest-api-python),
-[vendor example of vulnerable BOM components](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json).
+Keep the original rows and collection total. If the BOM changes during
+pagination, export it again after the scan finishes.
+[Black Duck Python client](https://github.com/blackducksoftware/hub-rest-api-python) · [Vulnerable BOM component example](https://github.com/blackducksoftware/hub-client-go/blob/5f78f7257c00fe9cebabf1bf89a6fc36a4d1f095/hubapi/testdata/vulnerableBomComponents.json)

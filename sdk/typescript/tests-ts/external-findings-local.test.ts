@@ -12,6 +12,8 @@ import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
+import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
@@ -475,6 +477,7 @@ describe("local normalized scanner findings", () => {
       const common = join(root, "common.git");
       const git = (args: string[], stdin?: string): string =>
         execFileSync("git", args, {
+          env: environment,
           encoding: "utf8",
           input: stdin,
           stdio: ["pipe", "pipe", "pipe"],
@@ -628,10 +631,19 @@ describe("local normalized scanner findings", () => {
     },
   );
 
-  test.each(["repository", "prepare-state", "read-state", "prepare-metadata"])(
+  const pendingPaths = [
+    "repository",
+    "prepare-state",
+    "read-state",
+    "prepare-metadata",
+    "prepare-snyk-remotes",
+  ];
+  test.each(pendingPaths)(
     "cancels %s resolution while its filesystem lookup is pending",
     async (operation) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { repository, stateDirectory, environment } = await fixture({
+        isolatedGit: operation === "prepare-snyk-remotes",
+      });
       if (operation === "prepare-metadata")
         await rm(join(repository, ".git"), { recursive: true });
       const module = new URL(
@@ -648,7 +660,9 @@ describe("local normalized scanner findings", () => {
       const operation = ${JSON.stringify(operation)};
       const heldPath = operation === "repository" ? repository
         : operation === "prepare-metadata" ? ${JSON.stringify(join(repository, "HEAD"))}
+        : operation === "prepare-snyk-remotes" ? ${JSON.stringify(join(repository, ".git", "remotes"))}
         : ${JSON.stringify(stateDirectory)};
+      const holdLstat = operation === "prepare-metadata" || operation === "prepare-snyk-remotes";
       const originalRealpath = fs.realpath;
       const originalLstat = fs.lstat;
       let enteredLookup, releaseLookup;
@@ -656,13 +670,13 @@ describe("local normalized scanner findings", () => {
       const lookup = new Promise((_, reject) => { releaseLookup = reject; });
       mockFs(() => ({
         realpath: (path, ...args) => {
-          if (operation === "prepare-metadata" || path !== heldPath)
+          if (holdLstat || path !== heldPath)
             return originalRealpath(path, ...args);
           enteredLookup();
           return lookup;
         },
         lstat: (path, ...args) => {
-          if (operation !== "prepare-metadata" || path !== heldPath)
+          if (!holdLstat || path !== heldPath)
             return originalLstat(path, ...args);
           enteredLookup();
           return lookup;
@@ -675,7 +689,15 @@ describe("local normalized scanner findings", () => {
       let outcome;
       const pending = operation.startsWith("prepare-")
         ? prepareNormalizedLocalImport(
-            { read: 0, findings: [], excluded: [] },
+            ${JSON.stringify(
+              operation === "prepare-snyk-remotes"
+                ? normalizeSnykIssues(
+                    snykRestFixture("open-source", {
+                      sourceRepositoryUrl: "https://github.com/example/project",
+                    }),
+                  )
+                : { read: 0, findings: [], excluded: [] },
+            )},
             { repository, provider: "snyk", sourceKey: "synthetic-project" },
             { signal: controller.signal,
               sourceRepositories: [{ url: "https://github.com/example/project" }] },
@@ -874,6 +896,110 @@ describe("local normalized scanner findings", () => {
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
+  test("local previews and storage capture the same numeric source data", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    let reads = 0;
+    const sourceData = {
+      scores: Object.assign([3], {
+        note: Object.assign(new Number(4), {
+          toJSON() {
+            throw new Error("JSON ignores named array properties");
+          },
+        }),
+      }),
+      get section() {
+        const n = ++reads;
+        return [new Number(n), new Number(n)];
+      },
+      value: Object.assign(new Number(9), {
+        toJSON: (key: string) => (key === "value" ? 0 : 9),
+      }),
+    };
+    data.findings[0]!.evidence.source_data = sourceData;
+    data.report = { value: sourceData.value, alias: sourceData.value };
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    const expected = { scores: [3], section: [1, 1], value: 0 };
+    expect(reads).toBe(1);
+    const preview = prepared.preview.findings[0]!.evidence.source_data!;
+    expect(JSON.parse(JSON.stringify(preview))).toEqual(expected);
+    expect(prepared.preview.report).toEqual({ value: 0, alias: 9 });
+    expect((await prepared.import()).report).toEqual(prepared.preview.report);
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test("captures numeric fields before later getters mutate the source", async () => {
+    const { repository, environment } = await fixture();
+    const data = input();
+    class Scores {
+      score = new Number(3);
+    }
+    const scores = new Scores();
+    let reads = 0;
+    Object.defineProperty(scores, "getterScore", {
+      enumerable: true,
+      get() {
+        reads++;
+        scores.score = new Number(7);
+        return Object.assign(new Number(1), { toJSON: () => 5 });
+      },
+    });
+    data.findings[0]!.evidence.source_data = { scores };
+    Object.assign(data.findings[0]!, {
+      vendorCursor: 2 ** 53,
+      previousCursor: new Number(2 ** 53),
+    });
+    const prepared = await prepareNormalizedLocalImport(
+      data,
+      { repository, ...source },
+      { environment },
+    );
+    expect(reads).toBe(1);
+    const expected = { scores: { score: 3, getterScore: 5 } };
+    expect(
+      JSON.parse(
+        JSON.stringify(prepared.preview.findings[0]!.evidence.source_data),
+      ),
+    ).toEqual(expected);
+    await prepared.import();
+    const rows = await listLocalExternalFindings(
+      { repository },
+      { environment },
+    );
+    expect(
+      rows.find((item) => item.sourceFindingId === "scanner-finding-1")
+        ?.evidence.source_data,
+    ).toEqual(expected);
+  });
+
+  test.each([2 ** 53, new Number(2 ** 53)])(
+    "rejects unsafe normalized evidence before writing any local state",
+    async (score) => {
+      const { repository, stateDirectory, environment } = await fixture();
+      const data = input();
+      data.findings[0]!.evidence.source_data = { score };
+      await expect(
+        prepareNormalizedLocalImport(
+          data,
+          { repository, ...source },
+          { environment },
+        ),
+      ).rejects.toThrow("safe integer");
+      expect(existsSync(stateDirectory)).toBe(false);
+    },
+  );
+
   test("uses the canonical selected checkout and rejects state inside it", async () => {
     const { root, repository, environment } = await fixture();
     const link = join(root, "repository-link");
@@ -920,21 +1046,16 @@ describe("local normalized scanner findings", () => {
   test.each(["bare", "linked", "ordinary"] as const)(
     "protects selected %s roots through nested paths and aliases",
     async (kind) => {
-      const { root, repository, environment } = await fixture();
+      const { root, repository, environment, git } = await fixture();
       const owner = join(root, "owner");
       const common = join(root, "common.git");
       if (kind === "linked") {
-        execFileSync("git", ["init", "--bare", "--quiet", common]);
+        git("init", "--bare", "--quiet", common);
         await mkdir(owner);
         await writeFile(join(owner, "HEAD"), "ref: refs/heads/main\n");
         await writeFile(join(owner, "commondir"), "../common.git\n");
       } else {
-        execFileSync("git", [
-          "init",
-          "--quiet",
-          ...(kind === "bare" ? ["--bare"] : []),
-          owner,
-        ]);
+        git("init", "--quiet", ...(kind === "bare" ? ["--bare"] : []), owner);
       }
       const nested = join(owner, "nested", "selected");
       await mkdir(nested, { recursive: true });
@@ -950,7 +1071,7 @@ describe("local normalized scanner findings", () => {
       ];
       if (kind === "bare") {
         const inner = join(owner, "inner-worktree");
-        execFileSync("git", ["init", "--quiet", inner]);
+        git("init", "--quiet", inner);
         selections.push(inner);
       }
       for (const protectedDirectory of kind === "linked"
@@ -1003,7 +1124,7 @@ describe("local normalized scanner findings", () => {
           ["commondir", "newline-before-nul"],
         ]),
   ])("preserves Git %s pointer format %s", async (kind, format) => {
-    const { root, stateDirectory, environment } = await fixture();
+    const { root, stateDirectory, environment, git } = await fixture();
     const common = join(
       root,
       format === "spaces"
@@ -1014,15 +1135,15 @@ describe("local normalized scanner findings", () => {
           ? "metadata.git\n"
           : "metadata.git",
     );
-    execFileSync("git", ["init", "--quiet", "--bare", common]);
-    execFileSync("git", [
+    git("init", "--quiet", "--bare", common);
+    git(
       "-C",
       common,
       "remote",
       "add",
       "origin",
       "https://github.com/example/project",
-    ]);
+    );
     let repository = join(root, "pointer-source");
     await mkdir(repository);
     if (format.startsWith("self-")) {
@@ -1046,11 +1167,7 @@ describe("local normalized scanner findings", () => {
       }
     }
     // Git accepts the exact bytes, including a path newline immediately before NUL.
-    expect(
-      execFileSync("git", ["-C", repository, "remote"], {
-        encoding: "utf8",
-      }).trim(),
-    ).toBe("origin");
+    expect(git("-C", repository, "remote").trim()).toBe("origin");
     const bin = join(common, "tools");
     const marker = join(root, "pointer-git-executed");
     await mkdir(bin);
@@ -1087,7 +1204,7 @@ describe("local normalized scanner findings", () => {
   test.skipIf(process.platform === "win32")(
     "Node protects associated metadata through POSIX path syntax",
     async () => {
-      const { root, environment } = await fixture();
+      const { root, environment, git } = await fixture();
       const storage = join(root, "storage");
       await mkdir(join(storage, "child"), { recursive: true });
       await symlink(join(storage, "child"), join(root, "pointer-link"), "dir");
@@ -1096,7 +1213,7 @@ describe("local normalized scanner findings", () => {
         const name =
           syntax === "parent-traversal" ? "common.git" : "common\\data.git";
         const common = join(storage, name);
-        execFileSync("git", ["init", "--quiet", "--bare", common]);
+        git("init", "--quiet", "--bare", common);
         const pointer =
           syntax === "parent-traversal"
             ? "../pointer-link/../common.git"
@@ -1111,12 +1228,7 @@ describe("local normalized scanner findings", () => {
             await writeFile(join(repository, "commondir"), `${pointer}\n`);
           }
           // Git must accept the pointer before testing the SDK's state boundary.
-          execFileSync("git", [
-            "-C",
-            repository,
-            "rev-parse",
-            "--git-common-dir",
-          ]);
+          git("-C", repository, "rev-parse", "--git-common-dir");
           cases.push({ repository, state: join(common, "runtime-state") });
         }
       }
@@ -1315,19 +1427,19 @@ describe("local normalized scanner findings", () => {
   );
 
   test("preserves Git pointer formats and invalid-pointer diagnostics", async () => {
-    const { root, environment, stateDirectory } = await fixture();
+    const { root, environment, stateDirectory, git } = await fixture();
     const repository = join(root, "linked");
     const common = join(root, "common.git");
     await mkdir(repository);
-    execFileSync("git", ["init", "--quiet", "--bare", common]);
-    execFileSync("git", [
+    git("init", "--quiet", "--bare", common);
+    git(
       "-C",
       common,
       "remote",
       "add",
       "origin",
       "https://github.com/example/project",
-    ]);
+    );
     const marker = join(repository, ".git");
     const dependencies = {
       environment,
@@ -1454,7 +1566,7 @@ describe("local normalized scanner findings", () => {
   });
 
   test("matches source repository context against SSH remotes and reader metadata", async () => {
-    const { repository, stateDirectory, environment } = await fixture({
+    const { repository, stateDirectory, environment, git } = await fixture({
       remote: "git@github.com:Example/Project.git",
     });
     const data = input();
@@ -1486,14 +1598,7 @@ describe("local normalized scanner findings", () => {
         { environment },
       ),
     ).rejects.toThrow("does not match a configured remote");
-    execFileSync("git", [
-      "-C",
-      repository,
-      "remote",
-      "add",
-      "upstream",
-      "https://github.com/example/other.git",
-    ]);
+    git("remote", "add", "upstream", "https://github.com/example/other.git");
     await prepareNormalizedLocalImport(
       data,
       { repository, ...source },
@@ -1556,7 +1661,7 @@ describe("local normalized scanner findings", () => {
   )(
     "matches %s on %s over the HTTPS port without equating other SSH ports",
     async (protocol, host) => {
-      const { repository, stateDirectory, environment } = await fixture({
+      const { repository, stateDirectory, environment, git } = await fixture({
         remote: `${protocol}://git@${host}:443/example/project.git`,
       });
       const dependencies = {
@@ -1578,14 +1683,12 @@ describe("local normalized scanner findings", () => {
           },
         ),
       ).rejects.toThrow("does not match a configured remote");
-      execFileSync("git", [
-        "-C",
-        repository,
+      git(
         "remote",
         "set-url",
         "origin",
         `${protocol}://git@ssh.github.com:2222/example/project.git`,
-      ]);
+      );
       await expect(
         prepareNormalizedLocalImport(
           input(),
@@ -1630,14 +1733,10 @@ describe("local normalized scanner findings", () => {
   ])(
     "allows a manual Sonar mapping for %s alongside an HTTPS fork",
     async (upstream, url) => {
-      const { repository, environment } = await fixture({
+      const { repository, environment, git } = await fixture({
         remote: "https://fork.example.invalid/team/project.git",
       });
-      execFileSync(
-        "git",
-        ["-C", repository, "remote", "add", "upstream", upstream],
-        { env: environment },
-      );
+      git("remote", "add", "upstream", upstream);
       const prepare = (sourceUrl: string, sourceRepositoryUrl?: string) =>
         prepareNormalizedLocalImport(
           input(),
@@ -1815,7 +1914,7 @@ describe("local normalized scanner findings", () => {
     "https://git.example.invalid/team/project",
     "git@git.example.invalid:team/project.git",
   ])("a custom SSH remote must match the claimed project: %s", async (url) => {
-    const { repository, environment } = await fixture({
+    const { repository, environment, git } = await fixture({
       remote: "git@git.example.invalid:team/other.git",
     });
     await expect(
@@ -1828,17 +1927,11 @@ describe("local normalized scanner findings", () => {
         },
       ),
     ).rejects.toThrow("does not match a configured remote");
-    execFileSync(
-      "git",
-      [
-        "-C",
-        repository,
-        "remote",
-        "set-url",
-        "origin",
-        "git@git.example.invalid:team/project.git",
-      ],
-      { env: environment },
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "git@git.example.invalid:team/project.git",
     );
     expect(
       (
@@ -2008,7 +2101,7 @@ describe("local normalized scanner findings", () => {
   ])(
     "ignores local remote %s while enforcing any network remote",
     async (remote) => {
-      const { repository, stateDirectory, environment } = await fixture({
+      const { repository, stateDirectory, environment, git } = await fixture({
         remote,
       });
       const dependencies = {
@@ -2020,14 +2113,7 @@ describe("local normalized scanner findings", () => {
         { repository, ...source },
         dependencies,
       );
-      execFileSync("git", [
-        "-C",
-        repository,
-        "remote",
-        "add",
-        "upstream",
-        "https://github.com/example/project",
-      ]);
+      git("remote", "add", "upstream", "https://github.com/example/project");
       await prepareNormalizedLocalImport(
         input(),
         { repository, ...source },
@@ -2093,7 +2179,13 @@ describe("local normalized scanner findings", () => {
   });
 
   test("requires Git for bare and linked metadata but permits plain directories without it", async () => {
-    const { root, repository, stateDirectory, environment } = await fixture({
+    const {
+      root,
+      repository,
+      stateDirectory,
+      environment,
+      git: runGit,
+    } = await fixture({
       remote: "https://github.com/example/project",
     });
     const plain = join(root, "plain");
@@ -2102,15 +2194,15 @@ describe("local normalized scanner findings", () => {
     const linked = join(root, "linked");
     const invalid = join(root, "invalid");
     await Promise.all([mkdir(plain), mkdir(linked), mkdir(invalid)]);
-    execFileSync("git", ["init", "--bare", "--quiet", bare]);
-    execFileSync("git", [
+    runGit("init", "--bare", "--quiet", bare);
+    runGit(
       "-C",
       bare,
       "remote",
       "add",
       "origin",
       "https://github.com/example/project",
-    ]);
+    );
     await mkdir(nested);
     await Promise.all([
       writeFile(join(linked, "HEAD"), "ref: refs/heads/main\n"),
