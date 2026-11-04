@@ -66,6 +66,10 @@ GIT_UNAVAILABLE_WARNING = (
 BUDGET_WARNING = "Scan stopped: estimated cost $0.00625 exceeded the $0.005 cost limit."
 
 EXPECTED_TABLES = {
+    "dependency_assessments",
+    "dependency_imported_findings",
+    "dependency_reports",
+    "dependency_task_launches",
     "deep_scan_dedup_inputs",
     "deep_scan_runs",
     "deep_scan_worker_threads",

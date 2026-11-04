@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dependency Resolution"
+  short_description: "Resolve repository dependencies and changes"
+  default_prompt: "Use $dependency-resolution to resolve direct and transitive repository dependencies and explain their sources, versions, and first-party impact."

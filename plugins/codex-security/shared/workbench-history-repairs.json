@@ -1,5 +1,16 @@
 [
   [
+    "-- Dependency-import previews used 42 and 43 before unrelated releases claimed those slots.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS version, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    ")",
+    "SELECT 'sql' AS operation, 'UPDATE schema_migrations SET version = ' || history.version ||",
+    "    ' WHERE version = ' || recorded.version AS value",
+    "FROM schema_migrations AS recorded JOIN history ON recorded.name = history.name",
+    "WHERE (recorded.version, history.version) IN ((42, 63), (43, 64));"
+  ],
+  [
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
     "    'UPDATE schema_migrations SET version = 60 WHERE version = ' || version AS value",

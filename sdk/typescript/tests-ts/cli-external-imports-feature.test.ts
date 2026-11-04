@@ -14,6 +14,7 @@ import { importedAlert } from "./support/github-import-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const commands = [
+  ["dependency-findings", "list"],
   ["publish", "findings"],
   ["findings", "imported"],
   ["import", "github-advisories"],

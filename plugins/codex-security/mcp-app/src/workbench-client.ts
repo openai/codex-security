@@ -59,6 +59,11 @@ async function executeWorkbench(
 ): Promise<JsonObject> {
   const timeout = [
     "begin-deep-scan",
+    "claim-dependency-task-launch",
+    "get-dependency-finding",
+    "import-dependency-findings",
+    "record-dependency-assessments",
+    "start-dependency-assessment",
     "cancel-scan",
     "fail-scan",
     "record-deep-scan-iteration",

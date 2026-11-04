@@ -394,6 +394,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     subparsers.add_parser("finding-issues")
 
+    # The inspection-only parser returns before loading persistence and report readers.
+    from dependency_imports.workbench import add_arguments as add_dependency_import_arguments
+
+    add_dependency_import_arguments(subparsers)
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     args = parser.parse_args()

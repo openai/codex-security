@@ -20,6 +20,7 @@ import {
   registerScanHandoffTools,
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
+import { registerDependencyImportTools } from "./src/server/dependency-import-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import {
@@ -1955,6 +1956,8 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
+  if (process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS === "1")
+    registerDependencyImportTools(server, runWorkbench);
   registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,

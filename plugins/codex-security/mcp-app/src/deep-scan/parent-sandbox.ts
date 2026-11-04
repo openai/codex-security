@@ -1,9 +1,10 @@
 import { asRecord as record, isNonEmptyString } from "../record.js";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { trustedSandboxState } from "../host-sandbox-state.js";
 import { DeepScanNonRetryableError } from "./errors.js";
 
-export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
+export { CODEX_SANDBOX_STATE_META_CAPABILITY } from "../host-sandbox-state.js";
 
 export type DeepWorkerParentSandbox = {
   /**
@@ -21,7 +22,7 @@ export type DeepWorkerParentSandbox = {
 export function resolveDeepWorkerParentSandbox(
   extra: unknown,
 ): DeepWorkerParentSandbox {
-  const state = trustedSandboxState(extra);
+  const state = trustedSandboxState(extra, unsupportedParentSandbox);
 
   const profile = record(state.permissionProfile);
   if (!profile || profile.type !== "managed") {
@@ -142,33 +143,6 @@ export function resolveDeepWorkerParentSandbox(
     ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
-}
-
-function trustedSandboxState(extra: unknown): Record<string, unknown> {
-  const request = record(extra);
-  const direct = record(request?._meta)?.[CODEX_SANDBOX_STATE_META_CAPABILITY];
-  const requestInfo = record(request?.requestInfo);
-  const forwarded = record(requestInfo?._meta)?.[
-    CODEX_SANDBOX_STATE_META_CAPABILITY
-  ];
-
-  if (
-    direct !== undefined &&
-    forwarded !== undefined &&
-    !isDeepStrictEqual(direct, forwarded)
-  ) {
-    throw unsupportedParentSandbox(
-      "the parent supplied conflicting sandbox metadata",
-    );
-  }
-
-  const state = record(direct ?? forwarded);
-  if (!state) {
-    throw unsupportedParentSandbox(
-      "the host did not provide trusted parent sandbox metadata",
-    );
-  }
-  return state;
 }
 
 function resolveGlobScanMaxDepth(

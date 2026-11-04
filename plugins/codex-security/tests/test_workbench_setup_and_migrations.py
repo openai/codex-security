@@ -105,6 +105,8 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
+    (63, "import external dependency claims and record selected assessments"),
+    (64, "persist dependency task launch ownership"),
 ]
 
 
@@ -1419,6 +1421,54 @@ def test_workbench_indexes_issue_ownership_without_changing_existing_receipts() 
             connection.execute(query, ("destination-0", "ISSUE-129", "another-finding")).fetchone()
             is None
         )
+
+
+def test_dependency_preview_upgrades_without_losing_imports_or_task_ownership() -> None:
+    connection, migrate = create_historical_database(42)
+    timestamp = "2026-09-23T00:00:00Z"
+    with closing(connection):
+        preview = tuple(
+            (version - 21, name, sql)
+            for version, name, sql in SCHEMA.MIGRATIONS
+            if version in (63, 64)
+        )
+        apply_historical_migrations(connection, preview, timestamp)
+        connection.execute(
+            "INSERT INTO dependency_reports VALUES "
+            "('r', '/repo', 'rev', 'digest', 'socket', 'report', 'sha', 'original', '[]', 1, ?)",
+            (timestamp,),
+        )
+        connection.execute(
+            """INSERT INTO dependency_imported_findings VALUES ('f', 'r', 1, '{}', NULL)"""
+        )
+        connection.execute(
+            """INSERT INTO dependency_assessments VALUES
+            ('a', 'r', '["f"]', 'rev', 'digest', '[]', 'pending', ?, NULL)""",
+            (timestamp,),
+        )
+        connection.execute(
+            """INSERT INTO dependency_task_launches VALUES
+            ('t', 'account', 'host', 'r', 'assessment', 'a', '', 'attempt', 'settled',
+             'thread', NULL, ?, ?)""",
+            (timestamp, timestamp),
+        )
+
+        migrate(connection)
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == EXPECTED_MIGRATIONS
+        assert tuple(
+            connection.execute(
+                """SELECT r.original_report, f.claim_json, a.state, t.account_id, t.thread_id
+               FROM dependency_task_launches t JOIN dependency_assessments a ON a.id = t.assessment_id
+               JOIN dependency_reports r ON r.id = t.report_id
+               JOIN dependency_imported_findings f ON f.report_id = r.id"""
+            ).fetchone()
+        ) == ("original", "{}", "pending", "account", "thread")
+        assert not connection.execute("PRAGMA foreign_key_check").fetchall()
 
 
 def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:

@@ -1,0 +1,38 @@
+{
+  "packageManager": "maven",
+  "displayTargetFile": "example-app/pom.xml",
+  "vulnerabilities": [
+    {
+      "title": "Synthetic parser vulnerability",
+      "id": "SNYK-JAVA-EXAMPLE-0001",
+      "packageManager": "maven",
+      "packageName": "org.example:parser",
+      "version": "3.1",
+      "severity": "medium",
+      "identifiers": {
+        "CVE": [
+          "CVE-2099-0001"
+        ],
+        "CWE": [
+          "CWE-502"
+        ],
+        "GHSA": [
+          "GHSA-aaaa-bbbb-cccc"
+        ]
+      },
+      "from": [
+        "org.example:example-app@0.0.1-SNAPSHOT",
+        "org.example:parser@3.1"
+      ],
+      "fixedIn": [
+        "3.2.2"
+      ],
+      "upgradePath": [
+        false,
+        "org.example:parser@3.2.2"
+      ],
+      "reachability": "reachable",
+      "malicious": false
+    }
+  ]
+}

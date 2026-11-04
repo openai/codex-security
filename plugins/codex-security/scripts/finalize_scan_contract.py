@@ -610,9 +610,23 @@ def _open_scan_local_file_with_path(
     resolve_spelling: bool = False,
     portable: bool = True,
 ) -> tuple[int, str]:
-    scan_dir = _require_scan_directory(scan_dir)
     validate_path = _require_portable_relative_path if portable else _require_safe_relative_path
-    relative_path = validate_path(relative_path, context)
+    return _open_regular_file_with_path(
+        scan_dir, validate_path(relative_path, context), context, resolve_spelling=resolve_spelling
+    )
+
+
+def open_regular_file_descriptor(root: Path, relative: Path, context: str) -> int:
+    """Safely open an operator-selected native filename relative to its verified root."""
+    if relative.anchor or not relative.parts or ".." in relative.parts:
+        raise ContractError(f"{context}: expected a relative file path")
+    return _open_regular_file_with_path(root, relative.as_posix(), context)[0]
+
+
+def _open_regular_file_with_path(
+    scan_dir: Path, relative_path: str, context: str, *, resolve_spelling: bool = False
+) -> tuple[int, str]:
+    scan_dir = _require_scan_directory(scan_dir)
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")

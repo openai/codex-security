@@ -1,0 +1,34 @@
+{
+  "list": {
+    "objects": [
+      {
+        "uuid": "example-endor-finding",
+        "meta": {"name": "dependency_with_vulnerabilities", "description": "Example dependency vulnerability"},
+        "spec": {
+          "summary": "Schema-derived test finding, not a captured export",
+          "ecosystem": "ECOSYSTEM_NPM",
+          "level": "FINDING_LEVEL_HIGH",
+          "target_dependency_name": "example-package",
+          "target_dependency_version": "1.0.0",
+          "finding_categories": ["FINDING_CATEGORY_VULNERABILITY"],
+          "finding_tags": ["FINDING_TAGS_REACHABLE_FUNCTION"],
+          "dependency_file_paths": ["package-lock.json"],
+          "reachable_paths": [{"nodes": [{"function_ref": {"function_or_attribute_name": "parse"}, "internal": false}]}],
+          "proposed_version": "1.0.1",
+          "finding_metadata": {
+            "vulnerability": {
+              "meta": {"name": "GHSA-example-test-only"},
+              "spec": {"aliases": ["CVE-2099-0001"]}
+            }
+          }
+        }
+      },
+      {
+        "uuid": "example-endor-license",
+        "meta": {"name": "license_risk"},
+        "spec": {"finding_categories": ["FINDING_CATEGORY_LICENSE_RISK"]}
+      }
+    ],
+    "response": {}
+  }
+}

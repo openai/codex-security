@@ -43,6 +43,7 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+from dependency_imports import workbench as dependency_imports
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -3153,6 +3154,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
     ) as connection:
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
+            **dict.fromkeys(dependency_imports.COMMANDS, dependency_imports.run_command),
             "create-workspace": create_workspace,
             "save-workspace": save_workspace,
             "start-scan": start_scan,

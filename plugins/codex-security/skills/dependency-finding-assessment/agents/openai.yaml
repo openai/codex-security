@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assess Dependency Findings"
+  short_description: "Assess selected imported dependency findings"
+  default_prompt: "Use $dependency-finding-assessment to assess the selected dependency findings against this repository."

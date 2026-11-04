@@ -78,6 +78,7 @@ describe("CLI help", () => {
     expect(sectionFor("patch")).toBe(sectionFor("scan"));
     expect(sectionFor("scans")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("findings")).toBe(sectionFor("scans"));
+    expect(text).not.toContain("dependency-findings");
     expect(sectionFor("login")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("init")).toBe(sectionFor("login"));
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
