@@ -116,6 +116,7 @@ export interface DeepScanLogEvent {
   count?: number;
   completed?: number;
   newFindings?: number;
+  retainedFindings?: number;
   pass?: number;
   reason?: string;
   total?: number;
