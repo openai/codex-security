@@ -1,5 +1,11 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
@@ -985,6 +991,141 @@ test("an explicit file can supply the model required by a provider override", as
     model_provider: "amazon-bedrock",
   });
 });
+
+test.each(["relative", "link into checkout", "link out of checkout"] as const)(
+  "scan checks the selected config against the target checkout (%s)",
+  async (selection) => {
+    const input = await fixture({
+      codex: {
+        profile: "review",
+        profiles: {
+          review: { openai_base_url: "https://synthetic.example.test/v1" },
+        },
+      },
+    });
+    git(input.repository, "init", "-q");
+    await copyFile(input.config, join(input.repository, "scan.json"));
+    const fromOutside = join(input.root, "linked-checkout");
+    const fromInside = join(input.repository, "linked-settings");
+    await symlink(input.repository, fromOutside, "junction");
+    await symlink(input.configDirectory, fromInside, "junction");
+    git(input.repository, "add", "--", "scan.json", "linked-settings");
+    git(input.repository, "commit", "--no-gpg-sign", "-qm", "fixture");
+    const selectedDirectory = {
+      relative: input.repository,
+      "link into checkout": fromOutside,
+      "link out of checkout": fromInside,
+    }[selection];
+    const cwd =
+      selection === "relative" ? join(input.repository, "src") : input.root;
+    const onConfig = mock();
+    const { runCli, stderr } = createCliTest(main);
+    const code = await runCli(
+      [
+        "scan",
+        join(input.repository, "lib"),
+        "-c",
+        relative(cwd, join(selectedDirectory, "scan.json")),
+        "--json",
+      ],
+      dependencies({ currentDirectory: cwd, onConfig }),
+    );
+    expect(code, stderr.text()).toBe(2);
+    expect(stderr.text()).toContain("codex.profiles.review.openai_base_url");
+    expect(stderr.text()).toContain("--codex");
+    expect(onConfig).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["operator file", "operator flag"] as const)(
+  "a project can select a named provider and use routing from an %s",
+  async (source) => {
+    const baseUrl = "https://gateway.example.test/v1";
+    const selector = { model: "synthetic-model", model_provider: "gateway" };
+    const input = await fixture({
+      codex: {
+        profile: "review",
+        profiles: { review: selector },
+        ...(source === "operator file"
+          ? { model_providers: { gateway: { base_url: baseUrl } } }
+          : {}),
+      },
+    });
+    git(input.repository, "init", "-q");
+    const args = ["scan", input.repository, "--json"];
+    if (source === "operator file") {
+      args.push("-c", input.config);
+    } else {
+      const local = join(input.repository, "scan.json");
+      await copyFile(input.config, local);
+      args.push(
+        "-c",
+        local,
+        "--codex",
+        `model_providers.gateway.base_url=${JSON.stringify(baseUrl)}`,
+      );
+    }
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
+    const { runCli, stderr } = createCliTest(main);
+    expect(
+      await runCli(
+        args,
+        dependencies({ currentDirectory: input.root, onConfig }),
+      ),
+      stderr.text(),
+    ).toBe(0);
+    expect(onConfig.mock.lastCall?.[0].codexOverrides).toMatchObject({
+      profile: "review",
+      profiles: { review: selector },
+      model_providers: { gateway: { base_url: baseUrl } },
+    });
+  },
+);
+
+test.each(["scan-components", "bulk-scan"] as const)(
+  "%s checks provider definitions from files in the selected repository",
+  async (command) => {
+    const input = await fixture({
+      codex: {
+        model_providers: {
+          gateway: { base_url: "https://synthetic.example.test/v1" },
+        },
+      },
+    });
+    const local = join(input.repository, "scan.json");
+    await copyFile(input.config, local);
+    let args: string[];
+    if (command === "bulk-scan") {
+      const csv = await bulkInventory(input, ["standard"]);
+      const other = join(input.root, "other");
+      git(input.root, "clone", "--quiet", "--local", input.repository, other);
+      const revision = git(other, "rev-parse", "HEAD");
+      await writeFile(
+        csv,
+        `id,repository,revision\nfirst,${other},${revision}\nsecond,${input.repository},${revision}\n`,
+      );
+      args = [command, csv];
+    } else {
+      args = [command, input.repository, "--component", "src", "--headless"];
+    }
+    const onConfig = mock();
+    const { runCli, stderr } = createCliTest(main);
+    const code = await runCli(
+      [
+        ...args,
+        "-c",
+        local,
+        "--output-dir",
+        join(input.root, "results"),
+        "--json",
+      ],
+      dependencies({ currentDirectory: input.root, onConfig }),
+    );
+    expect(code, stderr.text()).toBe(2);
+    expect(stderr.text()).toContain("codex.model_providers");
+    expect(onConfig).not.toHaveBeenCalled();
+  },
+);
 
 test.each(["file", "CLI"])(
   "a profile selected by the %s supplies the provider model",

@@ -80,6 +80,7 @@ const distModules = [
   "deep-scan-defaults",
   "project-config",
   "project-config-schema",
+  "project-provider-routing",
   "prompt-files",
   "provider-profile",
   "scan-modes",

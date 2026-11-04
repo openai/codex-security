@@ -1,4 +1,5 @@
 import { notify } from "./value.js";
+import { requireTrustedProjectProvider } from "./project-provider-routing.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
@@ -142,6 +143,11 @@ export async function runComponentScans(
     throw new Error("Component workers must be a positive integer.");
   if (Boolean(options.auto) === (options.components !== undefined))
     throw new Error("Choose components or automatic planning, not both.");
+  await requireTrustedProjectProvider(
+    options.config?.projectProviderRouting,
+    options.repository,
+    options.signal,
+  );
   const auth = options.scanOptions?.auth;
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {

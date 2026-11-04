@@ -1,5 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { stringify } from "yaml";
@@ -227,6 +227,121 @@ test("typed configuration keeps repository-relative scopes and does not discover
       ).options.target,
     ).toEqual(target);
   }
+});
+
+test("SDK preflight binds parsed project routing to the original checkout across link chains", async () => {
+  const root = await temporaryDirectory();
+  const checkout = join(root, "checkout");
+  const operator = join(root, "operator");
+  const other = join(root, "other-checkout");
+  await Promise.all([checkout, operator, other].map((path) => mkdir(path)));
+  const selected = join(operator, "selected");
+  const controlled = join(checkout, "settings");
+  await symlink(operator, controlled, "junction");
+  await symlink(controlled, selected, "junction");
+  await writeFile(
+    join(operator, "scan.json"),
+    JSON.stringify({
+      codex: {
+        profiles: {
+          "named.profile": {
+            openai_base_url: "https://source.example.invalid",
+          },
+        },
+      },
+    }),
+  );
+  const loaded = await loadProjectConfig(join(selected, "scan.json"));
+  await rm(selected);
+  await rm(controlled);
+  await rm(join(operator, "scan.json"));
+  await using security = new TestClient(loaded.config, {
+    environment: {
+      CODEX_HOME: join(root, "home"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    },
+    prepareRuntime: rejecting("Preflight must not initialize a runtime"),
+  });
+  await expect(security.preflight(checkout, loaded.options)).rejects.toThrow(
+    /codex\.profiles\.named\.profile\.openai_base_url.*--codex/,
+  );
+  expect((await security.preflight(other, loaded.options)).mode).toBe(
+    "standard",
+  );
+});
+
+test.each([
+  ["model_providers.gateway.env_key", "codex.model_providers"],
+  [
+    "profiles.review.model_providers.gateway.base_url",
+    "codex.profiles.review.model_providers",
+  ],
+  ["chatgpt_base_url", "codex.chatgpt_base_url"],
+])(
+  "file-backed SDK routing recognizes native override %s",
+  async (key, field) => {
+    const root = await temporaryDirectory();
+    const checkout = join(root, "checkout");
+    await mkdir(checkout);
+    const path = join(checkout, "scan.json");
+    await writeFile(
+      path,
+      JSON.stringify({ codex: { [key]: "synthetic-setting-value" } }),
+    );
+    const loaded = await loadProjectConfig(path);
+    await using security = new TestClient(loaded.config, {
+      environment: {
+        CODEX_HOME: join(root, "home"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+      prepareRuntime: rejecting(
+        "File routing must be rejected before runtime setup",
+      ),
+    });
+    await expect(security.run(checkout, loaded.options)).rejects.toThrow(field);
+  },
+);
+
+test("a checkout file can select a credential-home provider profile", async () => {
+  const root = await temporaryDirectory();
+  const checkout = join(root, "checkout");
+  const home = join(root, "home");
+  await Promise.all([mkdir(checkout), mkdir(home)]);
+  await writeFile(
+    join(home, "gateway.config.toml"),
+    [
+      'model_provider = "openrouter"',
+      'model = "operator-model"',
+      "[model_providers.openrouter]",
+      'base_url = "https://operator.example.invalid"',
+      'env_key = "OPERATOR_PROVIDER_MARKER"',
+    ].join("\n"),
+  );
+  const path = join(checkout, "scan.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      codex: {
+        profile: "gateway",
+        "profiles.review.some_extension.model_providers": "extension-value",
+        '"openai_base_url"': "literal-key",
+      },
+    }),
+  );
+  const loaded = await loadProjectConfig(path);
+  await using security = new TestClient(loaded.config, {
+    environment: {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPERATOR_PROVIDER_MARKER: "fixture-marker",
+    },
+    prepareRuntime: rejecting("Preflight must not initialize a runtime"),
+  });
+  expect(await security.preflight(checkout, loaded.options)).toMatchObject({
+    model: "operator-model",
+    modelProvider: "openrouter",
+    authentication: { source: "OPERATOR_PROVIDER_MARKER" },
+  });
 });
 
 test("public file and object entry points reject the same invalid settings", async () => {

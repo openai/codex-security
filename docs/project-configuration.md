@@ -15,12 +15,17 @@ neither, no file is loaded, even if `codex-security.yaml` exists. SDK `run()` ca
 and saved reruns do not read this environment variable or discover project files.
 The repository comes from the command's target selection, not the config file.
 
-**Treat the selected file as trusted operator configuration, with the same
-authority as CLI options and SDK `codexOverrides`.** Native Codex settings can
-start configured MCP server processes and select model-service destinations. Do not select a
-file controlled by an untrusted repository or pull request. In CI, keep the
-scanner configuration in an operator-controlled location outside the checkout
-being assessed. Explicit selection does not make a file safe to trust.
+Select a project file you trust. Native settings can start MCP server processes.
+For CI that scans pull requests, keep the scanner configuration in an
+operator-controlled location outside the checkout.
+
+A project file in the scanned checkout can select a model or a provider. For
+example, `codex: { model_provider: gateway }` selects a provider named `gateway`.
+If the checkout file already defines the provider's endpoint or credentials,
+remove those settings from the file. Supply them in an operator-controlled Codex
+profile, through explicit `--codex` options, or via SDK `codexOverrides`. A CI
+operator can also keep the complete project file outside the checkout and select
+it with `--config`.
 
 Create a starter and inspect its settings without a repository or runtime:
 

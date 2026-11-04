@@ -48,6 +48,7 @@ import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
+import { requireTrustedProjectProvider } from "./project-provider-routing.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
   VerificationModeSchema,
@@ -4984,6 +4985,11 @@ export class CodexSecurity {
     }
     const repositoryPath = resolveRepositoryPath(repository);
     const repo = await normalizeRepository(repositoryPath, signal);
+    await requireTrustedProjectProvider(
+      this.config.projectProviderRouting,
+      repo,
+      signal,
+    );
     throwIfAborted(signal);
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import {
   dirname,
   extname,
@@ -34,6 +34,10 @@ import {
   type ScanSettings,
 } from "./scan-settings.js";
 import { DiffTarget, type ScanTarget } from "./targets.js";
+import {
+  projectFileProviderRouting,
+  type ProjectProviderRouting,
+} from "./project-provider-routing.js";
 
 const validateProjectConfig = new Ajv({
   allErrors: true,
@@ -43,10 +47,16 @@ export interface ProjectConfigSource {
   path?: string;
   directory: string;
   input: ProjectConfigInput;
+  /** @internal */
+  projectProviderRouting?: ProjectProviderRouting;
 }
 
 export interface ResolvedProjectConfig {
-  config: { codexOverrides: JsonObject };
+  config: {
+    codexOverrides: JsonObject;
+    /** @internal */
+    projectProviderRouting?: ProjectProviderRouting;
+  };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
@@ -135,8 +145,10 @@ export async function readProjectConfig(
   const path = resolve(directory, expandHome(file));
   const extension = projectConfigExtension(path);
   let text: string;
+  let canonical: string;
   try {
-    text = await readFile(path, "utf8");
+    canonical = await realpath(path);
+    text = await readFile(canonical, "utf8");
   } catch (error) {
     throw new ConfigurationError(
       `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
@@ -161,7 +173,17 @@ export async function readProjectConfig(
     );
   }
   requireProjectConfig(value, path);
-  return { path, directory: dirname(path), input: value };
+  const projectProviderRouting = await projectFileProviderRouting(
+    value.codex,
+    path,
+    canonical,
+  );
+  return {
+    path,
+    directory: dirname(path),
+    input: value,
+    ...(projectProviderRouting && { projectProviderRouting }),
+  };
 }
 
 function projectConfigExtension(path: string): string {
@@ -410,7 +432,12 @@ export function resolveScanSettings(
   };
   const resolvedSources = configurationSources({ ...sources, ...scopeSources });
   return {
-    config: { codexOverrides },
+    config: {
+      codexOverrides,
+      ...(project?.projectProviderRouting && {
+        projectProviderRouting: project.projectProviderRouting,
+      }),
+    },
     options: settings,
     sources: resolvedSources,
     ...(project?.path === undefined
