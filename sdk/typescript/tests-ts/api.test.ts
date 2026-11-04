@@ -10334,6 +10334,9 @@ if __name__ == "__main__":
   type ScopedProgressScenario = PartitionedProgressScenario & {
     initialScope: number | null;
   };
+  type SplitProgressScenario = ProgressScenario & {
+    partitions?: readonly boolean[];
+  };
   const progress = (
     phase: ScanProgress["phase"],
     filesCompleted: number,
@@ -10372,7 +10375,7 @@ if __name__ == "__main__":
       workerFirst: boolean;
       stopBeforeResolution: boolean;
       split?: boolean;
-      partition?: ProgressPartition;
+      partition?: "batch" | "staged" | "each";
     },
     {
       resolutionIndex = -1,
@@ -11205,66 +11208,53 @@ if __name__ == "__main__":
     testProgressPartitions(scenarios, ["batch", "staged", "each"]);
   });
 
-  function splitProgressCases(
-    scenario: ProgressScenario & { partitions?: readonly boolean[] },
-  ) {
-    return [false, true].flatMap((workerFirst) =>
-      (scenario.partitions ?? [false, true]).flatMap((split) =>
-        [false, true].map((stopBeforeResolution) => ({
-          ...scenario,
-          workerFirst,
-          split,
-          stopBeforeResolution,
-        })),
-      ),
-    );
-  }
-
-  function testProgressWithFollowup(
-    name: string,
-    state: ScanProgress,
-    steps: ProgressScenarioStep[],
-    partitions?: readonly boolean[],
-  ): void {
-    const next =
-      state.filesCompleted < state.filesTotal
-        ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
-        : progress("validation", state.filesCompleted, state.filesTotal);
-    const expected = progress(next.phase, state.filesTotal, state.filesTotal);
-    const scenarioSteps: ProgressScenarioStep[] = [
-      ...steps,
-      ["poll"],
-      ["check", state],
-      [
-        "worker",
-        progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
-      ],
-      ["poll"],
-      ["check", state],
-      ["save", "followup", next],
-      ["poll"],
-      ["check", next],
-      [
-        "additional-worker",
-        progress("attack_path", state.filesTotal, state.filesTotal),
-      ],
-      ["poll"],
-      ["check", expected],
-    ];
-    test.each(
-      splitProgressCases({ name, expected, partitions, steps: scenarioSteps }),
-    )(
-      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      (scenario) => runProgressScenario(scenario),
-    );
-  }
-
   describe("review eligibility and ordered projections", () => {
+    const scenarios: SplitProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
     for (const mode of ["exact", "changed", "after inventory"] as const) {
       for (const eligible of [false, true]) {
         const initialTotal = eligible ? 7 : 6;
         const review = progress("discovery", 1, 7);
-        testProgressWithFollowup(
+        add(
           `accepted review after scope correction (mode=${mode}, eligible=${eligible})`,
           eligible ? review : progress("threat_model", 9, 10),
           [
@@ -11303,7 +11293,7 @@ if __name__ == "__main__":
       "review exact",
     ] as const) {
       const live = mode === "exact" ? "live" : "live-changed";
-      testProgressWithFollowup(
+      add(
         `repeated inventories around review (mode=${mode})`,
         progress("reporting", 3, 8),
         [
@@ -11332,12 +11322,70 @@ if __name__ == "__main__":
         ],
       );
     }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
   });
 
   describe("inventory authority before scope projection", () => {
+    const scenarios: SplitProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
     for (const persisted of ["late", "early", "absent"] as const) {
       for (const phase of ["reporting", "attack_path"] as const) {
-        testProgressWithFollowup(
+        add(
           `saved authority before fallback (persisted=${persisted}, phase=${phase})`,
           progress("validation", 3, 5),
           [
@@ -11372,7 +11420,7 @@ if __name__ == "__main__":
       "review delivered",
       "prior inventory",
     ] as const) {
-      testProgressWithFollowup(
+      add(
         `bounded inventory after review (mode=${mode})`,
         mode === "prior inventory"
           ? progress("validation", 3, 5)
@@ -11399,9 +11447,67 @@ if __name__ == "__main__":
         ],
       );
     }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
   });
 
   describe("inventory proof across completion intervals", () => {
+    const scenarios: SplitProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
     for (const total of [9, 10]) {
       for (const tail of ["same", "shrink", "none"] as const) {
         for (const exact of [false, true]) {
@@ -11413,7 +11519,7 @@ if __name__ == "__main__":
               ? []
               : [inventory(tail === "same" ? total : 5)]),
           ];
-          testProgressWithFollowup(
+          add(
             `eligible inventory before trailing zero (total=${total}, tail=${tail}, exact=${exact})`,
             progress("reporting", reviewed + 1, total),
             [
@@ -11437,7 +11543,7 @@ if __name__ == "__main__":
     for (const exact of [false, true]) {
       for (const intermediate of ["complete", "omitted"] as const) {
         const review = progress("validation", 1, 10);
-        testProgressWithFollowup(
+        add(
           `intermediate completion bound (exact=${exact}, review=${intermediate})`,
           progress("reporting", 3, 10),
           [
@@ -11481,7 +11587,7 @@ if __name__ == "__main__":
       for (const zero of [false, true]) {
         for (const eligible of [false, true]) {
           const review = progress("validation", 1, eligible ? 5 : 8);
-          testProgressWithFollowup(
+          add(
             `projection witness across zero phase (exact=${exact}, zero=${zero}, eligible=${eligible})`,
             eligible
               ? review
@@ -11503,12 +11609,70 @@ if __name__ == "__main__":
         }
       }
     }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
   });
 
   describe("bounded inventory marker evidence", () => {
+    const scenarios: SplitProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
     for (const command of ["changed", "exact"] as const) {
       const live = command === "changed" ? "live-changed" : "live";
-      testProgressWithFollowup(
+      add(
         `bounded inventory after saved review (${command})`,
         progress(command === "exact" ? "preflight" : "validation", 7, 8),
         [
@@ -11532,7 +11696,7 @@ if __name__ == "__main__":
     for (const total of [9, 5]) {
       for (const delayed of [true, false]) {
         const markers = [progress("threat_model", 0, 8), inventory(total)];
-        testProgressWithFollowup(
+        add(
           `scope-setting phase (total=${total}, delayed=${delayed})`,
           inventory(total),
           [
@@ -11558,7 +11722,7 @@ if __name__ == "__main__":
         "persisted message",
         "command",
       ] as const) {
-        testProgressWithFollowup(
+        add(
           `bounded inventory evidence (${kind}, total=${messageTotal})`,
           progress("validation", messageTotal - 1, messageTotal),
           [
@@ -11591,7 +11755,7 @@ if __name__ == "__main__":
           ? [inventory(9), progress("discovery", 1, 9)]
           : [progress("discovery", 1, 8), inventory(9)];
         const total = before ? 9 : 8;
-        testProgressWithFollowup(
+        add(
           `omitted command marker order (${command}, inventory before=${before})`,
           progress(before ? "reporting" : "validation", before ? 4 : 3, total),
           [
@@ -11613,7 +11777,7 @@ if __name__ == "__main__":
     }
     for (const kind of ["message", "command"] as const) {
       const live = kind === "message" ? "live-message" : "live-changed";
-      testProgressWithFollowup(
+      add(
         `separate inventory after omitted review (${kind})`,
         progress("validation", 3, 8),
         [
@@ -11637,12 +11801,70 @@ if __name__ == "__main__":
         ],
       );
     }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
   });
 
   describe("inventory occurrence and cutoff revalidation", () => {
+    const scenarios: SplitProgressScenario[] = [];
+    const add = (
+      name: string,
+      state: ScanProgress,
+      steps: ProgressScenarioStep[],
+      partitions?: readonly boolean[],
+    ) => {
+      const next =
+        state.filesCompleted < state.filesTotal
+          ? progress("reporting", state.filesCompleted + 1, state.filesTotal)
+          : progress("validation", state.filesCompleted, state.filesTotal);
+      const expected =
+        next.filesCompleted === next.filesTotal
+          ? next
+          : progress(next.phase, state.filesTotal, state.filesTotal);
+      scenarios.push({
+        name,
+        expected,
+        partitions,
+        steps: [
+          ...steps,
+          ["poll"],
+          ["check", state],
+          [
+            "worker",
+            progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+          ],
+          ["poll"],
+          ["check", state],
+          ["save", "followup", next],
+          ["poll"],
+          ["check", next],
+          [
+            "additional-worker",
+            progress("attack_path", state.filesTotal, state.filesTotal),
+          ],
+          ["poll"],
+          ["check", expected],
+        ],
+      });
+    };
     for (const control of ["dropped", "delivered", "eligible"] as const) {
       const review = progress("validation", 3, control === "eligible" ? 8 : 10);
-      testProgressWithFollowup(
+      add(
         `repeated native inventory (${control})`,
         control === "eligible" ? review : progress("reporting", 8, 10),
         [
@@ -11667,7 +11889,7 @@ if __name__ == "__main__":
       );
     }
     for (const control of ["staged", "exact", "single batch"] as const) {
-      testProgressWithFollowup(
+      add(
         `review cutoff after stronger inventory proof (${control})`,
         progress("reporting", 4, 4),
         [
@@ -11700,7 +11922,7 @@ if __name__ == "__main__":
       "eligible",
     ] as const) {
       const review = progress("discovery", 3, control === "eligible" ? 5 : 7);
-      testProgressWithFollowup(
+      add(
         `omitted inventory changes review eligibility (${control})`,
         progress("reporting", 4, control === "eligible" ? 5 : 4),
         [
@@ -11725,6 +11947,23 @@ if __name__ == "__main__":
         ],
       );
     }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? [false, true]).flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      (scenario) => runProgressScenario(scenario),
+    );
   });
 
   describe("inventory cutoffs from retained source proof", () => {
@@ -11911,11 +12150,37 @@ if __name__ == "__main__":
         },
       );
     }
-    test.each(scenarios.flatMap(splitProgressCases))(
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
       (scenario) => runProgressScenario(scenario),
     );
   });
+
+  function splitProgressCases(scenario: ProgressScenario) {
+    return [false, true].flatMap((workerFirst) =>
+      [false, true].flatMap((split) =>
+        [false, true].map((stopBeforeResolution) => ({
+          ...scenario,
+          workerFirst,
+          split,
+          stopBeforeResolution,
+        })),
+      ),
+    );
+  }
 
   describe("source proof before inventory admission", () => {
     const scenarios: ProgressScenario[] = [];
