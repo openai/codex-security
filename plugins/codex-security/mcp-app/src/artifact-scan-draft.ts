@@ -577,17 +577,25 @@ export async function retainRecordedReceiptOwnership(
   context: ArtifactContext,
   input: JsonObject,
 ): Promise<void> {
-  if (await hasScanDraftCheckpoint(context, input)) return;
-  clearScanReceiptRefs(input);
+  const owners = scanReceiptOwners(input);
+  if (!owners.length || (await hasScanDraftCheckpoint(context, input))) return;
+  for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
 function clearScanReceiptRefs(input: JsonObject): void {
+  for (const owner of scanReceiptOwners(input)) delete owner.scanReceiptRefs;
+}
+
+function scanReceiptOwners(input: JsonObject): JsonObject[] {
   const coverage = input.reviewState ?? input.coverage;
-  if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
-  for (const surface of coverage.surfaces) {
-    if (isObject(surface) && isObject(surface.provenance))
-      delete surface.provenance.scanReceiptRefs;
-  }
+  if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return [];
+  return coverage.surfaces.flatMap((surface) =>
+    isObject(surface) &&
+    isObject(surface.provenance) &&
+    "scanReceiptRefs" in surface.provenance
+      ? [surface.provenance]
+      : [],
+  );
 }
 
 export function workerCoverageReceiptLocation(
@@ -598,13 +606,14 @@ export function workerCoverageReceiptLocation(
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const normalized = components.join("/");
   const shared =
     isObject(surface.provenance) &&
     (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
   if (
     shared ||
-    ref.startsWith(`${workerPrefix}output/`) ||
-    ref.startsWith(`${workerPrefix}attempts/`)
+    normalized.startsWith(`${workerPrefix}output/`) ||
+    normalized.startsWith(`${workerPrefix}attempts/`)
   ) {
     return {
       context: {
