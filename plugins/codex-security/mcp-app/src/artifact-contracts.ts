@@ -269,15 +269,13 @@ const draft_finding = z.looseObject({
           .array(nonEmptyText)
           .meta({ uniqueItems: true })
           .describe(
-            "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once.",
+            "IDs of the Standard scan findings grouped into this Deep scan finding.",
           ),
       )
       .optional(),
     sourceFindings: z
       .array(z.strictObject({ id: nonEmptyText, finding: z.looseObject({}) }))
-      .describe(
-        "Original source payloads retained by the host for lossless semantic merges.",
-      )
+      .describe("Original Standard scan findings retained by the host.")
       .optional(),
     source: nonEmptyText.describe(
       "The actual finding producer. Use local_plugin only for a finding discovered by this plugin.",
@@ -376,7 +374,7 @@ const draft_scanDraftInput = z.strictObject({
   complete: z
     .boolean()
     .describe(
-      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings.",
+      "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in reviewState.deferred, not findings.",
     )
     .optional(),
   scanId: scanId,
@@ -384,7 +382,7 @@ const draft_scanDraftInput = z.strictObject({
   scope: draft_scope.optional(),
   threatModel: draft_threatModel.optional(),
   findings: z.array(draft_finding),
-  coverage: draft_coverage,
+  reviewState: draft_coverage,
 });
 
 /** Native tool contracts; JSON resources are generated compatibility exports. */
@@ -479,39 +477,11 @@ export const artifactSchemaDocuments = {
       scope: draft_scope,
       threatModel: draft_threatModel,
       surface: draft_surface,
-      coverage: draft_coverage,
+      reviewState: draft_coverage,
       scanDraftInput: draft_scanDraftInput,
       completedScanInput: z.strictObject({
         scanId: scanId,
         handoffClaimToken: draft_handoffClaimToken.optional(),
-      }),
-    },
-  },
-  "tools/deep-reducer": {
-    title: "Codex Security Deep Scan semantic reducer operations",
-    $ref: "#/$defs/reductionInput",
-    $defs: {
-      reducerInputs: z.strictObject({
-        cursor: z
-          .string()
-          .regex(new RegExp("^(0|[1-9][0-9]*)$"))
-          .describe("Continue the same document from its returned nextCursor.")
-          .optional(),
-        maxBytes: integer(1, 9007199254740991).describe(
-          "Caller-selected byte budget for the serialized MCP response. Choose below the transport and output budgets; reduce it if transport reports an oversized response.",
-        ),
-        findingRef: z
-          .string()
-          .describe(
-            "Omit to page assigned findings and the previous aggregate without retained provenance bodies. Use source:<sourceFindingId> to fetch a complete original, or previous:<zero-based index> to fetch a complete previous aggregate finding, including its retained history.",
-          )
-          .optional(),
-      }),
-      reductionInput: draft_scanDraftInput.omit({ coverage: true }).extend({
-        complete: z
-          .boolean()
-          .describe("Omit or set true when submitting the finished aggregate.")
-          .optional(),
       }),
     },
   },

@@ -1,6 +1,10 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readScanFile, safeScopePath } from "./contract.js";
+import {
+  readScanFile,
+  safeScopePath,
+  validatedFileDigests,
+} from "./contract.js";
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
 import {
@@ -14,9 +18,14 @@ export type { ScanExecutor, ScanExecutionRequest } from "./scan-executor.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { CodexSecurity } from "./api.js";
+import { CodexSecurity, type CodexSecuritySurface } from "./api.js";
+import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { ScanInterruptedError, errorMessage } from "./errors.js";
-import { normalizeRepository, repositoryRevision } from "./targets.js";
+import {
+  abortable,
+  normalizeRepository,
+  repositoryRevision,
+} from "./targets.js";
 import { isWithin } from "./trusted-executable.js";
 
 /** Hosted v2 mirrors repository/paths targets; only Standard scans are supported. */
@@ -31,6 +40,12 @@ export const HostedScanInputSchema = z.strictObject({
   stateDirectory: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string(),
+  severityRubric: severityRubricSnapshotSchema
+    .refine(
+      ({ markdown, sha256 }) => hash("sha256", markdown) === sha256,
+      "Rubric SHA-256 does not match its exact UTF-8 Markdown.",
+    )
+    .optional(),
   ownerSuggestions: z.boolean().optional(),
   identity: z.strictObject({
     runId: z.string().min(1),
@@ -106,21 +121,24 @@ export function normalizeHostedPaths(
 }
 
 /** Validate every path at the frozen commit before registering a scan/executing. */
-async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
-  const scope = { paths: normalizeHostedPaths(input.scope?.paths) };
+async function prepareHostedRepository(
+  input: Pick<ScanExecutionRequest, "repository" | "revision" | "scope">,
+  signal?: AbortSignal,
+) {
   const repository = await normalizeRepository(input.repository, signal);
   if ((await repositoryRevision(repository, signal)) !== input.revision)
     throw new HostedScanPreparationError(
       "revision_mismatch",
       "Checkout does not match the frozen revision.",
     );
-  for (const path of scope.paths) {
+  for (const path of input.scope.paths) {
     const selected = resolve(repository, path);
     let target: string;
     try {
-      target = await realpath(selected);
+      target = await abortable(() => realpath(selected), signal);
     } catch (error) {
       if (
+        (signal?.aborted && error === signal.reason) ||
         !(error instanceof Error) ||
         !("code" in error) ||
         error.code !== "ENOENT"
@@ -145,12 +163,7 @@ async function prepareHostedScan(input: HostedScanInput, signal?: AbortSignal) {
       );
     }
   }
-  return {
-    repository,
-    revision: input.revision,
-    scope,
-    identity: input.identity,
-  };
+  return repository;
 }
 
 function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
@@ -172,7 +185,7 @@ function hostedScanEnvironment(stateDirectory: string): Record<string, string> {
 
 export interface HostedScanOptions {
   executor: ScanExecutor;
-  /** Host-owned, read-only inference for the optional owner stage. Never uses local credentials. */
+  /** @deprecated Automatic owner reports validate scan hints without additional inference. */
   ownerCodex?: {
     startThread(options: { model?: string; modelReasoningEffort?: string }): {
       run(
@@ -186,51 +199,32 @@ export interface HostedScanOptions {
 }
 
 /** One invocation, with only scan-domain state. The host decides retry/reconciliation. */
-export async function runHostedScan(
+export function runHostedScan(
+  value: HostedScanInput,
+  options: HostedScanOptions,
+) {
+  return runHostedScanInternal("sdk", value, options);
+}
+
+/** @internal */
+export async function runHostedScanInternal(
+  surface: CodexSecuritySurface,
   value: HostedScanInput,
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
-  const context = await prepareHostedScan(input, options.signal);
+  const context = {
+    repository: input.repository,
+    revision: input.revision,
+    scope: { paths: normalizeHostedPaths(input.scope?.paths) },
+    identity: input.identity,
+    ...(input.severityRubric === undefined
+      ? {}
+      : { severityRubric: input.severityRubric }),
+  };
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
   let scanId: string | undefined;
-  const onEvent = (event: ScanExecutionEvent): void => {
-    void Promise.resolve()
-      .then(() => options.onEvent?.(event))
-      .catch(() => {});
-  };
-  const client = new CodexSecurity(
-    {
-      codexOverrides: {
-        model: input.model,
-        model_reasoning_effort: input.reasoningEffort,
-      },
-    },
-    {
-      environment: hostedScanEnvironment(input.stateDirectory),
-      hostedScan: {
-        context,
-        ownerCodex: options.ownerCodex ?? {
-          startThread() {
-            throw new Error("Hosted owner inference is unavailable.");
-          },
-        },
-        executor: {
-          async run(value, runOptions) {
-            request = value;
-            execution = await options.executor.run(value, runOptions);
-            return execution;
-          },
-        },
-        onEvent,
-      },
-      createCodex() {
-        throw new Error("Local inference is unavailable in hosted mode.");
-      },
-    },
-    { surface: "sdk" },
-  );
   let outputDirectory = resolve(input.outputDirectory);
   const base = () => ({
     version: 2 as const,
@@ -251,6 +245,53 @@ export async function runHostedScan(
     },
     ...(execution === undefined ? {} : { execution }),
   });
+  try {
+    context.repository = await prepareHostedRepository(context, options.signal);
+  } catch (error) {
+    if (
+      options.signal?.aborted &&
+      (Object.is(error, options.signal.reason) ||
+        (error instanceof DOMException && error.name === "AbortError"))
+    )
+      return {
+        ...base(),
+        status: "canceled" as const,
+        error: `Canceled before checkout verification finished: ${errorMessage(error)}`,
+        artifacts: [],
+      };
+    throw error;
+  }
+  const onEvent = (event: ScanExecutionEvent): void => {
+    void Promise.resolve()
+      .then(() => options.onEvent?.(event))
+      .catch(() => {});
+  };
+  const client = new CodexSecurity(
+    {
+      codexOverrides: {
+        model: input.model,
+        model_reasoning_effort: input.reasoningEffort,
+      },
+    },
+    {
+      environment: hostedScanEnvironment(input.stateDirectory),
+      hostedScan: {
+        context,
+        executor: {
+          async run(value, runOptions) {
+            request = value;
+            execution = await options.executor.run(value, runOptions);
+            return execution;
+          },
+        },
+        onEvent,
+      },
+      createCodex() {
+        throw new Error("Local inference is unavailable in hosted mode.");
+      },
+    },
+    { surface },
+  );
   try {
     const result = await client.run(context.repository, {
       target:
@@ -292,12 +333,12 @@ export async function runHostedScan(
     )
       throw new Error("Completed artifacts do not match the requested scope.");
     const sources = result.manifest.scan["preservedSources"];
+    const sealedDigests = validatedFileDigests.get(result.manifest)!;
     const names = new Set([
       "scan-manifest.json",
       "findings.json",
-      "coverage.json",
       "report.md",
-      ...result.manifest.scan.artifacts.map((artifact) => artifact.path),
+      ...result.manifest.scan.artifacts.map(({ path }) => path),
       ...(isRecord(sources) ? Object.keys(sources) : []),
     ]);
     if (result.ownerSuggestionsPath !== undefined)
@@ -307,11 +348,20 @@ export async function runHostedScan(
         const contents = await readScanFile(outputDirectory, path, path);
         return {
           path,
-          sha256: createHash("sha256").update(contents).digest("hex"),
-          bytes: Buffer.byteLength(contents),
+          sha256: hash("sha256", contents),
+          bytes: contents.byteLength,
         };
       }),
     );
+    // Report a seal mismatch after the concurrent reads have closed their files.
+    for (const { path, sha256 } of artifacts) {
+      const expected = sealedDigests.get(path);
+      if (expected !== undefined && expected !== sha256) {
+        throw new Error(
+          `The sealed file ${path} changed before the hosted receipt was created.`,
+        );
+      }
+    }
     return {
       ...base(),
       status: "completed" as const,

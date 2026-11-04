@@ -129,6 +129,15 @@ function repairStableTargets(database: DatabaseSync): boolean {
   return true;
 }
 
+export function stableTargetId(path: string): string {
+  return (
+    "target_sha256_" +
+    createHash("sha256")
+      .update("local-workspace\0" + path)
+      .digest("hex")
+  );
+}
+
 function backfillTargets(database: DatabaseSync): void {
   const targets = database
     .prepare(
@@ -145,11 +154,7 @@ function backfillTargets(database: DatabaseSync): void {
     const path = String(row.target_path);
     let id = lookup.get(path)?.id;
     if (id === undefined) {
-      id =
-        "target_sha256_" +
-        createHash("sha256")
-          .update("local-workspace\0" + path)
-          .digest("hex");
+      id = stableTargetId(path);
       const timestamp = new Date().toISOString();
       insert.run(id, path, basename(path), timestamp, timestamp);
     }
@@ -224,7 +229,11 @@ export function applyMigrations(
         );
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
-        if ([2, 12, 13, 26, 28, 31, 32, 42, 47, 50].includes(item.version))
+        if (
+          [
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61,
+          ].includes(item.version)
+        )
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
       } else {

@@ -1,12 +1,11 @@
-import { join } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   artifactDestination,
   readArtifactJsonObject,
   replaceArtifactText,
 } from "./artifact-io.js";
-import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
 import { asRecord } from "./record.js";
+import { renderThreatModel } from "./threat-model-render.js";
 
 const pendingDocuments = new Map<string, Promise<void>>();
 
@@ -48,9 +47,11 @@ async function writeCurrentThreatModelDocument(
       ["threatmodel.md"],
       "threat model document",
     );
-    const python = context.pythonCommand ?? (await resolvePythonCommand());
     const target = asRecord(document?.target);
-    const markdown = await renderThreatModel(python, context.pluginRoot!, {
+    const snapshotDigest =
+      target?.snapshotDigest ??
+      asRecord(context.targetContract?.target)?.requiredSnapshotDigest;
+    const markdown = renderThreatModel({
       threatModel,
       provenance: {
         source: context.layout,
@@ -58,8 +59,7 @@ async function writeCurrentThreatModelDocument(
         target: context.repoRoot,
         revision: context.targetRevision,
         snapshotDigest:
-          target?.snapshotDigest ??
-          asRecord(context.targetContract?.target)?.requiredSnapshotDigest,
+          typeof snapshotDigest === "string" ? snapshotDigest : undefined,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined
@@ -72,23 +72,4 @@ async function writeCurrentThreatModelDocument(
     const reason = error instanceof Error ? error.message : String(error);
     return `The threat model was saved, but threatmodel.md could not be written: ${reason}`;
   }
-}
-
-function renderThreatModel(
-  python: string,
-  pluginRoot: string,
-  input: Record<string, unknown>,
-): Promise<string> {
-  return runPythonWithInput(
-    python,
-    [
-      "-I",
-      "-X",
-      "utf8",
-      join(pluginRoot, "scripts", "threat_model_projection.py"),
-      "--input-json-stdin",
-    ],
-    JSON.stringify(input),
-    "Threat-model renderer",
-  );
 }

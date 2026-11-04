@@ -2,52 +2,51 @@ import { CodexSecurityError } from "./errors.js";
 import {
   repositoryUrlKey,
   validateExternalEvidence,
+  type ExternalImportTarget,
 } from "./external-import-contract.js";
-import { parseJsonOrJsonl, readScannerText } from "./scanner-import.js";
-import { readWizCsv, wizCsvFinding } from "./wiz-csv.js";
+import { asRecord } from "./record.js";
+import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
+import { isGitHubCloudHost } from "./git-remote.js";
+import { readWizCsv, wizCsvFinding, wizCsvRepositoryUrl } from "./wiz-csv.js";
 import type {
   ExternalFinding as VendorFinding,
   ExternalFindings as VendorFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
 
-export type {
-  ExternalFinding as VendorFinding,
-  ExternalFindings as VendorFindings,
-} from "./external-findings.js";
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function sourceFindingId(value: unknown): string {
+function sourceFindingId(value: unknown, target: ExternalImportTarget): string {
   const id = text(value);
-  if (!id || id.includes("\0") || Buffer.byteLength(id) > 512)
+  if (
+    !id ||
+    id.includes("\0") ||
+    (target === "cloud" && Buffer.byteLength(id) > 512)
+  )
     throw new Error(
-      "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters.",
+      target === "cloud"
+        ? "Source finding id must contain 1–512 UTF-8 bytes and no NUL characters."
+        : "Source finding id must be nonempty and contain no NUL characters.",
     );
   return id;
 }
 
 /** Keep a Wiz vulnerability occurrence intact; advisory names are not identities. */
-function wizFinding(record: Record<string, unknown>): VendorFinding {
+function wizFinding(
+  record: Record<string, unknown>,
+  target: ExternalImportTarget,
+): VendorFinding {
   if (record["detectionMethod"] === "EXTERNAL_NETWORK_SCAN")
     throw new Error(
       "Wiz external network findings are not supported by the package vulnerability mapping.",
     );
-  const id = sourceFindingId(record["id"]);
+  const id = sourceFindingId(record["id"], target);
   const name = text(record["name"]);
   const packageName = text(record["detailedName"]);
   const version = text(record["version"]);
-  const severity = text(record["vendorSeverity"]) ?? text(record["severity"]);
-  const asset = object(record["vulnerableAsset"]);
-  const artifact = object(record["artifactType"]);
+  const severity = (
+    text(record["vendorSeverity"]) ?? text(record["severity"])
+  )?.toLowerCase();
+  const asset = asRecord(record["vulnerableAsset"]);
+  const artifact = asRecord(record["artifactType"]);
   if (!name || !packageName || !text(asset?.["id"])) {
     throw new Error(
       "Expected a Wiz package vulnerability finding with name, detailedName, and vulnerableAsset.id. Other finding classes need a separate mapping.",
@@ -78,7 +77,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
       text(record["title"]) ??
       [packageName, version, name].filter(Boolean).join(" "),
     description: text(record["description"]),
-    severity: severity?.toLowerCase(),
+    severity: severity === "none" ? "unknown" : severity,
     url: text(record["portalUrl"]),
     advisory_ids: [text(record["vulnerabilityExternalId"]) ?? name],
     packages: [
@@ -106,7 +105,7 @@ function wizFinding(record: Record<string, unknown>): VendorFinding {
   };
   return {
     source_finding_id: id,
-    evidence: validateExternalEvidence(evidence),
+    evidence: validateExternalEvidence(evidence, target),
   };
 }
 
@@ -223,23 +222,24 @@ function repositoryFinding(
   record: Record<string, unknown>,
   repositories: FindingInput["repositories"],
   legacy = false,
+  target: ExternalImportTarget = "cloud",
 ): VendorFinding {
-  const id = sourceFindingId(record["id"]);
-  const resource = object(record["resource"]);
+  const id = sourceFindingId(record["id"], target);
+  const resource = asRecord(record["resource"]);
   if (kind === "secret" && resource?.["type"] !== "REPOSITORY_BRANCH")
     throw new Error(
       "Only repository-branch secret findings can be published to a repository. Workload secrets require a resource-scoped import and are not supported.",
     );
   const suppliedRepository =
     kind === "secret"
-      ? object(object(resource?.["typedProperties"])?.["repository"])
-      : object(record["repository"]);
+      ? asRecord(asRecord(resource?.["typedProperties"])?.["repository"])
+      : asRecord(record["repository"]);
   const repository = sourceRepository(suppliedRepository, repositories);
   const branch =
     kind === "secret"
       ? resource
-      : object(record[kind === "sast" ? "repositoryBranch" : "branch"]);
-  const rule = object(record["rule"]);
+      : asRecord(record[kind === "sast" ? "repositoryBranch" : "branch"]);
+  const rule = asRecord(record["rule"]);
   const path = text(record[kind === "secret" ? "path" : "filePath"]);
   const line = record[kind === "secret" ? "lineNumber" : "startLine"];
   const details = {
@@ -248,7 +248,9 @@ function repositoryFinding(
     source_status: text(record["status"]),
     scanner_origin: kind === "sast" ? text(record["origin"]) : null,
     scanner_verdict:
-      kind === "sast" ? text(object(record["aiAnalysis"])?.["verdict"]) : null,
+      kind === "sast"
+        ? text(asRecord(record["aiAnalysis"])?.["verdict"])
+        : null,
     rule: rule
       ? {
           id: text(rule["id"]),
@@ -258,7 +260,7 @@ function repositoryFinding(
       : null,
     weakness_ids:
       kind === "sast" && Array.isArray(record["weaknesses"])
-        ? record["weaknesses"].map((weakness) => object(weakness)?.["id"])
+        ? record["weaknesses"].map((weakness) => asRecord(weakness)?.["id"])
         : [],
     remediation_instructions:
       text(record["remediationInstructions"]) ??
@@ -281,7 +283,7 @@ function repositoryFinding(
             is_encrypted: record["isEncrypted"] ?? null,
             is_managed: record["isManaged"] ?? null,
             introduced_commit: text(
-              object(record["vcsDetails"])?.["initialCommitHash"],
+              asRecord(record["vcsDetails"])?.["initialCommitHash"],
             ),
           }
         : null,
@@ -299,25 +301,28 @@ function repositoryFinding(
   return {
     // Existing package occurrence IDs remain unchanged. New families cannot
     // collide with one another when the same tenant source key is used.
-    source_finding_id: sourceFindingId(`${kind}:${id}`),
-    evidence: validateExternalEvidence({
-      title: text(record["name"]) ?? text(rule?.["name"]),
-      severity: text(record["severity"])?.toLowerCase(),
-      description: text(record["description"]) ?? text(rule?.["description"]),
-      url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
-      locations: path ? [{ path, line: line ?? null }] : [],
-      branch: sourceBranch(branch, repository, legacy),
-      code_revision: null,
-      source_scan_id: null,
-      source_updated_at:
-        kind === "secret"
-          ? updatedAt(record["lastUpdatedAt"], "lastUpdatedAt")
-          : kind === "iac"
-            ? updatedAt(record["updatedAt"], "updatedAt")
-            : null,
-      source_data: record,
-      details,
-    }),
+    source_finding_id: sourceFindingId(`${kind}:${id}`, target),
+    evidence: validateExternalEvidence(
+      {
+        title: text(record["name"]) ?? text(rule?.["name"]),
+        severity: text(record["severity"])?.toLowerCase(),
+        description: text(record["description"]) ?? text(rule?.["description"]),
+        url: text(record["wizUrl"]) ?? text(record["portalUrl"]),
+        locations: path ? [{ path, line: line ?? null }] : [],
+        branch: sourceBranch(branch, repository, legacy),
+        code_revision: null,
+        source_scan_id: null,
+        source_updated_at:
+          kind === "secret"
+            ? updatedAt(record["lastUpdatedAt"], "lastUpdatedAt")
+            : kind === "iac"
+              ? updatedAt(record["updatedAt"], "updatedAt")
+              : null,
+        source_data: record,
+        details,
+      },
+      target,
+    ),
   };
 }
 
@@ -326,14 +331,14 @@ function records(payload: unknown): FindingInput {
   const legacyRepositories: FindingInput["repositories"] = new Map();
   if (Array.isArray(payload))
     return { records: payload.map((value) => ({ value })), repositories };
-  const envelope = object(payload);
+  const envelope = asRecord(payload);
   if (!envelope)
     throw new Error(
       "Expected finding objects or a named Wiz finding collection.",
     );
   if (
-    object(envelope["scannersRunStatuses"]) &&
-    object(envelope["codeAnalyzerDetails"])
+    asRecord(envelope["scannersRunStatuses"]) &&
+    asRecord(envelope["codeAnalyzerDetails"])
   )
     throw new Error(
       "This is a Wiz Code & Build Scan event, which contains scan metadata rather than vulnerability records. In Vulnerability Findings, filter the repository and selection, then choose Save as → Report with JSON format and Detailed columns. Download that report instead of Raw Event.",
@@ -347,16 +352,16 @@ function records(payload: unknown): FindingInput {
     envelope["id"] !== undefined
   )
     return { records: [{ value: envelope }], repositories };
-  const data = object(envelope["data"]) ?? envelope;
-  const inventory = object(data["versionControlResources"]);
-  if (object(inventory?.["pageInfo"])?.["hasNextPage"] === true)
+  const data = asRecord(envelope["data"]) ?? envelope;
+  const inventory = asRecord(data["versionControlResources"]);
+  if (asRecord(inventory?.["pageInfo"])?.["hasNextPage"] === true)
     throw new Error(
       "Wiz repository inventory has another page. Finish the selected inventory before publishing.",
     );
   if (Array.isArray(inventory?.["nodes"])) {
     const entries = inventory["nodes"].flatMap((entry) => {
-      const node = object(entry);
-      const repository = object(node?.["repository"]);
+      const node = asRecord(entry);
+      const repository = asRecord(node?.["repository"]);
       const id = text(repository?.["id"]);
       const url = text(repository?.["url"]);
       return id && url
@@ -419,12 +424,12 @@ function records(payload: unknown): FindingInput {
   const selected: InputRecord[] = [];
   let found = false;
   for (const [root, kind] of Object.entries(collections)) {
-    const collection = object(data[root]);
+    const collection = asRecord(data[root]);
     if (!collection) continue;
     found = true;
     if (!Array.isArray(collection["nodes"]))
       throw new Error(`Wiz ${root}.nodes must be an array.`);
-    if (object(collection["pageInfo"])?.["hasNextPage"] === true)
+    if (asRecord(collection["pageInfo"])?.["hasNextPage"] === true)
       throw new Error(
         "Wiz response has another page. Complete the requested pages or save the explicitly selected records in their named collection before publishing.",
       );
@@ -441,14 +446,70 @@ function records(payload: unknown): FindingInput {
   );
 }
 
+/** The source repository retained by a Wiz package finding or CSV row. */
+export function wizFindingRepository(
+  evidence: VendorFinding["evidence"],
+  target: ExternalImportTarget = "local",
+): ExternalSourceRepository | undefined {
+  const csvUrl = wizCsvRepositoryUrl(evidence);
+  if (csvUrl) return { url: csvUrl, platform: "github" };
+  const asset = asRecord(evidence.source_data?.["vulnerableAsset"]);
+  if (!asset || typeof asset["cloudProviderURL"] !== "string") return;
+  const url = URL.parse(asset["cloudProviderURL"]);
+  if (!url) return;
+  const github =
+    asset["nativeType"] === "github#repositoryBranch" ||
+    (asset["type"] === "REPOSITORY_BRANCH" && isGitHubCloudHost(url.hostname));
+  if (!github)
+    return asset["type"] === "REPOSITORY_BRANCH"
+      ? { url: asset["cloudProviderURL"] }
+      : undefined;
+  const [, owner, repository] = url.pathname.split("/");
+  if (!owner || !repository) return;
+  // URL.origin drops explicit default ports, which the Cloud catalog retains.
+  const port =
+    target === "cloud"
+      ? /^https?:\/\/[^/?#\\]*:(\d+)(?:[/?#]|$)/iu.exec(
+          asset["cloudProviderURL"],
+        )?.[1]
+      : undefined;
+  const origin = port ? `${url.protocol}//${url.hostname}:${port}` : url.origin;
+  return { url: `${origin}/${owner}/${repository}`, platform: "github" };
+}
+
 export async function readVendorFindings(
   path: string,
+  target: ExternalImportTarget = "cloud",
 ): Promise<VendorFindings> {
-  return normalizeFindings(await readFindingInput(path));
+  return normalizeFindings(await readFindingInput(path), target);
+}
+
+function inventorySources(input: FindingInput, current: VendorFindings) {
+  return current.findings.flatMap(({ evidence }) => {
+    const repository = evidence.details?.repository;
+    const inventory = input.repositories.get(repository?.id ?? "");
+    // Forward provenance only for selected findings that match the inventory.
+    // Use the emitted spelling so typed evidence and reader hints share it.
+    return repository &&
+      inventory?.platform === "GITHUB" &&
+      inventoryRepositoryUrlKey(repository.url, inventory.platform) ===
+        inventoryRepositoryUrlKey(inventory.url, inventory.platform)
+      ? [{ url: repository.url, platform: "github" as const }]
+      : [];
+  });
+}
+
+export async function readLocalWizFindings(path: string) {
+  const input = await readFindingInput(path);
+  const current = normalizeFindings(input, "local");
+  return { current, sourceRepositories: inventorySources(input, current) };
 }
 
 /** @internal Preserve older inventory projections only for saved publication replay. */
-export async function readVendorFindingsForPublication(path: string): Promise<{
+export async function readVendorFindingsForPublication(
+  path: string,
+  target: ExternalImportTarget = "cloud",
+): Promise<{
   current: VendorFindings;
   legacy: VendorFindings;
   currentIdentity: unknown[];
@@ -457,12 +518,22 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
 }> {
   const input = await readFindingInput(path);
   const normalized = new WeakSet<VendorFinding>();
-  const current = normalizeFindings(input, normalized);
-  const legacy = normalizeFindings(
-    { ...input, repositories: input.legacyRepositories ?? input.repositories },
-    normalized,
-    true,
+  const current = normalizeFindings(input, target, normalized);
+  // Only repository finding families use historical inventory and branch mapping.
+  const hasRepositoryFindings = input.records.some(
+    ({ kind }) => kind === "sast" || kind === "secret" || kind === "iac",
   );
+  const legacy = hasRepositoryFindings
+    ? normalizeFindings(
+        {
+          ...input,
+          repositories: input.legacyRepositories ?? input.repositories,
+        },
+        target,
+        normalized,
+        true,
+      )
+    : current;
   const identity = (parsed: VendorFindings) =>
     parsed.findings.map((finding) => {
       if (normalized.has(finding)) return finding;
@@ -484,23 +555,13 @@ export async function readVendorFindingsForPublication(path: string): Promise<{
         },
       };
     });
+  const currentIdentity = identity(current);
   return {
     current,
     legacy,
-    currentIdentity: identity(current),
-    legacyIdentity: identity(legacy),
-    sourceRepositories: current.findings.flatMap(({ evidence }) => {
-      const repository = evidence.details?.repository;
-      const inventory = input.repositories.get(repository?.id ?? "");
-      // Forward provenance only for selected findings that match the inventory.
-      // Use the emitted spelling so typed evidence and reader hints share it.
-      return repository &&
-        inventory?.platform === "GITHUB" &&
-        inventoryRepositoryUrlKey(repository.url, inventory.platform) ===
-          inventoryRepositoryUrlKey(inventory.url, inventory.platform)
-        ? [{ url: repository.url, platform: "github" as const }]
-        : [];
-    }),
+    currentIdentity,
+    legacyIdentity: legacy === current ? currentIdentity : identity(legacy),
+    sourceRepositories: inventorySources(input, current),
   };
 }
 
@@ -530,6 +591,7 @@ async function readFindingInput(path: string): Promise<FindingInput> {
 
 function normalizeFindings(
   input: FindingInput,
+  target: ExternalImportTarget,
   normalized?: WeakSet<VendorFinding>,
   legacy = false,
 ): VendorFindings {
@@ -540,12 +602,16 @@ function normalizeFindings(
   };
   const identities = new Set<string>();
   for (const [index, item] of input.records.entries()) {
-    const record = object(item.value);
+    const record = asRecord(item.value);
     try {
       if (!record) throw new Error("Finding must be an object.");
       let finding: VendorFinding;
       if (item.kind === "sca_csv") {
-        finding = wizCsvFinding(record, sourceFindingId(record["ID"]));
+        finding = wizCsvFinding(
+          record,
+          sourceFindingId(record["ID"], target),
+          target,
+        );
       } else if ("source_finding_id" in record) {
         if (
           Object.keys(record).some(
@@ -557,8 +623,11 @@ function normalizeFindings(
           );
         }
         finding = {
-          source_finding_id: sourceFindingId(record["source_finding_id"]),
-          evidence: validateExternalEvidence(record["evidence"]),
+          source_finding_id: sourceFindingId(
+            record["source_finding_id"],
+            target,
+          ),
+          evidence: validateExternalEvidence(record["evidence"], target),
         };
       } else if (item.kind === "cloud_configuration") {
         throw new Error(
@@ -570,18 +639,19 @@ function normalizeFindings(
           record,
           input.repositories,
           legacy,
+          target,
         );
       } else {
         if (
           !item.kind &&
-          (object(record["repository"]) ||
-            object(record["repositoryBranch"]) ||
-            object(record["resource"]))
+          (asRecord(record["repository"]) ||
+            asRecord(record["repositoryBranch"]) ||
+            asRecord(record["resource"]))
         )
           throw new Error(
             "Raw SAST, secret, and IaC records require their named sastFindings, secretInstances, or iacFindings collection. Bare arrays do not identify the finding family; use normalized JSONL for an explicit mapping.",
           );
-        finding = wizFinding(record);
+        finding = wizFinding(record, target);
       }
       if (identities.has(finding.source_finding_id)) {
         throw new CodexSecurityError(

@@ -26,9 +26,10 @@ Examples and templates for using Codex Security:
   synthetic invoice app, inspect saved findings and coverage, explicitly request
   a patch, and verify the original boundary. The app has ten seeded scenarios
   and no dependencies or external services. Its
-  [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs behavior tests and
-  automatic OpenAI scans. Guides and expected findings stay outside the scan
-  input; scan results include finding metrics and downloadable reports.
+  [CI workflow](invoice-desk/README.md#ci-and-openai-scans) runs behavior tests,
+  manual PR evaluations, and scheduled OpenAI baselines. Guides and expected
+  findings stay outside the scan input; scan results include finding metrics and
+  downloadable reports.
 
 - [Azure Pipelines with Amazon Bedrock](azure-pipelines/README.md): centrally run
   manual full or committed-diff scans against Azure Repos, with OIDC credentials,

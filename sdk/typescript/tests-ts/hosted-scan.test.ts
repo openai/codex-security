@@ -1,11 +1,19 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import { readFile, realpath, stat, symlink } from "node:fs/promises";
+import {
+  appendFile,
+  readFile,
+  realpath,
+  stat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import hostedContract from "../schemas/hosted-scan-v2.fixture.json" with { type: "json" };
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -19,9 +27,6 @@ import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import * as ownerSuggestions from "../src/suggest-owners.js";
-import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
-import { runReadOnlyCodex } from "../src/scan-comparison.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
 import {
   ScanExecutionEventSchema,
   ScanExecutionResultSchema,
@@ -44,6 +49,7 @@ import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
 
+const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
@@ -51,9 +57,12 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
   for (const enabled of [false, true]) {
     const input = await fixture();
     const executor = draftExecutor();
+    const startThread = mock(() => {
+      throw new Error("No additional owner turn");
+    });
     const result = await runHostedScan(
       { ...input, ownerSuggestions: enabled },
-      { executor },
+      enabled ? { executor, ownerCodex: { startThread } } : { executor },
     );
     expect(result.status).toBe("completed");
     expect(executor.run).toHaveBeenCalledTimes(1);
@@ -65,7 +74,9 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
       join(input.outputDirectory, "scan-manifest.json"),
     );
     expect(JSON.stringify(manifest)).not.toContain("owner-suggestions.json");
-    if (enabled)
+    if (enabled) {
+      expect(startThread).not.toHaveBeenCalled();
+      expect(result).not.toHaveProperty("ownerSuggestionsError");
       expect(
         await readJson(join(input.outputDirectory, "owner-suggestions.json")),
       ).toMatchObject({
@@ -73,6 +84,7 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
         revision: input.revision,
         results: [],
       });
+    }
   }
 });
 
@@ -128,6 +140,7 @@ async function fixture(
   ])
     writeSource(repository, name, "export const value = 1;\n");
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
   return {
@@ -147,11 +160,31 @@ async function fixture(
   };
 }
 
-async function writeDraft(request: ScanExecutionRequest) {
+async function writeDraft(
+  request: ScanExecutionRequest,
+  receiptRefs: string[] = [],
+) {
   const directory = request.runtime.outputDirectory;
+  const reviewState = {
+    inventoryStrategy:
+      request.scope.paths[0] === "." ? "repository" : "scoped_path",
+    surfaces: [
+      {
+        id: "fixture",
+        label: "Synthetic scope fixture",
+        disposition: "no_issue_found",
+        receiptRefs,
+        notes: "Synthetic test only.",
+      },
+    ],
+    explicitExclusions: [],
+    deferred: [],
+  };
   const documents = {
     "scan-manifest.json": {
       scan: {
+        mode: request.scope.paths[0] === "." ? "repository" : "scoped_path",
+        reviewState,
         target: { kind: "git_revision" },
         scope: {
           summary: "Synthetic scope fixture",
@@ -161,24 +194,10 @@ async function writeDraft(request: ScanExecutionRequest) {
       },
     },
     "findings.json": { findings: [] },
-    "coverage.json": {
-      inventoryStrategy:
-        request.scope.paths[0] === "." ? "repository" : "scoped_path",
-      surfaces: [
-        {
-          id: "fixture",
-          label: "Synthetic scope fixture",
-          disposition: "no_issue_found",
-          receiptRefs: [],
-          notes: "Synthetic test only.",
-        },
-      ],
-      explicitExclusions: [],
-      deferred: [],
-    },
   };
   for (const [name, document] of Object.entries(documents))
     await writeJson(join(directory, name), document);
+  return reviewState;
 }
 
 function receipt(
@@ -344,6 +363,7 @@ test.each(sealedScopes)(
     const executor = draftExecutor((request) => {
       expect(request.scope.paths).toEqual(normalized);
       expect(request.identity).toEqual(input.identity);
+      expect(request.runtime.environment["CODEX_SECURITY_SURFACE"]).toBe("sdk");
       expect(request).toMatchObject({
         model: input.model,
         reasoningEffort: input.reasoningEffort,
@@ -358,14 +378,11 @@ test.each(sealedScopes)(
     const manifest = await readJson<any>(
       join(result.outputDirectory, "scan-manifest.json"),
     );
-    const coverage = await readJson<any>(
-      join(result.outputDirectory, "coverage.json"),
-    );
     expect(manifest.scan.scope.includePaths).toEqual(normalized);
     expect(manifest.scan.target.revision).toBe(input.revision);
     expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(coverage).toMatchObject({
-      includePaths: normalized,
+    expect(manifest.scan).toMatchObject({
+      scope: { includePaths: normalized },
       mode: normalized[0] === "." ? "repository" : "scoped_path",
     });
     const report = await readFile(
@@ -376,9 +393,7 @@ test.each(sealedScopes)(
     if (normalized.length > 1) expect(report).not.toContain("service-c");
     for (const artifact of result.artifacts) {
       const data = await readFile(join(result.outputDirectory, artifact.path));
-      expect(artifact.sha256).toBe(
-        createHash("sha256").update(data).digest("hex"),
-      );
+      expect(artifact.sha256).toBe(hash("sha256", data));
       expect(artifact.bytes).toBe(data.byteLength);
     }
     const artifactPaths = result.artifacts.map((artifact) => artifact.path);
@@ -386,6 +401,65 @@ test.each(sealedScopes)(
       expect(artifactPaths).toContain(path);
     for (const artifact of manifest.scan.artifacts)
       expect(artifactPaths).toContain(artifact.path);
+  },
+);
+
+test.skipIf(process.platform !== "linux").each([
+  ["private", "completed"],
+  ["private", "acceptance_unknown"],
+  ["output", "completed"],
+  ["lost", "completed"],
+] as const)(
+  "hosted scope generation with %s scratch preserves the %s receipt",
+  async (storage, status) => {
+    const input = await fixture(["service-a/nested/route [x].ts"]);
+    const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
+    let inventory = "";
+    const run: ScanExecutor["run"] = async (request) => {
+      const commands = request.prompt.split("\n");
+      const [primary, recovery] = commands.filter((line) =>
+        line.includes("--helper make-hosted-repo-scope-input "),
+      );
+      const environment = { ...request.runtime.environment };
+      if (storage === "output")
+        environment["CODEX_SECURITY_STATE_DIR"] =
+          request.runtime.outputDirectory;
+      const shell = (command: string) =>
+        execFileSync("/bin/sh", ["-c", command], {
+          cwd: request.runtime.outputDirectory,
+          env: environment,
+          encoding: "utf8",
+        });
+      const generate = (command: string) =>
+        shell(command).match(/^Wrote 2 scoped paths to (.+)$/mu)![1]!;
+      inventory = generate(primary!);
+      if (storage !== "output") {
+        expect(await realpath(dirname(inventory))).toBe(
+          await realpath(request.runtime.stateDirectory),
+        );
+      }
+      if (storage === "lost") {
+        await unlink(inventory);
+        inventory = generate(recovery!);
+      }
+      if (storage !== "private") expect(inventory).toBe(outputCopy);
+      if (status === "completed") {
+        await writeDraft(request);
+        shell(
+          commands.find((line) => line.includes("--helper bind-repo-scopes "))!,
+        );
+      }
+      return receipt(request, { status });
+    };
+    const result = await runHostedScan(input, { executor: { run } });
+    expect(result.status, JSON.stringify(result)).toBe(status);
+    expect(result.execution?.sessionId).toBe("host-session");
+    expect(parseJsonLines(await readFile(inventory, "utf8"))).toEqual([
+      { path: "service-a/index.ts" },
+      { path: "service-a/nested/route [x].ts" },
+    ]);
+    if (storage === "private")
+      await expect(stat(outputCopy)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
 
@@ -483,7 +557,10 @@ test.each(["missing", "file"] as const)(
         signal: controller.signal,
       });
       if (timing === "during") queueMicrotask(() => controller.abort(reason));
-      await expect(pending).rejects.toBe(reason);
+      await expect(pending).resolves.toMatchObject({
+        status: "canceled",
+        error: expect.stringContaining(reason.message),
+      });
     }
     for (const options of [{}, { signal: new AbortController().signal }]) {
       await expect(
@@ -592,39 +669,159 @@ test.each(["missing", "invalid"] as const)(
   },
 );
 
-test("sealed coverage with follow-up diagnostics remains completed", async () => {
+test("sealed review with follow-up diagnostics remains completed", async () => {
   const result = await runHostedScan(await fixture(), {
     executor: draftExecutor(async (request) => {
-      const file = join(request.runtime.outputDirectory, "coverage.json");
-      const coverage = await readJson<any>(file);
-      coverage.surfaces[0].disposition = "needs_follow_up";
-      await writeJson(file, coverage);
+      const file = join(request.runtime.outputDirectory, "scan-manifest.json");
+      const manifest = await readJson<any>(file);
+      manifest.scan.reviewState.surfaces[0].disposition = "needs_follow_up";
+      await writeJson(file, manifest);
     }),
   });
   expect(result.status).toBe("completed");
-  expect(result.artifacts.map((artifact) => artifact.path)).toContain(
+  expect(result.artifacts.map((artifact) => artifact.path)).not.toContain(
     "coverage.json",
   );
-  const coverage = await readJson<any>(
-    join(result.outputDirectory, "coverage.json"),
+});
+
+test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
+  "changed bytes in %s cannot produce a completed hosted receipt",
+  async (path) => {
+    const original = CodexSecurity.prototype.run;
+    using _swap = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+      async function (this: CodexSecurity, ...args) {
+        const validated = await original.apply(this, args);
+        await appendFile(join(validated.scanDir, path), "\n");
+        return validated;
+      },
+    );
+    const result = await runHostedScan(await fixture(), {
+      executor: {
+        async run(request) {
+          const evidence = "artifacts/evidence.txt";
+          writeSource(
+            request.runtime.outputDirectory,
+            evidence,
+            "scan evidence",
+          );
+          await writeDraft(request, [evidence]);
+          return receipt(request);
+        },
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts).toEqual([]);
+    expect(result).toHaveProperty(
+      "error",
+      `The sealed file ${path} changed before the hosted receipt was created.`,
+    );
+  },
+);
+
+test("hosted receipts hash MCP checkpoints as written", async () => {
+  const { saveScanDraftCheckpoint } = await import(
+    new URL(
+      "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
+      import.meta.url,
+    ).href
   );
-  expect(coverage.surfaces[0].disposition).toBe("needs_follow_up");
+  const input = await fixture();
+  const result = await runHostedScan(input, {
+    executor: {
+      async run(request) {
+        const reviewState = await writeDraft(request);
+        await saveScanDraftCheckpoint(
+          {
+            root: request.runtime.outputDirectory,
+            repoRoot: request.repository,
+            layout: "scan",
+          },
+          { scanId: request.scanId, findings: [], reviewState },
+        );
+        return receipt(request);
+      },
+    },
+  });
+  expect(result.status).toBe("completed");
+  const manifest = await readJson<{
+    scan: { preservedSources: Record<string, string> };
+  }>(join(input.outputDirectory, "scan-manifest.json"));
+  const checkpoint = result.artifacts.find(
+    ({ path, sha256 }) =>
+      path.startsWith("checkpoints/") &&
+      Object.hasOwn(manifest.scan.preservedSources, path) &&
+      sha256 !== manifest.scan.preservedSources[path],
+  );
+  expect(checkpoint).toBeDefined();
+  const contents = await readFile(
+    join(input.outputDirectory, checkpoint!.path),
+  );
+  expect(checkpoint!.sha256).toBe(hash("sha256", contents));
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
+  input.severityRubric = severityRubric;
   const result = await runHostedScan(input, {
     executor: draftExecutor(() => {
       git(input.repository, "commit", "--allow-empty", "-qm", "changed");
     }),
   });
   expect(result.status).toBe("failed");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.artifacts).toEqual([]);
 });
 
 test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
+
+test.each(["valid", "tampered"] as const)(
+  "scan --host receives an immediate cancellation with a %s rubric",
+  async (rubric) => {
+    const params = await fixture();
+    params.severityRubric =
+      rubric === "valid"
+        ? severityRubric
+        : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
+    const input = new PassThrough();
+    const output = capture();
+    const run = main(["scan", "--host"], output.stream, capture().stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    try {
+      send(input, { id: "run", method: "run", params });
+      send(input, { method: "cancel", params: { id: "run" } });
+      expect(await run).toBe(rubric === "valid" ? 1 : 2);
+      const messages = parseJsonLines(output.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ jsonrpc: "2.0", id: "run" });
+      if (rubric === "tampered") {
+        expect(messages[0].error).toMatchObject({
+          code: -32602,
+          message: expect.stringContaining("SHA-256"),
+        });
+      } else {
+        expect(messages[0].result).toMatchObject({
+          status: "canceled",
+          identity: params.identity,
+          repository: params.repository,
+          revision: params.revision,
+          scope: params.scope,
+          severityRubric,
+          outputDirectory: params.outputDirectory,
+          provenance: { buildId: params.identity.buildId },
+          artifacts: [],
+        });
+        expect(messages[0].result).not.toHaveProperty("scanId");
+        expect(messages[0].result).not.toHaveProperty("execution");
+      }
+    } finally {
+      input.destroy();
+    }
+  },
+);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -658,7 +855,11 @@ test.each([false, true])(
   "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
     const input = await fixture();
-    if (!cancel) input.reasoningEffort = "synthetic-future-effort";
+    if (!cancel) {
+      input.reasoningEffort = "synthetic-future-effort";
+      input.ownerSuggestions = true;
+      input.severityRubric = severityRubric;
+    }
     const child = spawn(
       process.execPath,
       [join(import.meta.dirname, "../src/cli.ts"), "scan", "--host"],
@@ -689,6 +890,18 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(
+            message.params.runtime.environment.CODEX_SECURITY_SURFACE,
+          ).toBe("cli");
+          if (cancel) {
+            expect(message.params).not.toHaveProperty("severityRubric");
+            expect(message.params.prompt).not.toContain('"severityRubric"');
+          } else {
+            expect(message.params.severityRubric).toEqual(severityRubric);
+            expect(message.params.prompt).toContain(
+              JSON.stringify({ severityRubric: message.params.severityRubric }),
+            );
+          }
           requestId = message.params.requestId;
           for (const event of [
             progressEvent,
@@ -733,13 +946,30 @@ test.each([false, true])(
           method: "scan.progress",
           params: { id: "run", event },
         });
-      expect(messages.at(-1)).toMatchObject({
+      const response = messages.at(-1);
+      expect(response).toMatchObject({
         id: "run",
         result: {
           status: cancel ? "canceled" : "completed",
           execution: { sessionId: "fake-host", usage },
         },
       });
+      if (cancel) {
+        expect(response.result).not.toHaveProperty("severityRubric");
+      } else {
+        expect(response.result.severityRubric).toEqual(severityRubric);
+        expect(response.result).not.toHaveProperty("ownerSuggestionsError");
+        expect(response.result.artifacts).toContainEqual(
+          expect.objectContaining({ path: "owner-suggestions.json" }),
+        );
+        expect(
+          await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+        ).toMatchObject({
+          schemaVersion: 2,
+          revision: input.revision,
+          results: [],
+        });
+      }
     } finally {
       child.kill();
     }
@@ -813,18 +1043,22 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   const input = await fixture();
   delete input.scope;
   const events: string[] = [];
-  const result = await runHostedScan(input, {
-    executor: draftExecutor((request, options) => {
-      expect(request.scope.paths).toEqual(["."]);
-      options.onEvent?.(progressEvent);
-      options.onEvent?.(activityEvent);
-    }),
-    onEvent(event) {
+  const executor = draftExecutor((request, options) => {
+    expect(request.scope.paths).toEqual(["."]);
+    options.onEvent?.(progressEvent);
+    options.onEvent?.(activityEvent);
+  });
+  class Options {
+    get executor() {
+      return executor;
+    }
+    onEvent(event: ScanExecutionEvent) {
       events.push(event.type);
       if (event.type === "progress")
         throw new Error("Optional progress failed");
-    },
-  });
+    }
+  }
+  const result = await runHostedScan(input, new Options());
   expect(result.status, JSON.stringify(result)).toBe("completed");
   expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
@@ -1076,10 +1310,13 @@ test("cancellation after registration retains scan identity before executor disp
 test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  const result = await runHostedScan(input, {
+  input.severityRubric = { ...severityRubric };
+  const pending = runHostedScan(input, {
     signal: controller.signal,
     executor: {
       async run(request, options) {
+        expect(request.severityRubric).toEqual(severityRubric);
+        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
         controller.abort();
         expect(options.signal.aborted).toBe(true);
         await Promise.resolve();
@@ -1091,7 +1328,10 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
       },
     },
   });
+  input.severityRubric.markdown = "Edited by caller.";
+  const result = await pending;
   expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.execution).toMatchObject({
     status: "canceled",
     sessionId: "canceled-session",
@@ -1142,6 +1382,50 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   expect(requests[0]).not.toBe(requests[1]);
 });
 
+test("a host retry can resupply the saved rubric in a fresh attempt", async () => {
+  const input = await fixture();
+  const saved = join(dirname(input.repository), "host-rubric.json");
+  await writeJson(saved, severityRubric);
+  const requestIds = new Set<string>();
+  for (const [attemptId, status] of [
+    ["first", "canceled"],
+    ["retry", "completed"],
+  ] as const) {
+    const identity = { ...input.identity, attemptId };
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        return receipt(request, { status });
+      }),
+    };
+    const result = await runHostedScan(
+      {
+        ...input,
+        identity,
+        outputDirectory: join(input.outputDirectory, attemptId),
+        stateDirectory: join(input.stateDirectory, attemptId),
+        severityRubric: await readJson<typeof severityRubric>(saved),
+      },
+      { executor },
+    );
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const [request] = executor.run.mock.calls[0]!;
+    expect(request.identity).toEqual(identity);
+    expect(request.severityRubric).toEqual(severityRubric);
+    expect(request.prompt).toContain(
+      JSON.stringify({ severityRubric: request.severityRubric }),
+    );
+    expect(result).toMatchObject({
+      identity,
+      status,
+      severityRubric,
+      execution: { requestId: request.requestId, status },
+    });
+    requestIds.add(request.requestId);
+  }
+  expect(requestIds.size).toBe(2);
+});
+
 test.each(["cancel", "disconnect", "signal"])(
   "blocked execution request terminates on %s",
   async (action) => {
@@ -1149,7 +1433,7 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const run = spyOn(hostedScan, "runHostedScan");
+    const run = spyOn(hostedScan, "runHostedScanInternal");
     try {
       const finished = runHostedScanProtocol(input, output, controller.signal);
       send(input, { id: "run", method: "run", params });
@@ -1202,10 +1486,11 @@ test.each(["result", "error"])(
 );
 
 test("the exported contract fixture matches v2 and rejects explicit empty scope", async () => {
-  const fixture = await readJson<any>(
-    join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
-  );
-  expect(HostedScanInputSchema.parse(fixture.run.params).scope).toEqual({
+  const fixture = hostedContract;
+  const input = HostedScanInputSchema.parse(fixture.run.params);
+  expect(input.severityRubric).toEqual(severityRubric);
+  expect(fixture.execution.params.severityRubric).toEqual(severityRubric);
+  expect(input.scope).toEqual({
     paths: ["service-a", "service-b"],
   });
   expect(
@@ -1224,6 +1509,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     status: "completed",
     identity: fixture.run.params.identity,
     scope: fixture.run.params.scope,
+    severityRubric,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });
@@ -1255,61 +1541,3 @@ test("ordinary SDK rejects the removed hosted option instead of using local infe
     await client.close();
   }
 });
-
-test.each([true, false])(
-  "hosted owner inference uses only the hosted callback (supplied=%p)",
-  async (supplied) => {
-    const input = await fixture();
-    const run = mock(async () => ({
-      finalResponse: "synthetic owner response",
-    }));
-    const startThread = mock(() => ({ run }));
-    const owner = spyOn(
-      ownerArtifacts,
-      "writeScanOwnerSuggestions",
-    ).mockImplementation(async (_repository, _result, writer, options) => {
-      const response = await runReadOnlyCodex(
-        "Synthetic owner prompt",
-        {},
-        options,
-        {
-          surface: "sdk",
-          command: "suggest-owners",
-          threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
-        },
-      );
-      expect(response).toBe("synthetic owner response");
-      await writer.restore("owner-suggestions.json", Buffer.from("{}\n"));
-      return join(input.outputDirectory, "owner-suggestions.json");
-    });
-    try {
-      const result = await runHostedScan(
-        { ...input, ownerSuggestions: true },
-        {
-          executor: draftExecutor(),
-          ...(supplied ? { ownerCodex: { startThread } } : {}),
-        },
-      );
-      expect(result.status).toBe("completed");
-      if (supplied) {
-        expect(startThread).toHaveBeenCalledTimes(1);
-        expect(run).toHaveBeenCalledTimes(1);
-        expect(startThread).toHaveBeenCalledWith(
-          expect.objectContaining({
-            sandboxMode: "read-only",
-            networkAccessEnabled: false,
-          }),
-        );
-        expect(result).not.toHaveProperty("ownerSuggestionsError");
-      } else {
-        expect(startThread).not.toHaveBeenCalled();
-        expect(result).toHaveProperty(
-          "ownerSuggestionsError",
-          "Hosted owner inference is unavailable.",
-        );
-      }
-    } finally {
-      owner.mockRestore();
-    }
-  },
-);

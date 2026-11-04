@@ -74,6 +74,7 @@ function stageSkillRuntime() {
 async function runPromptfoo(
   promptfooArgs: string[],
   environment: NodeJS.ProcessEnv = {},
+  builtMcp?: string,
 ) {
   const runtimeRoot = stageSkillRuntime();
   const artifacts = path.join(EVAL_ROOT, "artifacts");
@@ -131,17 +132,22 @@ async function runPromptfoo(
     });
   }
   try {
-    const built = await runChild(
-      [
-        path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        path.join(runtimeRoot, "plugins", "codex-security", "mcp"),
-        "--native",
-        "host",
-      ],
-      path.join(PLUGIN_ROOT, "mcp-app"),
-    );
-    if (built !== 0) return built;
+    const mcp = path.join(runtimeRoot, "plugins", "codex-security", "mcp");
+    if (builtMcp) {
+      copyDirectory(builtMcp, mcp);
+    } else {
+      const built = await runChild(
+        [
+          path.join(PLUGIN_ROOT, "mcp-app", "scripts", "build_mcp_app.mjs"),
+          "--output",
+          mcp,
+          "--native",
+          "host",
+        ],
+        path.join(PLUGIN_ROOT, "mcp-app"),
+      );
+      if (built !== 0) return built;
+    }
     return await runChild(
       [
         "--import",

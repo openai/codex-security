@@ -38,6 +38,62 @@ const caseInsensitiveVolume = await stat(join(caseProbe, "REPORTS")).then(
 await rm(caseProbe, { recursive: true, force: true });
 
 describe("offline artifact export", () => {
+  test.each([
+    { warnings: undefined },
+    { warnings: [] },
+    { warnings: ["Synthetic run warning."] },
+  ])(
+    "exports persisted run warnings %j without changing sealed documents",
+    async ({ warnings }) => {
+      const root = await mkdtemp(
+        join(tmpdir(), "codex-security-sarif-warning-"),
+      );
+      const scanDir = join(root, "scan");
+      const output = join(root, "results.sarif");
+      try {
+        await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+          recursive: true,
+        });
+        const manifestPath = join(scanDir, "scan-manifest.json");
+        if (warnings !== undefined) {
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          manifest.scan.warnings = warnings;
+          await writeFile(manifestPath, JSON.stringify(manifest));
+        }
+        const canonicalPaths = [manifestPath, join(scanDir, "findings.json")];
+        const before = await Promise.all(
+          canonicalPaths.map((path) => readFile(path)),
+        );
+        const result = await exportArtifact({
+          source: { directory: scanDir },
+          format: "sarif",
+          output,
+          pythonPath: PYTHON,
+        });
+        expect(result.path).toBe(output);
+        const run = JSON.parse(await readFile(output, "utf8")).runs[0];
+        if (warnings?.length) {
+          expect(run.invocations).toEqual([
+            {
+              executionSuccessful: true,
+              toolExecutionNotifications: warnings.map((text) => ({
+                level: "warning",
+                message: { text },
+              })),
+            },
+          ]);
+        } else {
+          expect(run.invocations).toBeUndefined();
+        }
+        expect(
+          await Promise.all(canonicalPaths.map((path) => readFile(path))),
+        ).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32").each([
     ["artifact helper", "PATH"],
     ["artifact helper", "PYTHON"],

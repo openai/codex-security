@@ -3,12 +3,21 @@ import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
 } from "./external-import-contract.js";
-import { readExternalFindings } from "./external-findings-read.js";
 import {
-  prepareNormalizedLocalImport,
+  EXTERNAL_FINDINGS_PROVIDERS,
+  readExternalFindings,
+} from "./external-findings-read.js";
+import {
+  distinctSourceRepositories,
+  prepareLocalImport,
   type LocalExternalImportDependencies,
 } from "./external-findings-local.js";
+import {
+  snapshotImportOptions,
+  snapshotSourceRepositories,
+} from "./external-findings.js";
 import { abortable } from "./targets.js";
+import { requireExternalImports } from "./external-imports-feature.js";
 
 /** Read an installed vendor format and prepare it for the local workbench. */
 export async function prepareLocalExternalImport(
@@ -17,21 +26,35 @@ export async function prepareLocalExternalImport(
   dependencies: LocalExternalImportDependencies = {},
 ) {
   dependencies.signal?.throwIfAborted();
+  requireExternalImports(dependencies.environment);
+  const settings = snapshotImportOptions(options);
+  const readerSources = distinctSourceRepositories(
+    snapshotSourceRepositories(dependencies.sourceRepositories),
+  );
   const parsed = await abortable(
-    () => readExternalFindings(path, options),
+    () => readExternalFindings(path, settings, "local", readerSources),
     dependencies.signal,
   );
+  const normalizedOptions = {
+    ...settings,
+    provider: EXTERNAL_FINDINGS_PROVIDERS[settings.provider],
+  };
   let sourceRepositories = parsed.sourceRepositories ?? [];
-  if (options.provider === "semgrep") {
+  if (
+    normalizedOptions.provider === "semgrep" &&
+    parsed.sourceRepositories &&
+    settings.sourceRepositoryUrl
+  ) {
     // The Cloud reader allows custom GitHub casing. Local provenance must also
     // agree with the caller's source URL when the checkout has no remote.
-    const source = options.sourceRepositoryUrl!;
-    const knownGitHub = dependencies.sourceRepositories?.some(
+    const source = settings.sourceRepositoryUrl;
+    const knownGitHub = readerSources.some(
       ({ url, platform }) =>
         platform === "github" &&
         cloudRepositoryUrlKey(url) === cloudRepositoryUrlKey(source),
     );
     const key = knownGitHub ? cloudRepositoryUrlKey : repositoryUrlKey;
+    sourceRepositories = distinctSourceRepositories(sourceRepositories);
     for (const reference of sourceRepositories) {
       if (key(reference.url) !== key(source))
         throw new Error(
@@ -47,11 +70,12 @@ export async function prepareLocalExternalImport(
         })),
       ];
   }
-  return prepareNormalizedLocalImport(parsed.findings, options, {
-    ...dependencies,
-    sourceRepositories: [
-      ...(dependencies.sourceRepositories ?? []),
-      ...sourceRepositories,
-    ],
-  });
+  const { environment, runWorkbench, signal } = dependencies;
+  return prepareLocalImport(
+    parsed.findings,
+    normalizedOptions,
+    { environment, runWorkbench, signal },
+    readerSources,
+    sourceRepositories,
+  );
 }

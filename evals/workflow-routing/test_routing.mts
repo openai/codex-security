@@ -81,21 +81,22 @@ test("stages every production skill unchanged without the labels or harness", as
     assert.equal(entry.sha256, sha256(source));
   }
   for (const scenario of cases) {
-    if (scenario.skill) assert.ok(skill(scenario.skill));
+    if (scenario.skill !== null) assert.ok(skill(scenario.skill), scenario.id);
     assert.ok(!routingPrompt(scenario).includes(scenario.id));
     assert.ok(!routingPrompt(scenario).includes("$"));
   }
 });
 
-for (const scenario of cases) {
-  test(`accepts the expected observed route: ${scenario.id}`, () => {
-    const reads = scenario.skill ? [read(skill(scenario.skill))] : [];
+test("accepts an observed skill read and a completed turn without a skill", () => {
+  for (const entry of prepared.skills) {
     assert.equal(
-      grade(scenario.skill, [...reads, message, completed]).passed,
+      grade(entry.name, [read(entry), message, completed]).passed,
       true,
+      entry.name,
     );
-  });
-}
+  }
+  assert.equal(grade(null, [message, completed]).passed, true);
+});
 
 test("a claimed choice or filename listing cannot satisfy a skill read", () => {
   const expected = skill("security-scan");

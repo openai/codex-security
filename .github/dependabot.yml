@@ -55,7 +55,9 @@ updates:
 
   - package-ecosystem: github-actions
     labels: [dependencies]
-    directory: /
+    directories:
+      - /
+      - "/.github/actions/*"
     schedule:
       interval: cron
       cronjob: "0 9 * * *"

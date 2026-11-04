@@ -10,11 +10,16 @@ const child = spawn(process.env.SYNTHETIC_NATIVE_CODEX, process.argv.slice(2), {
 });
 child.stderr.pipe(process.stderr);
 const input = createInterface({ input: process.stdin });
-child.once("close", (code) => {
-  process.exitCode = code ?? 1;
-  input.close();
-  process.stdin.destroy();
+const childClosed = new Promise((resolve) => {
+  child.once("close", (code) => {
+    process.exitCode = code ?? 1;
+    input.close();
+    process.stdin.destroy();
+    resolve();
+  });
 });
+let preflightClient = false;
+let preflightConfigId;
 let turnRequest;
 let modelProvider;
 let initialConfig;
@@ -24,6 +29,15 @@ await Promise.all([
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.id !== undefined) methods.set(request.id, request.method);
+      if (request.method === "initialize")
+        preflightClient =
+          request.params.clientInfo.name === "codex_security_deep_scan";
+      if (
+        preflightClient &&
+        request.method === "config/read" &&
+        request.params.includeLayers === true
+      )
+        preflightConfigId = request.id;
       if (request.method === "thread/start") {
         daybreakEnabled = request.params.daybreakEnabled ?? null;
       }
@@ -45,8 +59,19 @@ await Promise.all([
     child.stdin.end();
   })(),
   (async () => {
+    let preflightResponse;
     for await (const line of createInterface({ input: child.stdout })) {
       const response = JSON.parse(line);
+      if (
+        preflightConfigId !== undefined &&
+        response.id === preflightConfigId
+      ) {
+        // The one-shot origins reader terminates this proxy after the response.
+        // Close its native child first, including on Windows where SIGTERM is forced.
+        preflightResponse = line;
+        child.stdin.end();
+        continue;
+      }
       if (methods.get(response.id) === "thread/start")
         modelProvider = response.result?.modelProvider;
       if (methods.get(response.id) === "config/read")
@@ -77,5 +102,10 @@ await Promise.all([
         threadId,
       );
     }
+    if (preflightResponse !== undefined) {
+      await childClosed;
+      process.stdout.write(preflightResponse + "\n");
+    }
   })(),
+  childClosed,
 ]);
