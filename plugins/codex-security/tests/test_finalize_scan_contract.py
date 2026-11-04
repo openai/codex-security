@@ -72,6 +72,15 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(findings, original)
         return compatible["findings"][0]
 
+    @skipIf(os.name == "nt", "POSIX control-character path fixture")
+    def test_missing_directory_escapes_terminal_controls(self) -> None:
+        path = self.scan_dir.parent / "missing\x1b[31m\x9b2J"
+        result = self.run_finalizer("--scan-dir", str(path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("\x1b", result.stderr)
+        self.assertNotIn("\x9b", result.stderr)
+        self.assertIn(r"missing\x1b[31m\x9b2J", result.stderr)
+
     def test_cli_resolves_noncanonical_scan_directory_arguments(self) -> None:
         self.write_scan()
         for spelling in (

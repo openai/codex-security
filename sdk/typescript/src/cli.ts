@@ -9778,8 +9778,19 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
-  // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
-  const diagnosticDetail = detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
+  // Paths may contain provider error codes as filenames. Keep the original for display.
+  const diagnosticDetail = detail
+    .replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "")
+    .replace(/[^\s"'()<>,]*[/\\][^\s"'()<>,]*/gu, (token) =>
+      /^HTTP\/\d+(?:\.\d+)?$/iu.test(token) ? token : "",
+    )
+    .replace(/\binvalid[ _-]token\b/giu, (code) =>
+      /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
+        detail,
+      )
+        ? ""
+        : code,
+    );
   const classificationDetail = diagnosticDetail.replace(
     /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
@@ -9789,18 +9800,20 @@ export function skillCommandFailure(
   if (
     classification === "unauthorized" ||
     /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
-      detail,
+      classificationDetail,
     )
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
-    /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(
+      classificationDetail,
+    ) ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
       /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
-        detail,
+        classificationDetail,
       )) ||
     /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
-      detail,
+      classificationDetail,
     ) ||
     (classification === "forbidden" &&
       /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
@@ -9811,12 +9824,14 @@ export function skillCommandFailure(
   } else if (
     classification === "rate_limited" ||
     /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
-      detail,
+      classificationDetail,
     )
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
+    /\b(?:models?[ _.-]cache|supports_reasoning_summaries)\b/iu.test(
+      classificationDetail,
+    )
   ) {
     advice =
       "Codex could not load its model metadata. Update Codex or refresh its model cache.";
@@ -9825,7 +9840,7 @@ export function skillCommandFailure(
     classification === "timeout" ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
       /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-        detail,
+        classificationDetail,
       ))
   ) {
     advice =

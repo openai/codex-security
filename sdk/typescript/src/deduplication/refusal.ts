@@ -28,7 +28,7 @@ export function isReviewRefusal(
   if (policyRefusal) {
     // The explicit refusal predicate decides; its explanation has no controlled vocabulary.
     // A leading service-outage cause still describes an operational failure.
-    return !/^\s*(?:(?:(?:because|as|due to)\s+|[.!:]\s*)(?:the\s+)?(?:upstream\s+)?service\s+(?:is\s+)?(?:unavailable|unavailability|timed? out|timeout)\b|by\s+upstream\s+with\s+[45]\d{2}\b)/iu.test(
+    return !/^\s*(?:(?:(?:because|as|due to)\s+|[.!:]\s*)(?:the\s+)?(?:upstream\s+)?service\s+(?:is\s+)?(?:unavailable|unavailability|timed? out|timeout)\b|by\s+upstream\s+with\s+[45]\d{2}\b|(?:because|as)\s+(?:the\s+)?upstream(?:\s+service)?\s+returned\s+(?:HTTP\s+)?[45]\d{2}\b)/iu.test(
       policyRefusal[1] ?? "",
     );
   }

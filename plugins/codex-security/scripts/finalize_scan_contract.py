@@ -3441,7 +3441,10 @@ def main() -> int:
         else:
             finalize_scan(args.scan_dir, args.schema_dir, args.source_root)
     except (ContractError, OSError) as exc:
-        parser.error(str(exc))
+        # Keep canonical paths readable and escape control characters at the terminal boundary.
+        parser.error(
+            "".join(char if char.isprintable() else ascii(char)[1:-1] for char in str(exc))
+        )
     return 0
 
 

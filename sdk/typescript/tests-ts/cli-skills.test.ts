@@ -1722,6 +1722,18 @@ process.stdout.write(JSON.stringify({
     expect(message).not.toContain("rate limited");
   });
 
+  test.each([
+    "cache lookup failed at C:\\synthetic\\model_access_denied\\cache",
+    "permission denied opening /synthetic/rate_limit/cache",
+    "could not open /synthetic/request_timeout/cache",
+    "database cache schema migration failed",
+    "SyntaxError: invalid token at line 5",
+  ])("retains local diagnostics without provider advice: %s", (detail) => {
+    expect(skillCommandFailure("validate", 7, detail)).toBe(
+      `validate failed with exit code 7.\n${detail}`,
+    );
+  });
+
   const diagnosticAdviceCases = [
     ...(
       [
