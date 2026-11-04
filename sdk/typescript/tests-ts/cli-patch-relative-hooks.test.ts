@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
+  publicationRepository,
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
@@ -151,3 +152,37 @@ test.each([
     expect(await readFile(join(nested, "app.txt"), "utf8")).toBe("after\n");
   },
 );
+
+test("publication from a subdirectory protects worktree-relative commit hooks", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const hooks = join(directory, "project-hooks");
+  const hook = join(hooks, "pre-commit");
+  await mkdir(hooks);
+  await writeFile(hook, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  git("add", "project-hooks");
+  git("commit", "-m", "Add synthetic commit hook");
+  git("config", "core.hooksPath", "project-hooks");
+  const head = git("rev-parse", "HEAD");
+  let protectedPaths: readonly string[] = [];
+  const outcome = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr", "--json"],
+    {
+      currentDirectory: join(directory, "src"),
+      onRepositoryCommand: (command, args, cwd, options) =>
+        command === "git"
+          ? runGitRepositoryCommand(command, args, cwd, options)
+          : "[]",
+      onCodex: async (_args, output) => {
+        protectedPaths = output?.appServer?.permissions?.readOnlyPaths ?? [];
+        await writeFile(hook, "#!/bin/sh\n# changed fixture\nexit 0\n");
+        await writeFile(join(directory, "src/finding-1.ts"), "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    },
+  );
+  expect(protectedPaths).toContain(hook);
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  expect(outcome.stderr).toContain("Git hook changed during the patch");
+  expect(git("rev-parse", "HEAD")).toBe(head);
+});

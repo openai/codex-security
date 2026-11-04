@@ -933,6 +933,9 @@ export async function capturePatchGitControls(
             ? []
             : ["-c", `core.hooksPath=${configured}`]),
           "rev-parse",
+          // Report an entry relative to the worktree even when called from a subdirectory.
+          "--prefix",
+          "",
           "--git-path",
           "hooks/post-index-change",
         ]);
