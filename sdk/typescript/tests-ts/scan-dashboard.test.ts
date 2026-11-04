@@ -80,6 +80,25 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("keeps activity while a terminal is backpressured and restores the screen", async () => {
+    const stderr = capture(true);
+    const stream = { ...stderr.stream, writableNeedDrain: true };
+    const dashboard = createDashboard(stream);
+    dashboard.start();
+    const initial = stderr.text();
+    dashboard.note("First event");
+    await Promise.resolve();
+    expect(stderr.text()).toBe(initial);
+    stream.writableNeedDrain = false;
+    dashboard.note("Second event");
+    await Promise.resolve();
+    expect(stderr.text()).toContain("First event");
+    expect(stderr.text()).toContain("Second event");
+    stream.writableNeedDrain = true;
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("flushes queued activity before stopping without rendering afterward", () => {
     const stderr = capture(true);
     const pending: (() => void)[] = [];
@@ -2051,6 +2070,33 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("finding-28");
     expect(frame).not.toContain("finding-30");
     expect(stderr.text().match(/\u001B\[H/gu)?.length).toBe(framesBefore + 2);
+    dashboard.stop();
+  });
+
+  test("keeps scrolled history in place once the oldest activity is dropped", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 80, rows: 14 },
+      { input },
+    );
+    const visible = () => lastFrame(stderr).match(/finding-\d+/gu);
+
+    recordActions(dashboard, 2_000);
+    dashboard.start();
+    input.emit("data", "\u001B[A".repeat(6));
+    const before = visible();
+    expect(before).toContain("finding-1994");
+
+    dashboard.record({
+      id: "action-2001",
+      kind: "command",
+      status: "completed",
+      description: "rg -n finding-2001 routes.ts",
+      paths: [],
+    });
+    expect(visible()).toEqual(before);
+    expect(lastFrame(stderr)).toContain("7 lines above live");
     dashboard.stop();
   });
 

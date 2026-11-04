@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import { SCAN_SEVERITIES } from "./scan-settings.js";
 import { isRecord } from "./record.js";
 import { previousAdmission } from "./external-import-contract.js";
 import { rememberPreviousSelection } from "./reader-selection.js";
@@ -30,6 +31,10 @@ export function requiredText(value: unknown, label: string): string {
   return result;
 }
 
+export function scannerSeverity(value: string | null | undefined) {
+  return SCAN_SEVERITIES.find((severity) => severity === value) ?? "unknown";
+}
+
 export function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((v): v is string => text(v) !== null)
@@ -45,6 +50,14 @@ export function relativePath(value: unknown): string | null {
     !/^[A-Za-z]:/.test(path) &&
     !path.split("/").includes("..")
     ? path
+    : null;
+}
+
+// Hosted findings do not identify the scanner operating system or its path separator.
+export function hostedRepositoryPath(value: unknown) {
+  const path = text(value);
+  return path && !path.includes("\\") && !path.includes("://")
+    ? relativePath(path)
     : null;
 }
 
@@ -89,6 +102,7 @@ export function parseJsonOrJsonl(contents: string): unknown {
 
 export async function readScannerJson(
   path: string | FileHandle,
+  parse: (json: string) => unknown = JSON.parse,
 ): Promise<unknown> {
   const bytes = await readScannerBytes(path);
   let decoded: string;
@@ -101,7 +115,7 @@ export async function readScannerJson(
     );
   }
   try {
-    return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
+    return parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,
@@ -226,8 +240,8 @@ export function indexSarifRules(
   return byId;
 }
 
-/** Keep the report and producer context shared by individual SARIF results. */
-export function sarifResultContext(
+/** Pair each result with its shared run context and original evidence. */
+export function sarifRunResults(
   document: Record<string, unknown>,
   run: Record<string, unknown>,
   tool: Record<string, unknown>,
@@ -242,14 +256,33 @@ export function sarifResultContext(
   const { results: _results, tool: _tool, ...runContext } = run;
   const { rules: _rules, ...driverContext } = driver;
   const { driver: _driver, ...toolContext } = tool;
-  return {
+  const selectRunContext = sarifRunContextSelector(runContext);
+  // JS callers may supply lazy metadata. Preserve each adapter's original traversal order.
+  const metadataInReadOrder =
+    producer === "Semgrep"
+      ? [driverContext, toolContext, documentContext]
+      : [documentContext, driverContext, toolContext];
+  const context = {
     rulesById,
-    selectRunContext: sarifRunContextSelector(runContext),
-    documentContext,
     runContext,
-    driverContext,
-    toolContext,
+    sourceData(
+      result: Record<string, unknown>,
+      rule?: Record<string, unknown>,
+    ) {
+      return structuredClone({
+        documentContext,
+        runContext: selectRunContext(result, rule, ...metadataInReadOrder),
+        driverContext,
+        toolContext,
+        ...(rule ? { rule } : {}),
+        result,
+      });
+    },
   };
+  return array(run["results"] ?? [], `${producer} results`).map((result) => ({
+    result,
+    context,
+  }));
 }
 
 /** The top-level index and nested descriptor must agree with the selected driver rule. */

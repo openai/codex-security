@@ -1280,6 +1280,54 @@ describe("CLI workbench", () => {
     ]);
   });
 
+  test.each(["older plugin", "missing scan ID"] as const)(
+    "preserves earlier saves when bulk matching rejects a plan (%s)",
+    async (scenario) => {
+      const saved: string[][] = [];
+      const stderr = captureCli(main, "stderr");
+      expect(
+        await stderr.run(
+          ["scans", "match", "--all"],
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              if (args[0] === "list-unmatched-scan-pairs")
+                return scenario === "older plugin"
+                  ? {
+                      batches: [
+                        {
+                          afterScanId: "last",
+                          afterFindings: [],
+                          beforeScans: [{ scanId: "first", findings: [] }],
+                        },
+                      ],
+                    }
+                  : {
+                      findingsByScanId: { first: [], second: [], last: [] },
+                      batches: [
+                        { afterScanId: "second", beforeScanIds: ["first"] },
+                        { afterScanId: "last", beforeScanIds: ["missing"] },
+                      ],
+                    };
+              saved.push([args[2]!, args[4]!]);
+              return {};
+            },
+            onMatch: rejecting(
+              "Empty or incomplete batches must not start matching.",
+            ),
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        scenario === "older plugin"
+          ? "Update the custom plugin"
+          : "Matching plan is missing findings for scan missing.",
+      );
+      expect(saved).toEqual(
+        scenario === "older plugin" ? [] : [["first", "second"]],
+      );
+    },
+  );
+
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
     let comparisonInput: string | undefined;

@@ -507,7 +507,14 @@ describe("scan knowledge bases", () => {
     );
     await writeFile(
       join(root, "self-closing-tab.docx"),
-      docx("User", "Permission", "<w:tab/>"),
+      docxBody(
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1701"/></w:tabs></w:pPr>' +
+          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "non-breaking-hyphen.docx"),
+      docx("X", "Frame-Options", "<w:noBreakHyphen/>"),
     );
     await writeFile(
       join(root, "tracked-change.docx"),
@@ -515,6 +522,14 @@ describe("scan knowledge bases", () => {
         '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
           '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
           "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "tracked-move.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Rotate keys. </w:t></w:r>' +
+          '<w:moveFrom w:id="2" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveFrom></w:p>' +
+          '<w:p><w:moveTo w:id="3" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveTo></w:p>',
       ),
     );
     await writeFile(
@@ -536,7 +551,9 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
   });
 
@@ -833,16 +850,40 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
-  test("skips Office owner files while a document is open", async () => {
+  test("skips Office owner files and LibreOffice lock files during discovery", async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "policy.docx"), docx("Access policy."));
     await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+    await writeFile(
+      join(root, ".~lock.policy.docx#"),
+      ",Example User,example-host,01.01.2026 09:00,file:///home/example/.config/libreoffice/4;",
+    );
+    await writeFile(join(root, ".~lock.#"), "Named document");
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
 
-    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.\n",
+      "Named document",
+    ]);
+  });
+
+  test("skips macOS metadata files copied next to documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
+    await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    const appleDouble = Buffer.alloc(82);
+    appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
+    await writeFile(join(root, "._guide.md"), appleDouble);
+    await writeFile(join(root, "._policy.pdf"), appleDouble);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "Access policy.",
+      "Rotate admin keys monthly.",
     ]);
   });
 

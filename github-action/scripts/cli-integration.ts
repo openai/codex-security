@@ -7,9 +7,10 @@ import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { parse as parseYaml } from 'yaml';
 import { parseInputs, scanArguments } from '../src/inputs.js';
 import { analyzeResults } from '../src/results.js';
-import { captureRunnerPath, checkPython, resolveTool, runtimeEnvironment, writeRuntimeLauncher } from '../src/runtime.js';
+import { captureRunnerPath, checkPython, checkSandbox, resolveTool, runtimeEnvironment, SandboxUnavailableError, writeRuntimeLauncher } from '../src/runtime.js';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
 const [candidatePackage, candidateVersion] = process.argv.slice(2);
@@ -100,6 +101,34 @@ try {
   assert.equal(deepPreflight.mode, 'deep');
   assert.equal(deepPreflight.maxTimeHours, 0.25);
   assert.deepEqual(deepPreflight.target.paths, ['example.ts']);
+
+  // Validate workflow model and cost settings against both the published pin and release candidates.
+  const diffBase = git('rev-parse', 'HEAD').trim();
+  await writeFile(join(repository, 'added.ts'), 'export const added = true;\n');
+  git('add', 'added.ts'); git('commit', '-m', 'Synthetic pull request');
+  const diffHead = git('rev-parse', 'HEAD').trim();
+  for (const example of ['repository', 'pull-request']) {
+    const workflow = parseYaml(await readFile(resolve(import.meta.dirname, `../examples/${example}.yml`), 'utf8'));
+    const values: Record<string, string> = workflow.jobs.security.steps.find((step: {id?: string}) => step.id === 'security').with;
+    const production = parseInputs(name => values[name] ?? '', repository);
+    assert.equal(production.dryRun, false);
+    for (const mode of production.scope === 'repository' ? ['standard', 'deep'] : ['standard']) for (const program of [undefined, 'daybreak_blue']) {
+      // Test the example's program selection first, then the optional Blue variant.
+      // The production policy was already parsed; dry-run cannot enforce it.
+      const dryValues: Record<string, string> = {...values, mode,
+        ...(program === undefined ? {} : {'cyber-access-program':program}),
+        'fail-on-severity':'none', 'dry-run':'true'};
+      const inputs = parseInputs(name => dryValues[name] ?? '', repository);
+      const target = production.scope === 'diff' ? {repository, diffBase, diffHead} : {repository};
+      const args = scanArguments(inputs, target, join(root, `budget-${example}-${mode}-${program ?? 'example'}`));
+      const result = JSON.parse(run(args, 0));
+      assert.equal(result.dryRun, true);
+      assert.equal(result.mode, mode);
+      assert.equal(result.model, production.model);
+      assert.equal(result.reasoningEffort, production.effort);
+      assert.equal(result.maxCostUsd, production.maxCost);
+    }
+  }
 
   // Exercise each installed provider while covering both scan modes.
   for (const [provider, mode] of [['amazon-bedrock', 'deep'], ['openrouter', 'standard'], ['fireworks', 'deep']]) {
@@ -240,6 +269,17 @@ try {
   await writeRuntimeLauncher(nodeLauncher, process.execPath, 'RUNNER_TRACKING_ID', 'synthetic-cli-job');
   const venvEnv = runtimeEnvironment({root, home, codexHome:env.CODEX_HOME, stateDirectory:env.CODEX_SECURITY_STATE_DIR,
     runnerPath, runnerTrackingId:'synthetic-cli-job', runnerLibraryPath:libraryPath});
+  const shadowBin = join(repository, 'bin');
+  await mkdir(shadowBin);
+  await writeFile(join(shadowBin, 'bwrap'), '#!/bin/sh\n: > "$0.ran"\nexit 70\n', {mode:0o755});
+  const probeEnv = {...venvEnv, CODEX_HOME:join(root, 'probe-home')};
+  await checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:'example/model'}, {
+    ...probeEnv, PATH:shadowBin + delimiter + venvEnv.PATH,
+  });
+  await assert.rejects(checkSandbox(process.execPath, cli, {repository, provider:'openrouter', model:''}, probeEnv),
+    error => error instanceof Error && !(error instanceof SandboxUnavailableError) && /model/i.test(error.message));
+  await assert.rejects(readFile(join(shadowBin, 'bwrap.ran')), {code:'ENOENT'});
+  await rm(shadowBin, {recursive:true});
   // Use the published MCP launcher and its actual allowlist without a model turn.
   // The synthetic server reports its marker and one actual Node child's marker.
   const mcpConfig = JSON.parse(await readFile(join(cliPackage, '_bundled_plugin/.mcp.json'), 'utf8')).mcpServers['codex-security'];
@@ -275,6 +315,40 @@ try {
   assert.equal(selected.prefix, venv);
   assert.equal(selected.loader, libraryPath);
   assert.equal(selected.tracking, 'synthetic-cli-job');
+
+  const nativeProbe = join(root, 'native-probe');
+  const nativeEnv = {...probeEnv, CODEX_CLI_PATH:nativeProbe, PROBE_CODEX:selected.codex};
+  const probe = (nodePath = process.execPath) => checkSandbox(nodePath, cli, {repository, provider:'openai', model:''}, nativeEnv);
+  await writeFile(nativeProbe, `#!/bin/sh\nexec "$PROBE_CODEX" -c 'model_provider="synthetic-undefined"' "$@"\n`, {mode:0o755});
+  await assert.rejects(probe, error => error instanceof Error && !(error instanceof SandboxUnavailableError) && error.message.includes('synthetic-undefined'));
+  await writeFile(nativeProbe, '#!/bin/sh\n[ "$1" != sandbox ] && exec "$PROBE_CODEX" "$@"\n');
+  await assert.rejects(probe, SandboxUnavailableError);
+  // Observe both real SDK child boundaries without invoking a sandbox or a model.
+  const probeInvocations = join(root, 'probe-invocations.jsonl');
+  for (const featuresExit of [0, 19]) {
+    await writeFile(probeInvocations, '');
+    await writeFile(nativeProbe, `#!${process.execPath}
+      const fs = require('node:fs'); const path = require('node:path');
+      fs.appendFileSync(${JSON.stringify(probeInvocations)}, JSON.stringify({args:process.argv.slice(2),
+        config:fs.readFileSync(path.join(process.env.CODEX_HOME, 'config.toml'), 'utf8')}) + '\\n');
+      if (process.argv[2] === 'sandbox') {
+        console.error('synthetic sandbox failure sk-example-original'); process.exitCode = 1;
+      } else {
+        console.log('synthetic configuration stdout'); console.error('synthetic configuration stderr');
+        process.exitCode = ${featuresExit};
+      }
+    `);
+    await assert.rejects(probe, error => error instanceof Error
+      && (error instanceof SandboxUnavailableError) === (featuresExit === 0)
+      && error.message.includes('synthetic sandbox failure sk-example-original')
+      && (featuresExit === 0 || (error.message.includes('synthetic configuration stdout')
+        && error.message.includes('synthetic configuration stderr') && error.message.includes('exit 19'))));
+    const invocations = (await readFile(probeInvocations, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(invocations.map(call => call.args[0]), ['sandbox', 'features']);
+    for (const call of invocations) assert.match(call.config, /\[analytics\]\s+enabled = false/);
+  }
+  await writeFile(nativeProbe, `#!${process.execPath}\nprocess.on('SIGTERM', () => process.exit(0)); process.kill(process.ppid, 'SIGINT'); setInterval(() => {}, 1000);\n`);
+  await assert.rejects(probe(nativeProbe), /sandbox preflight was interrupted/);
 
   // Exercise filesystem enforcement with the scan and network-disabled Deep
   // worker profiles, using the same pinned Codex and child PATH as the Action.
