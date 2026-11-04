@@ -11,6 +11,11 @@ import {
   gitTransportBytes,
   hostedRepositoryMatches,
 } from "./hosted-git-repository.js";
+import {
+  checkRetainedTrivyProvider,
+  checkTrivyReportProvider,
+  matchTrivyCheckout,
+} from "./trivy-import.js";
 import { readHostedGitRemotes } from "./hosted-git-remotes.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -739,6 +744,7 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  checkTrivyReportProvider(options.provider, current.report);
   // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
   if (!("snykRestContext" in current) && "snykRestContext" in input)
     current.snykRestContext = structuredClone(input.snykRestContext);
@@ -761,6 +767,7 @@ export async function prepareLocalImport(
     identities.add(finding.source_finding_id);
     if (!isRecord(finding.evidence))
       throw new CodexSecurityError("Imported evidence must be an object.");
+    checkRetainedTrivyProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
     if (!native) continue;
@@ -1210,20 +1217,29 @@ export async function prepareLocalImport(
     false,
   );
   const selected = manualSource ? new URL(manualSource) : undefined;
-  const matchesRepositoryRemote = await requireMatchingRepository(
-    repository,
-    options.provider,
-    ordinarySources,
-    strictSources,
-    hosted,
-    (source, bound) => (bound ? platformFor(source) : loosePlatformFor(source)),
-    snyk,
-    workbenchOptions.protectedRoot,
-    workbenchOptions.environment,
-    dependencies.signal,
-    selected?.protocol === "https:" ? selected.hostname : undefined,
-    fetchRemotes,
-  );
+  const matchesRepositoryRemote =
+    options.provider === "trivy"
+      ? await matchTrivyCheckout(
+          repository,
+          current,
+          references,
+          workbenchOptions,
+        )
+      : await requireMatchingRepository(
+          repository,
+          options.provider,
+          ordinarySources,
+          strictSources,
+          hosted,
+          (source, bound) =>
+            bound ? platformFor(source) : loosePlatformFor(source),
+          snyk,
+          workbenchOptions.protectedRoot,
+          workbenchOptions.environment,
+          dependencies.signal,
+          selected?.protocol === "https:" ? selected.hostname : undefined,
+          fetchRemotes,
+        );
   dependencies.signal?.throwIfAborted();
   const preview = {
     ...cloneImportPreview(current),

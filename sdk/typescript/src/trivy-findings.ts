@@ -123,11 +123,11 @@ export function trivyRemoteKey(
 
 const sshScheme = /^(?:ssh|git\+ssh|ssh\+git):\/\//u;
 
-function userlessSsh(url: string): boolean {
+export function trivyRemoteOmitsSshUser(url: string): boolean {
   return sshScheme.test(url) && !new URL(url).username;
 }
 
-const headerFields = [
+export const trivyHeaderFields = [
   "SchemaVersion",
   "ArtifactType",
   "ArtifactID",
@@ -177,7 +177,7 @@ export function trivyReportRemotes(report: unknown) {
   // other difference visible when validating the report's repository claims.
   if (
     repository &&
-    userlessSsh(repository) &&
+    trivyRemoteOmitsSshUser(repository) &&
     artifact?.replace(/^([^:]+:\/\/)[^/@]+@/u, "$1") === repository
   )
     return { urls: [repository] };
@@ -394,7 +394,7 @@ export function normalizeTrivyFindings(
   const metadata = record(document["Metadata"] ?? {}, "Trivy Metadata");
   const { urls } = trivyReportRemotes(document);
   const report = {
-    ...pick(document, headerFields),
+    ...pick(document, trivyHeaderFields),
     ...(isRecord(document["Trivy"])
       ? { Trivy: pick(document["Trivy"], ["Version"]) }
       : {}),

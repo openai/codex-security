@@ -49,6 +49,7 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
 | [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
+| [Trivy](trivy.md)                                           | Native schema-v2 repository or filesystem JSON, optionally gzip-compressed      |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
 | [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |
 
