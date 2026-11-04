@@ -81,6 +81,10 @@
 - honor native provider API-key settings for scans ([#139](https://github.com/openai/codex-security/pull/139))
 - preserve Guardian attribution and Snyk evidence on replay ([#2316](https://github.com/openai/codex-security/pull/2316))
 - preserve inference endpoints on rerun and resume ([#2286](https://github.com/openai/codex-security/pull/2286))
+- reserve worker directories across coordinator handoffs ([#2322](https://github.com/openai/codex-security/pull/2322))
+- preserve native turn failures observed before cancellation ([#735](https://github.com/openai/codex-security/pull/735))
+- preserve archived deep scans and streamline progress reads ([#2314](https://github.com/openai/codex-security/pull/2314))
+- show direct coordinator events in verbose CLI scans ([#2323](https://github.com/openai/codex-security/pull/2323))
 
 <!-- release-section: highlights:end -->
 
