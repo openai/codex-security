@@ -324,7 +324,7 @@ service_tier = "ultrafast"
       excludedScanIds: [expiredScanId],
     });
     const competing = await server.request(
-      5,
+      9,
       "tools/call",
       toolCall(
         "start_codex_security_deep_scan",
