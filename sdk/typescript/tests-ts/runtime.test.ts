@@ -5232,7 +5232,8 @@ describe("runtime directories and plugin Python boundary", () => {
       const inspection = inspectWindowsTestAcl(
         [
           "$ErrorActionPreference = 'Stop'",
-          "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+          '$env:PSModulePath = "$PSHOME\\Modules"',
+          "$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
           "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
           "$everyone.Count",
         ],
