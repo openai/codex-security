@@ -339,6 +339,7 @@ import {
   type PolicySecurity,
 } from "./security-policy-cli.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -352,6 +353,7 @@ import {
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
   normalizeRepository,
+  trustedGitCommand,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
@@ -5073,20 +5075,31 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
+          const cwd = dependencies.currentDirectory();
+          const repository = resolveCliPath(cwd, args.repository ?? ".");
+          const environment = dependencies.environment;
+          const git = await trustedGitCommand(
+            repository,
+            true,
+            environment,
+            await commandGitProtectionRoots(
+              repository,
+              environment,
+              undefined,
+              cwd,
+            ),
+          );
           const hook = execFileSync(
-            "git",
+            git.executable,
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
-                args.repository ?? ".",
-              ),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
               "hooks/pre-commit",
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", env: git.environment },
           ).trim();
           const command = [
             realpathSync(process.execPath),
