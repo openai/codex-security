@@ -55,7 +55,12 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.storage import create_private_directory, resolve_scan_root, state_dir
+from workbench.storage import (
+    create_private_directory,
+    resolve_scan_root,
+    saved_deep_workers,
+    state_dir,
+)
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -1253,10 +1258,7 @@ def complete_scan_locked(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
+                    saved_deep_workers(connection, scan),
                     warnings,
                     stopped=False,
                     scan_mode=scan["mode"],

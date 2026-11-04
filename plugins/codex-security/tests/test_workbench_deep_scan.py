@@ -39,6 +39,7 @@ from workbench_test_support import (
     update_progress,
     upsert_deep_worker,
     worker_paths,
+    write_checkpoint,
     write_completed_contract,
 )
 
@@ -350,7 +351,10 @@ def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> N
     assert "other completed scans" in save(sources, check=False)["stderr"]
 
 
-def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_archive", [False, True])
+def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(
+    tmp_path: Path, legacy_archive: bool
+) -> None:
     deep = start_empty_target_scan(tmp_path)
     worker, *_ = deep.dispatch_discovery_worker(name="discovery-0001")
     deep.record_iteration(name="dedup-0001", input_worker_ids=[worker], new_findings_count=1)
@@ -381,6 +385,20 @@ def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(tmp_path: P
         environment=deep_environment(deep.codex_home),
     )
     archived = Path(registration["archivedScanDir"])
+    if legacy_archive:
+        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+                (str(manifest), deep.id),
+            )
+            connection.executemany(
+                "UPDATE deep_scan_workers SET prompt_path = ?, artifact_dir = ?, "
+                "result_manifest_path = ? WHERE id = ?",
+                [
+                    (row["promptPath"], row["artifactDir"], row["resultManifestPath"], row["id"])
+                    for row in before["workers"]
+                ],
+            )
     after = deep.read("thread-deep-scan")
     assert Path(after["manifestPath"]) == archived / manifest.name
     for old, current in zip(before["workers"], after["workers"], strict=True):
@@ -389,6 +407,18 @@ def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(tmp_path: P
             path = Path(current[field])
             assert path == archived / Path(old[field]).relative_to(deep.directory)
             assert path.exists()
+    replay = deep.command(
+        "fail-deep-scan", "--message", "Stopped", "--manifest-path", after["manifestPath"]
+    )
+    assert replay["deepScan"]["manifestPath"] == after["manifestPath"]
+    worker_output = Path(
+        next(row["artifactDir"] for row in after["workers"] if row["id"] == worker)
+    )
+    checkpoint = write_checkpoint(worker_output / "checkpoints", saved_draft(deep.id))
+    assert deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
+    deep.command("recover-scan-results")
+    saved = json.loads((archived / "scan-manifest.json").read_text())
+    assert checkpoint.relative_to(archived).as_posix() in saved["scan"]["preservedSources"]
 
 
 def test_existing_generation_safely_claims_and_reclaims_without_schema_migration(
