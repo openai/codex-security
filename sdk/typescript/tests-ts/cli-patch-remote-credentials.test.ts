@@ -131,15 +131,21 @@ test.each([
   ["resume", "vcs"],
   ["preflight", "uploadpack"],
   ["preflight", "receivepack"],
+  ["preflight", "proxy"],
+  ["patch branch", "proxy"],
+  ["resume", "proxy"],
+  ["preflight", "proxyauthmethod"],
 ])(
   "rejects checkout-selected publication transport (%s, remote.origin.%s)",
   async (stage, field) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
     const key = `remote.origin.${field}`;
-    const hosted = "https://gitlab.com/example/repository.git";
+    const hosted = field.startsWith("proxy")
+      ? "http://gitlab.com/example/repository.git"
+      : "https://gitlab.com/example/repository.git";
     const branch = "codex-security/patch-scan-1";
     git("remote", "set-url", "origin", hosted);
-    if (field !== "vcs") {
+    if (field === "uploadpack" || field === "receivepack") {
       git("config", "--add", "remote.origin.pushurl", hosted);
       git("config", "--add", "remote.origin.pushurl", remote);
     }

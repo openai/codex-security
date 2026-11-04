@@ -673,7 +673,7 @@ describe("patch change tracking", () => {
   );
 
   test.each([false, true])(
-    "preserves remote proxy settings with collision=%j",
+    "preserves operator remote proxy settings with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -748,7 +748,18 @@ describe("patch change tracking", () => {
             "origin",
             `http://127.0.0.2:${proxy.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
-        git("config", "remote.origin.proxy", `http://127.0.0.1:${proxy.port}`);
+        const config = join(
+          await fixtures.create("patch-proxy-config-"),
+          "gitconfig",
+        );
+        git(
+          "config",
+          "--file",
+          config,
+          "remote.origin.proxy",
+          `http://127.0.0.1:${proxy.port}`,
+        );
+        environment["GIT_CONFIG_GLOBAL"] = config;
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
         const outcome = await runWorkflow(
