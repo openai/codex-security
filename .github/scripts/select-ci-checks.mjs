@@ -51,12 +51,18 @@ export function selectLockfileAudits(paths, { event, baseChanged }) {
     baseChanged ||
     paths.includes(".github/actions/audit-pnpm-lockfiles/action.yml")
   )
-    return "mcp evals";
+    return "mcp evals tokenizer";
   return [
     ["mcp", "plugins/codex-security/mcp-app/pnpm-lock.yaml"],
     ["evals", "evals/triage-finding/pnpm-lock.yaml"],
+    [
+      "tokenizer",
+      "sdk/typescript/pnpm-lock.yaml",
+      "sdk/typescript/src/server/embedding-tokenizer.ts",
+      "sdk/typescript/scripts/build-embedding-tokenizer.mjs",
+    ],
   ]
-    .filter(([, lockfile]) => paths.includes(lockfile))
+    .filter(([, ...inputs]) => inputs.some((input) => paths.includes(input)))
     .map(([target]) => target)
     .join(" ");
 }
