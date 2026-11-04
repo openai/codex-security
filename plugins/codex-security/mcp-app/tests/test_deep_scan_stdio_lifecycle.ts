@@ -1007,8 +1007,20 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
+      const sealed = await runWorkbench(environment, [
+        "get-scan",
+        "--scan-id",
+        resumedScanId,
+      ]);
+      const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
+      assert.equal(usage.coverage, "unavailable");
+      assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
-        scan: { progress: { status: "complete" }, reportAvailable: true },
+        scan: {
+          progress: { status: "complete" },
+          reportAvailable: true,
+          usage,
+        },
       });
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,

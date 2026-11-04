@@ -1024,12 +1024,24 @@ export function createCodexSecurityServer(): McpServer {
             ),
           ]);
           // Full findings and workspace history can exceed the host's tool-result limit.
-          const { progress, reportAvailable } = completion.scan as {
-            progress: { status: string };
-            reportAvailable: boolean;
-          };
+          const { progress, reportAvailable, usage, cost } =
+            completion.scan as {
+              progress: { status: string };
+              reportAvailable: boolean;
+              usage?: JsonObject;
+              cost?: { model: string; estimatedUsd: number };
+            };
+          // Rate-limit snapshots can grow independently of the measured scan totals.
+          const { accountRateLimits: _limits, ...scanUsage } = usage ?? {};
           return deepScanTerminalResult(run, {
-            scan: { progress: { status: progress.status }, reportAvailable },
+            scan: {
+              progress: { status: progress.status },
+              reportAvailable,
+              ...(usage && { usage: scanUsage }),
+              ...(cost && {
+                cost: { model: cost.model, estimatedUsd: cost.estimatedUsd },
+              }),
+            },
           });
         } catch (error) {
           logDeepScanEvent({
