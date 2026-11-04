@@ -118,38 +118,6 @@ async function run() {
       overrides.push(args[++index]);
   }
   const config = parse(overrides.join("\n"));
-  if (args.includes("--output-schema")) {
-    assert.equal(
-      config.responses_api_metadata.codex_security_worker_role,
-      "setup",
-    );
-    assert.equal(config.mcp_servers.cs_artifacts, undefined);
-    await trace({ phase: "planner" });
-    const workItems = [
-      {
-        title: "Fixture input",
-        objective: "Trace the fixture input",
-        startingPoints: ["fixture.py"],
-      },
-    ];
-    for (const event of [
-      { type: "thread.started", thread_id: "package-planner" },
-      {
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          id: "plan",
-          text: JSON.stringify({ workItems }),
-        },
-      },
-      {
-        type: "turn.completed",
-        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
-      },
-    ])
-      console.log(JSON.stringify(event));
-    return;
-  }
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
@@ -175,50 +143,28 @@ async function run() {
   });
   let complete = true;
   try {
-    if (layout === "worker") {
-      const draft = {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [],
-        },
-      };
-      const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
-      if (marker && !existsSync(marker)) {
-        await writeFile(marker, "process completed without a final artifact");
-        complete = false;
-      } else {
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: false,
-        });
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: true,
-        });
-      }
+    assert.equal(layout, "worker");
+    const draft = {
+      scanId: env.CODEX_SECURITY_SCAN_ID,
+      findings: [],
+      reviewState: {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
+    if (marker && !existsSync(marker)) {
+      await writeFile(marker, "process completed without a final artifact");
+      complete = false;
     } else {
-      assert.equal(layout, "reducer");
-      let cursor;
-      let json = "";
-      do {
-        const page = await server.call(
-          "get_codex_security_deep_reducer_inputs",
-          {
-            maxBytes: 64_000,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
-        );
-        json += page.json;
-        cursor = page.nextCursor;
-      } while (cursor !== undefined);
-      const inputs = JSON.parse(json);
-      assert.ok(inputs.discoveries.length > 0);
-      await server.call("record_codex_security_deep_reduction", {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: false,
+      });
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: true,
       });
     }
     await trace({

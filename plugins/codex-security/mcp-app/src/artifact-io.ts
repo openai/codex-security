@@ -4,22 +4,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-  attempt?: number;
-}
-
-/** Only the coordinator chooses the shared directory and identifies the worker. */
 export interface DiscoveryBoardContext {
   root: string;
   author: string;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
 }
 
 /**
@@ -28,7 +15,8 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
+  layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -40,8 +28,6 @@ export interface ArtifactContext {
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
-  discoveryBoard?: DiscoveryBoardContext;
 }
 
 export interface ArtifactPage {

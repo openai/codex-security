@@ -125,7 +125,7 @@ async function testDeepScanStdioLifecycle() {
     `[deep_scan]
 workers = 1
 subagents = 0
-stop_after_no_new = 1
+stop_after_no_new = 2
 max_discovery_runs = 2
 `,
   );
@@ -306,13 +306,6 @@ service_tier = "ultrafast"
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
     assert.equal(startedWorker.hasExpectedApiKey, true);
     const workerContext = discoveryPromptContext(startedWorker.stdin);
-    const [planner] = await waitForJsonLines(`${startLogPath}.planner`, 1);
-    assertReadOnlyWorkerInvocation(planner.argv, codexHome);
-    assertFlagPair(planner.argv, "--model", "gpt-5.5");
-    assertConfigOverrides(planner.argv, { model_reasoning_effort: "xhigh" });
-    assert.ok(planner.stdin.includes("stdio lifecycle fixture"));
-    assert.equal(planner.hasExpectedApiKey, true);
-    assert.equal(workerContext.assignment.title, "Request handling");
     assert.match(startedWorker.stdin, /record_codex_security_scan_draft/);
     const startedState = await getDeepScan({ environment, scanId, threadId });
     assert.equal(startedState.config.maxTimeHours, 0.5);
@@ -415,10 +408,15 @@ service_tier = "ultrafast"
     const stillRunning = await getDeepScan({ environment, scanId, threadId });
     assert.equal(stillRunning.status, "running");
     assert.equal(stillRunning.cancelRequested, false);
-    assert.deepEqual(workerStates(stillRunning.workers), [
-      "discovery:running",
-      "setup:succeeded",
-    ]);
+    assert.equal(
+      stillRunning.workers.some(
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
+      ),
+      false,
+    );
+    assert.equal(stillRunning.workers.length, 1);
+    assert.equal(stillRunning.workers[0].kind, "discovery");
+    assert.equal(stillRunning.workers[0].status, "running");
     assertProcessAlive(startedWorker.pid);
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
@@ -551,10 +549,18 @@ service_tier = "ultrafast"
     const canceledState = await getDeepScan({ environment, scanId, threadId });
     assert.equal(canceledState.status, "canceled");
     assert.equal(canceledState.cancelRequested, true);
-    assert.deepEqual(workerStates(canceledState.workers), [
-      "discovery:canceled",
-      "setup:succeeded",
-    ]);
+    assert.equal(
+      canceledState.workers.some(
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
+      ),
+      false,
+    );
+    assert.equal(
+      canceledState.workers.every(
+        (worker: PersistedDeepScanWorker) => worker.status === "canceled",
+      ),
+      true,
+    );
 
     const lateJoin = await server.request(
       14,
@@ -631,10 +637,15 @@ service_tier = "ultrafast"
       true,
     );
     assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
-    assert.deepEqual(workerStates(activeFailureState.workers), [
-      "discovery:running",
-      "setup:succeeded",
-    ]);
+    assert.equal(
+      activeFailureState.workers.some(
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
+      ),
+      false,
+    );
+    assert.equal(activeFailureState.workers.length, 1);
+    assert.equal(activeFailureState.workers[0].kind, "discovery");
+    assert.equal(activeFailureState.workers[0].status, "running");
     assertProcessAlive(failedWorker.pid);
 
     const failureMessage = "fixture unrecoverable failure\0source";
@@ -694,7 +705,12 @@ service_tier = "ultrafast"
     });
     assert.equal(failedState.status, "failed");
     assert.equal(failedState.error, failureMessage);
-    assert.ok(workerStates(failedState.workers).includes("setup:succeeded"));
+    assert.equal(
+      failedState.workers.some(
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
+      ),
+      false,
+    );
     assert.equal(
       failedState.workers.every(
         (worker: PersistedDeepScanWorker) =>
@@ -833,8 +849,7 @@ service_tier = "ultrafast"
       });
       return (
         partial.workers.some(
-          (worker: PersistedDeepScanWorker) =>
-            worker.kind === "discovery" && worker.status === "succeeded",
+          (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
         ) &&
         partial.workers.some(
           (worker: PersistedDeepScanWorker) => worker.status === "running",
@@ -842,8 +857,7 @@ service_tier = "ultrafast"
       );
     }, "one completed discovery and one interrupted discovery");
     const completedWorker = partial!.workers.find(
-      (worker: PersistedDeepScanWorker) =>
-        worker.kind === "discovery" && worker.status === "succeeded",
+      (worker: PersistedDeepScanWorker) => worker.status === "succeeded",
     );
     const completedDraft = await readJson(completedWorker.resultManifestPath);
     assert.equal(completedDraft.scanId, resumedScanId);
@@ -993,12 +1007,14 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
-      assert.equal(completion.scan.progress.status, "complete");
-      assert.equal(completion.scan.reportAvailable, true);
+      assert.deepEqual(completion, {
+        scan: { progress: { status: "complete" }, reportAvailable: true },
+      });
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
         manifestPath,
+        reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
         completion,
       });
@@ -1181,6 +1197,10 @@ service_tier = "ultrafast"
       assert.equal(
         retry.result.structuredContent.completion.scan.reportAvailable,
         true,
+      );
+      assert.equal(
+        retry.result.structuredContent.reportPath,
+        path.join(retry.result.structuredContent.scanDir, "report.md"),
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1401,13 +1421,9 @@ async function testCliDeepScanEngine({
   const starts = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).slice(
     startIndex,
   );
-  assert.ok(
-    starts.some((entry) => discoveryPromptContext(entry.stdin).workerLabel),
-  );
-  assert.ok(
-    starts.some(
-      (entry) => discoveryPromptContext(entry.stdin).claimedWorkerIds,
-    ),
+  assert.deepEqual(
+    starts.map((entry) => discoveryPromptContext(entry.stdin).workerLabel),
+    ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
     assertReadOnlyWorkerInvocation(entry.argv, codexHome);
@@ -1417,10 +1433,8 @@ async function testCliDeepScanEngine({
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
     assert.deepEqual(context.severityRubric, severityRubric);
-    if (context.workerLabel) {
-      assert.deepEqual(context.includePaths, paths);
-      assert.equal(context.userContext, userContext);
-    }
+    assert.deepEqual(context.includePaths, paths);
+    assert.equal(context.userContext, userContext);
   }
   const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
   const unsealed = await readJson(
@@ -1451,6 +1465,7 @@ async function testCliDeepScanEngine({
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.scanId, completed.scanId);
     assert.equal(joined.result.structuredContent.completion, undefined);
+    assert.equal(joined.result.structuredContent.reportPath, undefined);
     assert.match(joined.result.structuredContent.instructions, /SDK/);
   } finally {
     await parent.stop();
@@ -1695,7 +1710,6 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
-    if (deepScan.status === "failed") throw new Error(deepScan.error);
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",
@@ -1711,10 +1725,6 @@ function discoveryPromptContext(prompt: string) {
     "the discovery worker must receive its typed Standard artifact context",
   );
   return JSON.parse(match[1]);
-}
-
-function workerStates(workers: PersistedDeepScanWorker[]) {
-  return workers.map((worker) => `${worker.kind}:${worker.status}`).sort();
 }
 
 async function runWorkbench(
@@ -1761,17 +1771,6 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
-if (process.argv.includes('--output-schema')) {
-  appendFileSync(process.env.FAKE_CODEX_START_LOG + '.planner', JSON.stringify({ argv: process.argv.slice(2), stdin, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key' }) + '\\n');
-  const workItems = [
-    { title: 'Request handling', objective: 'Trace callers of the request handler.', startingPoints: ['fixture.py', 'api/source.py'] },
-    { title: 'Background processing', objective: 'Trace queued tasks to the worker.', startingPoints: ['background jobs/source.py'] },
-  ];
-  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'stdio-planner-' + process.pid }));
-  console.log(JSON.stringify({ type: 'item.completed', item: { id: 'plan', type: 'agent_message', text: JSON.stringify({ workItems }) } }));
-  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
-  process.exit(0);
-}
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
 const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
@@ -1781,13 +1780,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
     const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
-    if (context.claimedWorkerIds) {
-      const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
-      const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
-    } else {
-      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
-    }
+    writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
     console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
     console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
     process.exit(0);

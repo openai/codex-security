@@ -1,7 +1,4 @@
-import type {
-  DeepReducerContext,
-  DiscoveryBoardContext,
-} from "../artifact-io.js";
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type {
@@ -53,15 +50,6 @@ export type DeepScanWorkerMutation = Omit<
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
-/** Inputs committed atomically when a reducer finishes. */
-export interface DedupCommit {
-  id: string;
-  scanId: string;
-  newFindings: number;
-  resultManifestPath: string;
-  candidateLedgerPath?: string;
-}
-
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
@@ -71,14 +59,13 @@ export type DeepScanStore = Omit<
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
   discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
 export interface CodexWorkerRequest {
-  kind: DeepScanWorkerKind;
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -93,7 +80,6 @@ export interface CodexWorkerRequest {
 export interface CodexWorkerResult {
   threadId?: string;
   diagnostics?: CodexWorkerDiagnostic[];
-  finalResponse?: string;
 }
 
 /** SDK failure diagnostics retained alongside artifact-validation failures. */
@@ -108,17 +94,12 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
-  plan?(request: CodexWorkerRequest): Promise<DiscoveryPlan>;
-}
-
-export interface DiscoveryAssignment {
-  title: string;
-  objective: string;
-  startingPoints: string[];
-}
-
-export interface DiscoveryPlan {
-  workItems: DiscoveryAssignment[];
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {
