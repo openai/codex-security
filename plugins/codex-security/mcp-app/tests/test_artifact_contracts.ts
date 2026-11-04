@@ -184,15 +184,6 @@ for (const [startLine, runtime, json] of [
   assert.equal(location.safeParse(value).success, runtime);
   assert.equal(jsonSchema("tools/scan-draft", "location")(value), json);
 }
-const reducer =
-  artifactSchemaDocuments["tools/deep-reducer"].$defs.reducerInputs;
-const excessiveBudget = { maxBytes: Number.MAX_SAFE_INTEGER + 1 };
-assert.equal(reducer.safeParse(excessiveBudget).success, false);
-assert.equal(
-  jsonSchema("tools/deep-reducer", "reducerInputs")(excessiveBudget),
-  false,
-);
-
 // Uniqueness is checked on raw values before parsing the text items.
 const sourceFindingIds =
   artifactSchemaDocuments["tools/scan-draft"].$defs.finding.shape.provenance

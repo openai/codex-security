@@ -1314,13 +1314,8 @@ function isReceiptRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
-  let value: unknown;
-  try {
-    value = JSON.parse(line);
-  } catch {
-    value = undefined;
-  }
+function parseReceipt(line: string): MultiscanReceipt {
+  const value: unknown = JSON.parse(line);
   if (
     !isReceiptRecord(value) ||
     !["id", "repository", "revision", "outputDir"].every(
@@ -1348,9 +1343,7 @@ function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
     (value["coverage"] !== undefined &&
       !["complete", "partial", "unknown"].includes(value["coverage"] as string))
   ) {
-    throw new Error(
-      `Multiscan recovery is required: results line ${lineNumber} is not a valid receipt.`,
-    );
+    throw new Error("Invalid multiscan receipt");
   }
   if (value["status"] === "completed_with_incomplete_coverage")
     value["status"] = "completed";
@@ -1371,7 +1364,28 @@ async function readReceipts(
     throw error;
   }
   const end = contents.lastIndexOf(10) + 1;
-  if (contents.at(-1) !== 10) {
+  const lines = contents.subarray(0, end).toString("utf8").split("\n");
+  const receipts = new Map<string, MultiscanHistory>();
+  for (const [index, line] of lines.entries()) {
+    if (!line) continue;
+    let receipt: MultiscanReceipt;
+    try {
+      receipt = parseReceipt(line);
+    } catch (cause) {
+      throw new Error(
+        `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
+        { cause },
+      );
+    }
+    const id = receipt.id.toLowerCase();
+    const previous = receipts.get(id);
+    receipts.set(id, {
+      maxAttempt: Math.max(previous?.maxAttempt ?? 0, receipt.attempt),
+      // Extraction failures never start or modify a scan; keep its last receipt.
+      scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
+    });
+  }
+  if (end < contents.length) {
     const partial = contents.subarray(end);
     if (preserveInterrupted) {
       await writeFile(`${path}.interrupted-${randomUUID()}`, partial, {
@@ -1380,19 +1394,6 @@ async function readReceipts(
       });
     }
     await truncate(path, end);
-  }
-  const lines = contents.subarray(0, end).toString("utf8").split("\n");
-  const receipts = new Map<string, MultiscanHistory>();
-  for (const [index, line] of lines.entries()) {
-    if (!line) continue;
-    const receipt = parseReceipt(line, index + 1);
-    const id = receipt.id.toLowerCase();
-    const previous = receipts.get(id);
-    receipts.set(id, {
-      maxAttempt: Math.max(previous?.maxAttempt ?? 0, receipt.attempt),
-      // Extraction failures never start or modify a scan; keep its last receipt.
-      scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
-    });
   }
   return receipts;
 }

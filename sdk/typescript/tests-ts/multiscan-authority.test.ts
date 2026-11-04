@@ -27,6 +27,7 @@ import type { ScanOptions } from "../src/api.js";
 import type { CodexSecurityConfig } from "../src/config.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { rejecting } from "./support/errors.js";
+import { git } from "./git-fixture.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
@@ -40,31 +41,16 @@ async function fixture(registerOnly = false) {
   const root = await temporaryDirectory();
   const source = join(root, "source");
   await mkdir(source);
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", source, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-  git("init", "--quiet");
+  git(source, "init", "--quiet");
   await mkdir(join(source, "src"));
   await writeFile(join(source, "src/app.ts"), "export const value = 1;\n");
   await writeFile(
     join(source, ".gitattributes"),
     "src/*.ts text eol=lf filter=codexCampaignFixture\n",
   );
-  git("add", ".");
-  git(
-    "-c",
-    "user.name=Synthetic",
-    "-c",
-    "user.email=synthetic@example.test",
-    "-c",
-    "commit.gpgsign=false",
-    "commit",
-    "-qm",
-    "Synthetic baseline",
-  );
-  const revision = git("rev-parse", "HEAD");
+  git(source, "add", ".");
+  git(source, "commit", "--no-gpg-sign", "-qm", "Synthetic baseline");
+  const revision = git(source, "rev-parse", "HEAD");
   const state = join(root, "state");
   const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: state };
   const python = await resolvePluginPython({ environment });
@@ -278,25 +264,15 @@ for (const registerOnly of [false, true]) {
           join(value.source, "src/app.ts"),
           "export const value = 2;\n",
         );
-        execFileSync("git", ["-C", value.source, "add", "."]);
-        execFileSync("git", [
-          "-C",
+        git(value.source, "add", ".");
+        git(
           value.source,
-          "-c",
-          "user.name=Synthetic",
-          "-c",
-          "user.email=synthetic@example.test",
-          "-c",
-          "commit.gpgsign=false",
           "commit",
+          "--no-gpg-sign",
           "-qm",
           "Second requested revision",
-        ]);
-        revision = execFileSync(
-          "git",
-          ["-C", value.source, "rev-parse", "HEAD"],
-          { encoding: "utf8" },
-        ).trim();
+        );
+        revision = git(value.source, "rev-parse", "HEAD");
         expect(revision).not.toBe(registered.target_revision);
         await writeFile(
           value.options.inputPath,
@@ -333,11 +309,7 @@ for (const registerOnly of [false, true]) {
         close: async () => {},
         run: async (checkout) => {
           fresh++;
-          expect(
-            execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], {
-              encoding: "utf8",
-            }).trim(),
-          ).toBe(revision);
+          expect(git(checkout, "rev-parse", "HEAD")).toBe(revision);
           throw new Error(
             "Synthetic stop after preparing the requested fresh revision.",
           );
@@ -397,7 +369,6 @@ for (const kind of ["prompt", "configuration", "legacy", "seal"] as const) {
         campaign.scanPrompt = value.options.scanPrompt;
       } else if (kind === "configuration") {
         value.options.config.codexOverrides = { analytics: { enabled: false } };
-        const { workflowDigest } = await import("../src/finding-workflow.js");
         campaign.configurationDigest = workflowDigest({
           scanOptions: value.options.scanOptionsByMode,
           codex: value.options.config.codexOverrides,
@@ -632,7 +603,7 @@ test.each(["local", "include", "worktree", "host"] as const)(
       skipped: 0,
     });
     const checkout = join(value.options.outputDir, "checkouts/repo");
-    execFileSync("git", ["clone", "--quiet", value.source, checkout]);
+    git(value.root, "clone", "--quiet", value.source, checkout);
     const marker = join(value.root, "filter-called");
     const script = join(value.root, "filter.cjs");
     await writeFile(
@@ -649,29 +620,17 @@ test.each(["local", "include", "worktree", "host"] as const)(
             ".git",
             kind === "worktree" ? "config.worktree" : "config",
           );
-    execFileSync("git", [
+    git(
+      checkout,
       "config",
       "--file",
       configured,
       "filter.codexCampaignFixture.smudge",
       filter,
-    ]);
-    if (kind === "include")
-      execFileSync("git", [
-        "-C",
-        checkout,
-        "config",
-        "include.path",
-        configured,
-      ]);
+    );
+    if (kind === "include") git(checkout, "config", "include.path", configured);
     if (kind === "worktree")
-      execFileSync("git", [
-        "-C",
-        checkout,
-        "config",
-        "extensions.worktreeConfig",
-        "true",
-      ]);
+      git(checkout, "config", "extensions.worktreeConfig", "true");
     const originalConfig = await readFile(join(checkout, ".git/config"));
     await rm(join(checkout, "src/app.ts"));
     const hostConfig = process.env["GIT_CONFIG_GLOBAL"];
