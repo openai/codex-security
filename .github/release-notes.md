@@ -61,6 +61,9 @@
 - share investigation notes between workers ([#2265](https://github.com/openai/codex-security/pull/2265))
 - inspect long credential-home descendant paths ([#2294](https://github.com/openai/codex-security/pull/2294))
 - preserve documents with AppleDouble-style names ([#2312](https://github.com/openai/codex-security/pull/2312))
+- persist canceled scans with their measured cost ([#2307](https://github.com/openai/codex-security/pull/2307))
+- preserve Guardian repository identity during replay ([#2308](https://github.com/openai/codex-security/pull/2308))
+- recover the latest public findings on interruption ([#2310](https://github.com/openai/codex-security/pull/2310))
 
 <!-- release-section: highlights:end -->
 
