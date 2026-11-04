@@ -125,10 +125,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
-    const scopeInput = JSON.stringify({
-      paths: includePaths,
-      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
-    });
     const includePathsFile =
       !discovery || includePaths === undefined
         ? undefined
@@ -149,7 +145,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv).catch((error: unknown) => {
+          // A failed read produced no snapshot. Let the next worker retry it.
+          this.runtimeSettings = undefined;
+          throw error;
+        }));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -187,7 +187,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
-        await writePrivateFile(includePathsFile, scopeInput);
+        await writePrivateFile(
+          includePathsFile,
+          JSON.stringify({
+            paths: includePaths,
+            filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+          }),
+        );
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
@@ -294,13 +300,19 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
-      if (!discovery) {
-        for (const name of mcpServerNames) {
-          if (name !== "codex-security")
-            configOverrides.push(
-              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
-            );
-        }
+      if (!discovery && mcpServerNames.length) {
+        // Codex splits dotted override paths literally. Put opaque server names
+        // inside a TOML table so config merging preserves their transports.
+        configOverrides.push(
+          ...profileConfigOverrides({
+            mcp_servers: {
+              ...Object.fromEntries(
+                mcpServerNames.map((name) => [name, { enabled: false }]),
+              ),
+              "codex-security": { command: "node", enabled: false },
+            },
+          }),
+        );
       }
       const prompt =
         request.kind === "compare"

@@ -100,6 +100,12 @@ export { parseDeepScan } from "./response.js";`,
   },
 });
 
+const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
+const nativeLauncher = path.join(
+  path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
+  "bin",
+  "codex.js",
+);
 const temporaryDirectories = createTemporaryDirectories(true);
 const fakeCodexFixture = createFakeCodexFixture.bind(
   null,
@@ -166,6 +172,7 @@ try {
       "cyber access settings",
     );
     await check(t, testReportOnlyComparison);
+    await check(t, testRuntimeSnapshotReadRetry);
     if (process.platform !== "win32") {
       await check(
         t,
@@ -1061,6 +1068,29 @@ async function testSdkInvocationAndThreadCapture() {
   }, deniedWorkerPermissionProfile);
 }
 
+async function testRuntimeSnapshotReadRetry() {
+  await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    const configPath = path.join(fixture.root, "runtime.toml");
+    const savedPath = process.env.CODEX_SECURITY_CONFIG_PATH;
+    process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+    try {
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+      });
+      const request = workerRequest(promptPath, workingDirectory);
+      await writeFile(promptPath, "fixture worker");
+      await assert.rejects(executor.run(request), { code: "ENOENT" });
+      await writeFile(configPath, 'model_reasoning_effort = "low"');
+      await executor.run(request);
+      assertConfigOverrides((await readJson(fixture.markerPath)).argv, {
+        model_reasoning_effort: "low",
+      });
+    } finally {
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", savedPath);
+    }
+  });
+}
+
 async function testReportOnlyComparison() {
   return withWorkerFixture(async (fixture, _promptPath, workingDirectory) => {
     const executor = new CodexSdkWorkerExecutor({
@@ -1093,9 +1123,33 @@ async function testReportOnlyComparison() {
       "features.multi_agent_v2": false,
       web_search: "disabled",
     });
-    assert.ok(
-      invocation.argv.includes('mcp_servers."fixture.catalog".enabled=false'),
+    // Check the actual CLI parser. A TOML parser alone accepts quoted dotted
+    // override paths that the pinned native executable splits literally.
+    await writeFile(
+      path.join(fixture.root, "config.toml"),
+      '[mcp_servers."fixture.catalog"]\ncommand = "fixture-command"\n',
     );
+    const overrides = nativeConfigOverrides(invocation.argv);
+    const effective = spawnSync(
+      process.execPath,
+      [
+        nativeLauncher,
+        "mcp",
+        "get",
+        "fixture.catalog",
+        "--json",
+        ...overrides.flatMap((override) => ["--config", override]),
+      ],
+      {
+        encoding: "utf8",
+        cwd: fixture.root,
+        env: { ...process.env, CODEX_HOME: fixture.root },
+      },
+    );
+    assert.equal(effective.status, 0, effective.stderr);
+    const server = JSON.parse(effective.stdout);
+    assert.equal(server.enabled, false);
+    assert.equal(server.transport.command, "fixture-command");
   });
 }
 
@@ -1120,12 +1174,6 @@ async function testOpenAiCredentialsReachWorker() {
     );
     assert.equal(created.status, 0, created.stderr);
   }
-  const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
-  const nativeLauncher = path.join(
-    path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
-    "bin",
-    "codex.js",
-  );
   const cases: {
     openai?: string;
     codex?: string;

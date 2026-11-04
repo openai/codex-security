@@ -297,6 +297,34 @@ test("preserves complete worker usage and cost after direct engine completion", 
   assert.equal((await events.next()).done, true);
 });
 
+test("preserves the engine diagnostic when the child exits before reading its request", async () => {
+  const { root, pluginRoot } = await fixture();
+  await writeFile(
+    join(pluginRoot, "mcp", "server.mjs"),
+    'process.stderr.write("synthetic engine startup failure"); process.exitCode = 23;',
+  );
+  // Exceed the control pipe capacity so the engine closes with a write pending.
+  const events = runDeepScan({
+    preflightCommand: { command: "/synthetic/codex" },
+    pluginRoot,
+    repository: root,
+    scanDir: root,
+    scanId: "startup-failure",
+    prompt: "Synthetic audit.",
+    signal: new AbortController().signal,
+    codexOptions: {
+      configOverrides: [`synthetic="${"x".repeat(2 * 1024 * 1024)}"`],
+      env: {
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
+        CODEX_HOME: join(root, "codex-home"),
+        SYNTHETIC_THREAD_ID: "startup-session",
+      },
+    },
+  });
+  await events.next();
+  await assert.rejects(events.next(), /synthetic engine startup failure/);
+});
+
 test("waits for the direct engine to stop when the scan is canceled", async () => {
   const { root, pluginRoot } = await fixture();
   const receipt = join(root, "engine.json");
