@@ -1,3 +1,6 @@
+const { createDeepScanArtifacts } = await importSource(
+  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
+);
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,8 +13,10 @@ import {
   workerDraft,
 } from "./scan-draft-fixture.ts";
 
-const { readDeepReductionSources } = await importSource(
-  fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
+const { readAcceptedDiscovery } = await importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
 );
 const { recordCodexSecurityWorkerScanDraft, readArchivedWorkerCheckpoints } =
   await importSource(
@@ -49,8 +54,13 @@ test("three actual cumulative worker attempts retain original coverage ownership
         path.join(f.workerRoot, "attempts", `attempt-0${attempt}`),
       );
   }
-  const source = (await readDeepReductionSources(f.context)).discoveries[0]
-    .coverage;
+  const source = (
+    await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    )
+  ).coverage;
   for (const attempt of [1, 2, 3]) {
     assert.equal(
       source.surfaces.find(
@@ -111,8 +121,13 @@ for (const field of [
         }
       }
       const accepted = await readFile(f.resultPath);
-      const source = (await readDeepReductionSources(f.context)).discoveries[0]
-        .coverage;
+      const source = (
+        await readAcceptedDiscovery(
+          createDeepScanArtifacts(f.scanRoot),
+          f.worker,
+          scanId,
+        )
+      ).coverage;
       assert.equal(source[field].length, 3);
       assert.deepEqual(
         source[field].map(
@@ -206,7 +221,11 @@ test("readable retry origin survives one unsafe unrelated archive", async (t) =>
     readArchivedWorkerCheckpoints(worker),
     /archived checkpoint head is not a safe file/,
   );
-  const source = (await readDeepReductionSources(f.context)).discoveries[0];
+  const source = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
   assert.equal(source.coverage.surfaces.length, 1);
   assert.equal(source.coverage.surfaces[0].provenance.attempt, 1);
   assert.deepEqual(await readFile(f.resultPath), current);

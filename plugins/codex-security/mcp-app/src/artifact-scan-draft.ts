@@ -1201,7 +1201,32 @@ export async function reconcileAcceptedWorkerHistory(
     receiptPath,
   );
   for (const row of result.reviewState.surfaces as JsonObject[]) {
-    for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
+    const refs = (row.receiptRefs as string[] | undefined) ?? [];
+    for (const ref of refs) {
+      // A missing writer copy can fall back to its readable original on this same surface.
+      if (
+        !receiptDigests.has(JSON.stringify([false, ref])) &&
+        refs.some(
+          (original) =>
+            original.startsWith(archivePrefix) &&
+            copiedArchiveReceiptRef(workerPrefix, original) === ref &&
+            receiptDigests.has(JSON.stringify([false, original])),
+        )
+      ) {
+        try {
+          await readReceipt(ref);
+        } catch (error) {
+          if (!(
+            error instanceof Error &&
+            error.message.endsWith("the requested artifact is unavailable.")
+          ))
+            throw error;
+          row.receiptRefs = (row.receiptRefs as string[]).filter(
+            (value) => value !== ref,
+          );
+          continue;
+        }
+      }
       const normalized = receiptPath(ref)
         .split("/")
         .filter((part) => part !== "" && part !== ".")

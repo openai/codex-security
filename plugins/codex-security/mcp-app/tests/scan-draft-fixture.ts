@@ -50,35 +50,20 @@ export async function workerHistoryFixture(t: TestContext, attempt: number) {
   const output = path.join(workerRoot, "output");
   await mkdir(output, { recursive: true });
   const resultPath = path.join(output, "result.json");
-  const reducerRoot = path.join(
-    scanRoot,
-    "artifacts/deep_discovery/dedup/dedup-0001/output",
-  );
-  await mkdir(reducerRoot, { recursive: true });
   const workerContext = {
     root: output,
     repoRoot: root,
     scanId,
     layout: "worker",
   };
-  const context = {
-    root: reducerRoot,
-    repoRoot: root,
-    scanId,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot,
-      claimedWorkers: [{ id: "synthetic-worker", attempt, resultPath }],
-    },
-  };
+  const worker = { id: "synthetic-worker", attempt, resultPath };
   return {
     root,
     scanRoot,
     workerRoot,
     output,
     resultPath,
-    reducerRoot,
     workerContext,
-    context,
+    worker,
   };
 }

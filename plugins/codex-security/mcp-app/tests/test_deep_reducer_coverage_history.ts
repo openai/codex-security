@@ -1,3 +1,4 @@
+import type { ScanUnion } from "../src/deep-scan/artifact-validation.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -20,14 +21,15 @@ import {
 const source = fileURLToPath(new URL("../src", import.meta.url));
 const { recordCodexSecurityWorkerScanDraft, parsePersistedScanDraft } =
   await importSource(path.join(source, "artifact-scan-draft.ts"));
-const { readDeepReductionSources, recordCodexSecurityDeepReduction } =
-  await importSource(path.join(source, "artifact-deep-reducer.ts"));
 const {
+  readAcceptedDiscovery,
   validateDiscoveryArtifacts,
-  validateReducerArtifacts,
-  parseDeepReduction,
-  reconcileDeepReduction,
+  persistedScanUnion,
+  parseScanUnion,
 } = await importSource(path.join(source, "deep-scan/artifact-validation.ts"));
+const { mergeBatch } = await importSource(
+  path.join(source, "deep-scan/iteration.ts"),
+);
 const { archiveDirectory, createDeepScanArtifacts } = await importSource(
   path.join(source, "deep-scan/artifacts.ts"),
 );
@@ -62,45 +64,38 @@ async function artifactTree(
 
 async function publishAndReplay(
   f: Awaited<ReturnType<typeof workerHistoryFixture>>,
-  findings: unknown[] = [],
 ) {
-  const sources = await readDeepReductionSources(f.context);
-  await recordCodexSecurityDeepReduction(f.context, {
-    scanId,
-    complete: true,
-    findings,
-  });
-  const resultPath = path.join(f.reducerRoot, "result.json");
-  const input = {
-    artifacts: createDeepScanArtifacts(f.scanRoot),
-    artifactDir: f.reducerRoot,
-    resultPath,
-    reducerId: "dedup-0001",
-    sources,
-  };
-  const accepted = await validateReducerArtifacts(input, scanId);
-  const bytes = await readFile(resultPath);
-  const persisted = JSON.parse(bytes.toString());
-  assert.equal(Object.hasOwn(persisted, "sourceCoverage"), false);
-  assert.deepEqual(
-    parseDeepReduction(persisted).findings,
-    accepted.result.findings,
-  );
-  for (const name of await readdir(path.join(f.reducerRoot, "checkpoints"))) {
-    const checkpoint = JSON.parse(
-      await readFile(path.join(f.reducerRoot, "checkpoints", name), "utf8"),
+  async function aggregate() {
+    const worker = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
     );
-    assert.equal(Object.hasOwn(checkpoint, "sourceCoverage"), false);
-    parseDeepReduction(checkpoint);
+    const result: ScanUnion = { scanId, complete: true, findings: [] };
+    await mergeBatch(
+      result,
+      [worker],
+      f.scanRoot,
+      () => {
+        throw new Error("unexpected comparison");
+      },
+      (error: unknown) => {
+        throw error;
+      },
+    );
+    assert.ok(result.sourceCoverage);
+    return { ...result, sourceCoverage: result.sourceCoverage };
   }
-  const replay = await validateReducerArtifacts(input, scanId);
-  assert.deepEqual(replay.result, accepted.result);
-  assert.deepEqual(await readFile(resultPath), bytes);
-  return accepted.result;
+  const result = await aggregate();
+  const stored = persistedScanUnion(result);
+  assert.equal(Object.hasOwn(stored, "sourceCoverage"), false);
+  assert.deepEqual(parseScanUnion(stored).findings, result.findings);
+  assert.deepEqual(await aggregate(), result);
+  return result;
 }
 
 for (const close of [false, true]) {
-  test(`accepted worker ${close ? "closure" : "pending control"} survives actual reducer publication`, async (t) => {
+  test(`accepted worker ${close ? "closure" : "pending control"} survives aggregation and replay`, async (t) => {
     const f = await workerHistoryFixture(t, 2);
     const pending = {
       id: "review",
@@ -210,23 +205,15 @@ for (const changed of [false, true]) {
       },
     ]);
     assert.ok(
-      sourceCoverage.reviews.some(
+      (sourceCoverage.reviews as { attempt: number }[]).some(
         (review: { attempt: number }) => review.attempt === attempt,
       ),
     );
     assert.equal(sourceCoverage.deferred.length, 0);
-    const canonical = structuredClone(acceptedReduction);
-    const nextReduction = reconcileDeepReduction(
-      { scanId, complete: true, findings: [] },
-      [],
-      acceptedReduction,
-    );
-    assert.deepEqual(nextReduction.sourceCoverage, canonical.sourceCoverage);
-    assert.deepEqual(acceptedReduction, canonical);
     assert.deepEqual(await readFile(f.resultPath), original);
     const secondArchive = path.join(f.workerRoot, "attempts/attempt-02");
     await archiveDirectory(f.output, secondArchive);
-    f.context.deepReducer.claimedWorkers[0].attempt = 3;
+    f.worker.attempt = 3;
     await recordCodexSecurityWorkerScanDraft(
       f.workerContext,
       workerDraft([], { complete: true }),
@@ -237,7 +224,7 @@ for (const changed of [false, true]) {
       sourceCoverage.resolvedDeferred,
     );
     assert.ok(
-      repeated.sourceCoverage.reviews.some(
+      (repeated.sourceCoverage.reviews as { attempt: number }[]).some(
         (review: { attempt: number }) => review.attempt === attempt,
       ),
     );
@@ -312,7 +299,11 @@ for (const history of [
     );
     assert.deepEqual(admitted.findings, terminal.findings);
     assert.equal(admitted.reviewState.surfaces.length, 0);
-    const source = (await readDeepReductionSources(f.context)).discoveries[0];
+    const source = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
     assert.deepEqual(source.result.findings, admitted.findings);
     assert.equal(Object.hasOwn(source.result, "coverage"), false);
     assert.deepEqual(await artifactTree(f.scanRoot), before);
@@ -441,8 +432,11 @@ for (const repair of [
       scanId,
     );
     const before = await artifactTree(f.scanRoot);
-    const { coverage } = (await readDeepReductionSources(f.context))
-      .discoveries[0];
+    const { coverage } = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
     assert.deepEqual(await artifactTree(f.scanRoot), before);
     const reviewed = coverage.surfaces.find(
       (row: { label: string }) => row.label === "Synthetic review",
@@ -551,14 +545,18 @@ for (const copy of [
       );
     if (copy === "missing") await rm(path.join(f.scanRoot, copied));
     const before = await artifactTree(f.scanRoot);
-    const source = (await readDeepReductionSources(f.context)).discoveries[0];
+    const source = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
     assert.deepEqual(await artifactTree(f.scanRoot), before);
     assert.equal(source.coverage.surfaces.length, 1);
     const refs = source.coverage.surfaces[0].receiptRefs;
     const preservedOriginal = copy === "changed" || copy === "missing";
-    assert.equal(refs.length, preservedOriginal ? 3 : 2);
+    assert.equal(refs.length, copy === "changed" ? 3 : 2);
     assert.equal(refs.includes(original), preservedOriginal);
-    assert.ok(refs.includes(copied));
+    assert.equal(refs.includes(copied), copy !== "missing");
     assert.ok(
       refs.includes(`${prefix}output/${receipt}`),
       "Distinct current work must keep its own receipt even when bytes agree.",
@@ -636,8 +634,11 @@ test("a direct-file surface cannot inherit archived shared receipt ownership fro
     admitted.reviewState.surfaces[0].provenance.scanReceiptRefs,
     undefined,
   );
-  const { coverage } = (await readDeepReductionSources(f.context))
-    .discoveries[0];
+  const { coverage } = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
   assert.deepEqual(await artifactTree(f.scanRoot), before);
   const current = coverage.surfaces.find(
     (surface: { label: string }) => surface.label === repeated.label,
@@ -792,8 +793,11 @@ for (const outcome of [
       scanId,
     );
     const current = await readFile(f.resultPath);
-    const inputs = await readDeepReductionSources(f.context);
-    const accepted = inputs.discoveries[0];
+    const accepted = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
     assert.equal(accepted.result.findings.length, terminal ? 0 : 1);
     assert.equal(accepted.coverage.deferred.length, 1);
     assert.equal(
@@ -804,10 +808,7 @@ for (const outcome of [
     assert.equal(publishedExclusion.reason, exclusion.reason);
     if (terminal)
       assert.equal(publishedExclusion.finding.title, archivedFinding.title);
-    const { sourceCoverage: coverage } = await publishAndReplay(
-      f,
-      accepted.result.findings,
-    );
+    const { sourceCoverage: coverage } = await publishAndReplay(f);
     assert.equal(coverage.explicitExclusions.length, 1);
     assert.equal(coverage.deferred.length, 1);
     assert.deepEqual(await readFile(f.resultPath), current);
@@ -823,11 +824,8 @@ for (const workflowVersion of [
   "deep-security-scan/v2",
 ] as const) {
   for (const stopBeforeDraft of [false, true]) {
-    test(`typed reducer artifacts remain compatible through ${workflowVersion} ${stopBeforeDraft ? "stop and replay" : "completion"}`, async () => {
-      const root = await temporaryDirectory(
-        "reducer-format-compatibility-",
-        true,
-      );
+    test(`worker retry evidence survives ${workflowVersion} ${stopBeforeDraft ? "stop and replay" : "completion"}`, async () => {
+      const root = await temporaryDirectory("worker-retry-coverage-", true);
       try {
         const { scanDir } = await publishCoverageFixture(root, "complete", {
           workflowVersion,

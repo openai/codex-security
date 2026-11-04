@@ -43,6 +43,7 @@ import {
   type ProcessEnvironment,
   type WorkbenchCommandOptions,
 } from "./runtime.js";
+import { VERSION } from "./version.js";
 
 export interface ImportScanOptions {
   sourcePath: string;
@@ -238,6 +239,8 @@ export async function importScan(
         parentScanId: options.parentScanId,
       }),
       JSON.stringify({
+        surface: "cli",
+        packageVersion: VERSION,
         recipe: {
           repository,
           target: { kind: "repository", paths: [] },

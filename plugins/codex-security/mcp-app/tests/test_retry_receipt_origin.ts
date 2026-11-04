@@ -1,3 +1,6 @@
+const { createDeepScanArtifacts } = await importSource(
+  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
+);
 import assert from "node:assert/strict";
 import { cp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -7,8 +10,10 @@ import { importSource } from "./import-module.ts";
 import { workerDraft, scanId } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const { readDeepReductionSources } = await importSource(
-  fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
+const { readAcceptedDiscovery } = await importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
 );
 const { recordCodexSecurityWorkerScanDraft } = await importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
@@ -97,20 +102,12 @@ for (const ref of [
         );
         const resultPath = path.join(output, "result.json");
         const resultBytes = await readFile(resultPath);
-        const sources = await readDeepReductionSources({
-          root: path.join(
-            root,
-            "artifacts/deep_discovery/dedup/dedup-0001/output",
-          ),
-          repoRoot: root,
+        const worker = await readAcceptedDiscovery(
+          createDeepScanArtifacts(root),
+          { id: "discovery-0001", attempt: 2, resultPath },
           scanId,
-          layout: "reducer",
-          deepReducer: {
-            scanRoot: root,
-            claimedWorkers: [{ id: "discovery-0001", attempt: 2, resultPath }],
-          },
-        });
-        const surface = sources.discoveries[0].coverage.surfaces[0];
+        );
+        const surface = worker.coverage.surfaces[0];
         assert.equal(
           surface.provenance.attempt,
           state === "copied" ? 1 : 2,
