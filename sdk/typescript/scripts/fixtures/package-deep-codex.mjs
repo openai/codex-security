@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { appendFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
 import { parse } from "./package-toml.cjs";
@@ -21,18 +21,6 @@ async function trace(event) {
     process.env.PACKAGE_DEEP_TRACE,
     `${JSON.stringify({ ...event, python: process.env.PYTHON })}\n`,
   );
-}
-
-function expectedWorkerProfile() {
-  const directory = dirname(process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE);
-  return {
-    extends: ":read-only",
-    filesystem: {
-      ":root": "read",
-      [directory]: { ".": "deny" },
-    },
-    network: { enabled: false },
-  };
 }
 
 async function run() {
@@ -89,7 +77,11 @@ async function run() {
             config: {
               default_permissions: "codex_security_deep_scan_worker",
               permissions: {
-                codex_security_deep_scan_worker: expectedWorkerProfile(),
+                codex_security_deep_scan_worker: {
+                  extends: ":read-only",
+                  filesystem: { ":root": "read" },
+                  network: { enabled: false },
+                },
               },
             },
             origins: {},
@@ -126,11 +118,6 @@ async function run() {
       overrides.push(args[++index]);
   }
   const config = parse(overrides.join("\n"));
-  const profile = config.permissions.codex_security_deep_scan_worker;
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(profile)),
-    expectedWorkerProfile(),
-  );
   const artifacts = config.mcp_servers.cs_artifacts;
   const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
@@ -156,50 +143,28 @@ async function run() {
   });
   let complete = true;
   try {
-    if (layout === "worker") {
-      const draft = {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [],
-        },
-      };
-      const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
-      if (marker && !existsSync(marker)) {
-        await writeFile(marker, "process completed without a final artifact");
-        complete = false;
-      } else {
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: false,
-        });
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: true,
-        });
-      }
+    assert.equal(layout, "worker");
+    const draft = {
+      scanId: env.CODEX_SECURITY_SCAN_ID,
+      findings: [],
+      reviewState: {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
+    if (marker && !existsSync(marker)) {
+      await writeFile(marker, "process completed without a final artifact");
+      complete = false;
     } else {
-      assert.equal(layout, "reducer");
-      let cursor;
-      let json = "";
-      do {
-        const page = await server.call(
-          "get_codex_security_deep_reducer_inputs",
-          {
-            maxBytes: 64_000,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
-        );
-        json += page.json;
-        cursor = page.nextCursor;
-      } while (cursor !== undefined);
-      const inputs = JSON.parse(json);
-      assert.ok(inputs.discoveries.length > 0);
-      await server.call("record_codex_security_deep_reduction", {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: false,
+      });
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: true,
       });
     }
     await trace({

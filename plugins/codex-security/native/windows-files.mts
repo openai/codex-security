@@ -38,12 +38,13 @@ export function windowsFileSystem(native: WindowsBinding) {
     );
   }
 
-  function openFile(
+  function withFile<T>(
     path: Buffer,
     access: number,
+    action: (handle: WindowsHandle) => T,
     disposition: number = flags.OPEN_EXISTING,
     follow = true,
-  ): WindowsHandle {
+  ): T {
     const result = native.openWindowsFile(
       operationPath(path),
       access,
@@ -53,17 +54,7 @@ export function windowsFileSystem(native: WindowsBinding) {
         (follow ? 0 : flags.FILE_FLAG_OPEN_REPARSE_POINT),
     );
     check(result.error, path);
-    return result.handle!;
-  }
-
-  function withFile<T>(
-    path: Buffer,
-    access: number,
-    action: (handle: WindowsHandle) => T,
-    disposition: number = flags.OPEN_EXISTING,
-    follow = true,
-  ): T {
-    const handle = openFile(path, access, disposition, follow);
+    const handle = result.handle!;
     try {
       return action(handle);
     } finally {
@@ -197,23 +188,16 @@ export function windowsFileSystem(native: WindowsBinding) {
     });
   }
 
-  function* chunks(path: Buffer): Iterable<Buffer> {
-    const handle = openFile(path, flags.GENERIC_READ);
-    try {
+  function readChunks(path: Buffer, consume: (chunk: Buffer) => boolean): void {
+    withFile(path, flags.GENERIC_READ, (handle) => {
       while (true) {
         const chunk = Buffer.alloc(64 * 1024);
         const result = handle.read(chunk, 0, chunk.length);
         check(result.error, path);
-        if (result.value === 0) return;
-        yield chunk.subarray(0, result.value);
+        if (result.value === 0 || !consume(chunk.subarray(0, result.value)))
+          return;
       }
-    } finally {
-      check(handle.close(), path);
-    }
-  }
-
-  function readChunks(path: Buffer, consume: (chunk: Buffer) => boolean): void {
-    for (const chunk of chunks(path)) if (!consume(chunk)) return;
+    });
   }
 
   function readFile(path: Buffer): Buffer {
@@ -289,7 +273,6 @@ export function windowsFileSystem(native: WindowsBinding) {
     mkdir,
     mkdirPrivate,
     readInto,
-    chunks,
     readChunks,
     readFile,
     writeFile,

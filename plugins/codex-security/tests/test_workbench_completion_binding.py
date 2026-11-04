@@ -118,44 +118,108 @@ def test_cli_registration_counts_the_selected_target(
     assert saved["progress"]["coverage"]["filesTotal"] == expected
 
 
-def test_cli_registration_does_not_refresh_excluded_metadata(tmp_path: Path) -> None:
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("missing_object", ["head_blob", "base_blob", "base_tree"])
+def test_diff_registration_keeps_unknown_total_for_missing_local_objects(
+    tmp_path: Path, missing_object: str
+) -> None:
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    (target / ".gitattributes").write_text("**/.svn/** filter=fixture\n")
-    metadata = target / ".svn" / "source.txt"
-    metadata.parent.mkdir()
-    metadata.write_text("before\n")
-    subprocess.run(["git", "add", "-f", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "base fixture"], cwd=target, check=True)
-    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
-    source = target / "README.md"
-    source.write_text("updated\n")
-    subprocess.run(["git", "commit", "-qam", "head fixture"], cwd=target, check=True)
-    source.write_text("fixture\n")
-    metadata.write_text("change\n")
-    for path in (source, metadata):
-        os.utime(path, (1, 1))
-    subprocess.run(
-        ["git", "config", "filter.fixture.clean", "echo %f >> .git/filter-calls; cat"],
-        cwd=target,
-        check=True,
-    )
-    calls = target / ".git" / "filter-calls"
-    index = target / ".git" / "index"
-    before = index.read_bytes()
+    base = initialize_git_repository(target)
+    (target / "changed.py").write_text("changed = True\n")
 
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(target), *args], text=True).strip()
+
+    (target / "README.md").unlink()
+    git("add", "-A")
+    git("commit", "-qm", "Add changed file")
+    oid = git(
+        "rev-parse",
+        {
+            "head_blob": "HEAD:changed.py",
+            "base_blob": f"{base}:README.md",
+            "base_tree": f"{base}^{{tree}}",
+        }[missing_object],
+    )
+    remote = tmp_path / "remote.git"
+    git("clone", "--bare", "--no-local", str(target), str(remote))
+    git("-C", str(remote), "config", "uploadpack.allowFilter", "true")
+    git("remote", "add", "origin", remote.as_uri())
+    git("config", "remote.origin.promisor", "true")
+    git("config", "remote.origin.partialCloneFilter", "blob:none")
+    missing = target / ".git" / "objects" / oid[:2] / oid[2:]
+    missing.chmod(0o600)  # Git marks loose objects read-only on Windows.
+    missing.unlink()
+
+    state_dir = tmp_path / "state"
     registered = register_cli_scan(
-        tmp_path / "state",
+        state_dir,
         target,
         tmp_path / "scan",
-        scan_target={"kind": "working_tree", "paths": [], "base": base, "head": "HEAD"},
+        scan_target={"kind": "refs", "paths": [], "base": base, "head": "HEAD"},
+    )
+    assert registered["scopeFileCount"] is None
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] is None
+    assert (
+        subprocess.run(
+            ["git", "-C", str(target), "cat-file", "-e", oid],
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
+        ).returncode
+        != 0
     )
 
-    assert registered["scopeFileCount"] == 1
-    assert not calls.exists()
-    assert index.read_bytes() == before
-    subprocess.run(["git", "add", "-f", ".svn/source.txt"], cwd=target, check=True)
-    assert ".svn/source.txt" in calls.read_text().splitlines()
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("entry_point", ["register-cli-scan", "start-scan"])
+def test_working_tree_change_during_count_prevents_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_point: str
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    head = initialize_git_repository(target)
+    source = target / "README.md"
+    source.write_text("selected version\n")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    db = load_script("workbench_db")
+    count = db.scan_scope_file_count
+
+    def count_then_change(*args):
+        total = count(*args)
+        source.write_text("changed during registration\n")
+        return total
+
+    monkeypatch.setattr(db, "scan_scope_file_count", count_then_change)
+    if entry_point == "register-cli-scan":
+        scan_dir = tmp_path / "scan"
+        scan_dir.mkdir(mode=0o700)
+        recipe = {
+            "repository": str(target),
+            "config": {},
+            "mode": "standard",
+            "target": {"kind": "working_tree", "base": head, "head": head, "paths": []},
+        }
+        options = [
+            "--repository",
+            str(target),
+            "--scan-dir",
+            str(scan_dir),
+            "--recipe-json",
+            json.dumps(recipe),
+        ]
+    else:
+        workspace_id = str(uuid.uuid4())
+        create_workspace(state_dir, workspace_id)
+        save_workspace(
+            state_dir, workspace_id, str(target), ".", "diff", "--diff-target-kind", "working_tree"
+        )
+        options = ["--workspace-id", workspace_id, "--scan-root", str(tmp_path / "scans")]
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", entry_point, *options])
+    args = db.parse_args(db.__doc__)
+    with db.connect() as connection:
+        start = db.register_cli_scan if entry_point == "register-cli-scan" else db.start_scan
+        with pytest.raises(SystemExit, match="changed"):
+            start(connection, args)
+        assert connection.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
 
 
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:

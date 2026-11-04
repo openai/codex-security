@@ -9,7 +9,7 @@ import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { copyCredentialTestPlugin, PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
@@ -881,7 +881,6 @@ for (const mode of ["standard", "deep"] as const) {
         await client.close();
       }
     },
-    30_000,
   );
 }
 
@@ -1106,8 +1105,7 @@ test.each(["root", "profile"])(
 );
 
 async function createPluginProbe(root: string, report: string) {
-  const plugin = join(root, "plugin");
-  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  const plugin = await copyCredentialTestPlugin(root);
   const probe = join(plugin, "environment-probe.mjs");
   await writeFile(
     probe,

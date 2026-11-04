@@ -344,26 +344,8 @@ test.each([
     scenario.runtimeNode === null
       ? undefined
       : join(root, scenario.runtimeNode, "node");
-  const gitConfiguration = {
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "diff.renames",
-    GIT_CONFIG_VALUE_0: "false",
-  };
-  const configuredServers =
-    scenario.configuredOmit === undefined
-      ? undefined
-      : {
-          "codex-security": {
-            command: "test-server",
-            omit_tools_from: [...scenario.configuredOmit],
-          },
-        };
-  const runtimeEnvironment: Record<string, string> = {
-    ...gitConfiguration,
-    ...(selectedNode === undefined
-      ? {}
-      : { CODEX_MCP_NODE_PATH: selectedNode }),
-  };
+  const runtimeEnvironment: Record<string, string> =
+    selectedNode === undefined ? {} : { CODEX_MCP_NODE_PATH: selectedNode };
   const originalRuntimeEnvironment = { ...runtimeEnvironment };
   const codeMode = scenario.codeMode ?? {
     direct_only_tool_namespaces: ["existing_tools"],
@@ -375,45 +357,13 @@ test.each([
     expect(options.codexOptions.env?.["CODEX_MCP_NODE_PATH"]).toBe(
       selectedNode,
     );
-    expect(options.codexOptions.env).toMatchObject(gitConfiguration);
-    expect(
-      JSON.parse(
-        await readFile(
-          options.codexOptions.env!["CODEX_SECURITY_GIT_ENVIRONMENT_FILE"]!,
-          "utf8",
-        ),
-      ),
-    ).toEqual({});
-    expect(options.codexOptions.config?.["mcp_servers"]).toEqual(
-      configuredServers,
-    );
     throw new Error("direct route reached");
   });
   const started: CodexOptions[] = [];
-  const createCodex = mock(async (options: CodexOptions) => {
+  const createCodex = mock((options: CodexOptions) => {
     expect(options.apiKey).toBe("synthetic-routing-key");
     expect(options.env?.["CODEX_MCP_NODE_PATH"]).toBe(selectedNode);
     expect(options.env?.["CODEX_SECURITY_SCAN_DIR"]).toBe(scanDir);
-    expect(options.env).toMatchObject(gitConfiguration);
-    expect(options.config?.["mcp_servers"]).toEqual(configuredServers);
-    expect(
-      JSON.parse(
-        await readFile(
-          options.env!["CODEX_SECURITY_GIT_ENVIRONMENT_FILE"]!,
-          "utf8",
-        ),
-      ),
-    ).toEqual({});
-    const workerSnapshot = parse(
-      await readFile(
-        options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-        "utf8",
-      ),
-    )["worker_runtime"] as JsonObject;
-    expect(workerSnapshot["mcp_servers"]).toEqual(configuredServers);
-    expect(JSON.stringify(workerSnapshot)).not.toContain(
-      "CODEX_SECURITY_GIT_ENVIRONMENT",
-    );
     expect(options.config).toMatchObject({
       model: "gpt-6.1-sol",
       model_reasoning_effort: "high",
@@ -432,7 +382,16 @@ test.each([
   const client = new TestClient(
     {
       codexOverrides: {
-        ...(configuredServers && { mcp_servers: configuredServers }),
+        ...(scenario.configuredOmit === undefined
+          ? {}
+          : {
+              mcp_servers: {
+                "codex-security": {
+                  command: "test-server",
+                  omit_tools_from: [...scenario.configuredOmit],
+                },
+              },
+            }),
         model: "gpt-6.1-sol",
         model_reasoning_effort: "high",
         features: {
@@ -497,6 +456,8 @@ test.each([
   }
 });
 
+// These stock routing tests disable plugins so a background marketplace fetch
+// cannot hold the temporary Codex home open after the app-server exits.
 test("stock Codex resolves ordered profile overrides and inherited transport policy in the scan", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
@@ -513,6 +474,7 @@ test("stock Codex resolves ordered profile overrides and inherited transport pol
         config: {
           "features.code_mode.enabled": true,
           features: {
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],
@@ -566,6 +528,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         env: { CODEX_HOME: home },
         config: {
           features: {
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],

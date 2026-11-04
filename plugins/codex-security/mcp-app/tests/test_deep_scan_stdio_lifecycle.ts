@@ -7,10 +7,6 @@ import {
   assertFlagPair,
 } from "./assertions.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
-import {
-  withGitEnvironmentDeny,
-  workerPermissionProfileOverride,
-} from "./support/worker-permissions.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { parse as parseToml } from "smol-toml";
@@ -129,7 +125,7 @@ async function testDeepScanStdioLifecycle() {
     `[deep_scan]
 workers = 1
 subagents = 0
-stop_after_no_new = 1
+stop_after_no_new = 2
 max_discovery_runs = 2
 `,
   );
@@ -361,7 +357,7 @@ service_tier = "ultrafast"
       startedWorker.argv.includes('model_reasoning_summary="none"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(startedWorker, codexHome);
+    assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
@@ -640,7 +636,7 @@ service_tier = "ultrafast"
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
-    assertReadOnlyWorkerInvocation(failedWorker, codexHome);
+    assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
     assert.equal(
       activeFailureState.workers.some(
         (worker: PersistedDeepScanWorker) => worker.kind === "setup",
@@ -1011,12 +1007,14 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
-      assert.equal(completion.scan.progress.status, "complete");
-      assert.equal(completion.scan.reportAvailable, true);
+      assert.deepEqual(completion, {
+        scan: { progress: { status: "complete" }, reportAvailable: true },
+      });
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
         manifestPath,
+        reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
         completion,
       });
@@ -1100,7 +1098,7 @@ service_tier = "ultrafast"
       for (const [index, execution] of executions.entries()) {
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
         assertConfigOverrides(execution.argv, { service_tier: "default" });
-        assertReadOnlyWorkerInvocation(execution, codexHome);
+        assertReadOnlyWorkerInvocation(execution.argv, codexHome);
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1199,6 +1197,10 @@ service_tier = "ultrafast"
       assert.equal(
         retry.result.structuredContent.completion.scan.reportAvailable,
         true,
+      );
+      assert.equal(
+        retry.result.structuredContent.reportPath,
+        path.join(retry.result.structuredContent.scanDir, "report.md"),
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1419,26 +1421,20 @@ async function testCliDeepScanEngine({
   const starts = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).slice(
     startIndex,
   );
-  assert.ok(
-    starts.some((entry) => discoveryPromptContext(entry.stdin).workerLabel),
-  );
-  assert.ok(
-    starts.some(
-      (entry) => discoveryPromptContext(entry.stdin).claimedWorkerIds,
-    ),
+  assert.deepEqual(
+    starts.map((entry) => discoveryPromptContext(entry.stdin).workerLabel),
+    ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
-    assertReadOnlyWorkerInvocation(entry, codexHome);
+    assertReadOnlyWorkerInvocation(entry.argv, codexHome);
     assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
     assert.deepEqual(context.severityRubric, severityRubric);
-    if (context.workerLabel) {
-      assert.deepEqual(context.includePaths, paths);
-      assert.equal(context.userContext, userContext);
-    }
+    assert.deepEqual(context.includePaths, paths);
+    assert.equal(context.userContext, userContext);
   }
   const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
   const unsealed = await readJson(
@@ -1469,6 +1465,7 @@ async function testCliDeepScanEngine({
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.scanId, completed.scanId);
     assert.equal(joined.result.structuredContent.completion, undefined);
+    assert.equal(joined.result.structuredContent.reportPath, undefined);
     assert.match(joined.result.structuredContent.instructions, /SDK/);
   } finally {
     await parent.stop();
@@ -1627,11 +1624,7 @@ function assertWorkerArtifactEnvironment(
   assert.equal(env.CODEX_SECURITY_PYTHON_COMMAND, expectedPython);
 }
 
-function assertReadOnlyWorkerInvocation(
-  invocation: { argv: string[]; gitEnvironmentFile: string },
-  deniedHome: string,
-) {
-  const args = invocation.argv;
+function assertReadOnlyWorkerInvocation(args: string[], deniedHome: string) {
   assert.equal(args.includes("--sandbox"), false);
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(
@@ -1648,19 +1641,21 @@ function assertReadOnlyWorkerInvocation(
     ),
     false,
   );
-  const override = workerPermissionProfileOverride(args);
-  assert.deepEqual(JSON.parse(JSON.stringify(parseToml(override))), {
-    permissions: {
-      codex_security_deep_scan_worker: withGitEnvironmentDeny(
-        {
-          extends: ":read-only",
-          filesystem: { ":root": "read", [deniedHome]: { ".": "deny" } },
-          network: { enabled: false },
-        },
-        invocation.gitEnvironmentFile,
+  assert.equal(
+    args.includes('default_permissions="codex_security_deep_scan_worker"'),
+    true,
+  );
+  const overrides = args.filter((arg) =>
+    arg.startsWith("permissions.codex_security_deep_scan_worker="),
+  );
+  assert.deepEqual(
+    overrides.map((value) => parseToml(value)),
+    [
+      parseToml(
+        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"}},network={enabled=false}}`,
       ),
-    },
-  });
+    ],
+  );
 }
 
 async function waitForScanId({
@@ -1763,7 +1758,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       } else if (message.method === 'thread/read') {
         result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' }, [path.dirname(process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE)]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -1779,19 +1774,13 @@ const stdin = (await process.stdin.toArray()).join('');
 const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
 const root = process.argv[process.argv.indexOf('--cd') + 1];
 const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
-appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), gitEnvironmentFile: process.env.CODEX_SECURITY_GIT_ENVIRONMENT_FILE, stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
     const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
-    if (context.claimedWorkerIds) {
-      const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
-      const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
-    } else {
-      writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
-    }
+    writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
     console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
     console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
     process.exit(0);
