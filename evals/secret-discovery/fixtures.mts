@@ -80,8 +80,8 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
     id: string,
     path: string,
     marker: string,
-    cwes: string[],
     consumerMarker?: string,
+    cwes = ["CWE-798", "CWE-312", "CWE-313", "CWE-522"],
     endMarker = marker,
   ) => {
     const lines = files[path].split("\n");
@@ -104,23 +104,16 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
         "active-source",
         "src/client.py",
         "SERVICE_TOKEN =",
-        ["CWE-798", "CWE-312", "CWE-313", "CWE-522"],
         '"Authorization": "Bearer " + SERVICE_TOKEN',
       ),
-      positive("unused-source", "src/retired.py", "LEGACY_SERVICE_TOKEN =", [
-        "CWE-798",
-        "CWE-312",
-        "CWE-313",
-        "CWE-522",
-      ]),
+      positive("unused-source", "src/retired.py", "LEGACY_SERVICE_TOKEN ="),
       positive(
         "integration-source",
         "tests/test_delivery.py",
         "INTEGRATION_TOKEN =",
-        ["CWE-798", "CWE-312", "CWE-313", "CWE-522"],
         '"Authorization": "Bearer " + INTEGRATION_TOKEN',
       ),
-      positive("dotenv-url", "config/.env", "DATABASE_URL=", [
+      positive("dotenv-url", "config/.env", "DATABASE_URL=", undefined, [
         "CWE-798",
         "CWE-256",
         "CWE-259",
@@ -129,18 +122,13 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
         "CWE-313",
         "CWE-522",
       ]),
-      positive("account-config", "config/service.json", '"client_secret"', [
-        "CWE-798",
-        "CWE-312",
-        "CWE-313",
-        "CWE-522",
-      ]),
+      positive("account-config", "config/service.json", '"client_secret"'),
       positive(
         "private-key",
         "src/signing.mjs",
         "const signingKey",
-        ["CWE-321", "CWE-798", "CWE-312", "CWE-313"],
         "return sign(",
+        ["CWE-321", "CWE-798", "CWE-312", "CWE-313"],
         privateKey.trim().split("\n").at(-2),
       ),
     ],
@@ -165,7 +153,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
 /** Stage source only. Gold labels and secret-value lookup stay in the harness. */
 export async function writeFixture(
   repo: string,
-  fixture: ReturnType<typeof createFixture>,
+  fixture: Pick<ReturnType<typeof createFixture>, "files">,
 ) {
   for (const [relative, contents] of Object.entries(fixture.files)) {
     const destination = join(repo, relative);

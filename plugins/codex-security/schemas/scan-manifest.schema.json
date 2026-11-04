@@ -1,68 +1,32 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openai.com/codex-security/schemas/scan-manifest.schema.json",
   "title": "Codex Security sealed scan manifest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["documentType", "schemaVersion", "scan"],
   "properties": {
-    "documentType": {
-      "const": "codex-security.scan-manifest"
-    },
-    "schemaVersion": {
-      "const": "1.0"
-    },
+    "documentType": { "const": "codex-security.scan-manifest" },
+    "schemaVersion": { "const": "1.0" },
     "scan": {
       "type": "object",
-      "required": [
-        "id",
-        "producer",
-        "status",
-        "startedAt",
-        "completedAt",
-        "sealedAt",
-        "target",
-        "scope",
-        "coverageRef",
-        "findingsRef",
-        "artifacts"
-      ],
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1
-        },
+        "id": { "type": "string", "minLength": 1 },
         "producer": {
           "type": "object",
-          "required": ["name", "version"],
           "properties": {
-            "name": {
-              "type": "string",
-              "minLength": 1
-            },
-            "version": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 }
+          },
+          "required": ["name", "version"]
         },
         "status": {
           "enum": ["completed", "failed", "canceled", "interrupted"]
         },
-        "startedAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "completedAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "sealedAt": {
-          "type": "string",
-          "format": "date-time"
-        },
+        "warnings": { "$ref": "#/$defs/stringList" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "sealedAt": { "type": "string", "format": "date-time" },
         "target": {
           "type": "object",
-          "required": ["kind", "targetId", "displayName"],
           "properties": {
             "kind": {
               "enum": [
@@ -72,44 +36,25 @@
                 "directory_snapshot"
               ]
             },
-            "targetId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "displayName": {
-              "type": "string",
-              "minLength": 1
-            },
+            "targetId": { "type": "string", "minLength": 1 },
+            "displayName": { "type": "string", "minLength": 1 },
             "remote": {
               "type": "string",
               "pattern": "^(?![^:/?#]+://[^/?#]*@)[^?#]+$"
             },
-            "revision": {
-              "type": "string"
-            },
-            "baseRevision": {
-              "type": "string"
-            },
-            "headRevision": {
-              "type": "string"
-            },
+            "revision": { "type": "string" },
+            "baseRevision": { "type": "string" },
+            "headRevision": { "type": "string" },
             "snapshotDigest": {
               "type": "string",
               "pattern": "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$"
             }
           },
+          "required": ["kind", "targetId", "displayName"],
           "allOf": [
             {
-              "if": {
-                "properties": {
-                  "kind": {
-                    "const": "git_revision"
-                  }
-                }
-              },
-              "then": {
-                "required": ["revision"]
-              }
+              "if": { "properties": { "kind": { "const": "git_revision" } } },
+              "then": { "required": ["revision"] }
             },
             {
               "if": {
@@ -119,114 +64,42 @@
                   }
                 }
               },
-              "then": {
-                "required": ["snapshotDigest"]
-              }
+              "then": { "required": ["snapshotDigest"] }
             }
           ]
         },
         "scope": {
           "type": "object",
-          "required": ["includePaths", "excludePaths"],
           "properties": {
-            "includePaths": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "excludePaths": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "summary": {
-              "type": "string",
-              "minLength": 1
-            },
-            "artifactsReviewed": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "runtimeStatus": {
-              "type": "string",
-              "minLength": 1
-            },
-            "validationMode": {
-              "type": "string",
-              "minLength": 1
-            },
-            "context": {
-              "type": "string",
-              "minLength": 1
-            },
-            "limitations": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            }
-          }
+            "includePaths": { "type": "array", "items": { "type": "string" } },
+            "excludePaths": { "type": "array", "items": { "type": "string" } },
+            "summary": { "type": "string", "minLength": 1 },
+            "artifactsReviewed": { "$ref": "#/$defs/stringList" },
+            "runtimeStatus": { "type": "string", "minLength": 1 },
+            "validationMode": { "type": "string", "minLength": 1 },
+            "context": { "type": "string", "minLength": 1 },
+            "limitations": { "$ref": "#/$defs/stringList" }
+          },
+          "required": ["includePaths", "excludePaths"]
         },
         "threatModel": {
-          "description": "Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.",
           "anyOf": [
             {
               "type": "object",
-              "required": ["summary"],
               "properties": {
-                "summary": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "assets": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "trustBoundaries": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "attackerCapabilities": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "securityObjectives": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "assumptions": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                }
-              }
+                "summary": { "type": "string", "minLength": 1 },
+                "assets": { "$ref": "#/$defs/stringList" },
+                "trustBoundaries": { "$ref": "#/$defs/stringList" },
+                "attackerCapabilities": { "$ref": "#/$defs/stringList" },
+                "securityObjectives": { "$ref": "#/$defs/stringList" },
+                "assumptions": { "$ref": "#/$defs/stringList" }
+              },
+              "required": ["summary"]
             },
             {
               "type": "object",
               "properties": {
-                "format": {
-                  "const": "markdown"
-                },
+                "format": { "const": "markdown" },
                 "content": {
                   "type": "string",
                   "minLength": 1,
@@ -234,29 +107,14 @@
                 },
                 "scope": {
                   "type": "object",
-                  "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown.",
                   "properties": {
-                    "includePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
-                    },
-                    "excludePaths": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      }
-                    },
-                    "summary": {
-                      "type": "string",
-                      "minLength": 1
-                    }
+                    "includePaths": { "$ref": "#/$defs/stringList" },
+                    "excludePaths": { "$ref": "#/$defs/stringList" },
+                    "summary": { "type": "string", "minLength": 1 }
                   },
                   "required": ["includePaths"],
-                  "additionalProperties": true
+                  "additionalProperties": true,
+                  "description": "The modeled source scope, which may differ from the scan scope. Omit when unknown."
                 },
                 "origin": {
                   "enum": ["generated", "provided", "reconciled", "recovered"]
@@ -265,47 +123,70 @@
               "required": ["format", "content"],
               "additionalProperties": true
             }
-          ]
+          ],
+          "description": "Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body."
         },
         "hardening": {
           "type": "object",
-          "required": ["portfolioPath"],
           "properties": {
-            "portfolioPath": {
-              "const": "hardening/hardening.md"
-            }
-          }
+            "portfolioPath": { "const": "hardening/hardening.md" }
+          },
+          "required": ["portfolioPath"]
         },
-        "coverageRef": {
-          "const": "coverage.json"
+        "coverageRef": { "const": "coverage.json" },
+        "mode": {
+          "enum": [
+            "repository",
+            "scoped_path",
+            "diff",
+            "commit",
+            "branch_diff",
+            "working_tree",
+            "deep_repository"
+          ]
         },
-        "findingsRef": {
-          "const": "findings.json"
+        "review": {
+          "type": "object",
+          "properties": {
+            "excludedPaths": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["excludedPaths"]
         },
+        "reviewState": {
+          "type": "object",
+          "propertyNames": { "type": "string" }
+        },
+        "findingsRef": { "const": "findings.json" },
         "artifacts": {
-          "type": "array",
           "minItems": 1,
+          "type": "array",
           "items": {
             "type": "object",
-            "required": ["path", "sha256", "mediaType"],
             "properties": {
               "path": {
                 "type": "string",
                 "minLength": 1,
                 "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
               },
-              "sha256": {
-                "type": "string",
-                "pattern": "^[a-f0-9]{64}$"
-              },
-              "mediaType": {
-                "type": "string",
-                "minLength": 1
-              }
-            }
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "mediaType": { "type": "string", "minLength": 1 }
+            },
+            "required": ["path", "sha256", "mediaType"]
           }
         }
       },
+      "required": [
+        "id",
+        "producer",
+        "status",
+        "startedAt",
+        "completedAt",
+        "sealedAt",
+        "target",
+        "scope",
+        "findingsRef",
+        "artifacts"
+      ],
       "allOf": [
         {
           "properties": {
@@ -313,11 +194,7 @@
               "contains": {
                 "type": "object",
                 "required": ["path"],
-                "properties": {
-                  "path": {
-                    "const": "findings.json"
-                  }
-                }
+                "properties": { "path": { "const": "findings.json" } }
               },
               "minContains": 1,
               "maxContains": 1
@@ -325,23 +202,30 @@
           }
         },
         {
-          "properties": {
-            "artifacts": {
-              "contains": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                  "path": {
-                    "const": "coverage.json"
-                  }
-                }
-              },
-              "minContains": 1,
-              "maxContains": 1
+          "if": { "required": ["coverageRef"] },
+          "then": {
+            "properties": {
+              "artifacts": {
+                "contains": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": { "path": { "const": "coverage.json" } }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
             }
-          }
+          },
+          "else": { "required": ["mode", "review"] }
         }
       ]
+    }
+  },
+  "required": ["documentType", "schemaVersion", "scan"],
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
     }
   }
 }

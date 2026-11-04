@@ -315,12 +315,16 @@ function allocateSampleCounts(
       .filter((stratum) => stratum.count < stratum.entries.length)
       .sort(
         (left, right) =>
-          deficit(right) - deficit(left) || left.name.localeCompare(right.name),
+          deficit(right) - deficit(left) || compareText(left.name, right.name),
       );
     candidates[0].count += 1;
     remaining -= 1;
   }
   return allocations;
+}
+
+function compareText(left: string, right: string) {
+  return left.localeCompare(right, "en-US");
 }
 
 function representativeSortKey(entry: SampleEntry) {
@@ -344,7 +348,7 @@ function deterministicSystematicSample(
     return [...entries];
   }
   const sortedEntries = [...entries].sort((left, right) =>
-    representativeSortKey(left).localeCompare(representativeSortKey(right)),
+    compareText(representativeSortKey(left), representativeSortKey(right)),
   );
   const interval = sortedEntries.length / sampleCount;
   const seedValue = hash(
@@ -394,7 +398,7 @@ export function selectRepresentativeSample(
     );
     const strata = [...entriesByBucket.entries()]
       .map(([bucket, entries]) => ({ name: `${label}:${bucket}`, entries }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => compareText(left.name, right.name));
     const allocations = allocateSampleCounts(strata, requestedCount);
 
     for (const stratum of allocations) {

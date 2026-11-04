@@ -66,6 +66,7 @@ assert.deepEqual(
     restricted(
       [
         rootRead,
+        { path: { type: "path", path: "/repo" }, access: "write" },
         {
           path: { type: "path", path: "/repo/.env" },
           access: "deny",
@@ -114,21 +115,6 @@ assert.deepEqual(
   { filesystemDenies: [], literalFilesystemDenies: literalPaths },
 );
 
-const collidingDenies = [
-  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
-  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
-];
-for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
-  assert.throws(
-    () => resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
-    (error: Error) =>
-      error.name === "DeepScanNonRetryableError" &&
-      /literal path and glob denials with the same key cannot be preserved/i.test(
-        error.message,
-      ),
-  );
-}
-
 assert.throws(
   () =>
     resolveDeepWorkerParentSandbox(
@@ -147,6 +133,20 @@ assert.throws(
     error.name === "DeepScanNonRetryableError" &&
     /symbolic project-roots denial metadata/i.test(error.message),
 );
+
+const collidingDenies = [
+  { path: { type: "glob_pattern", pattern: "/repo/[ab]" }, access: "deny" },
+  { path: { type: "path", path: "/repo/[ab]" }, access: "none" },
+];
+for (const entries of [collidingDenies, [...collidingDenies].reverse()]) {
+  assert.deepEqual(
+    resolveDeepWorkerParentSandbox(restricted([rootRead, ...entries])),
+    {
+      filesystemDenies: ["/repo/[ab]"],
+      literalFilesystemDenies: ["/repo/[ab]"],
+    },
+  );
+}
 
 const pinnedFileUri = extra(
   pinnedReadOnly,
@@ -190,6 +190,21 @@ assert.deepEqual(
     filesystemDenies: [],
   },
 );
+
+assert.throws(
+  () => resolveDeepWorkerParentSandbox({}),
+  /trusted parent sandbox metadata/,
+);
+for (const entry of [
+  { access: "deny", path: { type: "path", path: "relative/secret" } },
+  { access: "deny", path: { type: "special", value: { kind: "tmpdir" } } },
+  { access: "write", path: { type: "glob_pattern", pattern: "/repo/*" } },
+]) {
+  assert.throws(
+    () => resolveDeepWorkerParentSandbox(restricted([rootRead, entry])),
+    /cannot be preserved/,
+  );
+}
 
 for (const invalid of [
   undefined,

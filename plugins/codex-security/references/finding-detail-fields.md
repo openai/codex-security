@@ -4,10 +4,13 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 
 ## Writing Rules
 
+New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, and `evidenceRefs`. Legacy aliases (`code_evidence`, `root_cause`, `dataFlow`, `data_flow`, and `evidence_refs`) are rejected on writes. Optional fields must match the current schema; invalid values are not silently repaired or removed. Historical sealed reports remain readable without changing their saved bytes.
+
 - Lead the title and `summary` with the user action and product impact.
 - Use `attackPath.summary` to briefly explain how to reproduce the issue.
 - Explain how the code causes that product behavior in `rootCause.summary`. Use plain language and avoid repetition.
 - Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `item/rename`, `itemId`, `title`, and `ItemStore.rename()`.
+- In finding prose, write numeric ranges with an en dash (`3–5`) or the word “to” (`3 to 5`).
 - Keep code out of prose. Put source snippets in `codeEvidence[].code`, then reference them from the section that explains why the snippet matters. The workspace consolidates those referenced snippets under **Root cause** so the violated invariant and its source proof stay together.
 - Root cause must be a source-backed walkthrough, not a verdict paragraph. Start with the code where user-controlled data is declared, decoded, or read; follow each meaningful call, transformation, or state transition; then show the missing control, dangerous operation, and later consumer when it affects impact.
 - Give each code-evidence item a stable `id`, a concise `label`, an exact source location, the smallest useful snippet, a `role`, and an `explanation`. Supported roles include `user_input`, `entrypoint`, `propagation`, `root_control`, `sink`, `outcome`, and `expected_control`.
@@ -170,4 +173,4 @@ This fictional item-service fixture illustrates the field shape. Its paths, iden
 }
 ```
 
-`rootCause.code` and `rootCause.language` remain supported for older producers that can provide only one snippet. New producers should use the shared `codeEvidence` catalog, assign call-stack roles, and order `rootCause.evidenceRefs` from input to outcome so the same exact source can support Root Cause, Validation, and Attack-path analysis without copying it into several fields.
+Historical sealed reports may contain `rootCause.code` and `rootCause.language`; readers preserve those snippets. New writes reject these duplicate snippet fields. Use the shared `codeEvidence` catalog and order `rootCause.evidenceRefs` from input to outcome so the same source supports Root Cause, Validation, and Attack-path analysis.
