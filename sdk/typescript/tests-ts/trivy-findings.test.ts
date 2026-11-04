@@ -6,7 +6,6 @@ import { gzipSync } from "node:zlib";
 import {
   normalizeTrivyFindings,
   readTrivyFindings,
-  trivyRepositoryUrl,
 } from "../src/trivy-findings.js";
 import { trivyReport } from "./support/trivy-import-fixtures.js";
 
@@ -35,7 +34,7 @@ test("filesystem labels and uncorroborated repository targets require a scan roo
     { ...repositoryReport(origin, origin), ArtifactType: "filesystem" },
     { ...repositoryReport(schemeLess, origin), ArtifactType: "filesystem" },
   ])
-    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+    expect(() => normalizeTrivyFindings(report)).toThrow("scanRoot");
 });
 
 test.each([
@@ -55,7 +54,6 @@ test.each([
   );
   const retained = evidence.source_data!["report"];
   expect(retained).toMatchObject({ ArtifactName: target });
-  if (target === schemeLess) expect(trivyRepositoryUrl(retained)).toBeNull();
 });
 
 test.each([
@@ -105,21 +103,12 @@ test.each([
         expect(() => normalizeTrivyFindings(report, "local", "nested")).toThrow(
           "must be .",
         );
-      } else
-        expect(() => normalizeTrivyFindings(report)).toThrow(
-          "--trivy-scan-root",
-        );
+      } else expect(() => normalizeTrivyFindings(report)).toThrow("scanRoot");
       const saved = input.findings[0]!.evidence.source_data!["report"];
       expect(saved).toMatchObject({
         ArtifactName: report.ArtifactName,
         Metadata: report.Metadata,
       });
-      if (matches || prefix !== clonedBase)
-        expect(trivyRepositoryUrl(saved)).toBe(report.Metadata.RepoURL);
-      else
-        expect(() => trivyRepositoryUrl(saved)).toThrow(
-          "different repositories",
-        );
     }
   },
 );
@@ -140,16 +129,13 @@ test.each([
   "conflicting artifact %s and origin %s require explicit inspection",
   (artifact, remote) => {
     const report = repositoryReport(artifact, remote);
-    expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+    expect(() => normalizeTrivyFindings(report)).toThrow("scanRoot");
     const retained = normalizeTrivyFindings(report, "local", "apps/web")
       .findings[0]!.evidence.source_data!["report"];
     expect(retained).toMatchObject({
       ArtifactName: artifact,
       Metadata: { RepoURL: remote },
     });
-    expect(() => trivyRepositoryUrl(retained)).toThrow(
-      "different repositories",
-    );
   },
 );
 
@@ -159,10 +145,10 @@ test("a repository display label cannot supply an SSH account omitted from Git m
     ArtifactName: "ssh://tenant-a@git.example.test:2222/org/project",
     Metadata: { RepoURL: "ssh://git.example.test:2222/org/project" },
   };
-  expect(() => normalizeTrivyFindings(report)).toThrow("--trivy-scan-root");
+  expect(() => normalizeTrivyFindings(report)).toThrow("scanRoot");
   const retained =
     normalizeAtRoot(report).findings[0]!.evidence.source_data!["report"];
-  expect(trivyRepositoryUrl(retained)).toBe(report.Metadata.RepoURL);
+
   expect(retained).toMatchObject({
     ArtifactName: report.ArtifactName,
     Metadata: report.Metadata,
@@ -184,7 +170,7 @@ test("rejects unsafe scan directories before importing even a clean local report
     "a\0b",
   ])
     expect(() => normalizeTrivyFindings(report, "local", root)).toThrow(
-      "--trivy-scan-root",
+      "scanRoot",
     );
 });
 
@@ -368,7 +354,6 @@ test("filesystem scans without inventory or Git metadata do not invent lines, ve
     ],
     locations: [{ path: "app\\package-lock.json", line: null }],
   });
-  expect(trivyRepositoryUrl(evidence.source_data?.["report"])).toBeNull();
 });
 
 function normalizeResult(result: unknown) {
@@ -694,56 +679,9 @@ test("clean native reports differ from unsupported, mixed and malformed findings
   );
 });
 
-test.each([
-  [
-    ".",
-    "git@example.invalid:group/project.git",
-    "git@example.invalid:group/project.git",
-  ],
-  [
-    "C:\\work\\project",
-    "ssh://git@example.invalid/project",
-    "ssh://git@example.invalid/project",
-  ],
-  [
-    "https://example.invalid/project",
-    undefined,
-    "https://example.invalid/project",
-  ],
-  [
-    "https://github.com/example/project",
-    "https://github.com/example/project.git",
-    "https://github.com/example/project.git",
-  ],
-  ["relative/project", "file:///work/project", null],
-  ["C:\\work\\checkout", "D:mirrors\\project.git", null],
-  ["\\\\server\\share\\checkout", "D:mirrors/project.git", null],
-  ["//server/share/checkout", "D:mirror.git", null],
-  [".", "r:org/repo", null],
-  [".", "git@host:org@ver/repo", "git@host:org@ver/repo"],
-  [".", "user@r:org/repo", "user@r:org/repo"],
-  [".", "ssh://r/org/repo", "ssh://r/org/repo"],
-] as const)(
-  "retains Git repository provenance for artifact %s and remote %s",
-  (ArtifactName, RepoURL, expected) => {
-    const report = { ...trivyReport(), ArtifactName, Metadata: { RepoURL } };
-    expect(
-      trivyRepositoryUrl(
-        normalizeTrivyFindings(report, "cloud", ".").findings[0]!.evidence
-          .source_data?.["report"],
-      ),
-    ).toBe(expected);
-  },
-);
-
-test("binding rejects conflicting repository claims; clean reports still reject unsafe remote URLs", () => {
+test("clean reports reject unsafe remote URLs", () => {
   const report = { ...trivyReport(), Results: [] };
-  expect(() =>
-    trivyRepositoryUrl({
-      ...report,
-      ArtifactName: "https://example.invalid/other",
-    }),
-  ).toThrow(/different repositories/);
+
   for (const source of [
     "https://synthetic-user@example.invalid/repo",
     "https://example\\scanner:fixture@example.invalid/repo",
@@ -763,12 +701,6 @@ test("binding rejects conflicting repository claims; clean reports still reject 
     expect(() =>
       normalizeTrivyFindings({ ...report, ArtifactName: source }, "cloud", "."),
     ).toThrow(/without credentials/);
-    expect(() => trivyRepositoryUrl({ ArtifactName: source })).toThrow(
-      /without credentials/,
-    );
-    expect(() => trivyRepositoryUrl({ Metadata: { RepoURL: source } })).toThrow(
-      /without credentials/,
-    );
   }
 });
 
@@ -784,10 +716,6 @@ test("a repository target can carry an HTTPS account without an explicit scheme"
     const header = { ArtifactName, Metadata: {} };
     expect(() =>
       normalizeAtRoot({ ...report, ...header, Results: [] }),
-    ).toThrow(/without credentials/);
-    expect(() => trivyRepositoryUrl(header)).toThrow(/without credentials/);
-    expect(() =>
-      trivyRepositoryUrl({ Metadata: { RepoURL: ArtifactName } }),
     ).toThrow(/without credentials/);
   }
   for (const ArtifactName of [
@@ -808,7 +736,7 @@ test("reads native JSON and gzip by content, applying the destination's evidence
     const path = join(directory, "report.json");
     const report = trivyReport();
     await writeFile(path, JSON.stringify(report));
-    await expect(readTrivyFindings(path)).rejects.toThrow("--trivy-scan-root");
+    await expect(readTrivyFindings(path)).rejects.toThrow("scanRoot");
     expect(await readTrivyFindings(path, "cloud", "apps/web")).toEqual(
       normalizeTrivyFindings(report, "cloud", "apps/web"),
     );
