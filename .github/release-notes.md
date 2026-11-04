@@ -58,6 +58,9 @@
 - explain the cost limit in scan dry runs ([#2295](https://github.com/openai/codex-security/pull/2295))
 - collect and import Checkmarx SAST findings ([#2269](https://github.com/openai/codex-security/pull/2269))
 - read native Trivy dependency reports in the SDK ([#2087](https://github.com/openai/codex-security/pull/2087))
+- share investigation notes between workers ([#2265](https://github.com/openai/codex-security/pull/2265))
+- inspect long credential-home descendant paths ([#2294](https://github.com/openai/codex-security/pull/2294))
+- preserve documents with AppleDouble-style names ([#2312](https://github.com/openai/codex-security/pull/2312))
 
 <!-- release-section: highlights:end -->
 

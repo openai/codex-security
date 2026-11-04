@@ -849,7 +849,9 @@ codex-security scan . --mode deep --workers 2 --subagents 0 \
 ```
 
 Deep Scan repeats Standard scans in batches of up to `--workers`, with
-`--subagents` per scan. It merges each completed batch in launch order.
+`--subagents` per scan. Workers can share what they are investigating, ask each
+other to check a source location, and reply while their audits are running. Each
+worker verifies the evidence it reports. Deep Scan merges each completed batch in launch order.
 It uses source locations, cited code and weakness descriptions to match repeated
 findings. Each group keeps its first description, all reported locations, and
 the original observations. Later batches receive the titles and primary
