@@ -110,6 +110,7 @@ EXPECTED_MIGRATIONS = [
     (64, "stabilize Linux repository generations"),
     (65, "distinguish unvalidated workspace targets"),
     (66, "retain checkout roots for Git discovery"),
+    (67, "retain rejected workspace checkout boundaries"),
 ]
 
 
@@ -1194,6 +1195,7 @@ def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
                 **before,
                 "target_id": after["target_id"],
                 "target_path_unvalidated": 0,
+                "rejected_checkout_roots_json": None,
             }
             assert after["target_id"] is not None
             if binding == "bound":
@@ -3005,7 +3007,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 66
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 67
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"

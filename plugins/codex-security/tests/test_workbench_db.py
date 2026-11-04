@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1904,8 +1905,10 @@ def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
-def test_relative_rejected_workspace_cannot_supply_git_to_later_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rejected_workspace_cannot_supply_git_to_later_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool, legacy: bool
 ) -> None:
     state = tmp_path / "state"
     requested, rejected = tmp_path / "requested", tmp_path / "rejected"
@@ -1913,18 +1916,30 @@ def test_relative_rejected_workspace_cannot_supply_git_to_later_history(
     initialize_git_repository(rejected)
     create_workspace(state, str(uuid.uuid4()), "--target-path", str(requested))
     monkeypatch.chdir(rejected)
-    workspace = create_workspace(state, str(uuid.uuid4()), "--target-path", ".")
-    assert workspace["targetPath"] == "."
+    value = "." if relative else str(rejected / "missing")
+    workspace = create_workspace(state, str(uuid.uuid4()), "--target-path", value)
+    assert workspace["targetPath"] == value
     assert workspace["setupValidation"]["valid"] is False
 
+    if legacy:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute("UPDATE workspaces SET rejected_checkout_roots_json = NULL")
+    (rejected / ".git").rename(tmp_path / "removed-git")
     monkeypatch.chdir(requested)
     monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
-    monkeypatch.setenv("PATH", str(rejected) + os.pathsep + os.environ["PATH"])
-    shim = rejected / "git"
-    shim.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexit 1\n')
-    shim.chmod(0o700)
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    host_git = shutil.which("git")
+    assert host_git
+    monkeypatch.setenv("WORKBENCH_HOST_GIT", host_git)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (rejected, trusted))))
+    for directory in (rejected, trusted):
+        shim = directory / "git"
+        shim.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexec "$WORKBENCH_HOST_GIT" "$@"\n')
+        shim.chmod(0o700)
     run_workbench(state, "list-scans", "--repository", str(requested))
     assert not (rejected / "git.ran").exists()
+    assert (trusted / "git.ran").exists() is not legacy
 
 
 def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:

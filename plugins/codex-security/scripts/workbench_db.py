@@ -90,7 +90,6 @@ from workbench_schema import (
     MIGRATIONS,
     migration_target_paths,
     recorded_git_checkout_roots,
-    unvalidated_workspace_paths,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
@@ -128,6 +127,7 @@ from workbench_target import (
     git_submodule_entries,
     git_target_metadata,
     git_worktree_context,
+    rejected_checkout_roots,
     remediation_checkout_snapshot,
     require_remediation_target,
     require_scan_target_identity,
@@ -526,11 +526,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
         optional_text(args.diff_content_digest, maximum=128) if args.mode == "diff" else None
     )
     target_path_unvalidated = False
+    rejected_roots = None
     if target_path:
-        try:
-            require_target(target_path)
-        except SystemExit:
-            target_path_unvalidated = True
         try:
             inspected = inspect_setup_values(
                 target_path,
@@ -541,7 +538,6 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision,
                 diff_content_digest,
             )
-            target_path_unvalidated = False
             target_path = inspected["target"]["targetPath"]
             default_scope = inspected["scope"]
             if inspected["diffTarget"]:
@@ -550,8 +546,12 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision = inspected["diffTarget"]["headRevision"]
                 diff_content_digest = inspected["diffTarget"].get("contentDigest")
         except SystemExit:
-            # Preserve an incomplete setup so workspace_state can report its validation error.
-            pass
+            # Setup may fail on scope even when the target itself is valid.
+            try:
+                require_target(target_path)
+            except SystemExit:
+                target_path_unvalidated = True
+                rejected_roots = rejected_checkout_roots(target_path)
     with connection:
         target_id = (
             ensure_security_target(connection, target_path)
@@ -564,8 +564,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 id, thread_id, target_id, target_path, target_title, target_summary,
                 default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, created_at, updated_at, target_path_unvalidated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                diff_content_digest, created_at, updated_at, target_path_unvalidated, rejected_checkout_roots_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -584,6 +584,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 timestamp,
                 timestamp,
                 target_path_unvalidated,
+                json.dumps(rejected_roots) if rejected_roots is not None else None,
             ),
         )
     return workspace_state(connection, workspace_id)
@@ -618,7 +619,8 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                deep_scan_config_json = ?, submitted = 1, updated_at = ?, target_path_unvalidated = 0
+                deep_scan_config_json = ?, submitted = 1, updated_at = ?, target_path_unvalidated = 0,
+                rejected_checkout_roots_json = NULL
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
@@ -3169,7 +3171,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *command_targets],
             recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
-            excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
         remediation_state.require_available(connection, args, require_scan)

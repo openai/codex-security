@@ -542,5 +542,12 @@
     "statements": [
       "ALTER TABLE security_targets ADD COLUMN git_checkout_root TEXT;"
     ]
+  },
+  {
+    "version": 67,
+    "name": "retain rejected workspace checkout boundaries",
+    "statements": [
+      "ALTER TABLE workspaces ADD COLUMN rejected_checkout_roots_json TEXT;"
+    ]
   }
 ]

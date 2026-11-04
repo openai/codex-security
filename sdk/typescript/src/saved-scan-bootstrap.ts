@@ -4,7 +4,7 @@ import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join, parse, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -37,7 +37,6 @@ interface SavedCheckout {
 interface SavedBoundaries {
   byTarget: Map<string, string | null>;
   roots: string[];
-  rejectedPaths: string[];
   complete: boolean;
 }
 
@@ -310,17 +309,11 @@ export async function savedDiscoveryRoots(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const targets = [...new Set([...paths, ...(checkouts?.rejectedPaths ?? [])])];
+  const targets = [...new Set([...paths, ...(checkouts?.roots ?? [])])];
   const currentRoots = await Promise.all(
     targets.map((path) => gitProtectionRoots(path, signal)),
   );
-  return [
-    ...new Set([
-      ...(checkouts?.roots ?? []),
-      ...targets,
-      ...currentRoots.flat(),
-    ]),
-  ];
+  return [...new Set([...targets, ...currentRoots.flat()])];
 }
 
 export function readSavedScanLifecycle(
@@ -462,29 +455,21 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
           `SELECT target_path, MAX(checkout_root) AS checkout_root
      FROM (${sources.join(" UNION ALL ")}) GROUP BY target_path`,
         );
+  const saved = workspace.has("rejected_checkout_roots_json")
+    ? "rejected_checkout_roots_json"
+    : "NULL";
   const rejected = workspace.has("target_path_unvalidated")
-    ? readRows<{ target_path: string }>(
+    ? readRows<{ root: string | null }>(
         database,
-        "SELECT DISTINCT target_path FROM workspaces WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL",
-      ).map((row) => row.target_path)
+        `SELECT DISTINCT value AS root FROM workspaces LEFT JOIN json_each(${saved})
+         WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL`,
+      ).map((row) => row.root)
     : [];
-  // A relative rejected input has no saved cwd or, on Windows, drive.
-  const absoluteRejected = rejected.filter(
-    (path) =>
-      isAbsolute(path) &&
-      (process.platform !== "win32" || parse(path).root.length > 1),
-  );
+  const roots = [...rows.map((row) => row.checkout_root), ...rejected];
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
-    roots: [
-      ...new Set(
-        rows.flatMap((row) => (row.checkout_root ? [row.checkout_root] : [])),
-      ),
-    ],
-    rejectedPaths: absoluteRejected,
-    complete:
-      absoluteRejected.length === rejected.length &&
-      rows.every((row) => row.checkout_root !== null),
+    roots: roots.filter((root): root is string => root !== null),
+    complete: !roots.includes(null),
   };
 }
 

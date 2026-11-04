@@ -62,7 +62,6 @@ def apply_migrations(
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *discovery_roots],
             recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
-            excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
         connection.execute(
@@ -160,19 +159,6 @@ def migration_target_paths(connection: sqlite3.Connection) -> list[Path]:
     return list(paths)
 
 
-def unvalidated_workspace_paths(connection: sqlite3.Connection) -> list[Path]:
-    columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
-    if "target_path_unvalidated" not in columns:
-        return []
-    return [
-        Path(row[0])
-        for row in connection.execute(
-            "SELECT DISTINCT target_path FROM workspaces "
-            "WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL"
-        )
-    ]
-
-
 def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | None:
     """Return saved boundaries, or None if any historical target lacks one."""
     target_columns = {
@@ -192,7 +178,20 @@ def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | N
     # Even an unversioned scan may have come from an unborn Git checkout.
     if any(path not in boundaries for path in migration_target_paths(connection)):
         return None
-    return set(boundaries.values())
+    roots = set(boundaries.values())
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
+    if "target_path_unvalidated" in columns:
+        saved = (
+            "rejected_checkout_roots_json" if "rejected_checkout_roots_json" in columns else "NULL"
+        )
+        for (root,) in connection.execute(
+            f"SELECT DISTINCT value FROM workspaces LEFT JOIN json_each({saved}) "
+            "WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL"
+        ):
+            if root is None:
+                return None
+            roots.add(Path(root))
+    return roots
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:

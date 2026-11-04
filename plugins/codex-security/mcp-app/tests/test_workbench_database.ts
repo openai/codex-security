@@ -1322,7 +1322,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 66),
+      String(through ?? migrations.length),
     ],
     { encoding: "utf8" },
   );
@@ -1508,7 +1508,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          66,
+          migrations.length,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1761,7 +1761,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 66
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 67
 `,
       scripts,
       databasePath,

@@ -1428,7 +1428,7 @@ def test_unvalidated_workspace_paths_exclude_tools_without_blocking_host_git(
             (candidate / name).write_text("synthetic repository executable fixture\n")
             (candidate / name).chmod(0o700)
         with WORKBENCH_TARGET["scoped_git_discovery"](
-            lambda: (repository,), excluded_roots=lambda: (candidate,)
+            lambda: (repository,), recorded_git_roots=lambda: (candidate,)
         ):
             assert trusted_git_executable(repository) == str(host / name)
 

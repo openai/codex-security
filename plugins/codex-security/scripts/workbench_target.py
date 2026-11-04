@@ -202,8 +202,10 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
 
 def _protected_repository_root(target: Path) -> Path:
     root = target.resolve()
-    if root.is_file():
-        root = root.parent
+    return _outer_checkout_root(root.parent if root.is_file() else root)
+
+
+def _outer_checkout_root(root: Path) -> Path:
     protected = root
     for ancestor in (root, *root.parents):
         try:
@@ -212,6 +214,24 @@ def _protected_repository_root(target: Path) -> Path:
             continue
         protected = ancestor
     return protected
+
+
+def rejected_checkout_roots(value: str) -> list[str] | None:
+    # Retain both spellings before a checkout marker or symlink can move.
+    try:
+        lexical = Path(value).expanduser().absolute()
+        canonical = lexical.resolve()
+        lexical_root = _outer_checkout_root(lexical)
+        roots = {
+            lexical,
+            canonical,
+            lexical_root,
+            lexical_root.resolve(),
+            _protected_repository_root(canonical),
+        }
+        return sorted(map(str, roots))
+    except (OSError, RuntimeError):
+        return None
 
 
 def pin_scoped_git(target: Path) -> str | None:
@@ -256,7 +276,6 @@ def _resolve_git_executable(
     *,
     discovery_roots: Iterable[Path] = (),
     recorded_git_roots: Iterable[Path] | None = (),
-    excluded_roots: Iterable[Path] = (),
 ) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
@@ -291,11 +310,6 @@ def _resolve_git_executable(
                         # Its former checkout is neither discoverable nor already excluded.
                         return None
                     repositories.append(repository)
-            for root in excluded_roots:
-                if not root.is_absolute():
-                    # Rejected inputs retain their literal text but not their original cwd.
-                    return None
-                repositories.extend(_historical_repository_roots(root))
     except (OSError, RuntimeError):
         return None
 
@@ -335,7 +349,6 @@ def scoped_git_discovery(
     protected_roots: Callable[[], Iterable[Path]],
     *,
     recorded_git_roots: Callable[[], Iterable[Path] | None] = lambda: (),
-    excluded_roots: Callable[[], Iterable[Path]] = lambda: (),
 ) -> Iterator[None]:
     """Pin ambient Git when an operation first needs to inspect repository targets."""
     if os.environ.get("CODEX_SECURITY_GIT") is not None:
@@ -352,7 +365,6 @@ def scoped_git_discovery(
                     None,
                     discovery_roots=(*protected_roots(), target),
                     recorded_git_roots=recorded_git_roots(),
-                    excluded_roots=excluded_roots(),
                 )
                 or ""
             )

@@ -50,14 +50,13 @@ function writePythonProbe(path: string) {
   );
 }
 
-test.each(["absolute", "relative"])(
-  "a rejected %s workspace excludes its checkout from Python discovery",
-  async (pathKind) => {
+test.each(["recorded", "legacy"])(
+  "a %s rejected workspace excludes its former checkout from Python discovery",
+  async (history) => {
     const root = await temporaryDirectory();
     const checkout = join(root, "untrusted");
     const candidate = join(checkout, "requested");
-    await mkdir(join(checkout, ".git"), { recursive: true });
-    await mkdir(candidate);
+    await mkdir(checkout);
     const database = new Database(join(root, "workbench.sqlite3"), {
       create: true,
     });
@@ -67,16 +66,24 @@ test.each(["absolute", "relative"])(
       );
       database
         .query("INSERT INTO workspaces VALUES (?, 1, NULL)")
-        .run(pathKind === "absolute" ? candidate : ".");
+        .run(candidate);
+      if (history === "recorded") {
+        database.exec(
+          "ALTER TABLE workspaces ADD COLUMN rejected_checkout_roots_json TEXT",
+        );
+        database
+          .query("UPDATE workspaces SET rejected_checkout_roots_json = ?")
+          .run(JSON.stringify([checkout, candidate]));
+      }
     } finally {
       database.close();
     }
     const boundaries = await savedCheckoutBoundaries({
       CODEX_SECURITY_STATE_DIR: root,
     });
-    expect(boundaries?.complete).toBe(pathKind === "absolute");
+    expect(boundaries?.complete).toBe(history === "recorded");
     const roots = await savedDiscoveryRoots(boundaries, []);
-    if (pathKind === "absolute") expect(roots).toContain(candidate);
+    if (history === "recorded") expect(roots).toContain(checkout);
 
     if (process.platform !== "win32") {
       const marker = join(root, "probed");
