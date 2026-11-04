@@ -1,3 +1,5 @@
+"""Check that canceling a remediation request restores the finding's prior state."""
+
 from __future__ import annotations
 
 import subprocess

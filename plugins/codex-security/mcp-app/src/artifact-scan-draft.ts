@@ -2,6 +2,7 @@ import type { JsonObject } from "./types.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
+  validateWorkerReport,
 } from "./coverage-publication.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -696,6 +697,7 @@ async function preserveScanDraft(
   warnings?: string[];
 }> {
   requireFiniteNumbers(input);
+  if (context.layout === "worker") validateWorkerReport(input);
   const warnings: string[] = [];
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation =

@@ -34,6 +34,7 @@ from workbench_target import (
 
 
 def stable_target_id(target: Path) -> str:
+    """Hash the supplied path spelling into the workbench ID for a local workspace."""
     digest = hashlib.sha256(f"local-workspace\0{target}".encode()).hexdigest()
     return f"target_sha256_{digest}"
 
@@ -962,6 +963,7 @@ def backfill_repository_identities(connection: sqlite3.Connection) -> None:
 
 
 def backfill_security_targets(connection: sqlite3.Connection) -> None:
+    """Fill missing target IDs on scans and workspaces in the caller’s transaction."""
     workspace_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
     validated_workspace = (
         " AND target_path_unvalidated = 0" if "target_path_unvalidated" in workspace_columns else ""
@@ -1106,6 +1108,7 @@ def register_security_target(
 def ensure_security_target(
     connection: sqlite3.Connection, target_path: str, *, verify_ownership: bool = True
 ) -> str:
+    """Return the stable ID for the registered target and its verified ownership."""
     return register_security_target(
         connection, target_path, verify_ownership=verify_ownership
     ).target_id

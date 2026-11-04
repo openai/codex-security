@@ -53,6 +53,12 @@ def apply_migrations(
     immediate: bool = False,
     discovery_roots: tuple[Path, ...] = (),
 ) -> None:
+    """Apply missing schema versions and repair supported historical migrations.
+
+    Commit pending work on the connection before starting the migration transaction.
+    Set immediate to acquire the SQLite write lock up front. The backfill callback
+    links older scans and workspaces to stable targets when required.
+    """
     from workbench_target import scoped_git_discovery
 
     connection.commit()
@@ -275,6 +281,11 @@ def repair_thread_scoped_workspaces_migration(connection: sqlite3.Connection) ->
 
 
 def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
+    """Repair a partial target-ID migration and return whether the schema required repair.
+
+    Create missing target tables, columns, and indexes. Clear scan references
+    to missing target records so they can be backfilled.
+    """
     workspace_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
     scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
     existing_objects = {
@@ -433,6 +444,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
 
 
 def repair_additive_migration(connection: sqlite3.Connection, version: int) -> None:
+    """Replay the column additions from one historical migration, skipping columns already present."""
     sql = next(sql for migration_version, _, sql in MIGRATIONS if migration_version == version)
     for statement in sql_statements(sql):
         add_migration_column(connection, statement)

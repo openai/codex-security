@@ -1,3 +1,5 @@
+"""Exercise scan directory reuse and protect the active database while archiving or rolling back."""
+
 from __future__ import annotations
 
 import argparse

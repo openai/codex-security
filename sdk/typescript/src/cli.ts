@@ -131,8 +131,15 @@ import {
 import { listLocalExternalFindings } from "./external-findings-local.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
 import { prepareSonarImport } from "./sonar-import.js";
-import { EXTERNAL_FINDINGS_READERS } from "./external-findings-read.js";
-import type { ExternalFindings } from "./external-findings.js";
+import {
+  EXTERNAL_FINDINGS_PROVIDERS,
+  EXTERNAL_FINDINGS_READERS,
+} from "./external-findings-read.js";
+import {
+  externalImportDisposition,
+  NoPublishableFindingsError,
+  type ExternalFindings,
+} from "./external-findings.js";
 import {
   publishPatchReview,
   resolvePatchReviewPublisher,
@@ -428,7 +435,6 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
-const TOKEN_OUTPUT_OPTION = /^--token-(?:count|limit|offset)(?:=|$)/u;
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -2173,7 +2179,7 @@ export async function main(
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
   let rawExportOutput = false;
-  let escapeHostedOutput = false;
+  let escapeFrameworkOutput = false;
   let batchedVerification = false;
   let deferredVerificationDiagnostic: string | undefined;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
@@ -2208,8 +2214,7 @@ export async function main(
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
         const data = { status: "failed", code, message };
-        if (argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument)))
-          filteredScanFailure = { format, data };
+        if (frameworkFlags.filterOutput) filteredScanFailure = { format, data };
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
@@ -3728,6 +3733,7 @@ export async function main(
           const writeDiagnostic = (message: string): void =>
             notify(() => errorOutput.write(message));
           const machineFormat = format === "json" || format === "jsonl";
+          escapeFrameworkOutput = !machineFormat;
           if (argv.includes("--full-output") && !machineFormat) {
             structuredError = true;
             exitCode = 2;
@@ -3745,6 +3751,17 @@ export async function main(
             format === "toon" &&
             !formatExplicit &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const showExclusions = (excluded: ExternalFindings["excluded"]) => {
+            const sample = excluded.slice(0, 5);
+            for (const item of sample)
+              writeDiagnostic(
+                `Excluded item ${item.position}: ${diagnosticValue(item.reason)}\n`,
+              );
+            if (sample.length < excluded.length)
+              writeDiagnostic(
+                `Showing ${sample.length} of ${excluded.length} exclusions. Use --format json for every position and reason.\n`,
+              );
+          };
           const confirmImport = async (
             preview: ExternalFindings,
             showPreview: () => void,
@@ -3844,10 +3861,7 @@ export async function main(
                 writeDiagnostic(
                   `Local repository: ${diagnosticValue(preview.repository)}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}\n`,
                 );
-                for (const excluded of preview.excluded)
-                  writeDiagnostic(
-                    `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-                  );
+                showExclusions(preview.excluded);
                 for (const finding of preview.findings.slice(0, 5))
                   writeDiagnostic(
                     `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
@@ -3856,19 +3870,28 @@ export async function main(
                   `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
                 );
               };
+              const disposition = externalImportDisposition(preview);
+              if (disposition === "excluded" || disposition === "failed")
+                throw new NoPublishableFindingsError(preview);
               if (!structured) showPreview();
               if (options.dryRun) {
                 if (humanSummary)
                   renderedOutput = "Dry run complete. No findings stored.\n";
                 return { ...preview, dryRun: true };
               }
-              if (!(await confirmImport(preview, showPreview))) {
+              if (
+                disposition === "ready" &&
+                !(await confirmImport(preview, showPreview))
+              ) {
                 if (humanSummary) renderedOutput = "No findings stored.\n";
                 return { imported: false, preview };
               }
               const result = await prepared.import();
               if (result.excluded.length > 0) exitCode = 1;
-              const summary = `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
+              const summary =
+                disposition === "empty"
+                  ? "The report contains no findings. Nothing was stored.\n"
+                  : `Local import complete.\nCreated: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Excluded: ${result.excluded.length}\nImported evidence remains not assessed by Codex.\nRead stored evidence with codex-security findings imported REPOSITORY.\n`;
               if (humanSummary) renderedOutput = summary;
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
@@ -3893,10 +3916,7 @@ export async function main(
                 writeDiagnostic(
                   `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
                 );
-              for (const excluded of preview.excluded)
-                writeDiagnostic(
-                  `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
-                );
+              showExclusions(preview.excluded);
               writeDiagnostic(
                 `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
               );
@@ -3939,14 +3959,40 @@ export async function main(
               writeDiagnostic(renderExternalPublicationSummary(result));
             return { ...result };
           } catch (error) {
+            const noFindings =
+              error instanceof NoPublishableFindingsError ? error : undefined;
+            const selection = noFindings?.selection;
+            if (
+              selection &&
+              externalImportDisposition(selection) === "empty" &&
+              !controller.signal.aborted
+            ) {
+              const message =
+                "The report contains no findings. Nothing was uploaded.\n";
+              if (humanSummary) renderedOutput = message;
+              else if (!structured) writeDiagnostic(message);
+              return {
+                ...selection,
+                status: "empty",
+                published: false,
+                ready: 0,
+                repository: options.repository,
+                source: {
+                  provider: EXTERNAL_FINDINGS_PROVIDERS[options.provider],
+                  source_key: options.sourceKey,
+                },
+                ...(options.dryRun ? { dryRun: true } : {}),
+              };
+            }
+            const message = diagnosticValue(noFindings?.summary ?? error);
             if (argv.includes("--full-output") && machineFormat)
               failedResultOutput = {
                 format,
                 code: "IMPORT_FAILED",
-                message: diagnosticValue(error),
+                message,
               };
             reportPublicationError(
-              diagnosticValue(error),
+              message,
               controller.signal.aborted ? controller.signal.reason : undefined,
             );
             if (error instanceof ExternalPublicationError) {
@@ -3954,11 +4000,22 @@ export async function main(
                 renderedOutput = renderExternalPublicationSummary(error.result);
               return { ...error.result };
             }
-            const failure = { status: "failed", error: diagnosticValue(error) };
+            if (selection && !machineFormat) showExclusions(selection.excluded);
+            const failure = {
+              status: "failed",
+              error: message,
+              ...(machineFormat &&
+                selection && {
+                  read: selection.read,
+                  ready: 0,
+                  excluded: selection.excluded,
+                  report: selection.report,
+                }),
+            };
             if (
               machineFormat &&
-              !argv.includes("--full-output") &&
-              argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
+              (!argv.includes("--full-output") || selection !== undefined) &&
+              frameworkFlags.filterOutput
             )
               filteredScanFailure = { format, data: failure };
             return structured ? failure : undefined;
@@ -4203,7 +4260,7 @@ export async function main(
       fetch: dependencies.hostedScannerFetch,
     };
     function setHostedOutputFormat(format?: string) {
-      escapeHostedOutput =
+      escapeFrameworkOutput =
         format === "md" || (format === "toon" && output.isTTY === true);
     }
     const semgrepReport = z
@@ -6366,7 +6423,7 @@ export async function main(
         const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = async (chunk: string): Promise<void> => {
           if (structured) {
-            if (!batchedVerification || frameworkFlags.tokenOutput)
+            if (!batchedVerification || frameworkFlags.tokenArguments.length)
               deferredVerificationDiagnostic = chunk;
           } else {
             await writeCliOutput(errorOutput, chunk).catch(() => {});
@@ -7598,25 +7655,18 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  let frameworkOutput = frameworkCapture.text();
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
     // and token controls without running the saved scan a second time.
     const failureOutput = captureOutput();
-    const failureArguments = ["render", "--format", filteredScanFailure.format];
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (!TOKEN_OUTPUT_OPTION.test(argument)) continue;
-      const separator = argument.indexOf("=");
-      if (separator !== -1)
-        failureArguments.push(
-          argument.slice(0, separator),
-          argument.slice(separator + 1),
-        );
-      else {
-        failureArguments.push(argument);
-        if (argument !== "--token-count") failureArguments.push(argv[++index]!);
-      }
-    }
+    const failureArguments = [
+      "render",
+      "--format",
+      filteredScanFailure.format,
+      ...frameworkFlags.tokenArguments,
+    ];
+    if (failedResultOutput) failureArguments.push("--full-output");
     const failure = filteredScanFailure.data;
     await Cli.create("codex-security-scan-error")
       .command("render", { run: () => failure })
@@ -7624,10 +7674,10 @@ export async function main(
         stdout: failureOutput.stream.write,
         exit: () => undefined,
       });
-    renderedOutput = failureOutput.text();
+    if (failedResultOutput) frameworkOutput = failureOutput.text();
+    else renderedOutput = failureOutput.text();
   }
-  let frameworkOutput = frameworkCapture.text();
-  if (escapeHostedOutput)
+  if (escapeFrameworkOutput)
     frameworkOutput = escapeTerminalText(frameworkOutput, true);
   const writeUpdateNotice = () => {
     if (notice === undefined || batchedVerification) return;
@@ -7672,9 +7722,19 @@ export async function main(
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
+        // Re-rendered failures carry the unfiltered page, but the command's
+        // original metadata describes the actual invocation.
+        const meta =
+          filteredScanFailure && isJsonObject(envelope["meta"])
+            ? {
+                ...JSON.parse(frameworkCapture.text()).meta,
+                nextOffset: envelope["meta"]["nextOffset"],
+              }
+            : envelope["meta"];
         frameworkOutput = `${JSON.stringify(
           {
             ...envelope,
+            meta,
             ok: false,
             error: {
               code: failedResultOutput.code ?? "SCAN_FAILED",
@@ -7700,7 +7760,7 @@ export async function main(
     if (deferredVerificationDiagnostic !== undefined) {
       // Token output can omit the diagnostic. Otherwise a buffered stderr
       // write is optional once the complete structured failure is on stdout.
-      if (frameworkFlags.tokenOutput) {
+      if (frameworkFlags.tokenArguments.length) {
         await writeCliOutput(errorOutput, deferredVerificationDiagnostic).catch(
           () => {},
         );
@@ -8004,7 +8064,8 @@ function frameworkOutputFlags(argv: readonly string[]) {
   let hideDisabledRoute = false;
   let fullOutput = false;
   let rawCollector = false;
-  let tokenOutput = false;
+  const tokenArguments: string[] = [];
+  let filterOutput = false;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
     if (
@@ -8016,9 +8077,15 @@ function frameworkOutputFlags(argv: readonly string[]) {
       hideDisabledRoute = true;
     if (value === "--full-output") fullOutput = true;
     if (value === "--json") rawCollector = true;
-    if (TOKEN_OUTPUT_OPTION.test(value)) tokenOutput = true;
+    if (value === "--token-count") tokenArguments.push(value);
     if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
       const operand = argv[++index];
+      if (value === "--filter-output") filterOutput = true;
+      if (
+        (value === "--token-limit" || value === "--token-offset") &&
+        operand !== undefined
+      )
+        tokenArguments.push(value, operand);
       if (value === "--format")
         rawCollector =
           operand === "json" || operand === "jsonl" || operand === "yaml";
@@ -8027,7 +8094,8 @@ function frameworkOutputFlags(argv: readonly string[]) {
   return {
     hideDisabledRoute,
     rawCollector: rawCollector && !fullOutput,
-    tokenOutput,
+    filterOutput,
+    tokenArguments,
   };
 }
 
@@ -11199,17 +11267,19 @@ function scanFailureMessage(
       : nativeRefreshRecovery;
   const detail =
     error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
-  if (
-    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
-      message,
-    )
-  ) {
+  const refreshFailure = message.match(
+    /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu,
+  );
+  if (refreshFailure) {
+    const recovery =
+      refreshFailure[1]?.toLowerCase() === "was already used"
+        ? "The refresh token was already used. Run"
+        : "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. Otherwise run";
     return (
       detail +
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
       "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
-      "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
-      "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
+      `${recovery} 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'.`
     );
   }
   switch (classification) {
