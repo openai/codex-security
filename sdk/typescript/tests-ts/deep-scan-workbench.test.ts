@@ -79,7 +79,7 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
   >;
 }
 
-test("recovers an interrupted publication when the filesystem rejects hardlinks", async () => {
+test("recovers a legacy publication copied without hardlinks", async () => {
   const root = await temporaryDirectories.create(
     "codex-security-deep-copy-recovery-",
   );
@@ -90,7 +90,7 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
   const result = runPython(python!, [
     "-c",
     [
-      "import errno, json, sqlite3, sys",
+      "import json, shutil, sqlite3, sys",
       "from pathlib import Path",
       "sys.path.insert(0, sys.argv[1])",
       "import deep_scan_workbench as deep_scan",
@@ -102,13 +102,10 @@ test("recovers an interrupted publication when the filesystem rejects hardlinks"
       "ledger.parent.mkdir(parents=True)",
       "snapshot.parent.mkdir(parents=True)",
       "ledger.write_text('old ledger\\n', encoding='utf-8')",
-      "def reject_hardlink(source, destination):",
-      "    raise OSError(errno.ENOTSUP, 'hardlinks are unavailable')",
-      "deep_scan.os.link = reject_hardlink",
-      "deep_scan.create_publication_copy(ledger, backup)",
+      "shutil.copyfile(ledger, backup)",
       "snapshot.write_text('new ledger\\n', encoding='utf-8')",
       "ledger.unlink()",
-      "deep_scan.create_publication_copy(snapshot, ledger)",
+      "shutil.copyfile(snapshot, ledger)",
       "assert ledger.read_bytes() == snapshot.read_bytes()",
       "connection = sqlite3.connect(':memory:')",
       "connection.row_factory = sqlite3.Row",

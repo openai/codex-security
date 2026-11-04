@@ -322,9 +322,28 @@ export async function savedDiscoveryRoots(
   ];
 }
 
+export function readSavedScanLifecycle(
+  environment: ProcessEnvironment,
+  scanId: string,
+): unknown {
+  return readSnapshot(
+    workbenchDatabasePath(environment),
+    (database) => {
+      const [row] = readRows<{ snapshot: string }>(
+        database,
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?",
+        scanId,
+      );
+      return row && JSON.parse(row.snapshot);
+    },
+    0,
+  );
+}
+
 function readSnapshot<T>(
   path: string,
   select: (database: BootstrapDatabase) => T,
+  timeout: 0 | 5000 = 5000,
 ): T {
   const require = createRequire(import.meta.url);
   const bun = process.versions["bun"] !== undefined;
@@ -353,7 +372,7 @@ function readSnapshot<T>(
           }
         : { readOnly: true },
     );
-    database.exec("PRAGMA busy_timeout = 5000");
+    database.exec(`PRAGMA busy_timeout = ${timeout}`);
     database.exec("PRAGMA query_only = ON");
     // Select scans and their saved boundaries from the same snapshot.
     database.exec("BEGIN");

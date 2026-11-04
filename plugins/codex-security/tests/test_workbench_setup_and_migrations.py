@@ -104,10 +104,12 @@ EXPECTED_MIGRATIONS = [
     (58, "record the final Deep Scan reviewed surface count"),
     (59, "retain the launching Deep Scan service tier"),
     (60, "record classification rubric provenance"),
-    (61, "persist repository identities"),
-    (62, "stabilize Linux repository generations"),
-    (63, "distinguish unvalidated workspace targets"),
-    (64, "retain checkout roots for Git discovery"),
+    (61, "record scan launch attribution"),
+    (62, "project scan lifecycle snapshots"),
+    (63, "persist repository identities"),
+    (64, "stabilize Linux repository generations"),
+    (65, "distinguish unvalidated workspace targets"),
+    (66, "retain checkout roots for Git discovery"),
 ]
 
 
@@ -1110,7 +1112,7 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
 
 @pytest.mark.cross_platform
 def test_registration_retains_the_widest_observed_checkout(tmp_path: Path) -> None:
-    connection, migrate = create_historical_database(64)
+    connection, migrate = create_historical_database(66)
     with closing(connection):
         migrate(connection)
         target = tmp_path / "checkout" / "nested" / "target"
@@ -1141,7 +1143,7 @@ def test_checkout_root_is_not_inferred_from_legacy_paths(
     target = tmp_path / "nested" / "target"
     initialize_git_repository(target.parent)
     target.mkdir()
-    connection, migrate = create_historical_database(64)
+    connection, migrate = create_historical_database(66)
     with closing(connection):
         if legacy_registration == "target":
             connection.execute(
@@ -1169,7 +1171,7 @@ def test_checkout_root_is_not_inferred_from_legacy_paths(
 def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
     tmp_path: Path, binding: str
 ) -> None:
-    connection, apply_migrations = create_historical_database(63)
+    connection, apply_migrations = create_historical_database(65)
     with closing(connection):
         target_path = str(tmp_path / "unavailable")
         target_id = None if binding == "unbound" else "legacy-target"
@@ -1204,23 +1206,93 @@ def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
             )
 
 
-def test_scan_model_migration_preserves_existing_scans() -> None:
+@pytest.mark.parametrize("complete", [False, True])
+def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
     insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
-    insert_legacy_scan(connection, timestamp)
+    status = "complete" if complete else "running"
+    finished_at = "2026-07-01T01:00:00Z" if complete else None
+    insert_legacy_scan(connection, timestamp, status=status, completed_at=finished_at)
     connection.commit()
 
     apply_migrations(connection)
 
-    scan = connection.execute(
-        "SELECT status, model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
-        ("legacy-scan",),
-    ).fetchone()
-    assert scan["status"] == "running"
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", ("legacy-scan",)).fetchone()
+    assert scan["status"] == status
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+    assert scan["launch_surface"] is None
+    assert scan["launch_package_version"] is None
+    assert scan["launch_plugin_version"] is None
+    assert scan["launch_kind"] is None
+    (snapshot,) = connection.execute(
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?", ("legacy-scan",)
+    ).fetchone()
+    assert json.loads(snapshot) == {
+        "scanId": "legacy-scan",
+        "mode": "standard",
+        "startedAt": timestamp,
+        "status": "completed" if complete else "running",
+        "finishedAt": finished_at,
+        "hasReportableFindings": None,
+        "surface": None,
+        "packageVersion": None,
+        "pluginVersion": None,
+        "mock": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("recipe", "kind", "mode", "is_mock", "plugin_version", "registered_version"),
+    (
+        ('{"mock":true,"pluginVersion":"0.4.0"}', "mock", "standard", True, "0.4.0", None),
+        ('{"import":{},"pluginVersion":"0.5.0"}', "import", "import", False, "0.5.0", None),
+        ('{"mode":"standard","pluginVersion":"0.6.0"}', None, "standard", None, "0.6.0", None),
+        ('{"pluginVersion":"0.6.0"}', None, "standard", None, "0.7.0", "0.7.0"),
+        ('{"pluginVersion":"  "}', None, "standard", None, None, None),
+        ('{"pluginVersion":42}', None, "standard", None, None, None),
+        ('{"mode":"standard"}', None, "standard", None, None, None),
+        ('{"pluginVersion":', None, "standard", None, None, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "write_after_upgrade", [False, True], ids=["before-upgrade", "after-upgrade"]
+)
+def test_scan_lifecycle_migration_recognizes_saved_recipes(
+    recipe: str,
+    kind: str | None,
+    mode: str,
+    is_mock: bool | None,
+    plugin_version: str | None,
+    registered_version: str | None,
+    write_after_upgrade: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(64 if registered_version else 63)
+    if write_after_upgrade:
+        apply_migrations(connection)
+
+    timestamp = "2026-07-01T00:00:00Z"
+    with connection:
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        attribution = {"launch_plugin_version": registered_version} if registered_version else {}
+        insert_legacy_scan(connection, timestamp, **attribution)
+        connection.execute("UPDATE scans SET recipe_json = ? WHERE id = ?", (recipe, "legacy-scan"))
+
+    if not write_after_upgrade:
+        apply_migrations(connection)
+
+    stored_kind, snapshot = connection.execute(
+        "SELECT launch_kind, snapshot FROM scans JOIN scan_lifecycles ON scan_id = id"
+    ).fetchone()
+    assert stored_kind == kind
+    lifecycle = json.loads(snapshot)
+    assert lifecycle["mode"] == mode
+    assert lifecycle["mock"] is is_mock
+    assert lifecycle["surface"] is None
+    assert lifecycle["packageVersion"] is None
+    assert lifecycle["pluginVersion"] == plugin_version
 
 
 @pytest.mark.parametrize(
@@ -2136,6 +2208,10 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
+        # Recreate the historical schema before removing its recipe column.
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         rename_migration(connection, 22, "dynamic scan execution profiles")
@@ -2860,7 +2936,7 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
                 for row in connection.execute("SELECT * FROM schema_migrations")
             }
             assert migrations["editable scan names"][0] == 42
-            assert migrations["persist repository identities"][0] == 61
+            assert migrations["persist repository identities"][0] == 63
             for name, timestamp in timestamps.items():
                 assert migrations[name][1] == timestamp
 
@@ -2896,7 +2972,7 @@ def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spell
         )
 
 
-@pytest.mark.parametrize("before_version", [61, 62])
+@pytest.mark.parametrize("before_version", [63, 64])
 @pytest.mark.parametrize("with_scan", [False, True])
 def test_identity_migrations_skip_unavailable_historical_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
@@ -2917,7 +2993,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
         "VALUES (?, ?, ?, ?, ?)",
         (workspace_id, target_id, historical, timestamp, timestamp),
     )
-    old_identity = "repository_sha256_" + "1" * 64 if before_version == 62 else None
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 64 else None
     if old_identity is not None:
         connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
     if with_scan:
@@ -2929,7 +3005,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 64
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 66
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"
@@ -2964,7 +3040,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
 def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    connection, apply_migrations = create_historical_database(62)
+    connection, apply_migrations = create_historical_database(64)
     connection.executescript("""
         CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
         WHEN NEW.id <> 'existing-target'
@@ -3003,7 +3079,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         initialize_git_repository(repository)
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
-    connection, _ = create_historical_database(61)
+    connection, _ = create_historical_database(63)
     timestamp = "2026-08-01T00:00:00Z"
     destination = tmp_path / "destination"
     if executable_source.startswith("redirected-"):
@@ -3066,7 +3142,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
 def test_identity_migration_merges_partially_sequenced_completion_history(
     clock_reversed: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(62)
+    connection, apply_migrations = create_historical_database(64)
     connection.execute(
         "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
     )
@@ -3118,7 +3194,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
     connection, apply_migrations = create_historical_database(
-        61 if migration == "pre-release" else 62
+        63 if migration == "pre-release" else 64
     )
     import workbench_target as target
     import workbench_target_state as state
@@ -3132,7 +3208,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
     if migration == "pre-release":
         connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (61, 'persist repository identities', ?)",
+            "INSERT INTO schema_migrations VALUES (63, 'persist repository identities', ?)",
             (timestamp,),
         )
     missing = tmp_path / "unavailable" / "old-checkout"
@@ -3210,7 +3286,7 @@ def test_identity_migrations_respect_git_availability_for_unavailable_history(
 def test_current_database_does_not_inspect_historical_git_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection, apply_migrations = create_historical_database(62)
+    connection, apply_migrations = create_historical_database(64)
     connection.executemany(
         "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
         "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",

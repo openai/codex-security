@@ -1,4 +1,5 @@
 import type { JsonObject, ScanOptions } from "../src/index.js";
+import { BUNDLED_PLUGIN_VERSION, VERSION } from "../src/version.js";
 import {
   mkdir,
   mkdtemp,
@@ -26,7 +27,7 @@ import { rejecting, throwing } from "./support/errors.js";
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(workbench: typeof runWorkbench = runWorkbench) {
   const root = await mkdtemp(join(await realpath(tmpdir()), "mock-scan-test-"));
   roots.track(root);
   const repository = join(root, "repository");
@@ -47,7 +48,7 @@ async function fixture() {
     { pythonPath: python! },
     {
       environment,
-      runWorkbench,
+      runWorkbench: workbench,
       resolvePluginPython: async () => python!,
       prepareRuntime: rejecting("Mock scan initialized Codex"),
       matchFindings: rejecting("Mock scan called model matching"),
@@ -62,6 +63,9 @@ test("mock scans seal real artifacts and index shared and unique findings withou
   const registrations: Array<
     Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
   > = [];
+  const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+  onLifecycle.mockImplementationOnce(rejecting("observer unavailable"));
+  const onObserverError = mock<NonNullable<ScanOptions["onObserverError"]>>();
   try {
     const first = await client.run(repository, {
       mock: true,
@@ -69,6 +73,8 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       maxCostUsd: 0.01,
       failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
+      onLifecycle,
+      onObserverError,
       onScanRegistered: (scan) => {
         callbacks.push("registered");
         registrations.push(scan);
@@ -77,6 +83,33 @@ test("mock scans seal real artifacts and index shared and unique findings withou
     });
     const second = await client.run(repository, { mock: true });
     expect(callbacks).toEqual(["registered", "started"]);
+    const launch = {
+      scanId: first.manifest.scan.id,
+      mode: "standard",
+      startedAt: first.manifest.scan.startedAt,
+      status: "running",
+      finishedAt: null,
+      hasReportableFindings: null,
+      surface: "sdk",
+      packageVersion: VERSION,
+      pluginVersion: BUNDLED_PLUGIN_VERSION,
+      mock: true,
+    } as const;
+    expect(onLifecycle.mock.calls).toEqual([
+      [launch],
+      [
+        {
+          ...launch,
+          status: "completed",
+          finishedAt: first.manifest.scan.completedAt,
+          hasReportableFindings: true,
+        },
+      ],
+    ]);
+    expect(onObserverError).toHaveBeenCalledWith(
+      "onLifecycle",
+      expect.any(Error),
+    );
     expect(registrations).toEqual([
       {
         scanId: first.manifest.scan.id,
@@ -283,10 +316,18 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       "export const example = 2;\n",
     );
     await git("commit", "-am", "Update synthetic fixture");
+    const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
     const diff = await client.run(repository, {
       mock: true,
       target: DiffTarget.refs({ base: "HEAD~1" }),
+      onLifecycle,
     });
+    expect(
+      onLifecycle.mock.calls.map(([{ mode, status }]) => [mode, status]),
+    ).toEqual([
+      ["diff", "running"],
+      ["diff", "completed"],
+    ]);
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
     expect(diff.manifest.scan.mode).toBe("branch_diff");
     await writeFile(
@@ -307,11 +348,13 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
 test("aborting mock generation leaves a terminal scan record", async () => {
   const { client, repository, environment, python } = await fixture();
   const controller = new AbortController();
+  const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
   try {
     await expect(
       client.run(repository, {
         mock: true,
         signal: controller.signal,
+        onLifecycle,
         onScanStarted: () => controller.abort(),
       }),
     ).rejects.toThrow(ScanInterruptedError);
@@ -322,6 +365,32 @@ test("aborting mock generation leaves a terminal scan record", async () => {
     expect(history["scans"]).toMatchObject([
       { progress: { status: "failed" } },
     ]);
+    const [saved] = history["scans"] as JsonObject[];
+    expect(onLifecycle.mock.calls.map(([snapshot]) => snapshot.status)).toEqual(
+      ["running", "failed"],
+    );
+    expect(saved?.["lifecycle"]).toEqual(onLifecycle.mock.lastCall?.[0]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("reports committed completion after the workbench response is lost", async () => {
+  const { client, repository } = await fixture(async (options, args, input) => {
+    if (args[0] === "get-scan")
+      throw new Error("Full scan details unavailable");
+    const saved = await runWorkbench(options, args, input);
+    if (args[0] === "complete-scan") throw new Error("completion reply lost");
+    return saved;
+  });
+  const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+  try {
+    await expect(
+      client.run(repository, { mock: true, onLifecycle }),
+    ).rejects.toThrow("completion reply lost");
+    expect(onLifecycle.mock.calls.map(([snapshot]) => snapshot.status)).toEqual(
+      ["running", "completed"],
+    );
   } finally {
     await client.close();
   }

@@ -322,7 +322,7 @@ def require_valid_patch(target: Path, patch: bytes) -> None:
             *arguments,
             text=False,
             input_data=data,
-            pathspec_environment={"LC_ALL": "C"},
+            environment_overrides={"LC_ALL": "C", "GIT_NO_REPLACE_OBJECTS": "1"},
             offline=True,
         )
         if result.returncode == 127:

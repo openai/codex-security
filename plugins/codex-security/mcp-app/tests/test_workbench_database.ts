@@ -853,7 +853,10 @@ test("repairs pre-release numbering and shadowed migrations without repeating da
   database.exec(
     "INSERT INTO schema_migrations VALUES (5, 'scan target snapshot digests', 'original')",
   );
-  applyMigrations(database);
+  applyMigrations(
+    database,
+    migrations.filter((item) => item.version <= 22),
+  );
   insertScan(database);
   database.exec(`UPDATE scans SET handoff_status = 'delivered', handoff_claimed_at = 'old', handoff_claim_token = 'old';
     UPDATE schema_migrations SET name = 'scan target summaries' WHERE version = 18;
@@ -1006,11 +1009,25 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60])
+  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, migrations[version - 1].name);
   applyMigrations(database);
+  const launch = database
+    .prepare(
+      "SELECT launch_surface, launch_package_version, launch_plugin_version, launch_kind FROM scans",
+    )
+    .get();
+  assert.deepEqual(
+    { ...launch },
+    {
+      launch_surface: null,
+      launch_package_version: null,
+      launch_plugin_version: null,
+      launch_kind: null,
+    },
+  );
   assert.ok(
     database
       .prepare("PRAGMA table_info(scan_severity_classifications)")
@@ -1305,7 +1322,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 64),
+      String(through ?? 66),
     ],
     { encoding: "utf8" },
   );
@@ -1338,6 +1355,9 @@ test("Node initialization leaves repository migration semantics to the Python co
     ["main43", 43],
     ["main53", 53],
     ["main60", 60],
+    ["main62", 62],
+    ["preview62", 60, 61, 62],
+    ["preview64MainReader", 60, 61, 64],
     ["legacy30", 29],
     ["legacy31", 30],
     ["partial43", 42],
@@ -1405,6 +1425,13 @@ test("Node initialization leaves repository migration semantics to the Python co
           current.exec(`ALTER TABLE workspaces ADD COLUMN target_path_unvalidated INTEGER
             NOT NULL DEFAULT 0 CHECK (target_path_unvalidated IN (0, 1));
             INSERT INTO schema_migrations VALUES (56, 'distinguish unvalidated workspace targets', 'original');`);
+        if (fixture === "preview64MainReader")
+          current.exec(`ALTER TABLE workspaces ADD COLUMN target_path_unvalidated INTEGER
+            NOT NULL DEFAULT 0 CHECK (target_path_unvalidated IN (0, 1));
+            ALTER TABLE security_targets ADD COLUMN git_checkout_root TEXT;
+            INSERT INTO schema_migrations VALUES (63, 'distinguish unvalidated workspace targets', 'original');
+            INSERT INTO schema_migrations VALUES (64, 'retain checkout roots for Git discovery', 'original');
+            ALTER TABLE scans ADD COLUMN launch_surface TEXT;`);
         assert.equal(
           current
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
@@ -1481,7 +1508,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          64,
+          66,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1501,11 +1528,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(61,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(63,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(62,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(64,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1637,10 +1664,17 @@ with sqlite3.connect(sys.argv[2]) as connection:
       .map(([name, rows]) => {
         if (name === "scans")
           for (const row of rows as Record<string, unknown>[]) {
-            assert.equal(row.source_scopes_json, null);
-            delete row.source_scopes_json;
-            assert.equal(row.retained_checkpoint_heads_json, null);
-            delete row.retained_checkpoint_heads_json;
+            for (const column of [
+              "source_scopes_json",
+              "retained_checkpoint_heads_json",
+              "launch_surface",
+              "launch_package_version",
+              "launch_plugin_version",
+              "launch_kind",
+            ]) {
+              assert.equal(row[column], null);
+              delete row[column];
+            }
           }
         if (name === "workspaces")
           for (const row of rows as Record<string, unknown>[]) {
@@ -1698,13 +1732,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   assertMigrationNames(initialized, 53);
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=61")
+      .prepare("SELECT name FROM schema_migrations WHERE version=63")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=62")
+      .prepare("SELECT name FROM schema_migrations WHERE version=64")
       .get(),
     undefined,
   );
@@ -1727,7 +1761,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 64
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 66
 `,
       scripts,
       databasePath,

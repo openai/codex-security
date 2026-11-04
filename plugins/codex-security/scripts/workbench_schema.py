@@ -84,14 +84,33 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 61:
+            elif version == 63:
                 should_backfill_targets = (
                     repair_repository_identity_migration(connection)
                     or version not in applied
                     or should_backfill_targets
                 )
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 63, 64):
+                if version in (
+                    2,
+                    12,
+                    13,
+                    26,
+                    28,
+                    31,
+                    32,
+                    42,
+                    47,
+                    50,
+                    54,
+                    55,
+                    58,
+                    59,
+                    60,
+                    61,
+                    65,
+                    66,
+                ):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -103,7 +122,7 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version == 62:
+                elif version == 64:
                     from workbench_target_state import upgrade_linux_repository_generations
 
                     upgrade_linux_repository_generations(connection)
@@ -349,7 +368,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
     if (
         "repository_identity" in columns
         and connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = 61 AND name = ?",
+            "SELECT 1 FROM schema_migrations WHERE version = 63 AND name = ?",
             ("persist repository identities",),
         ).fetchone()
         is not None
@@ -361,7 +380,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         from workbench_target_state import normalize_pre_release_repository_identities
 
         normalize_pre_release_repository_identities(connection)
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 61)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 63)
     for statement in sql_statements(migration_sql):
         if statement.startswith(("ALTER TABLE security_targets", "ALTER TABLE scans")):
             add_migration_column(connection, statement)
