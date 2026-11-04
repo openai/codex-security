@@ -2097,6 +2097,28 @@ describe("live scan dashboard", () => {
     });
     expect(visible()).toEqual(before);
     expect(lastFrame(stderr)).toContain("7 lines above live");
+
+    // A worker finishes an old action above the viewport with a longer result.
+    dashboard.record({
+      id: "action-10",
+      kind: "command",
+      status: "completed",
+      description: "finished",
+      paths: ["first.ts", "second.ts"],
+    });
+    expect(visible()).toEqual(before);
+
+    // A streaming action below the viewport grows and then shrinks.
+    for (const paths of [["third.ts", "fourth.ts"], []]) {
+      dashboard.record({
+        id: "action-2001",
+        kind: "command",
+        status: "completed",
+        description: "finished",
+        paths,
+      });
+      expect(visible()).toEqual(before);
+    }
     dashboard.stop();
   });
 

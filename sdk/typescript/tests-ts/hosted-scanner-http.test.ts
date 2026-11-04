@@ -133,3 +133,54 @@ test("does not retry a fetch rejection", async () => {
   await expect(get({ fetch })).rejects.toBe(error);
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+test("bounds a streamed scanner error while retaining its status and diagnostic prefix", async () => {
+  let pulls = 0;
+  let canceled = false;
+  const chunk = new TextEncoder().encode("x".repeat(8192));
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+        if (++pulls === 40) controller.close();
+      },
+      cancel() {
+        canceled = true;
+      },
+    }),
+    { status: 503 },
+  );
+  const error = await get({ fetch: async () => response }).catch(
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain(
+    `failed (HTTP 503): ${"x".repeat(64 * 1024)}\n`,
+  );
+  expect((error as Error).message).toContain("first 65536 bytes");
+  expect(canceled).toBe(true);
+  expect(pulls).toBeLessThan(40);
+});
+
+test("an interrupted error body retains the HTTP status, received text and transport cause", async () => {
+  const failure = new Error("scanner disconnected");
+  let sent = false;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) return controller.error(failure);
+        sent = true;
+        controller.enqueue(new TextEncoder().encode("upstream maintenance"));
+      },
+    }),
+    { status: 502 },
+  );
+  const error = await get({ fetch: async () => response }).catch(
+    (reason: unknown) => reason,
+  );
+  expect((error as Error).message).toContain(
+    "failed (HTTP 502): upstream maintenance",
+  );
+  expect((error as Error).message).toContain(failure.message);
+  expect((error as Error).cause).toBe(failure);
+});
