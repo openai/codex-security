@@ -1458,8 +1458,8 @@ review the new submission before confirming.
 | Status        | Exit code | Meaning                                                                      |
 | ------------- | --------- | ---------------------------------------------------------------------------- |
 | `empty`       | 0         | No records were available to upload. Check the report for coverage warnings. |
-| `complete`    | 0         | The inbox processed every record, or the publisher verified each one.                        |
-| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed.                     |
+| `complete`    | 0         | The inbox processed every record, or the publisher verified each one.        |
+| `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed.         |
 | `interrupted` | 2         | Upload, verification, or receipt persistence stopped after preparation.      |
 | `failed`      | 2         | Preparation failed before upload.                                            |
 
