@@ -1,3 +1,5 @@
+"""Check provider app declarations and the instructions for reading back a published finding."""
+
 from __future__ import annotations
 
 import json

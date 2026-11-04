@@ -1,3 +1,5 @@
+"""Exercise the native-test CI gate with missing, malformed, skipped, and passing reports."""
+
 from contextlib import nullcontext
 from pathlib import Path
 from runpy import run_path
