@@ -979,6 +979,30 @@ def test_completion_retains_cache_baseline_across_omissions(
     )
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+def test_inconsistent_partial_cache_snapshot_cannot_establish_a_baseline(
+    scan_usage, tmp_path: Path, recovered: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    initial = _token_event(started, 100, 0, cached_input_tokens=80)
+    partial = _token_event(started, 100, 0)
+    partial_usage = partial["payload"]["info"]["total_token_usage"]
+    del partial_usage["cached_input_tokens"]
+    partial_usage["cache_write_input_tokens"] = 50
+    events = [initial, partial]
+    if recovered:
+        latest = _token_event(started, 140, 0, cached_input_tokens=80)
+        latest["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 60
+        events.append(latest)
+    result = _measure_rollout(
+        scan_usage, _rollout(tmp_path, "scan-parent", events), started, started
+    )
+    assert result.warnings == {"token_breakdown_unavailable"}
+    assert result.tokens == _counts(
+        140 if recovered else 100, 80, 0, cache_write_input_tokens=60 if recovered else 0
+    )
+
+
 @pytest.mark.parametrize("category", ["cached_input_tokens", "cache_write_input_tokens"])
 @pytest.mark.parametrize("missing", [None, "refined", "other"])
 @pytest.mark.parametrize("new_input", [0, 1000])

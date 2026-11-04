@@ -599,7 +599,7 @@ def _read_rollout_usage(
     warnings = result.warnings
     previous = _empty_token_usage()
     previous_cache_writes_reported = True
-    prefix_missing_cache: set[str] = set()
+    prefix_missing_cache: set[str] | None = None
     ambiguous_legacy_cache = False
     boundary_reached = False
     legacy_usage = _empty_token_usage()
@@ -686,8 +686,12 @@ def _read_rollout_usage(
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
                         missing_cache = _missing_cache_fields(payload)
-                        previous = _retain_cache_baseline(previous, inherited_usage, missing_cache)
-                        prefix_missing_cache = _unclassified_prefix(missing_cache, previous)
+                        baseline = _retain_cache_baseline(previous, inherited_usage, missing_cache)
+                        if baseline is None:
+                            warnings.add("token_breakdown_unavailable")
+                        else:
+                            previous = baseline
+                            prefix_missing_cache = _unclassified_prefix(missing_cache, baseline)
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
@@ -830,10 +834,14 @@ def _read_rollout_usage(
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
             if reset:
-                prefix_missing_cache = set()
+                prefix_missing_cache = None
             missing_cache = _missing_cache_fields(payload)
             cache_writes_reported = "cacheWriteInputTokens" not in missing_cache
             baseline = _retain_cache_baseline(previous, snapshot, missing_cache)
+            if baseline is None:
+                if not past_scan_end(timestamp, current_turn_id):
+                    warnings.add("token_breakdown_unavailable")
+                continue
             if baseline is previous:
                 cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
             refines_classification = (
@@ -882,7 +890,15 @@ def _read_rollout_usage(
                 if refines_classification and response_usage is None
                 else 0
             )
-            if refines_classification and any(delta[key] > 0 for key in prefix_missing_cache):
+            if (
+                prefix_missing_cache is not None
+                and refines_classification
+                and (
+                    any(delta[key] > 0 for key in prefix_missing_cache)
+                    or delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
+                    > cache_write_capacity + completed_capacity
+                )
+            ):
                 # The newly classified tokens could have occurred before this scan.
                 ambiguous_legacy_cache = True
             for key in ("cacheWriteInputTokens", "cachedInputTokens"):
@@ -983,15 +999,15 @@ def _missing_cache_fields(payload: Mapping[str, Any]) -> set[str]:
     return missing
 
 
-def _unclassified_prefix(missing: set[str], baseline: dict[str, int]) -> set[str]:
+def _unclassified_prefix(missing: set[str], baseline: dict[str, int]) -> set[str] | None:
     if baseline["inputTokens"] == baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]:
-        return set()
+        return None
     return missing
 
 
 def _retain_cache_baseline(
     previous: dict[str, int], snapshot: dict[str, int], missing: set[str]
-) -> dict[str, int]:
+) -> dict[str, int] | None:
     baseline = snapshot
     if (
         missing
@@ -999,6 +1015,11 @@ def _retain_cache_baseline(
         and snapshot["outputTokens"] >= previous["outputTokens"]
     ):
         baseline = {**snapshot, **{key: previous[key] for key in missing}}
+        if (
+            baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]
+            > baseline["inputTokens"]
+        ):
+            return None
     if (
         baseline["inputTokens"] == previous["inputTokens"]
         and baseline["outputTokens"] == previous["outputTokens"]
