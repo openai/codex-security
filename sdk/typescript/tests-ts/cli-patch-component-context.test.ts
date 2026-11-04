@@ -47,24 +47,30 @@ test.each([
     );
     const support = await fixtures.create("patch-component-filter-");
     const filter = join(support, "clean.cjs");
+    const userConfig = join(support, "user.gitconfig");
     await writeFile(
       filter,
       'process.stdout.write(require("node:fs").readFileSync(0,"utf8").toUpperCase());\n',
     );
     git(
       "config",
+      "--file",
+      userConfig,
       "filter.synthetic.clean",
       `node ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
     );
-    git("config", "filter.synthetic.required", "true");
+    git("config", "--file", userConfig, "filter.synthetic.required", "true");
     await writeFile(
       join(directory, ".gitattributes"),
       "component/app.ts filter=synthetic\n",
     );
-    git("add", ".");
+    git("-c", `include.path=${userConfig}`, "add", ".");
     git("commit", "-m", "Synthetic component snapshot baseline");
     const caller = scope === "root" ? directory : component;
-    const environment = literal ? { GIT_LITERAL_PATHSPECS: "1" } : {};
+    const environment = {
+      GIT_CONFIG_GLOBAL: userConfig,
+      ...(literal && { GIT_LITERAL_PATHSPECS: "1" }),
+    };
     let assessments = 0;
     let pushes = 0;
     let streamedBlobs = 0;
