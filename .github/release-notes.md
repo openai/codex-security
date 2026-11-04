@@ -24,6 +24,7 @@
 - refresh the Node 26.12.1 container digest ([#2282](https://github.com/openai/codex-security/pull/2282))
 - bump pytest from 9.1.1 to 9.2.0 in /plugins/codex-security ([#2280](https://github.com/openai/codex-security/pull/2280))
 - refresh the GitHub Action archive matchers ([#2290](https://github.com/openai/codex-security/pull/2290))
+- update the SDK mutation-test glob matcher ([#2288](https://github.com/openai/codex-security/pull/2288))
 
 <!-- release-section: highlights:end -->
 
