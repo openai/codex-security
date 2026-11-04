@@ -244,20 +244,43 @@ export async function confirmScanMerge(
     const entries = members.map((member) => {
       const sourceIds = refs(member);
       const originals = sourceIds.map((id) => sources.get(id)!.original);
-      return { finding: member, originals, sourceIds };
+      const incoming = sources.get(sourceIds[0]!)!.input !== undefined;
+      const observations = originals.map((source) => {
+        const report = { ...source };
+        for (const key of ["findingId", "occurrenceId", "fingerprints"])
+          delete report[key];
+        return report;
+      });
+      return { finding: member, originals, sourceIds, incoming, observations };
     });
-    // The host may assign different per-run IDs and provenance to identical reports.
-    const content = (member: SemanticFinding) => ({
+    const displays = members.map((member) => ({
       ...member,
       provenance: undefined,
-    });
-    const copies = entries.map(({ finding: member }) =>
-      entries.findIndex((entry) =>
-        isDeepStrictEqual(content(entry.finding), content(member)),
-      ),
+    }));
+    const copies = displays.map((report) =>
+      displays.findIndex((other) => isDeepStrictEqual(report, other)),
     );
+    const exactMatch = (left: number, right: number) => {
+      if (copies[left] === copies[right]) return true;
+      const a = entries[left]!;
+      const b = entries[right]!;
+      if (a.incoming === b.incoming) return false;
+      // A new report can repeat a secondary original of an accepted group.
+      // Keep the original severity, evidence and provenance in that comparison.
+      const [incoming, saved] = a.incoming ? [a, b] : [b, a];
+      return (
+        saved.observations.length > 1 &&
+        saved.observations.some((report) =>
+          isDeepStrictEqual(report, incoming.observations[0]),
+        )
+      );
+    };
     let matches = new Map<number, Set<number>>();
-    if (new Set(copies).size > 1) {
+    if (
+      entries.some((_, right) =>
+        entries.some((_, left) => left < right && !exactMatch(left, right)),
+      )
+    ) {
       try {
         matches = await checkSameFix(entries, compare);
       } catch (error) {
@@ -269,8 +292,7 @@ export async function confirmScanMerge(
     for (let right = 0; right < entries.length; right++) {
       const group = kept.find((indices) =>
         indices.every(
-          (left) =>
-            copies[left] === copies[right] || matches.get(right)?.has(left),
+          (left) => exactMatch(left, right) || matches.get(right)?.has(left),
         ),
       );
       if (group) group.push(right);

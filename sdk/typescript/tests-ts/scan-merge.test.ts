@@ -390,6 +390,17 @@ test("model input excludes all coverage and retains complete source evidence onc
   expect({ previous, two }).toEqual(original);
 });
 
+const codeEvidence = [
+  {
+    id: "sink",
+    label: "Sink",
+    path: "src/render.js",
+    startLine: 1,
+    code: "render(input)",
+    explanation: "Caller-supplied input reaches the renderer.",
+  },
+];
+
 test.each([
   "same",
   "survivor",
@@ -399,17 +410,11 @@ test.each([
 ] as const)(
   "checks disputed source reports before accepting a proposed merge (%s)",
   async (outcome) => {
-    const codeEvidence = [
-      {
-        id: "sink",
-        label: "Sink",
-        path: "src/render.js",
-        startLine: 1,
-        code: "render(input)",
-        explanation: "Caller-supplied input reaches the renderer.",
-      },
-    ];
-    const left = child("left", [finding("earlier", { codeEvidence })]);
+    const alias = finding("earlier", {
+      codeEvidence,
+      severity: { level: "critical" },
+    });
+    const left = child("left", [alias]);
     const right = child("right", [
       finding("later", { title: "Another caller", codeEvidence }),
     ]);
@@ -490,6 +495,16 @@ test.each([
     expect(result.newFindingScanIds).toEqual(
       outcome === "same" ? ["left"] : ["left", "right"],
     );
+    if (outcome === "same") {
+      const canonicalSeverity = right.draft.findings[0]!.severity;
+      const accepted = result.aggregate.findings[0]!;
+      expect(accepted.severity).toEqual(canonicalSeverity);
+      expect(
+        accepted.provenance.sourceFindings?.map(
+          ({ finding }) => finding["severity"],
+        ),
+      ).toEqual([canonicalSeverity, alias.severity]);
+    }
     expect(errors).toHaveLength(outcome === "unavailable" ? 1 : 0);
     if (outcome === "unavailable")
       expect(result.aggregate.scope?.limitations?.[0]).toContain(
@@ -517,3 +532,58 @@ test("an exact repeated report retains both sources without a confirmation turn"
     "right:0",
   ]);
 });
+
+test.each(["exact", "changed severity", "changed provenance"] as const)(
+  "checks a later observation of a merged secondary report (%s)",
+  async (version) => {
+    const primary = finding("primary", { codeEvidence });
+    const alias = finding("secondary", {
+      severity: { level: "medium" },
+      codeEvidence,
+    });
+    const previous = merge(
+      submission(["first:0", "first:1"]),
+      [child("first", [primary, alias])],
+      null,
+    ).aggregate;
+    const repeated = structuredClone(alias);
+    if (version === "changed severity")
+      repeated.severity = { level: "critical" };
+    if (version === "changed provenance")
+      repeated.provenance["notes"] = "Independent source";
+    const inputs = [child("next", [repeated])];
+    const proposed = merge(
+      submission(["first:0", "first:1", "next:0"]),
+      inputs,
+      previous,
+    );
+    let comparisons = 0;
+    const result = await confirmScanMerge(
+      proposed,
+      inputs,
+      previous,
+      async () => {
+        comparisons++;
+        return { reviews: [] };
+      },
+      (error) => {
+        throw error;
+      },
+    );
+    const exact = version === "exact";
+    expect(comparisons).toBe(exact ? 0 : 1);
+    expect(result.newFindingScanIds).toEqual(exact ? [] : ["next"]);
+    expect(result.aggregate.findings).toHaveLength(exact ? 1 : 2);
+    const accepted = result.aggregate.findings[0]!;
+    expect(accepted.severity).toEqual(primary.severity);
+    expect(
+      accepted.provenance.sourceFindings?.map(
+        ({ finding }) => finding["severity"],
+      ),
+    ).toEqual(
+      exact
+        ? [primary.severity, alias.severity, alias.severity]
+        : [primary.severity, alias.severity],
+    );
+  },
+);
