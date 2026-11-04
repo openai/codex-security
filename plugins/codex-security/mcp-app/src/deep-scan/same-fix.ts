@@ -63,14 +63,29 @@ Apply each fix alone. If a claimed defect in the other report survives, quote th
 const PAIRS_PER_REVIEW = 16;
 type Pair = { id: number; left: number; right: number };
 function claim({
+  ruleId,
+  identity,
   title,
   summary,
   rootCause,
   remediation,
   locations,
   codeEvidence,
+  attackPath,
+  validation,
 }: Record<string, unknown>) {
-  return { title, summary, rootCause, remediation, locations, codeEvidence };
+  return {
+    ruleId,
+    identity,
+    title,
+    summary,
+    rootCause,
+    remediation,
+    locations,
+    codeEvidence,
+    attackPath,
+    validation,
+  };
 }
 
 // Structured output constrains each row, but can still return the same ID twice.
@@ -206,14 +221,11 @@ export async function checkSameFix(
       ...new Set(pairs.flatMap(({ left, right }) => [left, right])),
     ].map((id) => {
       const [first, ...rest] = claimsFor(id);
-      const { title, summary, rootCause, remediation } = first!;
+      const { codeEvidence: _codeEvidence, ...primary } = first!;
       return {
         id,
         primary: {
-          title,
-          summary,
-          rootCause,
-          remediation,
+          ...primary,
           locations: records[id]!.locations,
           evidence: evidence[id]!.map((excerpt, id) => ({ id, ...excerpt })),
         },

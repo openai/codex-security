@@ -70,6 +70,7 @@
 - checkpoint accepted reviews before honoring stop conditions ([#2318](https://github.com/openai/codex-security/pull/2318))
 - keep the viewport anchored during worker updates ([#2298](https://github.com/openai/codex-security/pull/2298))
 - attribute comparison sessions to usage and logs ([#2299](https://github.com/openai/codex-security/pull/2299))
+- require consistent evidence before merging reports ([#2301](https://github.com/openai/codex-security/pull/2301))
 
 <!-- release-section: highlights:end -->
 
