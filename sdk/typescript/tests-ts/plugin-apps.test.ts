@@ -3,6 +3,18 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
+test("registers hosted connections as explicitly optional", async () => {
+  const configuration = JSON.parse(
+    await readFile(join(PLUGIN_ROOT, ".app.json"), "utf8"),
+  ) as { apps: Record<string, { id: string; required?: boolean }> };
+  const cloud = configuration.apps["codex-security-cloud"];
+
+  expect(cloud?.id).toBe("connector_openai_defense_factory");
+  for (const app of Object.values(configuration.apps)) {
+    expect(app.required).toBe(false);
+  }
+});
+
 test("registers security access through the Codex Security MCP, not a hosted app", async () => {
   const [appConfiguration, mcpConfiguration] = await Promise.all([
     readFile(join(PLUGIN_ROOT, ".app.json"), "utf8"),

@@ -1,13 +1,16 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { isRecord } from "./record.js";
+import { lstat, readFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
+import { canonicalConfigPath } from "./runtime.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   DEFAULT_SCAN_MODE,
   DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
+  ScanSettingsSchema,
   type DeepScanOptions,
 } from "./scan-settings.js";
 import type { ScanMode } from "./scan-modes.js";
@@ -25,9 +28,17 @@ export interface ResolvedDeepScanConfig {
 }
 
 export function deepScanOptions(
-  options: DeepScanOptions & { mode?: ScanMode },
+  options: DeepScanOptions & { mode?: ScanMode; maxTimeMinutes?: number },
 ): DeepScanOptions {
   const selected: DeepScanOptions = {};
+  const minutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
+    options.maxTimeMinutes,
+  );
+  if (!minutes.success) {
+    throw new CodexSecurityError(
+      "maxTimeMinutes / --max-time must be a finite positive number of minutes.",
+    );
+  }
   for (const [name] of DEEP_SCAN_SETTINGS) {
     const value = options[name];
     if (value === undefined) continue;
@@ -35,6 +46,32 @@ export function deepScanOptions(
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
     selected[name] = requireDeepScanValue(name, value, name);
+  }
+  if (minutes.data !== undefined && options.mode === "deep") {
+    if (minutes.data > 5760) {
+      throw new CodexSecurityError(
+        "Deep scan maxTimeMinutes / --max-time must be no greater than 5760 minutes.",
+      );
+    }
+    const hours = minutes.data / 60;
+    if (
+      selected.maxTimeHours !== undefined &&
+      Math.abs(selected.maxTimeHours - hours) >
+        Number.EPSILON * Math.max(selected.maxTimeHours, hours)
+    ) {
+      throw new CodexSecurityError(
+        "Conflicting maxTimeMinutes / --max-time and maxTimeHours / --max-time-hours settings.",
+      );
+    }
+    selected.maxTimeHours = hours;
+  }
+  if (
+    minutes.data !== undefined &&
+    !Number.isFinite(new Date(Date.now() + minutes.data * 60_000).getTime())
+  ) {
+    throw new CodexSecurityError(
+      "maxTimeMinutes / --max-time must produce a deadline within the supported date range.",
+    );
   }
   return selected;
 }
@@ -54,7 +91,7 @@ function requireDeepScanValue(
 }
 
 export async function resolveDeepScanConfig(
-  options: DeepScanOptions,
+  options: DeepScanOptions & { maxTimeMinutes?: number },
   source: string,
   signal?: AbortSignal,
 ): Promise<ResolvedDeepScanConfig> {
@@ -67,9 +104,7 @@ export async function resolveDeepScanConfig(
   const existing = document["deep_scan"];
   if (
     existing !== undefined &&
-    (typeof existing !== "object" ||
-      existing === null ||
-      Array.isArray(existing) ||
+    (!isRecord(existing) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(existing)))
   ) {
     throw new CodexSecurityError(
@@ -119,6 +154,7 @@ export async function resolveDeepScanConfig(
 export async function writeDeepScanConfig(
   destination: string,
   resolved: ResolvedDeepScanConfig,
+  workerRuntime?: JsonObject,
 ): Promise<void> {
   const [source, target] = await Promise.all([
     canonicalConfigPath(resolved.source),
@@ -138,6 +174,7 @@ export async function writeDeepScanConfig(
     DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
   await writeCodexConfig(destination, {
     ...document,
+    ...(workerRuntime === undefined ? {} : { worker_runtime: workerRuntime }),
     deep_scan: {
       ...(retainAmbientSettings
         ? (document["deep_scan"] as TomlTable | undefined)
@@ -163,25 +200,6 @@ async function runtimeConfigPath(path: string): Promise<string> {
     // A stale cyclic file link is replaced by writeCodexConfig's atomic rename.
     // Errors resolving its parent (or the ambient source) still fail the write.
     return join(await canonicalConfigPath(dirname(path)), basename(path));
-  }
-}
-
-async function canonicalConfigPath(path: string): Promise<string> {
-  let existing = resolve(path);
-  const missing: string[] = [];
-  while (true) {
-    try {
-      return join(await realpath(existing), ...missing);
-    } catch (error) {
-      const parent = dirname(existing);
-      if (
-        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
-        parent === existing
-      )
-        throw error;
-      missing.unshift(basename(existing));
-      existing = parent;
-    }
   }
 }
 

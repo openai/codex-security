@@ -65,7 +65,13 @@ Each entry in `findings` must use this shape:
     "rank_queue": "confirmed",
     "rank": 1,
     "rationale": "why this finding is more or less exploitable than other findings with the same verdict",
-    "drivers": ["attacker reachability", "privilege required", "preconditions", "source-to-sink control", "guard strength"]
+    "drivers": [
+      "attacker reachability",
+      "privilege required",
+      "preconditions",
+      "source-to-sink control",
+      "guard strength"
+    ]
   },
   "evidence": ["static evidence observed"],
   "counterevidence": ["static evidence that weakens or defeats the claim"],

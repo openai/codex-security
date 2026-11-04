@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
@@ -13,25 +13,45 @@ import {
   type ProjectConfigInput,
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { mergedCodexConfig, type JsonValue } from "../src/config.js";
+import { ConfigurationError } from "../src/errors.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
-async function temporaryDirectory() {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "project-config-")),
-  );
-  directories.push(directory);
-  return directory;
-}
+const { temporaryDirectory, cleanup } =
+  createApiTestFixtures("project-config-");
+afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
+  ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
+  ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
+  [
+    "owner artifact requires a boolean",
+    { scan: { owner_suggestions: "true" } },
+    false,
+  ],
+  [
+    "fractional investigation minutes",
+    { scan: { max_time_minutes: 0.5 } },
+    true,
+  ],
+  ["unset Standard cap", { scan: { max_time_minutes: 6000 } }, true],
+  [
+    "nonpositive investigation minutes",
+    { scan: { max_time_minutes: 0 } },
+    false,
+  ],
+  ["minute strings", { scan: { max_time_minutes: "15" } }, false],
+  [
+    "Cyber selection",
+    { scan: { cyber_access_program: "daybreak_blue" } },
+    true,
+  ],
+  [
+    "unknown Cyber selection",
+    { scan: { cyber_access_program: "unknown" } },
+    false,
+  ],
   [
     "standard path scope",
     { scan: { mode: "standard", scope: { paths: ["src"] } } },
@@ -131,6 +151,65 @@ const cases: [string, unknown, boolean][] = [
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
 
+test("minute and deprecated hour settings follow source precedence", () => {
+  const directory = process.cwd();
+  for (const [scan, overrides, expected, sourceKey, source] of [
+    [
+      { mode: "standard", max_time_minutes: 15 },
+      {},
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 30, deep: { max_time_hours: 2 } },
+      { maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 15, deep: { max_time_hours: 1 } },
+      { maxTimeHours: 2 },
+      { maxTimeMinutes: undefined, maxTimeHours: 2 },
+      "scan.deep.max_time_hours",
+      "cli",
+    ],
+    [
+      { mode: "deep", max_time_minutes: 90, deep: { max_time_hours: 1.5 } },
+      {},
+      { maxTimeMinutes: 90, maxTimeHours: 1.5 },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 15, deep: { max_time_hours: 2 } },
+      {},
+      { maxTimeMinutes: 15, maxTimeHours: undefined },
+      "scan.max_time_minutes",
+      "project",
+    ],
+    [
+      { mode: "standard", max_time_minutes: 6000 },
+      { mode: "deep", maxTimeMinutes: 15 },
+      { maxTimeMinutes: 15 },
+      "scan.max_time_minutes",
+      "cli",
+    ],
+  ] as const) {
+    const resolved = resolveScanSettings(
+      { input: { scan }, directory },
+      overrides,
+      directory,
+    );
+    expect({
+      maxTimeMinutes: resolved.options.maxTimeMinutes,
+      maxTimeHours: resolved.options.maxTimeHours,
+    }).toMatchObject(expected);
+    expect(resolved.sources[sourceKey]).toBe(source);
+  }
+});
+
 describe("project configuration input contract", () => {
   const validate = new Ajv({ strict: true, allErrors: true }).compile(
     projectConfigJsonSchema(),
@@ -170,7 +249,7 @@ describe("project configuration input contract", () => {
     ).toEqual(DEFAULT_DEEP_SCAN_SETTINGS);
   });
 
-  test("YAML and JSON load the same literal data without adding defaults", async () => {
+  test("YAML, JSON, and BOM-prefixed JSON load literal data without adding defaults", async () => {
     const root = await temporaryDirectory();
     const yaml = join(root, "scan.yaml");
     const json = join(root, "scan.json");
@@ -185,6 +264,10 @@ describe("project configuration input contract", () => {
     await writeFile(json, JSON.stringify(input));
     expect((await readProjectConfig(yaml)).input).toEqual(input);
     expect((await readProjectConfig(json)).input).toEqual(input);
+
+    const marked = { codex: { synthetic_setting: "preserve\uFEFFthis" } };
+    await writeFile(json, `\uFEFF${JSON.stringify(marked)}`);
+    expect((await readProjectConfig(json)).input).toEqual(marked);
   });
 
   test.each([
@@ -250,10 +333,8 @@ describe("project configuration input contract", () => {
   });
 
   test.each([
-    ["invalid.yaml", "scan: [\n"],
     ["duplicate.yaml", "scan: {}\nscan: {}\n"],
     ["stream.yaml", "scan: {}\n---\nscan: {}\n"],
-    ["invalid.json", '{"scan":'],
     ["invalid.ts", "export default {};"],
     ["unknown.yaml", "scan:\n  workres: 2\n"],
   ])("rejects an invalid selected file: %s", async (name, contents) => {
@@ -263,10 +344,35 @@ describe("project configuration input contract", () => {
     await expect(readProjectConfig(path)).rejects.toThrow();
   });
 
-  test("reports a missing selected file", async () => {
-    await expect(
-      readProjectConfig("missing.yaml", await temporaryDirectory()),
-    ).rejects.toThrow("Cannot read project configuration");
+  test.each([
+    ["scan.yaml", "scan: [\n"],
+    ["scan.json", '{"scan":'],
+  ])(
+    "includes the parser message when %s cannot be parsed",
+    async (name, contents) => {
+      const path = join(await temporaryDirectory(), name);
+      await writeFile(path, contents);
+      const error = await readProjectConfig(path).catch(
+        (cause: unknown) => cause,
+      );
+      assert(error instanceof ConfigurationError);
+      assert(error.cause instanceof Error);
+      expect(error.message).toBe(
+        `Cannot parse project configuration at ${path}: ${error.cause.message}`,
+      );
+    },
+  );
+
+  test.each([
+    ["missing.yaml", "ENOENT"],
+    ["directory.yaml", "EISDIR"],
+  ])("includes the system error for %s", async (name, code) => {
+    const path = join(await temporaryDirectory(), name);
+    if (code === "EISDIR") await mkdir(path);
+    await expect(readProjectConfig(path)).rejects.toMatchObject({
+      message: expect.stringContaining(`${path}: ${code}`),
+      cause: expect.objectContaining({ code }),
+    });
   });
 });
 
@@ -364,6 +470,98 @@ describe("project configuration resolution", () => {
       "codex.profiles.reviewCase.model": "project",
       "codex.synthetic_setting.itemCount": "cli",
     });
+  });
+
+  test.each<{ value: JsonValue; source: "default" | "project" }>([
+    { value: null, source: "default" },
+    { value: false, source: "default" },
+    { value: [], source: "default" },
+    { value: {}, source: "default" },
+    { value: { enabled: true }, source: "project" },
+  ])(
+    "tracks restored native defaults after replacing $value with a CLI table",
+    async ({ value, source }) => {
+      const root = await temporaryDirectory();
+      const input = { codex: { features: { multi_agent_v2: value } } };
+      const original = structuredClone(input);
+      const resolved = resolveScanSettings(
+        { input, directory: root },
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: 2 },
+            },
+          },
+        },
+        root,
+      );
+      expect(
+        (await mergedCodexConfig(resolved.config))["features"],
+      ).toMatchObject({
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 2,
+        },
+      });
+      expect(resolved.sources).toMatchObject({
+        "codex.features.multi_agent_v2.enabled": source,
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      });
+      expect(
+        Object.hasOwn(resolved.sources, "codex.features.multi_agent_v2"),
+      ).toBe(false);
+      expect(Object.isFrozen(resolved.sources)).toBe(true);
+      expect(input).toEqual(original);
+    },
+  );
+
+  test("preserves literal native keys and profile sources across empty-table and list replacements", async () => {
+    const root = await temporaryDirectory();
+    const { config, sources } = resolveScanSettings(
+      {
+        directory: root,
+        input: {
+          codex: {
+            "setting.with.dot": { keep: true, retained: null, replace: [] },
+            setting: { with: { dot: { keep: true } } },
+            "literal.branch": { leaf: true },
+            synthetic: { old: true },
+            profile: "review",
+            profiles: { review: { model: "gpt-5.6-terra" } },
+          },
+        },
+      },
+      {
+        codexOverrides: {
+          "setting.with.dot": { keep: false, replace: {} },
+          literal: { branch: false },
+          synthetic: [],
+        },
+      },
+      root,
+    );
+    expect(config.codexOverrides["setting.with.dot"]).toEqual({
+      keep: false,
+      retained: null,
+      replace: {},
+    });
+    expect(config.codexOverrides["synthetic"]).toEqual([]);
+    expect(config.codexOverrides["literal.branch"]).toEqual({ leaf: true });
+    expect(config.codexOverrides["literal"]).toEqual({ branch: false });
+    expect(sources).toMatchObject({
+      "codex.setting.with.dot.keep": "cli",
+      "codex.setting.with.dot.retained": "project",
+      "codex.literal.branch.leaf": "project",
+      "codex.literal.branch": "cli",
+      "codex.synthetic": "cli",
+      "codex.profile": "project",
+      "codex.profiles.review.model": "project",
+    });
+    expect(Object.hasOwn(sources, "codex.setting.with.dot.replace")).toBe(
+      false,
+    );
+    expect(Object.hasOwn(sources, "codex.synthetic.old")).toBe(false);
   });
 
   test("ignores valid inactive deep defaults but rejects explicit deep CLI options in standard mode", async () => {

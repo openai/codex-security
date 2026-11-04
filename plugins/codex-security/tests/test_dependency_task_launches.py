@@ -174,7 +174,7 @@ def test_history_migrates_and_retains_all_assessments(tmp_path: Path) -> None:
     assessment_id = start(state, report_id, [findings[0]["id"]])["assessment"]["id"]
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("DROP TABLE dependency_task_launches")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 64")
         for _ in range(105):
             connection.execute(
                 "INSERT INTO dependency_assessments SELECT ?, report_id, finding_ids_json, "

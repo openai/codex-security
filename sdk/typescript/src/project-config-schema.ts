@@ -39,6 +39,9 @@ export const ProjectConfigInputSchema = z.strictObject({
   scan: z
     .strictObject({
       mode: ScanSettingsSchema.shape.mode,
+      max_time_minutes: ScanSettingsSchema.shape.maxTimeMinutes,
+      cyber_access_program: ScanSettingsSchema.shape.cyberAccessProgram,
+      owner_suggestions: ScanSettingsSchema.shape.ownerSuggestions,
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),

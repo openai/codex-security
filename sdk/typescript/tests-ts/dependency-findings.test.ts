@@ -1,3 +1,5 @@
+import { preflightReadOnlyProfileCodex } from "../src/provider-profile.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import {
   mkdir,
@@ -19,18 +21,13 @@ import type {
 } from "@openai/codex-sdk";
 import {
   DependencyFindings,
-  checkDependencyPermissions,
   type DependencyFindingSkillRequest,
 } from "../src/dependency-findings.js";
-import type { JsonObject } from "../src/config.js";
+import { inlineToml, type JsonObject } from "../src/config.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   OutputInsideProtectedRootError,
@@ -494,7 +491,20 @@ async function skillSession(
     return selected;
   });
   const permissionCheck = mock(
-    async (..._args: Parameters<typeof checkDependencyPermissions>) => {},
+    async (
+      options: Parameters<typeof preflightReadOnlyProfileCodex>[0],
+      profile: JsonObject,
+    ) => ({
+      permissionProfileId: "codex_security_deep_scan_worker",
+      configOverrides: [
+        ...(options.configOverrides ?? []),
+        'default_permissions="codex_security_deep_scan_worker"',
+        `permissions.codex_security_deep_scan_worker=${inlineToml(profile)}`,
+      ],
+    }),
+  );
+  const permissionWarning = mock(
+    (_message: string): Error | undefined => undefined,
   );
   const security = new TestClient(
     {
@@ -517,7 +527,10 @@ async function skillSession(
       }),
       resolvePluginPython: async () => join(root, "python"),
       runWorkbench: workbench,
-      checkDependencyPermissions: permissionCheck,
+      preflightDependencyPermissions: permissionCheck,
+      dependencyPermissionPreflight: async () => ({
+        deepScanPermissionProfileFallbackError: permissionWarning,
+      }),
       createCodex: (options) => {
         captured.codex = options;
         return {
@@ -553,6 +566,7 @@ async function skillSession(
     workbench,
     selected,
     permissionCheck,
+    permissionWarning,
   };
 }
 
@@ -709,26 +723,17 @@ describe("imported finding SDK sessions", () => {
         ...captured.codex!.configOverrides!.map((value) => parse(value)),
       );
       expect(permissionCheck.mock.calls[0]).toEqual([
-        await realpath(PLUGIN_ROOT),
-        "dependency-permission-profile",
+        captured.codex,
         {
-          codexPath: captured.codex!.codexPathOverride!,
-          cwd: output,
-          profileId: "codex_security_scan",
-          configOverrides: captured.codex!.configOverrides!,
-          expectedProfile: {
-            filesystem: {
-              ":root": "read",
-              ":workspace_roots": "write",
-              [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
-              [stateDirectory]: { ".": "deny" },
-            },
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
+            [stateDirectory]: { ".": "deny" },
           },
         },
-        {
-          ...captured.codex!.env,
-          CODEX_API_KEY: "synthetic-imported-finding-key",
-        },
+        expect.any(Object),
+        output,
         expect.any(AbortSignal),
       ]);
       expect(captured.codex!.config).toEqual({});
@@ -747,11 +752,11 @@ describe("imported finding SDK sessions", () => {
         findings: [{ original: { marker: "selected-source-claim" } }],
       });
       const scopeOverride = captured.codex?.configOverrides?.find((value) =>
-        value.startsWith("permissions.codex_security_scan.filesystem="),
+        value.startsWith("permissions.codex_security_deep_scan_worker="),
       );
       expect(parse(scopeOverride!)).toEqual({
         permissions: {
-          codex_security_scan: {
+          codex_security_deep_scan_worker: {
             filesystem: {
               ":root": "read",
               ":workspace_roots": "write",
@@ -851,24 +856,28 @@ describe("imported finding SDK sessions", () => {
   test.each(["preflight", "runtime-warning"] as const)(
     "rejects a permission profile failure at %s",
     async (failure) => {
-      const { security, repository, captured, workbench, permissionCheck } =
-        await skillSession(async function* () {
-          yield {
-            type: "error",
-            message: "synthetic permission fallback warning",
-          };
-          yield* completedEvents();
-        });
-      permissionCheck.mockImplementation(async (_plugin, command) => {
-        if (
-          command ===
-          (failure === "preflight"
-            ? "dependency-permission-profile"
-            : "dependency-permission-warning")
-        ) {
-          throw new Error("Required dependency permission profile rejected");
-        }
+      const {
+        security,
+        repository,
+        captured,
+        workbench,
+        permissionCheck,
+        permissionWarning,
+      } = await skillSession(async function* () {
+        yield {
+          type: "error",
+          message: "synthetic permission fallback warning",
+        };
+        yield* completedEvents();
       });
+      if (failure === "preflight")
+        permissionCheck.mockImplementation(async () => {
+          throw new Error("Required dependency permission profile rejected");
+        });
+      else
+        permissionWarning.mockReturnValue(
+          new Error("Required dependency permission profile rejected"),
+        );
       await using client = security;
       await expect(
         client.runDependencyFindingSkill({

@@ -1,10 +1,10 @@
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
 import { mkdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { DependencyFindings } from "../src/dependency-findings.js";
 import { OutputInsideProtectedRootError } from "../src/errors.js";
-import { createApiTestFixtures } from "./support/api-events.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);

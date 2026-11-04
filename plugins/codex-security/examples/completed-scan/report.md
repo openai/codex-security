@@ -2,14 +2,13 @@
 
 ## Scope
 
-The scan reviewed the canonical include paths and exclusions listed below.
+The scan was configured for the include paths and exclusions listed below.
 
 - Scan mode: repository
-- Target kind: git_worktree
-- Target ID: target_sha256_example
+- Target kind: git\_worktree
+- Target ID: target\_sha256\_example
 - Revision: deadbeef
 - Snapshot digest: codex-security-snapshot/v1:sha256:ed88f96a4c1a06603a41b3f261f59c3de2555c367ef6ad3bb8b9e483495d34eb
-- Inventory strategy: repository
 - Included paths: .
 - Excluded paths: none
 
@@ -17,13 +16,13 @@ The scan reviewed the canonical include paths and exclusions listed below.
 
 | Field | Value |
 | --- | --- |
+| Scan outcome | completed |
 | Reportable findings | 1 |
 | Severity mix | high: 1 |
 | Confidence mix | high: 1 |
-| Coverage | complete |
 | Validation mode | not recorded |
 
-Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.
+Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.
 
 ## Threat Model
 
@@ -87,9 +86,3 @@ Tests:
 
 Preventive controls:
 - Route all archive extraction through one helper that normalizes and validates destination paths.
-
-## Reviewed Surfaces
-
-| Surface | Risk Area | Outcome | Notes |
-| --- | --- | --- | --- |
-| Archive extraction | not recorded | Reported | No additional canonical notes were recorded. |

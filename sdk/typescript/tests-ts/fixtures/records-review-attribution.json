@@ -1,0 +1,38 @@
+[
+  {
+    "anchors": ["A", "B", "D"],
+    "participants": ["A", "B", "C"],
+    "attribution": {
+      "version": 1,
+      "beneficiaryObservationIds": ["A", "B"],
+      "contextObservationIds": ["C"]
+    }
+  },
+  {
+    "anchors": ["A", "B", "D"],
+    "participants": ["A", "C"],
+    "attribution": {
+      "version": 1,
+      "beneficiaryObservationIds": ["A"],
+      "contextObservationIds": ["C"]
+    }
+  },
+  {
+    "anchors": ["A", "B", "D"],
+    "participants": ["A", "B"],
+    "attribution": {
+      "version": 1,
+      "beneficiaryObservationIds": ["A", "B"],
+      "contextObservationIds": []
+    }
+  },
+  {
+    "anchors": ["A"],
+    "participants": ["A", "D"],
+    "attribution": {
+      "version": 1,
+      "beneficiaryObservationIds": ["A"],
+      "contextObservationIds": ["D"]
+    }
+  }
+]

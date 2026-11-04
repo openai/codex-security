@@ -2,11 +2,13 @@
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -14,13 +16,30 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from finalize_scan_contract import ContractError, _prepare_scan_finalization
+from finalize_scan_contract import (
+    ContractError,
+    _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
+    _read_sealed_scan,
+    manifest_is_sealed,
+)
 from report_projection import SEVERITY_ORDER
+from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
+from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json
+from workbench_validation import timestamp_key
+
+
+def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
+    name = name.strip()
+    if not name:
+        raise SystemExit("Scan name cannot be empty.")
+    connection.execute("UPDATE scans SET name = ? WHERE id = ?", (name, scan["id"]))
+    connection.commit()
+    return {"scanId": scan["id"], "name": name}
 
 
 def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
@@ -28,7 +47,7 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
@@ -48,17 +67,12 @@ def preserve_sealed_completion(
 
 
 def cli_scan_resume(
+    wb: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     workspace: sqlite3.Row,
-    *,
-    parse_scan_recipe: Callable[[str, Path], dict[str, Any]],
-    scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
-    require_scan_directory: Callable[[Path], Path],
-    artifact_path: Callable[..., Path | None],
-    read_json_object: Callable[[Path], dict[str, Any]],
-    workbench_completion_binding: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
+    scan = scan_with_progress(connection, scan["id"])
     if scan["mode"] != "deep" or scan["recipe_json"] is None:
         raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
@@ -94,17 +108,15 @@ def cli_scan_resume(
         scan["target_inode"],
     ):
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-    recipe = parse_scan_recipe(scan["recipe_json"], repository)
-    scan_dir = require_scan_directory(Path(scan["scan_dir"]))
-    progress = connection.execute(
-        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
+    recipe = wb.parse_scan_recipe(scan["recipe_json"], repository)
+    scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
     result = {
-        "contract": scan_contract(scan),
+        "contract": wb.scan_contract(scan),
+        "lifecycle": json.loads(scan["lifecycle_json"]),
         "recipe": recipe,
         "scanDir": str(scan_dir),
         "scanId": scan["id"],
-        "scopeFileCount": progress["scope_file_count"],
+        "scopeFileCount": scan["scope_file_count"],
         "startedAt": scan["started_at"],
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
@@ -114,16 +126,13 @@ def cli_scan_resume(
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":
-        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+        manifest_path = wb.artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
         if manifest_path is not None:
-            manifest = read_json_object(manifest_path)
+            manifest = wb.read_json_object(manifest_path)
             manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and (
-                manifest_scan.get("sealedAt") is not None
-                or manifest_scan.get("artifacts") is not None
-            ):
+            if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
-                    binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+                    binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
                     _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=binding["coverageMode"],
@@ -135,6 +144,69 @@ def cli_scan_resume(
     return result
 
 
+def coverage_summary_for_history(
+    wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
+) -> dict[str, Any]:
+    scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
+    coverage_ref = "coverage.json"
+    try:
+        if scan["seal_manifest_digest"] is None:
+            # Older workbench rows can have valid seals without a pinned digest.
+            manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
+            wb.verify_manifest_binding(scan, manifest)
+            if coverage["mode"] != wb.expected_coverage_mode(scan):
+                raise ContractError("coverage.mode: must match the workbench scan")
+        else:
+            # Completion already validated the full scan. History only needs the
+            # pinned manifest and any legacy coverage artifact, not findings or receipts.
+            manifest, manifest_bytes = _read_scan_local_json_bytes(
+                scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
+            )
+            if (
+                f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+                != scan["seal_manifest_digest"]
+            ):
+                raise ContractError("The sealed scan manifest changed after completion.")
+            sealed_scan = manifest["scan"]
+            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            if "coverageRef" not in sealed_scan:
+                coverage = review_state(sealed_scan)
+                return {
+                    key: coverage[key]
+                    for key in ("mode", "includePaths", "excludePaths", "explicitExclusions")
+                }
+            if sealed_scan["coverageRef"] != coverage_ref:
+                raise ContractError("The sealed coverage does not belong to this scan.")
+            coverage, coverage_bytes = _read_scan_local_json_bytes(
+                scan_dir, coverage_ref, coverage_ref
+            )
+            expected = next(
+                (
+                    artifact["sha256"]
+                    for artifact in sealed_scan["artifacts"]
+                    if artifact["path"] == coverage_ref
+                ),
+                None,
+            )
+            if (
+                hashlib.sha256(coverage_bytes).hexdigest() != expected
+                or coverage.get("scanId") != scan["id"]
+            ):
+                raise ContractError("The sealed coverage changed after completion.")
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    return {
+        key: coverage[key]
+        for key in (
+            "mode",
+            "includePaths",
+            "excludePaths",
+            "explicitExclusions",
+        )
+    }
+
+
 def _windows_path_key(value: str) -> str:
     return os.path.normcase(os.path.realpath(value))
 
@@ -143,7 +215,7 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+    after_git: Callable[..., str | None] | None = None,
 ) -> bool:
     if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
@@ -151,28 +223,23 @@ def _same_repository(
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
         return True
-    before_git_dir = git_output(
-        before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
-    )
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    after_git = after_git or git_output
+    before_git_dir = git_output(before_target, *common_dir)
     if (
         before_git_dir is not None
-        and after_git_dir is not None
+        and (after_git_dir := after_git(after_target, *common_dir)) is not None
         and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
     ):
         return True
-    before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    origin = ("remote", "get-url", "origin")
+    before_origin = _repository_origin(git_output(before_target, *origin))
+    return before_origin is not None and before_origin == _repository_origin(
+        after_git(after_target, *origin)
     )
 
 
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
+def _repository_origin(remote: str | None) -> tuple[str, str] | None:
     if remote is None:
         return None
     if "://" in remote:
@@ -198,9 +265,96 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+SCAN_SUMMARY_COLUMNS = """
+    scans.*,
+    lifecycle.snapshot AS lifecycle_json,
+    progress.reportable_findings_count,
+    progress.scope_file_count,
+    progress.review_items_completed,
+    progress.review_items_total,
+    progress.updated_at AS progress_updated_at,
+    (
+        SELECT COUNT(*)
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.scan_id = scans.id
+    ) AS finding_count
+"""
+SCAN_SUMMARY_QUERY = f"""
+SELECT {SCAN_SUMMARY_COLUMNS}
+FROM scans
+JOIN scan_progress AS progress ON progress.scan_id = scans.id
+JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
+"""
+
+
+def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
+    return connection.execute(
+        """
+        SELECT scans.*, lifecycle.snapshot AS lifecycle_json, progress.updated_at AS progress_updated_at,
+               progress.scope_file_count, progress.reportable_findings_count,
+               progress.review_items_total, progress.review_items_completed, progress.deep_review_pass,
+               progress.phase_items_total, progress.phase_items_completed, progress.phase_progress_unit,
+               progress.preflight_checks_total, progress.preflight_checks_completed,
+               progress.preflight_issues_json
+        FROM scans
+        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
+        WHERE scans.id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+
+def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "completedAt": row["completed_at"],
+        "continuationThreadId": row["continuation_thread_id"],
+        **stored_scan_cost_fields(row["cost_json"]),
+        "findingCount": row["finding_count"],
+        "lifecycle": json.loads(row["lifecycle_json"]),
+        "handoffStatus": row["handoff_status"],
+        "mode": row["mode"],
+        "model": row["model"],
+        "name": row["name"],
+        "parentScanId": row["parent_scan_id"],
+        "progress": {
+            "candidates": {"reportable": row["reportable_findings_count"]},
+            "coverage": {
+                "closedRows": row["review_items_completed"],
+                "filesTotal": row["scope_file_count"],
+                "worklistRows": row["review_items_total"],
+            },
+            "phase": row["phase"],
+            "status": "canceled" if row["canceled_at"] else row["status"],
+            "updatedAt": row["progress_updated_at"],
+        },
+        "recipeAvailable": row["recipe_json"] is not None,
+        "reasoningEffort": row["reasoning_effort"],
+        "scanDir": row["scan_dir"],
+        "scanId": row["id"],
+        "scope": row["scope"],
+        "startedAt": row["started_at"],
+        "targetId": row["target_id"],
+        "targetPath": row["target_path"],
+        "targetRevision": row["target_revision"],
+        "targetSummary": row["target_summary"],
+        "updatedAt": max(
+            row["updated_at"],
+            row["progress_updated_at"],
+            key=lambda value: (timestamp_key(value), value),
+        ),
+        **(
+            {"warnings": json.loads(row["completion_warnings_json"])}
+            if row["completion_warnings_json"] != "[]"
+            else {}
+        ),
+    }
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
+    connection.create_function("casefold", 1, str.casefold, deterministic=True)
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
@@ -214,16 +368,13 @@ def list_scans(
             """,
             (str(repository), str(repository)),
         ).fetchone()
-        requested_identity = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
-        )
+        requested_git = cache(git_output)
         related_target_ids = [
             target["target_id"]
             for target in connection.execute(
                 "SELECT id AS target_id, current_path AS target_path FROM security_targets"
             )
-            if _same_repository(target, requested_repository, after_identity=requested_identity)
+            if _same_repository(target, requested_repository, after_git=requested_git)
         ]
         repository_clauses = ["scans.target_path = ?"]
         values.append(str(repository))
@@ -261,12 +412,13 @@ def list_scans(
         query = args.query.strip().casefold()
         if query:
             clauses.append(
-                "(instr(lower(scans.target_path), ?) > 0 "
-                "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
-                "OR instr(lower(scans.scope), ?) > 0 "
-                "OR instr(lower(scans.mode), ?) > 0)"
+                "(instr(casefold(scans.target_path), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.name, '')), ?) > 0 "
+                "OR instr(casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(casefold(scans.scope), ?) > 0 "
+                "OR instr(casefold(scans.mode), ?) > 0)"
             )
-            values.extend((query, query, query, query))
+            values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
     limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
@@ -275,72 +427,18 @@ def list_scans(
         values.extend((limit + 1, args.offset))
     rows = connection.execute(
         f"""
-        SELECT
-            scans.*,
-            progress.reportable_findings_count,
-            progress.scope_file_count,
-            progress.review_items_completed,
-            progress.review_items_total,
-            progress.updated_at AS progress_updated_at,
-            (
-                SELECT COUNT(*)
-                FROM finding_occurrences AS occurrences
-                WHERE occurrences.scan_id = scans.id
-            ) AS finding_count
-        FROM scans
-        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        {SCAN_SUMMARY_QUERY}
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            MAX(scans.updated_at, progress.updated_at) DESC,
-            scans.started_at DESC,
+            MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
+            julianday(upper(scans.started_at)) DESC,
             scans.id
         {pagination}
         """,
         values,
     ).fetchall()
-    result = {
-        "scans": [
-            {
-                "completedAt": row["completed_at"],
-                "continuationThreadId": row["continuation_thread_id"],
-                **stored_scan_cost_fields(row["cost_json"]),
-                "findingCount": row["finding_count"],
-                "handoffStatus": row["handoff_status"],
-                "mode": row["mode"],
-                "model": row["model"],
-                "parentScanId": row["parent_scan_id"],
-                "progress": {
-                    "candidates": {"reportable": row["reportable_findings_count"]},
-                    "coverage": {
-                        "closedRows": row["review_items_completed"],
-                        "filesTotal": row["scope_file_count"],
-                        "worklistRows": row["review_items_total"],
-                    },
-                    "phase": row["phase"],
-                    "status": "canceled" if row["canceled_at"] else row["status"],
-                    "updatedAt": row["progress_updated_at"],
-                },
-                "recipeAvailable": row["recipe_json"] is not None,
-                "reasoningEffort": row["reasoning_effort"],
-                "scanDir": row["scan_dir"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "startedAt": row["started_at"],
-                "targetId": row["target_id"],
-                "targetPath": row["target_path"],
-                "targetRevision": row["target_revision"],
-                "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
-                **(
-                    {"warnings": json.loads(row["completion_warnings_json"])}
-                    if row["completion_warnings_json"] != "[]"
-                    else {}
-                ),
-            }
-            for row in rows[:limit]
-        ]
-    }
+    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
     if limit is not None:
         result.update(
             {
@@ -367,21 +465,25 @@ def list_unmatched_scan_pairs(
         """,
         (str(repository), str(repository)),
     ).fetchone()
-    selected = [
-        scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
-        if _same_repository(scan, requested)
-    ]
+    selected = []
+    requested_git = cache(git_output)
+    membership: dict[tuple[str | None, str], bool] = {}
+    for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
+        target = (scan["target_id"], scan["target_path"])
+        if target not in membership:
+            membership[target] = _same_repository(scan, requested, after_git=requested_git)
+        if membership[target]:
+            selected.append(scan)
+
+    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 
     available = []
-    for scan in selected:
+    for selected_index, scan in enumerate(selected):
         try:
             read_coverage(scan)
         except SystemExit:
             continue
-        available.append(scan)
+        available.append((selected_index, scan))
 
     saved_pairs = {
         (row["before_scan_id"], row["after_scan_id"])
@@ -391,10 +493,10 @@ def list_unmatched_scan_pairs(
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
-    for index, after in enumerate(available):
+    for index, (selected_index, after) in enumerate(available):
         previous = [
             before
-            for before in available[:index]
+            for _, before in available[:index]
             if args.force or (before["id"], after["id"]) not in saved_pairs
         ]
         skipped += index - len(previous)
@@ -414,11 +516,7 @@ def list_unmatched_scan_pairs(
                 ]
         known_groups = _known_finding_groups(
             known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
-            },
+            {scan["id"] for scan in selected[: selected_index + 1]},
         )
         batches.append(
             {
@@ -454,7 +552,7 @@ def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> 
             FROM scan_comparison_matches AS matches
             JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
             JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-            WHERE matches.before_scan_id IN ({placeholders})
+            WHERE matches.before_scan_id IN (SELECT value FROM json_each(?))
             ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
             """,
             sorted(scan_ids),
@@ -529,7 +627,6 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
-    comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -549,7 +646,10 @@ def compare_scans(
         else {}
     )
     findings: list[dict[str, Any]] = []
-    summary = {status: 0 for status in ("new", "persisting", "resolved", "reopened", "unknown")}
+    summary = {
+        status: 0
+        for status in ("new", "persisting", "resolved", "not_observed", "reopened", "unknown")
+    }
 
     for previous_rows, current_rows, match_reason in groups:
         previous = (
@@ -599,9 +699,6 @@ def compare_scans(
         elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
-        elif not comparable:
-            status = "unknown"
-            item["reason"] = "The later scan has incomplete coverage."
         elif not all(
             scan_covers_path(
                 after,
@@ -613,8 +710,14 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        else:
+        elif all(
+            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+            for row in previous_rows
+        ):
             status = "resolved"
+        else:
+            status = "not_observed"
+            item["reason"] = "Not observed in the later scan; remediation has not been verified."
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous["id"]
         elif previous_rows:
@@ -635,8 +738,6 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "comparable": comparable,
-        "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
         "repository": before["target_path"],
         "summary": summary,
@@ -653,14 +754,14 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
-                "SELECT * FROM scans WHERE status = 'complete' "
-                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
-                (after["started_at"], after["started_at"], after["id"]),
+                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
             )
-            if _same_repository(scan, after)
+            if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
+            and _same_repository(scan, after)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
@@ -822,14 +923,8 @@ def _rows_for_ids(
     connection: sqlite3.Connection, query: str, ids: Iterable[str]
 ) -> Iterator[sqlite3.Row]:
     values = tuple(dict.fromkeys(ids))
-    getlimit = getattr(connection, "getlimit", None)
-    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
-    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
-    for start in range(0, len(values), limit):
-        batch = values[start : start + limit]
-        yield from connection.execute(
-            query.format(placeholders=", ".join("?" for _ in batch)), batch
-        )
+    if values:
+        yield from connection.execute(query, (json.dumps(values),))
 
 
 # Stable finding IDs already include the target identity. Follow their indexed
@@ -849,7 +944,7 @@ _LINKED_FINDINGS_SQL = f"""
     WITH RECURSIVE linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
-        WHERE occurrences.id IN ({{placeholders}})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -918,7 +1013,7 @@ def finding_relations(
         for row in _rows_for_ids(
             connection,
             "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
-            "WHERE id IN ({placeholders})",
+            "WHERE id IN (SELECT value FROM json_each(?))",
             (pair[key] for pair in pairs for key in ("beforeOccurrenceId", "afterOccurrenceId")),
         )
     }
@@ -982,7 +1077,8 @@ def finding_matches(
         )
     )
     known_scans = sorted(
-        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
+        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
     )
     included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
     rows.extend(
@@ -1087,8 +1183,12 @@ def finding_occurrence_rows(
     severity: str | None = None,
     status: str | None = None,
 ) -> list[sqlite3.Row]:
+    connection.create_function("casefold", 1, str.casefold, deterministic=True)
     conditions, values = finding_occurrence_conditions(
         scan_id, query=query, severity=severity, status=status
+    )
+    severity_order = " ".join(
+        f"WHEN '{level}' THEN {rank}" for level, rank in SEVERITY_ORDER.items()
     )
     return connection.execute(
         f"""
@@ -1106,14 +1206,7 @@ def finding_occurrence_rows(
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         WHERE {conditions}
         ORDER BY
-            CASE occurrences.severity
-                WHEN 'critical' THEN 0
-                WHEN 'high' THEN 1
-                WHEN 'medium' THEN 2
-                WHEN 'low' THEN 3
-                WHEN 'informational' THEN 4
-                ELSE 5
-            END,
+            CASE occurrences.severity {severity_order} ELSE 5 END,
             occurrences.created_at,
             occurrences.id
         LIMIT ? OFFSET ?
@@ -1141,12 +1234,12 @@ def finding_occurrence_conditions(
         search = query.strip().casefold()
         if search:
             conditions.append(
-                "(instr(lower(occurrences.title), ?) > 0 "
-                "OR instr(lower(occurrences.summary), ?) > 0 "
+                "(instr(casefold(occurrences.title), ?) > 0 "
+                "OR instr(casefold(occurrences.summary), ?) > 0 "
                 "OR EXISTS ("
                 "SELECT 1 FROM finding_locations AS locations "
                 "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(lower(locations.relative_path), ?) > 0))"
+                "AND instr(casefold(locations.relative_path), ?) > 0))"
             )
             values.extend((search, search, search))
     return " AND ".join(conditions), values
@@ -1181,11 +1274,7 @@ def scan_covers_path(
     path: str | None,
     coverage: dict[str, Any],
 ) -> bool:
-    if (
-        scan["status"] != "complete"
-        or scan["target_id"] != target_id
-        or coverage.get("completeness") != "complete"
-    ):
+    if scan["status"] != "complete" or scan["target_id"] != target_id:
         return False
     if not isinstance(path, str) or not path:
         return False

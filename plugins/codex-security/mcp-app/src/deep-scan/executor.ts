@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
@@ -7,25 +8,42 @@ import {
   statSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import {
   delimiter,
   dirname,
   isAbsolute,
   join,
+  parse,
   resolve,
+  sep,
   win32,
 } from "node:path";
-import { Codex } from "@openai/codex-sdk";
-import { parse as parseToml } from "smol-toml";
-import { executablePathForSpawn } from "./executable-path.js";
+import {
+  Codex,
+  type CyberAccessProgram,
+  type ThreadEvent,
+} from "@openai/codex-sdk";
+import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import {
+  createCodexProfileClient,
+  preflightProviderDefinitions,
+  profileConfigOverrides,
+} from "../../../scripts/codex_profile.mjs";
+import { executablePathForSpawn } from "../executable-path.js";
+import { writePrivateFile } from "./artifacts.js";
 import {
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import {
   DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
+  readDeepScanParentCyberAccessProgram,
+  type DeepScanParentTurn,
 } from "./permission-profile-preflight.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type {
@@ -33,33 +51,92 @@ import type {
   CodexWorkerExecutor,
   CodexWorkerRequest,
   CodexWorkerResult,
+  DeepScanConfig,
 } from "./types.js";
 
 export interface CodexSdkWorkerModelSettings {
   model?: string;
   reasoningEffort?: string;
+  serviceTier?: string;
+  deepScanConfig?: DeepScanConfig;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
+  parentTurn?: DeepScanParentTurn;
 }
 
 /** The coordinator supplies scan identity; worker tools never choose paths. */
 export interface CodexSdkWorkerArtifactContext {
   pluginRoot: string;
-  scanRoot: string;
   repoRoot: string;
   scanId: string;
   scope?: string;
+  includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pythonCommand?: string;
 }
 
+interface CodexSdkWorkerRuntimeSettings {
+  environment?: Record<string, string>;
+  config: Record<string, unknown>;
+  preflightProviderOverrides?: string[];
+  nativeProfile?: string;
+  cyberAccessProgram?: CyberAccessProgram;
+}
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
-  private runtimeReasoningSummary?: Promise<string | undefined>;
+  private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
+  private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
+    const { threadId, diagnostics } = await this.runTurn(request);
+    return { threadId, ...(diagnostics && { diagnostics }) };
+  }
+
+  async compareFindings(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+  ): Promise<string> {
+    const turn = await this.runTurn({
+      kind: "compare",
+      prompt,
+      workingDirectory,
+      signal,
+      schema,
+    });
+    return turn.finalResponse;
+  }
+
+  private async runTurn(
+    request:
+      | CodexWorkerRequest
+      | {
+          kind: "compare";
+          prompt: string;
+          workingDirectory: string;
+          signal: AbortSignal;
+          schema: Record<string, unknown>;
+        },
+  ) {
+    const discovery = request.kind === "discovery" ? request : undefined;
+    const includePaths = this.modelSettings.artifactContext?.includePaths;
+    const scopeInput = JSON.stringify({
+      paths: includePaths,
+      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+    });
+    const includePathsFile =
+      !discovery || includePaths === undefined
+        ? undefined
+        : resolve(dirname(discovery.promptPath), `scope-${randomUUID()}.json`);
+    const deepConfigFile =
+      !discovery || this.modelSettings.deepScanConfig === undefined
+        ? undefined
+        : resolve(dirname(discovery.promptPath), `limits-${randomUUID()}.toml`);
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -68,13 +145,105 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(parentSandbox);
-      const configOverrides =
-        workerPermissionProfileConfigOverrides(workerProfile);
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const reasoningSummary = await (this.runtimeReasoningSummary ??=
-        workerReasoningSummary(childEnv));
+      const runtimeSettings = await (this.runtimeSettings ??=
+        workerRuntimeSettings(childEnv));
+      for (const [name, value] of Object.entries(
+        runtimeSettings.environment ?? {},
+      )) {
+        if (process.platform === "win32") {
+          for (const key of Object.keys(childEnv)) {
+            if (key.toUpperCase() === name.toUpperCase()) delete childEnv[key];
+          }
+        }
+        childEnv[name] = value;
+      }
+      if (deepConfigFile !== undefined) {
+        const config = this.modelSettings.deepScanConfig!;
+        // The saved run owns these limits, including after a coordinator restart.
+        // Runtime/provider inheritance was read above; workers only need the limits.
+        await writePrivateFile(
+          deepConfigFile,
+          stringifyToml({
+            deep_scan: {
+              workers: config.workers,
+              subagents: config.subagents,
+              stop_after_no_new: config.stopAfterNoNew,
+              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
+              max_discovery_runs: config.maxDiscoveryRuns,
+              ...(config.maxTimeHours === undefined
+                ? {}
+                : { max_time_hours: config.maxTimeHours }),
+            },
+          }),
+        );
+        for (const name of Object.keys(childEnv)) {
+          if (name.toUpperCase() === "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH")
+            delete childEnv[name];
+        }
+        childEnv.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepConfigFile;
+      }
+      if (includePathsFile !== undefined) {
+        // Keep host-bound inputs beside the prompt, outside the worker's output root.
+        await writePrivateFile(includePathsFile, scopeInput);
+      }
+      // Keep one native configuration for the policy check and the worker turn.
+      // Worker-owned tool and permission settings take precedence over inheritance.
+      const configOverrides = profileConfigOverrides({
+        ...runtimeSettings.config,
+        responses_api_metadata: {
+          codex_security_surface: "plugin",
+          codex_security_command: "scan",
+          codex_security_scan_mode: "deep",
+          // Keep the host's integration/provider context as this coordinator
+          // launches or resumes workers with a different role.
+          ...(isRecord(runtimeSettings.config.responses_api_metadata)
+            ? runtimeSettings.config.responses_api_metadata
+            : {}),
+          codex_security_worker_role: request.kind,
+        },
+        ...(this.modelSettings.reasoningEffort
+          ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
+          : {}),
+        ...(this.modelSettings.serviceTier === undefined
+          ? {}
+          : { service_tier: this.modelSettings.serviceTier }),
+        mcp_servers: {
+          // A disabled server still needs a valid transport during native resolution.
+          "codex-security": { command: "node", enabled: false },
+          ...(discovery &&
+            this.compactArtifactServer(discovery, includePathsFile)),
+        },
+        ...(discovery
+          ? workerSubagentConfig(
+              discovery.subagents,
+              runtimeSettings.config.features,
+            )
+          : {
+              web_search: "disabled",
+              project_doc_max_bytes: 0,
+              features: {
+                ...(isRecord(runtimeSettings.config.features) &&
+                  runtimeSettings.config.features),
+                apps: false,
+                plugins: false,
+                shell_tool: false,
+                unified_exec: false,
+                code_mode: false,
+                code_mode_only: false,
+                js_repl: false,
+                multi_agent: false,
+                multi_agent_v2: false,
+                enable_fanout: false,
+              },
+            }),
+        approval_policy: "never",
+        default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+        [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
+          workerProfile,
+      });
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -91,59 +260,87 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         process.arch,
         originalCwd,
       );
-      const { useOpenAiApiKey } =
+      const preflightOptions = {
+        codexPath,
+        cwd: request.workingDirectory,
+        configOverrides,
+        providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
+        env: childEnv,
+        signal: request.signal,
+      };
+      const parentProgram = this.modelSettings.parentTurn
+        ? await (this.parentCyberAccessProgram ??=
+            readDeepScanParentCyberAccessProgram({
+              ...preflightOptions,
+              parentTurn: this.modelSettings.parentTurn,
+            }).catch((error: unknown) => {
+              this.parentCyberAccessProgram = undefined;
+              throw error;
+            }))
+        : undefined;
+      const workerFeatures = runtimeSettings.config.features;
+      if (
+        parentProgram !== undefined &&
+        (!isRecord(workerFeatures) ||
+          workerFeatures.api_key_cyber_access_programs === undefined)
+      ) {
+        // Transmitting the inherited program requires this gate for API-key auth.
+        // Explicit per-scan feature settings remain authoritative.
+        configOverrides.push("features.api_key_cyber_access_programs=true");
+      }
+      const { useOpenAiApiKey, mcpServerNames } =
         await preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd: request.workingDirectory,
-          profileId: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-          configOverrides,
+          ...preflightOptions,
           expectedProfile: workerProfile,
-          env: childEnv,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
-          signal: request.signal,
         });
-      const prompt = await fs.readFile(request.promptPath, "utf8");
-      const codex = new Codex({
+      if (!discovery) {
+        for (const name of mcpServerNames) {
+          if (name !== "codex-security")
+            configOverrides.push(
+              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
+            );
+        }
+      }
+      const prompt =
+        request.kind === "compare"
+          ? request.prompt
+          : await fs.readFile(request.promptPath, "utf8");
+      const codexOptions = {
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
         ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
-        config: {
-          ...(reasoningSummary === undefined
-            ? {}
-            : { model_reasoning_summary: reasoningSummary }),
-          // The CLI can add effort levels before the pinned SDK widens ThreadOptions.
-          ...(this.modelSettings.reasoningEffort
-            ? { model_reasoning_effort: this.modelSettings.reasoningEffort }
-            : {}),
-          mcp_servers: {
-            // Discovery workers use the bundled skills and artifacts, not the parent workbench MCP.
-            // A disabled server still needs a valid transport while Codex resolves plugin configuration.
-            "codex-security": { command: "node", enabled: false },
-            ...this.compactArtifactServer(request),
-          },
-          ...workerSubagentConfig(request.subagents),
-        },
-        // Structured SDK config cannot preserve literal filesystem keys such as
-        // ":root" or "/repo/.env"; raw overrides keep this inline TOML intact.
+        // Raw overrides preserve literal filesystem and MCP keys.
         configOverrides,
-      });
+      };
+      const codex =
+        runtimeSettings.nativeProfile === undefined
+          ? new Codex(codexOptions)
+          : createCodexProfileClient<ThreadEvent>({
+              ...codexOptions,
+              profileName: runtimeSettings.nativeProfile,
+            });
       const threadOptions = {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
           : {}),
         threadSource: "security_scan",
-        approvalPolicy: "never",
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory,
       } as const;
-      const thread = request.resumeThreadId
-        ? codex.resumeThread(request.resumeThreadId, threadOptions)
+      const thread = discovery?.resumeThreadId
+        ? codex.resumeThread(discovery.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const input = request.resumeThreadId
-        ? (request.continuationPrompt ?? prompt)
+      const workerPrompt = discovery?.resumeThreadId
+        ? (discovery.continuationPrompt ?? prompt)
         : prompt;
+      const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
+      const input =
+        discovery && pluginRoot
+          ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
+          : workerPrompt;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -155,57 +352,54 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
+          ...(request.kind === "compare" && { outputSchema: request.schema }),
+          cyberAccessProgram:
+            parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
-        let finalResponse = "";
-        let threadId: string | undefined;
-        let turnCompleted = false;
-        let lastStreamError: string | undefined;
         const diagnostics: CodexWorkerDiagnostic[] = [];
-        for await (const event of events) {
-          if (event.type === "thread.started") {
-            threadId = event.thread_id;
-            await request.onThreadStarted?.(threadId);
-          } else if (event.type === "item.completed") {
-            const fallbackError =
-              event.item.type === "error"
-                ? deepScanPermissionProfileFallbackError(event.item.message)
-                : undefined;
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
+        const turn = await readCodexSessionTurn({
+          thread,
+          events,
+          stopOnCompletion: true,
+          onEvent: async (event) => {
+            const item = event.type === "item.completed" ? event.item : event;
+            if (item.type === "error") {
+              const fallbackError = deepScanPermissionProfileFallbackError(
+                item.message,
+              );
+              if (fallbackError) {
+                controller.abort(fallbackError);
+                throw fallbackError;
+              }
             }
-            if (event.item.type === "agent_message") {
-              finalResponse = event.item.text;
-            } else {
-              appendSafeItemDiagnostic(diagnostics, event.item);
+            if (event.type === "thread.started") {
+              await discovery?.onThreadStarted?.(event.thread_id);
+            } else if (event.type === "item.completed") {
+              appendItemDiagnostic(diagnostics, event.item);
+            } else if (event.type === "turn.completed") {
+              request.signal.removeEventListener("abort", forwardAbort);
+            } else if (event.type === "turn.failed") {
+              const error = codexWorkerTurnError(event.error.message);
+              if (error instanceof DeepScanNonRetryableError)
+                discovery?.onNonRetryableError?.(error);
+              throw error;
+            } else if (event.type === "error") {
+              // Codex exec emits retry-in-progress notifications as error events.
+              appendStreamDiagnostic(diagnostics, event.message);
             }
-          } else if (event.type === "turn.completed") {
-            turnCompleted = true;
-            request.signal.removeEventListener("abort", forwardAbort);
-            break;
-          } else if (event.type === "turn.failed") {
-            throw new Error(event.error.message);
-          } else if (event.type === "error") {
-            const fallbackError = deepScanPermissionProfileFallbackError(
-              event.message,
-            );
-            if (fallbackError) {
-              controller.abort(fallbackError);
-              throw fallbackError;
-            }
-            // Codex exec currently emits retry-in-progress notifications as error events.
-            lastStreamError = event.message;
-          }
-        }
-        if (!turnCompleted) {
-          const detail = lastStreamError ? `: ${lastStreamError}` : "";
+          },
+        });
+        if (turn.status !== "completed") {
+          const detail = turn.lastStreamError
+            ? `: ${turn.lastStreamError}`
+            : "";
           throw new Error(
             `Codex worker stream ended before turn.completed${detail}`,
           );
         }
         return {
-          finalResponse,
-          threadId: threadId ?? thread.id ?? undefined,
+          finalResponse: turn.finalResponse,
+          threadId: turn.threadId ?? thread.id ?? undefined,
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {
@@ -213,20 +407,18 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       throw classifyCodexWorkerError(error);
+    } finally {
+      if (includePathsFile !== undefined)
+        await fs.rm(includePathsFile, { force: true });
+      if (deepConfigFile !== undefined)
+        await fs.rm(deepConfigFile, { force: true });
     }
   }
 
-  private compactArtifactServer(request: CodexWorkerRequest): Record<
-    string,
-    {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      required: true;
-      startup_timeout_sec: number;
-      tool_timeout_sec: number;
-    }
-  > {
+  private compactArtifactServer(
+    request: CodexWorkerRequest,
+    includePathsFile?: string,
+  ) {
     const scan = this.modelSettings.artifactContext;
     if (!scan) return {};
 
@@ -236,21 +428,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "Deep Scan worker has no coordinator-bound artifact context.",
       );
     }
-    const expectedLayout = request.kind === "dedup" ? "reducer" : "worker";
-    if (assigned.layout !== expectedLayout) {
-      throw new Error(
-        "Deep Scan worker artifact context does not match its assigned phase.",
-      );
-    }
-    if (
-      (expectedLayout === "reducer") !==
-      (assigned.deepReducer !== undefined)
-    ) {
-      throw new Error(
-        "Deep Scan reducer requires its coordinator-bound source assignments.",
-      );
-    }
-
     return {
       // Keep every qualified worker tool within Codex's existing name limit.
       cs_artifacts: {
@@ -269,15 +446,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
+          ...(includePathsFile === undefined
+            ? {}
+            : { CODEX_SECURITY_INCLUDE_PATHS_FILE: includePathsFile }),
           ...(scan.pythonCommand !== undefined
             ? { CODEX_SECURITY_PYTHON_COMMAND: scan.pythonCommand }
-            : {}),
-          ...(assigned.deepReducer
-            ? {
-                CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify(
-                  assigned.deepReducer,
-                ),
-              }
             : {}),
         },
         required: true,
@@ -288,13 +461,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   }
 }
 
-function workerSubagentConfig(subagents: number) {
+function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   return {
     // V1 counts children; V2 counts the root plus its children. Keeping its
     // feature disabled lets the model choose either runtime without rejecting
     // inherited agents.max_threads configuration.
-    ...(subagents > 0 ? { agents: { max_threads: subagents } } : {}),
+    ...(subagents > 0 ? { "agents.max_threads": subagents } : {}),
     features: {
+      ...(isRecord(inheritedFeatures) ? inheritedFeatures : {}),
       multi_agent_v2: {
         enabled: false,
         max_concurrent_threads_per_session: subagents + 1,
@@ -310,80 +484,69 @@ function workerSubagentConfig(subagents: number) {
   };
 }
 
-type TomlValue = string | number | boolean | TomlObject;
-type TomlObject = { [key: string]: TomlValue };
-
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
-  const filesystemEntries: Array<[string, TomlValue]> = [[":root", "read"]];
-  const seenFilesystemKeys = new Set<string>();
-
-  for (const key of sandbox.filesystemDenies) {
-    if (seenFilesystemKeys.has(key)) continue;
-    seenFilesystemKeys.add(key);
-    filesystemEntries.push([key, "deny"]);
+function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+  const filesystem = new Map<string, string | Record<string, string>>([
+    [":root", "read"],
+    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
+  ]);
+  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+    if (sandbox.filesystemDenies.includes(literal)) {
+      const root = parse(literal).root;
+      const scope = filesystem.get(root);
+      filesystem.set(root, {
+        ...(typeof scope === "object"
+          ? scope
+          : scope === undefined
+            ? {}
+            : { ".": scope }),
+        [literal.slice(root.length)]: "deny",
+      });
+    }
+    filesystem.set(literal, { ".": "deny" });
   }
-
-  if (sandbox.globScanMaxDepth !== undefined) {
-    filesystemEntries.push(["glob_scan_max_depth", sandbox.globScanMaxDepth]);
-  }
-
   return {
     extends: ":read-only",
     // Object.fromEntries preserves literal keys such as "__proto__" without
     // letting a denied path mutate the serializer object prototype.
-    filesystem: Object.fromEntries(filesystemEntries) as TomlObject,
+    filesystem: {
+      ...Object.fromEntries(filesystem),
+      ...(sandbox.globScanMaxDepth === undefined
+        ? {}
+        : { glob_scan_max_depth: sandbox.globScanMaxDepth }),
+    },
     network: { enabled: false },
   };
 }
 
-function workerPermissionProfileConfigOverrides(profile: TomlObject): string[] {
-  return [
-    `default_permissions=${tomlString(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
-    `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${tomlInlineValue(profile)}`,
-  ];
-}
-
-function tomlInlineValue(value: TomlValue): string {
-  if (typeof value === "string") return tomlString(value);
-  if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  return `{${Object.entries(value)
-    .map(([key, entry]) => `${tomlKey(key)}=${tomlInlineValue(entry)}`)
-    .join(",")}}`;
-}
-
-function tomlKey(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
-}
-
-function tomlString(value: string): string {
-  return JSON.stringify(value).replace(/\u007f/g, "\\u007f");
-}
-
-/**
- * Convert SDK item failures into bounded classifications without retaining the
- * command, output, or paths carried by the event. Those fields can contain
- * repository contents and credentials, while the coordinator only needs the
- * reason a later deterministic artifact check failed.
- */
-function appendSafeItemDiagnostic(
+/** Retain SDK failure messages for a later deterministic artifact check. */
+function appendItemDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   item: unknown,
 ): void {
-  if (
-    !isRecord(item) ||
-    item.status !== "failed" ||
-    typeof item.type !== "string"
-  )
+  if (!isRecord(item) || typeof item.type !== "string") return;
+  if (item.type === "error" && typeof item.message === "string") {
+    appendStreamDiagnostic(diagnostics, item.message);
     return;
+  }
+  if (item.status !== "failed") return;
+  if (
+    item.type === "mcp_tool_call" &&
+    isRecord(item.error) &&
+    typeof item.error.message === "string" &&
+    isCodeModeFrameError(item.error.message)
+  ) {
+    appendUniqueDiagnostic(diagnostics, {
+      code: "artifact_tool_failed",
+      message: item.error.message,
+    });
+  }
   if (item.type === "command_execution") {
     const output =
       typeof item.aggregated_output === "string" ? item.aggregated_output : "";
     if (isSandboxNamespaceExhaustion(output)) {
       appendUniqueDiagnostic(diagnostics, {
         code: "sandbox_namespace_exhausted",
-        message:
-          "Codex worker sandbox namespace creation failed (bwrap ENOSPC).",
+        message: output,
       });
     }
     return;
@@ -401,16 +564,51 @@ function appendSafeItemDiagnostic(
       item.server === "codex_security_artifacts") &&
     typeof item.tool === "string"
   ) {
+    const messages = [
+      ...(isRecord(item.error) ? [item.error.message] : []),
+      ...(isRecord(item.result) && Array.isArray(item.result.content)
+        ? item.result.content.flatMap((content) =>
+            isRecord(content) && content.type === "text" ? [content.text] : [],
+          )
+        : []),
+    ].filter(
+      (message): message is string =>
+        typeof message === "string" && message.length > 0,
+    );
     const reason = isRecord(item.result)
       ? "returned an error"
       : isRecord(item.error)
         ? "transport failed"
         : "failed";
-    appendUniqueDiagnostic(diagnostics, {
-      code: "artifact_tool_failed",
-      message: `Codex worker artifact tool ${item.tool} ${reason}.`,
-    });
+    for (const message of messages.length > 0
+      ? messages
+      : [`Codex worker artifact tool ${item.tool} ${reason}.`]) {
+      appendUniqueDiagnostic(diagnostics, {
+        code: "artifact_tool_failed",
+        message,
+      });
+    }
   }
+}
+
+function isCodeModeFrameError(message: string): boolean {
+  return (
+    /^code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length [0-9]+ exceeds [0-9]+ bytes$/u.exec(
+      message,
+    )?.[0] === message
+  );
+}
+
+function appendStreamDiagnostic(
+  diagnostics: CodexWorkerDiagnostic[],
+  message: string,
+): void {
+  appendUniqueDiagnostic(diagnostics, {
+    code: isCodeModeFrameError(message)
+      ? "artifact_tool_failed"
+      : "worker_error",
+    message,
+  });
 }
 
 function isSandboxNamespaceExhaustion(output: string): boolean {
@@ -423,7 +621,13 @@ function appendUniqueDiagnostic(
   diagnostics: CodexWorkerDiagnostic[],
   diagnostic: CodexWorkerDiagnostic,
 ): void {
-  if (!diagnostics.some((existing) => existing.code === diagnostic.code)) {
+  if (
+    !diagnostics.some(
+      (existing) =>
+        existing.code === diagnostic.code &&
+        existing.message === diagnostic.message,
+    )
+  ) {
     diagnostics.push(diagnostic);
   }
 }
@@ -432,26 +636,165 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function workerReasoningSummary(
+function mergeConfigTables(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries([
+    ...Object.entries(base),
+    ...Object.entries(override).map(([key, value]) => {
+      const inherited = base[key];
+      return [
+        key,
+        isRecord(inherited) &&
+        !Array.isArray(inherited) &&
+        isRecord(value) &&
+        !Array.isArray(value)
+          ? mergeConfigTables(inherited, value)
+          : value,
+      ];
+    }),
+  ]);
+}
+
+export async function workerRuntimeSettings(
   environment: Record<string, string>,
-): Promise<string | undefined> {
+): Promise<CodexSdkWorkerRuntimeSettings> {
   const configPath = environmentVariable(
     environment,
     "CODEX_SECURITY_CONFIG_PATH",
     process.platform,
   );
-  if (!configPath) return undefined;
+  if (!configPath) return { config: {} };
   const config = parseToml(await fs.readFile(configPath, "utf8"));
   const profiles = config.profiles;
   const profile =
     typeof config.profile === "string" && isRecord(profiles)
       ? profiles[config.profile]
       : undefined;
-  const summary =
-    isRecord(profile) && profile.model_reasoning_summary !== undefined
-      ? profile.model_reasoning_summary
-      : config.model_reasoning_summary;
-  return typeof summary === "string" ? summary : undefined;
+  const selected: Record<string, unknown> = {
+    ...config,
+    ...(isRecord(profile) ? profile : {}),
+  };
+  for (const key of [
+    "analytics",
+    "otel",
+    "responses_api_metadata",
+    "features",
+  ]) {
+    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
+      selected[key] = mergeConfigTables(config[key], profile[key]);
+    }
+  }
+  const settings: CodexSdkWorkerRuntimeSettings = { config: selected };
+  const workerConfigPath = environmentVariable(
+    environment,
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    process.platform,
+  );
+  const snapshot = workerConfigPath
+    ? parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime
+    : undefined;
+  const {
+    environment: workerEnvironment,
+    native_profile: nativeProfile,
+    model_providers: legacyProviders,
+    ...workerConfig
+  } = isRecord(snapshot) ? snapshot : {};
+  if (isRecord(workerEnvironment)) {
+    settings.environment = workerEnvironment as Record<string, string>;
+  }
+  if (typeof nativeProfile === "string") {
+    // Match Codex's plain profile-v2 names before constructing a private file path.
+    if (nativeProfile.length === 0 || /[^A-Za-z0-9_-]/.test(nativeProfile)) {
+      throw new DeepScanNonRetryableError(
+        `invalid --profile value ${JSON.stringify(nativeProfile)}; pass a plain name such as "work"`,
+      );
+    }
+    settings.nativeProfile = nativeProfile;
+    const codexHome =
+      environmentVariable(environment, "CODEX_HOME", process.platform) ||
+      join(homedir(), ".codex");
+    const nativeProfileConfig = parseToml(
+      await fs.readFile(
+        join(codexHome, `${nativeProfile}.config.toml`),
+        "utf8",
+      ),
+    );
+    if (isRecord(nativeProfileConfig.model_providers)) {
+      const providers = preflightProviderDefinitions(
+        nativeProfileConfig.model_providers,
+      );
+      if (Object.keys(providers).length > 0) {
+        settings.preflightProviderOverrides = profileConfigOverrides({
+          model_providers: providers,
+        });
+      }
+    }
+  }
+  if (
+    settings.nativeProfile === undefined &&
+    isRecord(legacyProviders) &&
+    Object.keys(legacyProviders).length > 0
+  ) {
+    throw new DeepScanNonRetryableError(
+      "This Deep Scan provider snapshot needs private native profile support. Update the SDK and bundled plugin together.",
+    );
+  }
+  const security = config.codex_security;
+  if (isRecord(security) && typeof security.cyber_access_program === "string") {
+    settings.cyberAccessProgram =
+      security.cyber_access_program as CyberAccessProgram;
+  }
+  settings.config = {
+    ...selected,
+    ...workerConfig,
+    features: {
+      ...(isRecord(selected.features) ? selected.features : {}),
+      ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
+    },
+  };
+  // Profiles are resolved above; providers stay in their private native file.
+  // Workers register their own tools and verified read-only permission profile.
+  for (const key of [
+    "profile",
+    "profiles",
+    "projects",
+    "model_providers",
+    "codex_security",
+    "mcp_servers",
+    "plugins",
+    "marketplaces",
+    "permissions",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "approvals_reviewer",
+  ]) {
+    delete settings.config[key];
+  }
+  const parentScanDirectory = environmentVariable(
+    environment,
+    "CODEX_SECURITY_SCAN_DIR",
+    process.platform,
+  );
+  if (parentScanDirectory) {
+    for (const key of [
+      "model_instructions_file",
+      "model_catalog_json",
+      "experimental_compact_prompt_file",
+    ]) {
+      const value = settings.config[key];
+      if (
+        typeof value === "string" &&
+        value.length > 0 &&
+        !isAbsolute(value) &&
+        !value.startsWith("~")
+      ) {
+        settings.config[key] = resolve(parentScanDirectory, value);
+      }
+    }
+  }
+  return settings;
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
@@ -603,10 +946,7 @@ function resolveFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = `${absoluteCodexPath(directory, process.platform, originalCwd)}${sep}${executableName}`;
     if (isExecutableFile(candidate)) return candidate;
   }
   return undefined;
@@ -618,10 +958,7 @@ function resolveWindowsDirectFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = join(resolve(originalCwd, directory), executableName);
     if (!isWindowsAppsPath(candidate) && existsSync(candidate))
       return candidate;
   }
@@ -634,7 +971,7 @@ function resolveWindowsCodexFromSearchPath(
   originalCwd: string,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const absoluteDirectory = absoluteSearchDirectory(directory, originalCwd);
+    const absoluteDirectory = resolve(originalCwd, directory);
     const directBinary = join(absoluteDirectory, "codex.exe");
     if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
       return directBinary;
@@ -704,13 +1041,6 @@ function isExecutableFile(value: string): boolean {
   }
 }
 
-function absoluteSearchDirectory(
-  directory: string,
-  originalCwd: string,
-): string {
-  return resolve(originalCwd, directory || ".");
-}
-
 function absoluteCodexPath(
   value: string,
   platform: NodeJS.Platform,
@@ -723,7 +1053,9 @@ function absoluteCodexPath(
   if (isAbsolute(value) || (platform === "win32" && win32.isAbsolute(value))) {
     return value;
   }
-  return resolve(originalCwd, value);
+  return platform === "win32"
+    ? resolve(originalCwd, value)
+    : `${originalCwd}${sep}${value}`;
 }
 
 function isNativeWindowsRootRelativePath(value: string): boolean {

@@ -1,5 +1,10 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
+import type {
+  McpServer,
+  ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
+import type { JsonObject as JsonRecord } from "../types.js";
 import {
   createScanArtifactContext,
   type ArtifactContext,
@@ -20,24 +25,15 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
-import {
-  deepReducerInputsInputSchema,
-  deepReductionInputSchema,
-  getCodexSecurityDeepReducerInputs,
-  recordCodexSecurityDeepReduction,
-} from "../artifact-deep-reducer.js";
+} from "../artifact-candidate-ledger.js";
 import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
   scanDraftInputSchema,
-  type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 
 import {
@@ -48,8 +44,6 @@ import {
   standaloneArtifactContext,
   type ArtifactLocation,
 } from "../artifact-storage.js";
-
-type JsonRecord = Record<string, unknown>;
 
 export interface CompactArtifactToolOptions {
   runWorkbench: RunArtifactWorkbench;
@@ -65,33 +59,24 @@ const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
 };
 
-const readingAnnotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
+const semanticFindingGuidance =
+  " Findings require severity:{level}, confidence:{level,rationale}, taxonomy:{category,cwe:[]}, locations:[{path,startLine,endLine?}], and provenance:{source}, alongside ruleId,title,summary,remediation. Use repository-relative paths. Each codeEvidence entry needs id,label,path,startLine,code,explanation. Omit host-owned findingId,occurrenceId,fingerprints and scope.includePaths/excludePaths.";
 
-const writingAnnotations = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
+const reviewStateGuidance =
+  " Coverage shape: {surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Exclusions and unresolved review questions do not prevent a terminal result. Omit host-owned reviewState documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.";
 
-/** Prepare diff inventories and read existing diff or Deep inventories. */
-export function registerReviewItemTools(
+export function registerCompactArtifactTools(
   server: McpServer,
   options: CompactArtifactToolOptions,
 ): void {
+  /** Prepare diff inventories and read existing diff or Deep inventories. */
   registerCompactTool(server, {
     name: "prepare_codex_security_review_items",
     title: "Prepare Codex Security Review Items",
     description: "Generate the changed-file inventory for a diff scan.",
     inputSchema: prepareReviewItemsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = prepareReviewItemsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return prepareCodexSecurityReviewItems(
         await phaseScanContext(input, options, requestContext, "diff"),
       );
@@ -104,34 +89,24 @@ export function registerReviewItemTools(
     description: "Read one page of the diff or Deep scan discovery inventory.",
     inputSchema: reviewItemsReaderInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = reviewItemsReaderInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return listCodexSecurityReviewItems(
         await phaseScanContext(input, options, requestContext),
         input,
       );
     },
   });
-}
 
-/** Record diff candidates and read existing diff or Deep candidates. */
-export function registerDiscoveryCandidateTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
-  const writerSchema = workbenchDiscoveryCandidatesInputSchema;
-  const readerSchema = workbenchListCodexSecurityCandidatesInputSchema;
-
+  /** Record diff candidates and read existing diff or Deep candidates. */
   registerCompactTool(server, {
     name: "record_codex_security_discovery_candidates",
     title: "Record Codex Security Discovery Candidates",
     description: "Normalize and replace the selected diff scan's candidates.",
-    inputSchema: writerSchema,
+    inputSchema: workbenchDiscoveryCandidatesInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = writerSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
-        { candidates: input.candidates },
+        input,
         await phaseScanContext(input, options, requestContext, "diff"),
       );
     },
@@ -141,82 +116,62 @@ export function registerDiscoveryCandidateTools(
     name: "list_codex_security_candidates",
     title: "List Codex Security Candidates",
     description: "Read one page of diff or Deep scan discovery candidates.",
-    inputSchema: readerSchema,
+    inputSchema: workbenchListCodexSecurityCandidatesInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = readerSchema.parse(value);
+    handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
-        {
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
+        input,
         await phaseScanContext(input, options, requestContext),
       );
     },
   });
-}
 
-/** Record centralized validation results for a diff or Deep scan. */
-export function registerCandidateValidationTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Record centralized validation results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_codex_security_candidate_validations",
     title: "Record Codex Security Candidate Validations",
     description: "Record the diff or Deep scan candidate validation results.",
     inputSchema: candidateValidationsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = candidateValidationsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
-        { validations: input.validations },
+        input,
       );
     },
   });
-}
 
-/** Record centralized attack-path results for a diff or Deep scan. */
-export function registerCandidateAttackPathTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Record centralized attack-path results for a diff or Deep scan. */
   registerCompactTool(server, {
     name: "record_candidate_attack_paths",
     title: "Record Codex Security Candidate Attack Paths",
     description: "Record the diff or Deep scan candidate attack-path results.",
     inputSchema: candidateAttackPathsInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = candidateAttackPathsInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
-        { attackPaths: input.attackPaths },
+        input,
       );
     },
   });
-}
 
-/** Register draft construction and read-only completed scan retrieval. */
-export function registerScanDraftTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
+  /** Register draft construction and read-only completed scan retrieval. */
   registerCompactTool(server, {
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save semantic findings and coverage as an unsealed draft. Use complete:false for progress checkpoints, then complete:true for the final result; keep unvalidated candidates in coverage.deferred.",
+      "Save the canonical threat model, findings and reviewState as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in reviewState.deferred. On terminal Standard or diff drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
     inputSchema: scanDraftInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = scanDraftInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return recordCodexSecurityScanDraftViaWorkbench(
         await scanContext(input, options, true, requestContext),
         input,
         options.runWorkbench,
-        signalFromRequestContext(requestContext),
+        requestContext.signal,
       );
     },
   });
@@ -228,44 +183,21 @@ export function registerScanDraftTools(
       "Read the selected scan's existing completed, sealed canonical documents.",
     inputSchema: completedScanInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = completedScanInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return getCodexSecurityCompletedScan(
         await scanContext(input, options, false, requestContext),
         input,
       );
     },
   });
-}
-
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
-}
-
-/** Keep each vertical operation independently reviewable and registered. */
-export function registerCompactArtifactTools(
-  server: McpServer,
-  options: CompactArtifactToolOptions,
-): void {
-  registerReviewItemTools(server, options);
-  registerDiscoveryCandidateTools(server, options);
-  registerCandidateValidationTools(server, options);
-  registerCandidateAttackPathTools(server, options);
-  registerScanDraftTools(server, options);
   registerCompactTool(server, {
     name: "save_codex_security_artifact",
     title: "Save Codex Security Artifact",
     description:
-      "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ and either exact text content or a sourcePath inside the returned temporary directory. Canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
+      "Save a supplemental document or evidence file with temporary or persistent storage. Use scanId for a running scan, or targetPath for standalone documents and shared threat models. Omit path/content/sourcePath to prepare and return the selected directory. Otherwise provide a portable relative path under artifacts/, findings/ or hardening/ (or threatmodel.md for a standalone model) and either exact text content or a sourcePath inside the returned temporary directory. Scan threatmodel.md is host-generated from semantic drafts; canonical scan files and recovery checkpoints use the existing typed scan tools. Does not edit completed scans or source/configuration files.",
     inputSchema: saveArtifactInputSchema,
     readOnly: false,
-    handler: async (value, requestContext) => {
-      const input = saveArtifactInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return saveCodexSecurityArtifact(
         await supplementalContext(input, options, true, requestContext),
         input,
@@ -277,11 +209,10 @@ export function registerCompactArtifactTools(
     name: "read_codex_security_artifact",
     title: "Read Codex Security Artifact",
     description:
-      "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it.",
+      "Read a saved supplemental artifact from temporary or persistent storage, including after an MCP restart. Use the same scanId or standalone targetPath, storage and relative path used to save it. A scan's host-generated model is threatmodel.md; standalone legacy threat_model.md remains readable.",
     inputSchema: readArtifactInputSchema,
     readOnly: true,
-    handler: async (value, requestContext) => {
-      const input = readArtifactInputSchema.parse(value);
+    handler: async (input, requestContext) => {
       return readCodexSecurityArtifact(
         await supplementalContext(input, options, false, requestContext),
         input,
@@ -324,57 +255,35 @@ export function registerCompactWorkerArtifactTools(
   server: McpServer,
   context: ArtifactContext,
 ): void {
-  if (context.layout === "worker") {
-    registerCompactTool(server, {
-      name: "record_codex_security_scan_draft",
-      title: "Record Codex Security Scan Draft",
-      description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred.",
-      inputSchema: scanDraftInputSchema,
-      readOnly: false,
-      handler: async (value) =>
-        recordCodexSecurityWorkerScanDraft(context, value as ScanDraftInput),
-    });
-    return;
-  }
-
-  if (context.layout !== "reducer") {
-    throw new Error(
-      "The lightweight artifact server requires a bound discovery or reducer worker.",
-    );
-  }
-
   registerCompactTool(server, {
-    name: "get_codex_security_deep_reducer_inputs",
-    title: "Get Codex Security Deep Reducer Inputs",
-    description: "Read the assigned findings, context, and previous aggregate.",
-    inputSchema: deepReducerInputsInputSchema,
-    readOnly: true,
-    handler: async () => getCodexSecurityDeepReducerInputs(context),
-  });
-
-  registerCompactTool(server, {
-    name: "record_codex_security_deep_reduction",
-    title: "Record Codex Security Deep Reduction",
-    description: "Record the merged findings and context for this Deep scan.",
-    inputSchema: deepReductionInputSchema,
+    name: "record_codex_security_scan_draft",
+    title: "Record Codex Security Scan Draft",
+    description:
+      "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints or when source access or execution blocks the audit; record blockers and unvalidated candidates in reviewState.deferred. Use complete:true only after the source review finishes, including a review with no findings. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
+    inputSchema: scanDraftInputSchema,
     readOnly: false,
-    handler: async (value) => recordCodexSecurityDeepReduction(context, value),
+    handler: async (value) =>
+      recordCodexSecurityWorkerScanDraft(context, value),
   });
 }
 
-interface CompactToolRegistration {
+interface CompactToolRegistration<Input> {
   name: string;
   title: string;
   description: string;
-  inputSchema: ZodType;
+  inputSchema: ZodType<Input>;
   readOnly: boolean;
-  handler: (value: unknown, requestContext: unknown) => Promise<object>;
+  handler: (
+    value: Input,
+    requestContext: Parameters<ToolCallback<ZodType<Input>>>[1],
+  ) => Promise<object>;
 }
 
-function registerCompactTool(
+function registerCompactTool<Input>(
   server: McpServer,
-  registration: CompactToolRegistration,
+  registration: CompactToolRegistration<Input>,
 ): void {
   server.registerTool(
     registration.name,
@@ -387,11 +296,22 @@ function registerCompactTool(
         : writingAnnotations,
       _meta: modelOnlyMeta,
     },
-    async (input: unknown, requestContext: unknown) => {
+    async (input, requestContext) => {
       const value = await registration.handler(input, requestContext);
+      let structured = true;
+      const text = JSON.stringify(value, (key, item: unknown) => {
+        if (
+          !key.isWellFormed() ||
+          (typeof item === "string" && !item.isWellFormed())
+        )
+          structured = false;
+        return item;
+      });
+      // Codex's native JSON decoder rejects lone surrogates; the JSON text retains
+      // their exact escaped representation, including raw POSIX filename bytes.
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(value) }],
-        structuredContent: value as JsonRecord,
+        content: [{ type: "text" as const, text }],
+        ...(structured ? { structuredContent: value as JsonRecord } : {}),
       };
     },
   );

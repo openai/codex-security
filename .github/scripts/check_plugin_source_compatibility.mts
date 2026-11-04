@@ -60,11 +60,10 @@ function lineEndsNaturally(line: string): boolean {
   );
 }
 
-function hardWrappedLines(content: string): number[] {
+function* hardWrappedLines(content: string): Generator<number> {
   const lines = content.split(
     /\r\n|[\n\r\v\f\u001c-\u001e\u0085\u2028\u2029]/u,
   );
-  const offenders: number[] = [];
   let inFence = false;
   let inFrontmatter = content.startsWith("---\n");
   for (let index = 0; index < lines.length - 1; index++) {
@@ -85,9 +84,8 @@ function hardWrappedLines(content: string): number[] {
     if (LIST_ITEM.test(followingLine) || lineEndsNaturally(line)) continue;
     if (!/[A-Za-z0-9`]$/u.test(stripped)) continue;
     if (!/^[A-Za-z0-9`(]/u.test(followingLine.trim())) continue;
-    offenders.push(index + 1);
+    yield index + 1;
   }
-  return offenders;
 }
 
 function sourceCompatibilityErrors(pluginRoot: string): string[] {

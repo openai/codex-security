@@ -15,7 +15,6 @@ import {
   requireOutputOutsideRepository,
   resolvePluginPython,
   runWorkbench,
-  runCodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
@@ -462,23 +461,3 @@ export function dependencyFindingSkillPrompt(
 }
 
 /** @internal Reuse the bundled native permission checks before model work. */
-export async function checkDependencyPermissions(
-  pluginRoot: string,
-  command: "dependency-permission-profile" | "dependency-permission-warning",
-  input: JsonObject,
-  environment: ProcessEnvironment,
-  signal: AbortSignal,
-): Promise<void> {
-  const result = await runCodexCommand(
-    { command: process.execPath },
-    [join(pluginRoot, "mcp", "helpers.mjs"), command],
-    environment,
-    JSON.stringify(input),
-    signal,
-  );
-  if (result.exitCode !== 0) {
-    throw new CodexSecurityError(
-      result.stderr.trim() || "Dependency permission check failed.",
-    );
-  }
-}
