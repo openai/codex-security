@@ -7946,10 +7946,10 @@ async function runDependencyScan(
             chooseInteractiveAuthentication(
               {
                 auth,
-                provider: scanModelProvider({
+                config: {
                   ...DEFAULT_CODEX_CONFIG,
                   ...config.codexOverrides,
-                }),
+                },
                 command: "scan",
                 signal,
               },
