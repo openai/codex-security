@@ -137,6 +137,16 @@ async function testExactParentMatchBeforeWorkerAlias(
     // Saved reductions from the earlier workflow retain both the accepted
     // finding and its source observation. Replay consumes that persisted shape.
     const workerSourceId = `${worker.id}:0`;
+    const reduced = {
+      ...original,
+      summary: "Accepted reduced first-location finding.",
+      severity: { level: "low", score: 2.1, scoringSystem: "CVSS:3.1" },
+      provenance: {
+        ...original.provenance,
+        sourceFindingIds: [workerSourceId],
+        sourceFindings: [{ id: workerSourceId, finding: original }],
+      },
+    };
     const reduction = {
       scanId: run.scanId,
       complete: true,
@@ -149,16 +159,7 @@ async function testExactParentMatchBeforeWorkerAlias(
             sourceFindings: [{ id: "previous:0", finding: legacy }],
           },
         },
-        {
-          ...original,
-          summary: "Accepted reduced first-location finding.",
-          severity: { level: "low", score: 2.1, scoringSystem: "CVSS:3.1" },
-          provenance: {
-            ...original.provenance,
-            sourceFindingIds: [workerSourceId],
-            sourceFindings: [{ id: workerSourceId, finding: original }],
-          },
-        },
+        reduced,
       ],
     };
     const context = await createScanArtifactContext(run.scanId, runWorkbench, {
