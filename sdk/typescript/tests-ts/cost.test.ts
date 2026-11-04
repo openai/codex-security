@@ -8,7 +8,15 @@ import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  spyOn,
+  test,
+} from "bun:test";
 import {
   estimateScanCost,
   ScanCostTracker,
@@ -902,6 +910,15 @@ test.each(["open", "read", "close"] as const)(
 );
 
 describe("inventory source ordering", () => {
+  // These fixtures drive each poll explicitly. A real interval can read a
+  // partial batch between writes and move the close callback to a later batch.
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   async function fixture(workerFirst = false) {
     const { home, parent, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
