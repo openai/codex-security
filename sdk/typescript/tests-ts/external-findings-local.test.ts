@@ -766,7 +766,8 @@ describe("local normalized scanner findings", () => {
       const original = { lstat: fs.lstat, realpath: fs.realpath, stat: fs.stat };
       const held = new Map();
       function lookup(method, path, args) {
-        const gate = held.get(method + ":" + path);
+        // Repository normalization checks a byte path before the protected-root lookups.
+        const gate = typeof path === "string" && held.get(method + ":" + path);
         if (gate) { gate.entered(); return gate.wait; }
         return original[method](path, ...args);
       }
