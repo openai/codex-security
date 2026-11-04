@@ -6825,9 +6825,7 @@ function wasScanCanceled(
   if (
     !signal.aborted ||
     costStopped ||
-    signal.reason instanceof HostProtocolError ||
-    (signal.reason instanceof DOMException &&
-      signal.reason.name === "TimeoutError")
+    signal.reason instanceof HostProtocolError
   )
     return false;
   return (

@@ -422,11 +422,11 @@ lifecycle mode `import`. Exclude imports and mock scans when counting executed
 scans. For older records, saved recipes identify known imports, mock scans,
 and the plugin version used at launch. Missing fields stay unknown.
 
-With the bundled plugin, a newly registered local `run()` scan records `canceled`
-when the caller or client stops it. A hosted scan records cancellation before
-dispatch or when the executor confirms cancellation. An offline import
+With the bundled plugin, a registered local `run()` scan records `canceled` when
+the client closes or the caller's signal aborts, including `AbortSignal.timeout()`.
+A hosted scan records cancellation before dispatch or when the executor confirms
+it. An independent runtime failure, a malformed event, or an offline import
 interrupted after registration records `failed`.
-A timeout from `AbortSignal.timeout()` or a malformed runtime event counts as a failure.
 
 If `run()` rejects before you receive a registration, record the error separately
 from saved scan outcomes. The caller may have missed the registration receipt.

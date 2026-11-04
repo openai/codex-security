@@ -3827,6 +3827,12 @@ if __name__ == "__main__":
       "caller deadline",
       nativeAbort,
       new DOMException("Scan timed out", "TimeoutError"),
+      true,
+    ],
+    [
+      "independent timeout during caller abort",
+      new DOMException("Request timed out", "TimeoutError"),
+      undefined,
       false,
     ],
     ["older plugin", nativeAbort, undefined, false],
@@ -3882,7 +3888,11 @@ if __name__ == "__main__":
       else expect(interrupted.cause).toBe(cause);
       expect(stopped?.slice(1, 3)).toEqual(["--scan-id", "scan_example_001"]);
       expect(stopped).toContainEqual(expect.stringMatching(/^--message=.+/));
-      if (nativeError === decoderError || late)
+      if (
+        nativeError === decoderError ||
+        nativeError.name === "TimeoutError" ||
+        late
+      )
         expect(stopped).toContain(`--message=${nativeError.message}`);
       expect(stopped?.includes("--canceled")).toBe(canceled);
     },
