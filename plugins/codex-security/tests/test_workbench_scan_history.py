@@ -1201,7 +1201,8 @@ def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Pa
 
 @pytest.mark.parametrize("include_inputs", [False, True])
 def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_semantic_matching(
-    tmp_path: Path, include_inputs: bool,
+    tmp_path: Path,
+    include_inputs: bool,
 ) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
