@@ -96,12 +96,7 @@ import {
   blackDuckReportRepositories,
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
-import {
-  checkmarxReportRepositories,
-  checkmarxReportScope,
-  checkmarxSource,
-  projectedCheckmarxRepositoryUrl,
-} from "./checkmarx-repository.js";
+import { checkmarxSelection } from "./checkmarx-repository.js";
 import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
@@ -2711,8 +2706,7 @@ async function preparePublicationInput(
   if (legacyTypedUrl) requireApprovedSource(legacyTypedUrl);
 
   function checkRepositories(
-    findings: ExternalFindings["findings"],
-    report: ExternalFindings["report"],
+    { findings, report }: Pick<ExternalFindings, "findings" | "report">,
     historicalCheckmarx = Boolean(saved),
   ) {
     // A catalog casing or spelling change keeps the original source comparison target.
@@ -2755,21 +2749,18 @@ async function preparePublicationInput(
       ))
         requireDestination("Sonar source", url);
     }
-    const reportScope = checkmarxReportScope(
+    const checkmarx = checkmarxSelection(
       options.provider,
       findings,
       report,
       "cloud",
       historicalCheckmarx,
     );
-    requireDestination("Checkmarx source", reportScope?.url);
+    requireDestination("Checkmarx source", checkmarx.reportUrl);
     const repositories = replay
       ? undefined
       : blackDuckReportRepositories(options.provider, findings, "cloud");
-    const checkmarx =
-      historicalCheckmarx && options.provider !== "checkmarx"
-        ? undefined
-        : checkmarxReportRepositories(options.provider, findings, "cloud");
+    const checkmarxRepository = checkmarx.repositories();
     for (const [provider, repositories] of [
       ["veracode", veracodeReportRepositories],
       ["continuum", continuumReportRepositories],
@@ -2797,19 +2788,14 @@ async function preparePublicationInput(
     }
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
-      const projected = repositories
+      const blackDuckUrl = repositories
         ? repositories.get(id)?.url
         : projectedBlackDuckRepositoryUrl(finding, "cloud");
-      const checkmarxUrl =
-        checkmarx?.get(id)?.url ??
-        projectedCheckmarxRepositoryUrl(finding, "cloud", Boolean(reportScope));
-      const checkmarxProvenance = reportScope || checkmarxSource(finding);
-      const checkWizAsset =
-        options.provider === "wiz" && (projected || checkmarxProvenance);
+      const hasProjection =
+        !!blackDuckUrl || checkmarx.projections.has(finding);
       if (
         replay &&
-        !projected &&
-        !checkmarxProvenance &&
+        !hasProjection &&
         options.provider !== "inspector" &&
         options.provider !== "veracode" &&
         options.provider !== "checkmarx" &&
@@ -2818,14 +2804,14 @@ async function preparePublicationInput(
       )
         continue;
       const urls = [
-        projected,
-        checkmarxUrl,
+        blackDuckUrl,
+        checkmarxRepository(finding)?.url,
         evidence.details?.repository?.url,
-        checkWizAsset
-          ? wizFindingRepository(evidence, "cloud")?.url
-          : options.provider === "wiz"
-            ? wizCsvRepositoryUrl(evidence)
-            : undefined,
+        options.provider === "wiz"
+          ? hasProjection
+            ? wizFindingRepository(evidence, "cloud")?.url
+            : wizCsvRepositoryUrl(evidence)
+          : undefined,
         ...(options.provider === "snyk"
           ? snykRepositoryUrls(evidence.source_data, {
               cloudRepositoryUrl: destination.url,
@@ -2834,7 +2820,7 @@ async function preparePublicationInput(
         ...(options.provider === "endor"
           ? endorRepositoryUrls(
               evidence.source_data,
-              Boolean(replay && !projected),
+              Boolean(replay && !blackDuckUrl),
             )
           : []),
         options.provider === "github"
@@ -2862,10 +2848,54 @@ async function preparePublicationInput(
   // Existing repository submissions keep their original request bodies and receipts.
   const privatePath = join(state, `${key}.private-import.json`);
   const privateSaved = await readOptionalFile(privatePath);
-  if (
+  const usePrivateImport =
     !saved &&
-    (privateProviders?.has(source.provider) || privateSaved !== undefined)
-  ) {
+    (privateProviders?.has(source.provider) || privateSaved !== undefined);
+  if (!usePrivateImport) checkRepositories(parsed);
+  // A retry sends its saved projection, which may differ from today's reader.
+  if (saved) {
+    // Only use the report associated with the input digest in the saved checkpoint.
+    const report =
+      saved.inputProjection?.inputDigest === inputDigest
+        ? parsed.report
+        : undefined;
+    checkRepositories({ findings: submissionFindings(saved.requests), report });
+  }
+
+  // An older, genuinely unbound checkpoint first acquires a URL on a matching preview.
+  // Retain it at the original path so its bare caller can still recover the same request.
+  if (saved && !saved.approvedRepositoryUrl && hostedSource) {
+    await underLocks(lockKeys, async () => {
+      const serialized = await readOptionalFile(pendingPath);
+      if (serialized === undefined) return;
+      const current = validateSaved(JSON.parse(serialized));
+      if (!sameSubmission(current, saved))
+        throw new CodexSecurityError(
+          "Another publication prepared this input. Review the saved request again.",
+        );
+      if (current.approvedRepositoryUrl) {
+        requireApprovedSource(
+          current.approvedRepositoryUrl,
+          current.approvedRepositoryPlatform,
+        );
+      } else {
+        // Adding the catalog URL cannot erase an older SDK's same-selection hold.
+        if (
+          current.inputProjection &&
+          originalHostedPending(current, current.wireKey ?? fileKey) ===
+            "verified"
+        )
+          current.inputProjection.retainedHostedSelection = true;
+        current.approvedRepositoryUrl = approvedUrl;
+        await writeAtomicJson(pendingPath, current);
+      }
+      saved.inputProjection = current.inputProjection;
+      saved.approvedRepositoryUrl = current.approvedRepositoryUrl;
+      saved.approvedRepositoryPlatform = current.approvedRepositoryPlatform;
+    });
+  }
+
+  if (usePrivateImport) {
     const client = privateImportClient(
       apiBaseUrl,
       credentials,
@@ -2927,7 +2957,7 @@ async function preparePublicationInput(
         ? previous?.jobId
         : undefined;
     const resumed = previous !== undefined && retryOfJobId === undefined;
-    checkRepositories(parsed.findings, parsed.report, resumed);
+    checkRepositories(parsed, resumed);
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
@@ -2961,8 +2991,7 @@ async function preparePublicationInput(
           const retrying =
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
-          if (resumed && !active)
-            checkRepositories(parsed.findings, parsed.report);
+          if (resumed && !active) checkRepositories(parsed);
           requireAccess(current, !!active?.fileId, !!active?.jobId);
           if (await selectedCheckpoint())
             throw new CodexSecurityError(
@@ -3058,50 +3087,6 @@ async function preparePublicationInput(
           }
         }),
     };
-  }
-
-  checkRepositories(parsed.findings, parsed.report);
-  // A retry sends its saved projection, which may differ from today's reader.
-  if (saved) {
-    // Only use report scope associated with the input digest in the saved checkpoint.
-    const report =
-      saved.inputProjection?.inputDigest === inputDigest
-        ? parsed.report
-        : undefined;
-    checkRepositories(submissionFindings(saved.requests), report);
-  }
-
-  // An older, genuinely unbound checkpoint first acquires a URL on a matching preview.
-  // Retain it at the original path so its bare caller can still recover the same request.
-  if (saved && !saved.approvedRepositoryUrl && hostedSource) {
-    await underLocks(lockKeys, async () => {
-      const serialized = await readOptionalFile(pendingPath);
-      if (serialized === undefined) return;
-      const current = validateSaved(JSON.parse(serialized));
-      if (!sameSubmission(current, saved))
-        throw new CodexSecurityError(
-          "Another publication prepared this input. Review the saved request again.",
-        );
-      if (current.approvedRepositoryUrl) {
-        requireApprovedSource(
-          current.approvedRepositoryUrl,
-          current.approvedRepositoryPlatform,
-        );
-      } else {
-        // Adding the catalog URL cannot erase an older SDK's same-selection hold.
-        if (
-          current.inputProjection &&
-          originalHostedPending(current, current.wireKey ?? fileKey) ===
-            "verified"
-        )
-          current.inputProjection.retainedHostedSelection = true;
-        current.approvedRepositoryUrl = approvedUrl;
-        await writeAtomicJson(pendingPath, current);
-      }
-      saved.inputProjection = current.inputProjection;
-      saved.approvedRepositoryUrl = current.approvedRepositoryUrl;
-      saved.approvedRepositoryPlatform = current.approvedRepositoryPlatform;
-    });
   }
 
   let requests = saved?.requests;

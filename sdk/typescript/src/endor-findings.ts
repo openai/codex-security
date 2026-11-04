@@ -1,7 +1,7 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { asRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
@@ -21,19 +21,15 @@ export function endorRepositoryUrls(
   sourceData: unknown,
   retainedUrlsOnly = false,
 ): string[] {
-  if (!isRecord(sourceData)) return [];
-  const run = sourceData["runContext"];
+  const run = asRecord(sourceData)?.["runContext"];
   if (run == null) return [];
   if (retainedUrlsOnly) {
     // Historical projections can retain opaque run metadata alongside explicit URLs.
-    const entries = isRecord(run) ? run["versionControlProvenance"] : undefined;
-    return Array.isArray(entries)
-      ? entries.flatMap((entry: unknown) =>
-          isRecord(entry) && typeof entry["repositoryUri"] === "string"
-            ? [entry["repositoryUri"]]
-            : [],
-        )
-      : [];
+    const entries = asRecord(run)?.["versionControlProvenance"];
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((entry) => asRecord(entry)?.["repositoryUri"])
+      .filter((url) => typeof url === "string");
   }
   return array(
     record(run, "Endor run context")["versionControlProvenance"] ?? [],

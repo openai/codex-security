@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { readCheckmarxFindings } from "../src/checkmarx-findings.js";
 import { main } from "../src/cli.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import type { ExternalFinding } from "../src/external-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import {
   createAndReplayFinding,
@@ -15,6 +15,25 @@ import { createCliTest } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const repositoryUrl = "https://github.com/example/project";
+const checkmarx = {
+  provider: "checkmarx",
+  sourceKey: "example/project/main",
+  sourceRepositoryUrl: repositoryUrl,
+} as const;
+
+function projectedRow(
+  url: string,
+  scanner: string | null = "CxSAST",
+): ExternalFinding {
+  return {
+    source_finding_id: url,
+    evidence: {
+      title: "Synthetic issue",
+      severity: "low",
+      details: { kind: "sast", scanner_origin: scanner, repository: { url } },
+    },
+  };
+}
 
 function oneReport(severity: string) {
   return JSON.stringify({
@@ -23,16 +42,10 @@ function oneReport(severity: string) {
     results: [
       {
         type: "sast",
-        id: "101",
         similarityId: "-202",
-        status: "NEW",
-        state: "TO_VERIFY",
         severity,
-        description: "Input reaches a query",
-        vulnerabilityDetails: { cweId: 89 },
         data: {
           queryName: "SQL_Injection",
-          queryId: 17,
           resultHash: "a1b2c3",
           nodes: [{ fileName: "/src/query.ts", line: 3, column: 7 }],
         },
@@ -44,10 +57,10 @@ function oneReport(severity: string) {
 function xmlReport(severity: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <CxXMLResults ScanId="100" ProjectId="7">
-  <Query id="17" name="SQL_Injection" cweId="89" Severity="${severity}" Language="JavaScript">
-    <Result NodeId="1001" FileName="src/query.ts" Line="3" Column="7" Severity="${severity}" Status="New" FalsePositive="False" state="0">
-      <Path ResultId="100" PathId="1" SimilarityId="-202">
-        <PathNode><FileName>src/query.ts</FileName><Line>3</Line><Column>7</Column><NodeId>1</NodeId><Name>input</Name><Type>String</Type><Length>5</Length></PathNode>
+  <Query id="17" name="SQL_Injection">
+    <Result Severity="${severity}">
+      <Path SimilarityId="-202">
+        <PathNode><FileName>src/query.ts</FileName><Line>3</Line><Column>7</Column></PathNode>
       </Path>
     </Result>
   </Query>
@@ -61,11 +74,7 @@ for (const [format, report] of [
   test(`Checkmarx ${format} previews in the CLI and replays one unassessed finding in the workbench`, async () => {
     await using fixture = await localReportFixture(
       `checkmarx.${format}.gz`,
-      {
-        provider: "checkmarx",
-        sourceKey: `example/project/main/${format}`,
-        sourceRepositoryUrl: repositoryUrl,
-      },
+      checkmarx,
       { remote: repositoryUrl },
     );
     await writeFile(fixture.file, gzipSync(report("High")));
@@ -126,11 +135,7 @@ test.each([
     const url = `https://dev.azure.com/team/${project}/_git/repo`;
     await using fixture = await localReportFixture(
       "checkmarx.json",
-      {
-        provider: "checkmarx",
-        sourceKey: "team/project/main",
-        sourceRepositoryUrl: url,
-      },
+      { ...checkmarx, sourceRepositoryUrl: url },
       { remote },
     );
     await writeFile(fixture.file, oneReport("High"));
@@ -149,32 +154,22 @@ test("Wiz imports match Azure SSH remotes for their projected Checkmarx rows", a
     { provider: "wiz", sourceKey: "team/project" },
     { remote },
   );
-  const row = (url: string, scanner_origin: string | null = null) => ({
-    source_finding_id: url,
-    evidence: {
-      title: "Synthetic issue",
-      severity: "low" as const,
-      details: { kind: "sast" as const, scanner_origin, repository: { url } },
-    },
-  });
-  const prepare = (...findings: ReturnType<typeof row>[]) =>
+  const prepare = (...findings: ExternalFinding[]) =>
     fixture.prepareNormalized({
       read: findings.length,
       excluded: [],
       findings,
     });
-  expect((await prepare(row(url, "CxSAST"))).matchesRepositoryRemote).toBe(
-    true,
-  );
-  await expect(prepare(row(url + "-other", "CxSAST"))).rejects.toThrow(
+  expect((await prepare(projectedRow(url))).matchesRepositoryRemote).toBe(true);
+  await expect(prepare(projectedRow(url + "-other"))).rejects.toThrow(
     /does not match a configured remote/,
   );
   fixture.git("remote", "add", "second", remote + "-other");
   const sibling = {
-    ...row(url + "-other"),
+    ...projectedRow(url + "-other", null),
     source_finding_id: "blackduck-bom:" + "a".repeat(64),
   };
-  await expect(prepare(row(url, "CxSAST"), sibling)).rejects.toThrow(
+  await expect(prepare(projectedRow(url), sibling)).rejects.toThrow(
     /repo-other.*does not match a configured remote/,
   );
 });
@@ -219,70 +214,36 @@ test("reads plain and gzipped UTF-16 CxSAST XML while keeping Checkmarx One JSON
   });
 });
 
-test.each(["secondary URL", "embedded newline"])(
-  "Checkmarx binds only an effective Git fetch URL, even for projections (%s)",
-  async (kind) => {
+test.each(["checkmarx", "wiz"] as const)(
+  "%s binds Checkmarx evidence only to the effective Git fetch URL",
+  async (provider) => {
     const primary = "https://github.com/example/primary";
     await using fixture = await localReportFixture(
       "checkmarx.json",
-      {
-        provider: "checkmarx",
-        sourceKey: "example/project/main",
-        sourceRepositoryUrl: repositoryUrl,
-      },
-      { remote: primary },
+      { provider, sourceKey: checkmarx.sourceKey },
+      { remote: primary, isolatedGit: true },
     );
     await writeFile(fixture.file, oneReport("High"));
-    if (kind === "secondary URL")
-      fixture.git("config", "--add", "remote.origin.url", repositoryUrl);
-    else
-      fixture.git(
-        "config",
-        "remote.origin.url",
-        primary + "\n" + repositoryUrl,
-      );
-    const expected =
-      kind === "secondary URL"
-        ? /does not match a configured remote/
-        : /contains a line break/;
-    const project = () =>
-      prepareNormalizedLocalImport(
-        {
-          read: 1,
-          excluded: [],
-          report: { format: "sdk-selection" },
-          findings: [
-            {
-              source_finding_id: "projected-row",
-              evidence: {
-                title: "Example finding",
-                severity: "low",
-                details: {
-                  kind: "sast",
-                  scanner_origin: "CxSAST",
-                  repository: { url: repositoryUrl },
-                },
-              },
-            },
-          ],
-        },
-        {
-          provider: "wiz",
-          sourceKey: fixture.sourceKey,
-          repository: fixture.repository,
-        },
-        { environment: fixture.environment },
-      );
-    await expect(project()).rejects.toThrow(expected);
-    await expect(fixture.prepare()).rejects.toThrow(expected);
-    fixture.git(
-      "config",
-      "--replace-all",
-      "remote.origin.url",
-      "alias:example/project",
+    const prepare = () =>
+      provider === "checkmarx"
+        ? fixture.prepare({ sourceRepositoryUrl: repositoryUrl })
+        : fixture.prepareNormalized({
+            read: 1,
+            excluded: [],
+            report: { format: "sdk-selection" },
+            findings: [projectedRow(repositoryUrl)],
+          });
+
+    fixture.git("config", "--add", "remote.origin.url", repositoryUrl);
+    await expect(prepare()).rejects.toThrow(
+      /does not match a configured remote/,
     );
+    const setOrigin = (value: string) =>
+      fixture.git("config", "--replace-all", "remote.origin.url", value);
+    setOrigin(primary + "\n" + repositoryUrl);
+    await expect(prepare()).rejects.toThrow(/contains a line break/);
+    setOrigin("alias:example/project");
     fixture.git("config", "url.https://github.com/.insteadOf", "alias:");
-    expect((await fixture.prepare()).matchesRepositoryRemote).toBe(true);
-    expect((await project()).matchesRepositoryRemote).toBe(true);
+    expect((await prepare()).matchesRepositoryRemote).toBe(true);
   },
 );

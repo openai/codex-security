@@ -1,7 +1,6 @@
 import { SaxesParser } from "saxes";
-import { isRecord } from "./record.js";
+import { asRecord } from "./record.js";
 import { checkmarxEvidence } from "./checkmarx-evidence.js";
-import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   array,
@@ -95,8 +94,7 @@ function viewerId(link: URL | undefined, field: string, expected?: string) {
 export function checkmarxResultViewer(
   source: Record<string, unknown> | null | undefined,
 ) {
-  const result = source?.["result"];
-  return isRecord(result) ? viewerLink(result["DeepLink"]) : undefined;
+  return viewerLink(asRecord(source?.["result"])?.["DeepLink"]);
 }
 
 export function checkmarxXmlScope(
@@ -105,11 +103,10 @@ export function checkmarxXmlScope(
   projectId?: string,
 ) {
   const link = checkmarxResultViewer(source);
-  const path = source["path"];
   viewerId(
     link,
     "pathid",
-    isRecord(path) ? (text(path["PathId"]) ?? undefined) : undefined,
+    text(asRecord(source["path"])?.["PathId"]) ?? undefined,
   );
   const instance = source["instance"];
   return {
@@ -128,28 +125,27 @@ function readReport(contents: string) {
   const rows: Row[] = [];
   const stack: Element[] = [];
   const parser = new SaxesParser({ xmlns: false });
-  let projectId = "";
   let scanId = "";
-  let instance: string | undefined;
-  const projectNames: {
-    projectName?: string;
-    teamFullPathOnReportDate?: string;
-  } = {};
+  let rootInstance: string | undefined;
+  const project: Attributes & { projectId: string } = { projectId: "" };
   parser.on("opentag", ({ name, attributes }) => {
     const element: Element = { name, attributes, children: [], text: "" };
     if (!stack.length) {
       if (name !== "CxXMLResults")
         throw new Error("Expected a Checkmarx CxSAST CxXMLResults report.");
-      projectId = requiredText(attributes["ProjectId"], "CxSAST ProjectId");
+      project.projectId = requiredText(
+        attributes["ProjectId"],
+        "CxSAST ProjectId",
+      );
       scanId = requiredText(attributes["ScanId"], "CxSAST ScanId");
       const projectName = text(attributes["ProjectName"]);
       const team = text(attributes["TeamFullPathOnReportDate"]);
-      if (projectName) projectNames.projectName = projectName;
-      if (team) projectNames.teamFullPathOnReportDate = team;
+      if (projectName) project["projectName"] = projectName;
+      if (team) project["teamFullPathOnReportDate"] = team;
       const link = viewerLink(attributes["DeepLink"]);
       viewerId(link, "scanid", scanId);
-      viewerId(link, "projectid", projectId);
-      instance = viewerInstance(link);
+      viewerId(link, "projectid", project.projectId);
+      rootInstance = viewerInstance(link);
     } else if (
       (stack.length === 1 && name !== "Query") ||
       (stack.length === 2 && name !== "Result")
@@ -173,8 +169,7 @@ function readReport(contents: string) {
     const paths = element.children.filter((child) => child.name === "Path");
     const path = paths.length === 1 ? paths[0] : undefined;
     rows.push({
-      projectId,
-      ...projectNames,
+      ...project,
       query: parent.attributes,
       result: element.attributes,
       path: path?.attributes ?? null,
@@ -185,7 +180,7 @@ function readReport(contents: string) {
     });
   });
   parser.write(contents).close();
-  return { rows, projectId, projectNames, scanId, instance };
+  return { rows, project, scanId, rootInstance };
 }
 
 /** SimilarityId groups paths, including paths with different intermediate nodes. */
@@ -201,13 +196,9 @@ export function checkmarxXmlId(
   const nodes = array(source["nodes"], "CxSAST Path nodes");
   const route = (nodes.length ? nodes : [result]).map((value) => {
     const node = record(value, "CxSAST path node");
-    return [
-      text(node["FileName"]),
-      text(node["Line"]),
-      text(node["Column"]),
-      text(node["Name"]),
-      text(node["Type"]),
-    ];
+    return ["FileName", "Line", "Column", "Name", "Type"].map((field) =>
+      text(node[field]),
+    );
   });
   return stableId("checkmarx-cxsast", [
     projectId,
@@ -221,15 +212,16 @@ export function normalizeCheckmarxXml(
   contents: string,
   repository: string,
   target: ExternalImportTarget,
-): ExternalFindings {
-  const {
-    rows,
-    scanId,
-    projectId,
-    projectNames,
-    instance: rootInstance,
-  } = readReport(contents);
+) {
+  const { rows, project, scanId, rootInstance } = readReport(contents);
   function normalize(instance: string | undefined) {
+    const report = {
+      format: "cxsast-xml",
+      scanId,
+      ...project,
+      ...(instance && { instance }),
+      sourceRepositoryUrl: repository,
+    } as const;
     return normalizeRecords(
       rows,
       (row) => {
@@ -237,19 +229,17 @@ export function normalizeCheckmarxXml(
         const rowInstance =
           viewerInstance(viewerLink(result["DeepLink"])) ?? instance;
         return checkmarxEvidence(
+          report,
           {
-            format: "cxsast-xml",
-            repository,
-            scanId,
             title: requiredText(query["name"], "CxSAST Query name"),
-            ruleId: query["id"]!,
+            ruleId: query["id"],
             severity: text(result["Severity"]) ?? query["Severity"],
-            description: text(result["Remark"]),
-            status: text(result["Status"]),
+            description: result["Remark"],
+            status: result["Status"],
             verdict:
               result["FalsePositive"]?.toLowerCase() === "true"
                 ? "False positive"
-                : text(result["state"]),
+                : result["state"],
             cwe: query["cweId"],
             sourceData: rowInstance ? { ...row, instance: rowInstance } : row,
           },
@@ -258,16 +248,7 @@ export function normalizeCheckmarxXml(
       },
       (row) => checkmarxXmlId(row, scanId),
       target,
-      {
-        report: {
-          format: "cxsast-xml",
-          scanId,
-          projectId,
-          ...projectNames,
-          ...(instance && { instance }),
-          sourceRepositoryUrl: repository,
-        },
-      },
+      { report },
     );
   }
 

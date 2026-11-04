@@ -23,9 +23,9 @@ const sast = {
   vulnerabilityDetails: { cweId: 89 },
 };
 
-function report(results: unknown[]) {
-  return JSON.stringify({ scanID, results, totalCount: results.length });
-}
+const read = (json: string) => normalizeCheckmarxOne(json, repository, "local");
+const report = (results: unknown[], scan = scanID) =>
+  JSON.stringify({ scanID: scan, results, totalCount: results.length });
 
 test("retains native SAST flow and vendor triage from mixed-engine CLI JSON", () => {
   // A query ID emitted as a JSON integer can exceed JavaScript's exact range.
@@ -33,7 +33,7 @@ test("retains native SAST flow and vendor triage from mixed-engine CLI JSON", ()
     '"queryId":101',
     '"queryId":9007199254740993',
   );
-  const normalized = normalizeCheckmarxOne(contents, repository, "local");
+  const normalized = read(contents);
   expect(normalized.read).toBe(3);
   expect(normalized.excluded.map(({ position }) => position)).toEqual([1, 3]);
   expect(normalized.findings).toHaveLength(1);
@@ -61,29 +61,19 @@ test("separates paths sharing a similarity ID and excludes every exact identity 
     ...sast,
     data: { ...sast.data, resultHash: "cGF0aC10d28=" },
   };
-  const initial = normalizeCheckmarxOne(
-    report([sast, anotherPath]),
-    repository,
-    "local",
-  );
+  const initial = read(report([sast, anotherPath]));
   expect(initial.excluded).toEqual([]);
   const firstId = initial.findings[0]!.source_finding_id;
   const secondId = initial.findings[1]!.source_finding_id;
   expect(firstId).not.toBe(secondId);
-  const changed = normalizeCheckmarxOne(
-    report([{ ...sast, id: "202", severity: "MEDIUM" }]).replace(
-      scanID,
+  const changed = read(
+    report(
+      [{ ...sast, id: "202", severity: "MEDIUM" }],
       "71000000-0000-4000-8000-000000000002",
     ),
-    repository,
-    "local",
   );
   expect(changed.findings[0]!.source_finding_id).toBe(firstId);
-  const overlap = normalizeCheckmarxOne(
-    report([sast, anotherPath, sast]),
-    repository,
-    "local",
-  );
+  const overlap = read(report([sast, anotherPath, sast]));
   expect(overlap.findings.map((f) => f.source_finding_id)).toEqual([secondId]);
   expect(overlap.excluded).toMatchObject([
     { position: 1, source_finding_id: firstId },
@@ -94,11 +84,7 @@ test("separates paths sharing a similarity ID and excludes every exact identity 
 test("rejects partial and other JSON formats while accepting the CLI's empty collection", () => {
   for (const results of [[], null]) {
     expect(
-      normalizeCheckmarxOne(
-        JSON.stringify({ scanID, results, totalCount: 0 }),
-        repository,
-        "local",
-      ),
+      read(JSON.stringify({ scanID, results, totalCount: 0 })),
     ).toMatchObject({
       read: 0,
       findings: [],
@@ -112,14 +98,12 @@ test("rejects partial and other JSON formats while accepting the CLI's empty col
     { scanID, results: null, totalCount: 3 },
     { ScanSummary: {}, ScanResults: [] },
   ]) {
-    expect(() =>
-      normalizeCheckmarxOne(JSON.stringify(document), repository, "local"),
-    ).toThrow();
+    expect(() => read(JSON.stringify(document))).toThrow();
   }
 });
 
 test("reports malformed SAST identities and evidence at their original positions", () => {
-  const malformed = normalizeCheckmarxOne(
+  const malformed = read(
     report([
       { ...sast, similarityId: "" },
       { ...sast, data: { ...sast.data, resultHash: null } },
@@ -129,8 +113,6 @@ test("reports malformed SAST identities and evidence at their original positions
       },
       sast,
     ]),
-    repository,
-    "local",
   );
   expect(malformed.read).toBe(4);
   expect(malformed.findings).toHaveLength(1);

@@ -1,5 +1,4 @@
 import { checkmarxEvidence } from "./checkmarx-evidence.js";
-import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   array,
@@ -7,7 +6,6 @@ import {
   record,
   requiredText,
   stableId,
-  text,
 } from "./scanner-import.js";
 
 export function checkmarxOneId(value: unknown): string {
@@ -28,22 +26,23 @@ export function normalizeCheckmarxOne(
   contents: string,
   repository: string,
   target: ExternalImportTarget,
-): ExternalFindings {
+) {
+  // SAST query IDs can be 64-bit integers. Keep their exact digits in evidence.
+  function preserveQueryId(
+    key: string,
+    value: unknown,
+    context?: { source: string },
+  ) {
+    if (
+      key === "queryId" &&
+      Number.isInteger(value) &&
+      !Number.isSafeInteger(value)
+    )
+      return context!.source;
+    return value;
+  }
   const document = record(
-    JSON.parse(
-      contents,
-      (key: string, value: unknown, context?: { source: string }) => {
-        // SAST query IDs can be 64-bit integers. Keep their exact digits in evidence.
-        if (
-          key === "queryId" &&
-          typeof value === "number" &&
-          Number.isInteger(value) &&
-          !Number.isSafeInteger(value)
-        )
-          return context!.source;
-        return value;
-      },
-    ),
+    JSON.parse(contents, preserveQueryId),
     "Checkmarx One CLI JSON report",
   );
   const scanId = requiredText(document["scanID"], "Checkmarx One scanID");
@@ -55,25 +54,28 @@ export function normalizeCheckmarxOne(
     throw new Error(
       "Checkmarx One totalCount must equal the number of exported results.",
     );
+  const report = {
+    format: "checkmarx-one-json",
+    scanId,
+    sourceRepositoryUrl: repository,
+    totalCount: rows.length,
+  } as const;
   return normalizeRecords(
     rows,
     (value) => {
       const row = record(value, "Checkmarx One result");
       const data = record(row["data"], "Checkmarx One SAST data");
-      const queryId = data["queryId"];
       for (const node of array(data["nodes"] ?? [], "Checkmarx One SAST nodes"))
         record(node, "Checkmarx One SAST node");
       return checkmarxEvidence(
+        report,
         {
-          format: "checkmarx-one-json",
-          repository,
-          scanId,
           title: requiredText(data["queryName"], "Checkmarx One queryName"),
-          ruleId: typeof queryId === "number" ? String(queryId) : text(queryId),
+          ruleId: data["queryId"],
           severity: row["severity"],
-          description: text(row["description"]),
-          status: text(row["status"]),
-          verdict: text(row["state"]),
+          description: row["description"],
+          status: row["status"],
+          verdict: row["state"],
           cwe: record(
             row["vulnerabilityDetails"] ?? {},
             "Checkmarx One vulnerability details",
@@ -85,13 +87,6 @@ export function normalizeCheckmarxOne(
     },
     checkmarxOneId,
     target,
-    {
-      report: {
-        format: "checkmarx-one-json",
-        scanId,
-        sourceRepositoryUrl: repository,
-        totalCount: rows.length,
-      },
-    },
+    { report },
   );
 }

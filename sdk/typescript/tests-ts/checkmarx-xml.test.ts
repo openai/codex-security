@@ -8,21 +8,23 @@ import {
 const repository = "https://github.com/example/sample";
 const normalize = (xml: string) =>
   normalizeCheckmarxXml(xml, repository, "local");
+const linkAttribute = (url?: string) =>
+  url ? ` DeepLink="${url.replaceAll("&", "&amp;")}"` : "";
 const node = (file: string, line: number, name: string) =>
   `<PathNode><FileName>${file}</FileName><Line>${line}</Line><Column>2</Column>
      <Name>${name}</Name><Type>Reference</Type><NodeId>1</NodeId>
      <Snippet><Line><Number>${line}</Number><Code><![CDATA[work(a < b);]]></Code></Line></Snippet>
    </PathNode>`;
-const result = (middleLine: number) =>
-  `<Result FileName="src/input.ts" Line="5" Column="2" Severity="Medium" Status="Recurrent" FalsePositive="True" state="1" NodeId="1001">
+const result = (middleLine: number, url?: string) =>
+  `<Result${linkAttribute(url)} FileName="src/input.ts" Line="5" Column="2" Severity="Medium" Status="Recurrent" FalsePositive="True" state="1" NodeId="1001">
      <Path ResultId="100" PathId="1" SimilarityId="-17">
        ${node("src/input.ts", 5, "input")}
        ${node("src/query.ts", middleLine, "build")}
        ${node("src/db.ts", 22, "execute")}
      </Path>
    </Result>`;
-const report = (results: string) =>
-  `<CxXMLResults ScanId="100" ProjectId="8" Owner="report owner">
+const report = (results: string, url?: string) =>
+  `<CxXMLResults${linkAttribute(url)} ScanId="100" ProjectId="8" Owner="report owner">
      <Query id="12" name="SQL_Injection" cweId="89" Severity="High">${results}</Query>
    </CxXMLResults>`;
 
@@ -47,38 +49,31 @@ test("retains native triage and ordered flow with snippets for each CxSAST resul
       query: { id: "12" },
       result: { NodeId: "1001", FalsePositive: "True", state: "1" },
       path: { SimilarityId: "-17" },
+      nodes: [
+        { FileName: "src/input.ts", Line: "5" },
+        {
+          FileName: "src/query.ts",
+          Line: "13",
+          Snippet: [{ Number: "13", Code: "work(a < b);" }],
+        },
+        { FileName: "src/db.ts", Line: "22" },
+      ],
     },
   });
-  expect(evidence.source_data?.["nodes"]).toMatchObject([
-    { FileName: "src/input.ts", Line: "5" },
-    {
-      FileName: "src/query.ts",
-      Line: "13",
-      Snippet: [{ Number: "13", Code: "work(a < b);" }],
-    },
-    { FileName: "src/db.ts", Line: "22" },
-  ]);
   expect(JSON.stringify(evidence)).not.toContain("report owner");
 });
-
-const withLink = (xml: string, tag: string, link: string) =>
-  xml.replace(
-    `<${tag} `,
-    `<${tag} DeepLink="${link.replaceAll("&", "&amp;")}" `,
-  );
 
 test("retains optional CxSAST project and team names without changing occurrence IDs", () => {
   const xml = report(result(13));
   const original = normalize(xml);
+  const row = original.findings[0]!;
   const names = {
     projectName: "Source & API",
     teamFullPathOnReportDate: "CxServer\\SP\\Café",
   };
   for (const field of Object.keys(names)) {
     expect(original.report).not.toHaveProperty(field);
-    expect(original.findings[0]!.evidence.source_data).not.toHaveProperty(
-      field,
-    );
+    expect(row.evidence.source_data).not.toHaveProperty(field);
   }
   const scoped = normalize(
     xml.replace(
@@ -88,30 +83,23 @@ test("retains optional CxSAST project and team names without changing occurrence
   );
   expect(scoped.report).toEqual({ ...original.report, ...names });
   expect(scoped.findings[0]!.evidence.source_data).toEqual({
-    ...original.findings[0]!.evidence.source_data,
+    ...row.evidence.source_data,
     ...names,
   });
-  expect(scoped.findings[0]!.source_finding_id).toBe(
-    original.findings[0]!.source_finding_id,
-  );
+  expect(scoped.findings[0]!.source_finding_id).toBe(row.source_finding_id);
 });
 
 test("checks explicit scan, project and path IDs in native viewer links", () => {
   const viewer = "https://sast.example/CxWebClient/ViewerMain.aspx";
-  const matching = viewer + "?pathid=1&projectid=8&scanid=100";
+  const scanLink = viewer + "?projectid=8&scanid=100";
+  const matching = scanLink + "&pathid=1";
   const rows = [
     matching,
     viewer + "?scanid=101",
     viewer + "?projectid=9",
     viewer + "?pathid=2",
-  ].map((link) => withLink(result(13), "Result", link));
-  const output = normalize(
-    withLink(
-      report(rows.join("")),
-      "CxXMLResults",
-      viewer + "?scanid=100&projectid=8",
-    ),
-  );
+  ].map((link) => result(13, link));
+  const output = normalize(report(rows.join(""), scanLink));
   expect(output.findings).toHaveLength(1);
   expect(output.findings[0]!.evidence.source_data).toMatchObject({
     result: { DeepLink: matching },
@@ -121,20 +109,8 @@ test("checks explicit scan, project and path IDs in native viewer links", () => 
     { position: 3, reason: expect.stringContaining("DeepLink") },
     { position: 4, reason: expect.stringContaining("DeepLink") },
   ]);
-  const data = output.findings[0]!.evidence.source_data!;
-  expect(() =>
-    checkmarxXmlId(
-      { ...data, result: { DeepLink: viewer + "?pathid=2" } },
-      "100",
-    ),
-  ).toThrow(/DeepLink/u);
-  expect(
-    normalize(
-      report(
-        withLink(result(13).replace('PathId="1"', ""), "Result", matching),
-      ),
-    ).excluded,
-  ).toEqual([]);
+  const noPathId = result(13, matching).replace('PathId="1"', "");
+  expect(normalize(report(noPathId)).excluded).toEqual([]);
   expect(checkmarxXmlScope({ result: { DeepLink: matching } })).toEqual({
     instance: "https://sast.example",
     scanId: "100",
@@ -147,52 +123,42 @@ test("checks explicit scan, project and path IDs in native viewer links", () => 
     );
   }
   const unrelated = "https://sast.example/issue?scanid=101";
-  expect(
-    normalize(report(withLink(result(13), "Result", unrelated))).excluded,
-  ).toEqual([]);
-  expect(() =>
-    normalize(withLink(report(""), "CxXMLResults", viewer + "?scanid=101")),
-  ).toThrow(/DeepLink/u);
+  expect(normalize(report(result(13, unrelated))).excluded).toEqual([]);
+  expect(() => normalize(report("", viewer + "?scanid=101"))).toThrow(
+    /DeepLink/u,
+  );
 });
 
 test("requires all known CxSAST viewer instances to agree", () => {
-  const viewer = "https://sast.example/tenant/CxWebClient/ViewerMain.aspx";
-  const linked = withLink(result(13), "Result", viewer + "?pathid=1");
+  const instance = "https://sast.example/tenant";
+  const viewer = instance + "/CxWebClient/ViewerMain.aspx";
+  const linked = result(13, viewer + "?pathid=1");
   const unlinked = result(15);
   for (const xml of [
-    withLink(report(unlinked), "CxXMLResults", viewer),
+    report(unlinked, viewer),
     report(linked + unlinked),
     report(unlinked + linked),
   ]) {
     const parsed = normalize(xml);
     expect(parsed.excluded).toEqual([]);
-    expect(parsed.report).toMatchObject({
-      instance: "https://sast.example/tenant",
-    });
+    expect(parsed.report?.["instance"]).toBe(instance);
     for (const { evidence } of parsed.findings)
-      expect(evidence.source_data?.["instance"]).toBe(
-        "https://sast.example/tenant",
-      );
+      expect(evidence.source_data?.["instance"]).toBe(instance);
   }
   for (const other of [
     viewer.replace("sast.example", "other.example"),
     viewer.replace("/tenant/", "/other/"),
   ]) {
+    expect(() => normalize(report(linked, other))).toThrow(/same instance/u);
     expect(() =>
-      normalize(withLink(report(linked), "CxXMLResults", other)),
-    ).toThrow(/same instance/u);
-    expect(() =>
-      normalize(
-        report(linked + unlinked + withLink(result(19), "Result", other)),
-      ),
+      normalize(report(linked + unlinked + result(19, other))),
     ).toThrow(/same instance/u);
   }
 });
 
 test("compares retained CxSAST instance URLs without rewriting the evidence", () => {
   const viewer = "https://sast.example/Team/CxWebClient/ViewerMain.aspx";
-  const row = normalize(report(withLink(result(13), "Result", viewer)))
-    .findings[0]!;
+  const row = normalize(report(result(13, viewer))).findings[0]!;
   const instance = "https://SAST.EXAMPLE:443/Team";
   const retained = { ...row.evidence.source_data, instance };
   expect(checkmarxXmlScope(retained).instance).toBe(instance);
@@ -211,8 +177,8 @@ test("compares retained CxSAST instance URLs without rewriting the evidence", ()
 test("excluded results cannot select the instance of a linkless report", () => {
   const unlinked = result(15);
   const viewer = "https://other.example/CxWebClient/ViewerMain.aspx";
-  const wrongScan = withLink(result(17), "Result", viewer + "?scanid=999");
-  const duplicate = withLink(result(19), "Result", viewer + "?scanid=100");
+  const wrongScan = result(17, viewer + "?scanid=999");
+  const duplicate = result(19, viewer + "?scanid=100");
   const parsed = normalize(
     report(wrongScan + duplicate + unlinked + duplicate),
   );
@@ -251,17 +217,24 @@ test("retains distinct intermediate paths and replays their identity across scan
   ]);
 });
 
-test("imports a project-wide result without a source location", () => {
-  const output = normalize(
-    report(
-      '<Result FileName="" Line="1"><Path SimilarityId="17"><PathNode><FileName/><Line>1</Line><Column>0</Column></PathNode></Path></Result>',
-    ),
-  );
+test("retains project-wide results and paths without nodes", () => {
+  const projectWide =
+    '<Result FileName="" Line="1"><Path SimilarityId="17"><PathNode><FileName/><Line>1</Line><Column>0</Column></PathNode></Path></Result>';
+  const emptyPath =
+    '<Result FileName="src/app.ts" Line="7"><Path SimilarityId="-3"/></Result>';
+  const output = normalize(report(projectWide + emptyPath));
   expect(output.excluded).toEqual([]);
-  expect(output.findings[0]?.evidence.locations).toEqual([]);
+  expect(output.findings.map(({ evidence }) => evidence.locations)).toEqual([
+    [],
+    [],
+  ]);
+  expect(output.findings[1]?.evidence.source_data).toMatchObject({
+    result: { FileName: "src/app.ts", Line: "7" },
+    nodes: [],
+  });
 });
 
-test("handles empty reports and empty paths; rejects other XML and truncated reports", () => {
+test("handles empty reports and rejects other XML and truncated reports", () => {
   expect(normalize('<CxXMLResults ScanId="100" ProjectId="8"/>')).toMatchObject(
     {
       read: 0,
@@ -270,15 +243,6 @@ test("handles empty reports and empty paths; rejects other XML and truncated rep
       report: { scanId: "100", projectId: "8" },
     },
   );
-  const one = normalize(
-    report(
-      '<Result FileName="src/app.ts" Line="7"><Path SimilarityId="-3"/></Result>',
-    ),
-  );
-  expect(one.findings[0]?.evidence).toMatchObject({
-    locations: [],
-    source_data: { result: { FileName: "src/app.ts", Line: "7" }, nodes: [] },
-  });
   for (const input of [
     "<Other/>",
     "<CxXMLResults/>",

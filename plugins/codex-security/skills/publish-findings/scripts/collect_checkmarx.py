@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from contextlib import suppress
 from email.parser import BytesHeaderParser
 from pathlib import Path
 from xml.parsers import expat
@@ -26,8 +27,8 @@ def source_root(target: Path | None) -> Path | None:
     if target is not None and (not target.is_absolute() or not target.is_dir()):
         raise ValueError("Select an existing absolute source directory.")
     source = (target or Path.cwd()).resolve()
-    root = source if target is not None else None
-    for parent in (source, *source.parents):
+    # A nested checkout or submodule is still part of the enclosing source tree.
+    for parent in (*reversed(source.parents), source):
         marker = parent / ".git"
         try:
             info = marker.lstat()
@@ -36,8 +37,8 @@ def source_root(target: Path | None) -> Path | None:
         except (FileNotFoundError, NotADirectoryError):
             continue
         if stat.S_ISREG(info.st_mode) or is_link(info):
-            root = parent
-    return root
+            return parent
+    return source if target is not None else None
 
 
 def in_source(path: Path, source: Path | None) -> bool:
@@ -117,8 +118,7 @@ def check_cxflow_version(jar: Path) -> None:
     advice = "Use a released CxFlow 1.6.37 or later, or supply a scoped CxSAST XML export."
     try:
         with zipfile.ZipFile(jar) as archive:
-            with archive.open("META-INF/MANIFEST.MF") as manifest:
-                main = BytesHeaderParser().parse(manifest).get("Start-Class")
+            manifest = BytesHeaderParser().parsebytes(archive.read("META-INF/MANIFEST.MF"))
             metadata = archive.read("META-INF/build-info.properties").decode("utf-8")
     except (KeyError, UnicodeDecodeError, zipfile.BadZipFile) as error:
         raise ValueError(
@@ -126,7 +126,7 @@ def check_cxflow_version(jar: Path) -> None:
         ) from error
     properties = dict(line.split("=", 1) for line in metadata.splitlines() if "=" in line)
     if (
-        main != "com.checkmarx.flow.CxFlowApplication"
+        manifest.get("Start-Class") != "com.checkmarx.flow.CxFlowApplication"
         or properties.get("build.group") != "com.checkmarx"
     ):
         raise ValueError(f"The selected JAR does not identify itself as CxFlow. {advice}")
@@ -137,53 +137,38 @@ def check_cxflow_version(jar: Path) -> None:
         raise ValueError(f"Unsupported CxFlow version {version or '(unknown)'}. {advice}")
 
 
+def private_environment(work: str, inherit: tuple[str, ...]) -> dict[str, str]:
+    env = {name: os.environ[name] for name in inherit if name in os.environ}
+    return env | dict.fromkeys(("TEMP", "TMP", "TMPDIR"), work)
+
+
 def cxsast_environment(work: str, use_env_credentials: bool = False) -> dict[str, str]:
     # CxFlow uses the chosen profile for its server and Spring configuration.
-    env = {name: work for name in ("TEMP", "TMP", "TMPDIR")}
+    credentials = ("CHECKMARX_USERNAME", "CHECKMARX_PASSWORD", "CHECKMARX_CLIENT_SECRET")
+    env = private_environment(work, credentials if use_env_credentials else ())
     if os.name == "nt":
         env["SystemRoot"] = os.environ["SystemRoot"]
     else:
         # The Java launcher decodes native arguments before applying file.encoding.
         env["LC_CTYPE"] = "UTF-8" if sys.platform == "darwin" else "C.UTF-8"
-    if use_env_credentials:
-        for name in ("CHECKMARX_USERNAME", "CHECKMARX_PASSWORD", "CHECKMARX_CLIENT_SECRET"):
-            if name in os.environ:
-                env[name] = os.environ[name]
     return env
 
 
 def one_environment(source: Path | None, work: str) -> dict[str, str]:
     # An inherited endpoint or proxy must never receive credentials from a saved profile.
-    env = {name: work for name in ("TMP", "TEMP", "TMPDIR")}
-    for name in (
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "SystemRoot",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-    ):
-        if name in os.environ:
-            env[name] = os.environ[name]
-
+    account = ("HOME", "USER", "LOGNAME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot")
+    env = private_environment(work, (*account, "LANG", "LC_ALL", "LC_CTYPE"))
     configured = os.environ.get("CX_CONFIG_FILE_PATH")
     oauth = ("CX_CLIENT_ID", "CX_CLIENT_SECRET", "CX_BASE_URI", "CX_TENANT")
-    if not configured and (os.environ.get("CX_APIKEY") or all(os.environ.get(k) for k in oauth)):
+    api_key = os.environ.get("CX_APIKEY")
+    if not configured and (api_key or all(os.environ.get(k) for k in oauth)):
         # A separate config path also separates the vendor's path-keyed credential store.
         profile = Path(work, "env-auth.yaml")
         profile.write_text("{}\n", encoding="utf-8")
         env["CX_CONFIG_FILE_PATH"] = str(profile)
         env["CX_KEYRING_MODE"] = "disabled"
-        if os.environ.get("CX_APIKEY"):
-            env["CX_APIKEY"] = os.environ["CX_APIKEY"]
-        else:
-            for name in (*oauth, "CX_BASE_AUTH_URI"):
-                if os.environ.get(name):
-                    env[name] = os.environ[name]
+        credentials = ("CX_APIKEY",) if api_key else (*oauth, "CX_BASE_AUTH_URI")
+        env.update((name, os.environ[name]) for name in credentials if os.environ.get(name))
         return env
 
     profile = Path(configured) if configured else Path.home() / ".checkmarx" / "checkmarxcli.yaml"
@@ -277,30 +262,31 @@ def capture_directory(temp: Path) -> Path:
         kernel.LocalFree(descriptor)
 
 
-def capture_tempdir(source: Path | None) -> Path:
-    # gettempdir() probes candidates by writing a file. Check each path first,
-    # keeping Python's temporary directory override and platform fallback order.
+def create_capture(source: Path | None) -> Path:
+    # gettempdir() probes candidates by writing a file. Check each candidate before
+    # trying to create the actual capture directory in Python's platform order.
     cached = tempfile.tempdir
     candidates = [cached] if cached is not None else tempfile._candidate_tempdir_list()
+    last_error = None
     for candidate in candidates:
         temp = Path(os.fsdecode(candidate)).absolute()
         if in_source(temp, source):
             raise ValueError(
                 "Select a temporary directory outside the source checkout (TMPDIR or TEMP)."
             )
-        if cached is None:
-            try:
-                with tempfile.TemporaryFile(dir=temp) as probe:
-                    probe.write(b".")
-            except OSError:
-                continue
-        return temp
-    raise FileNotFoundError("No usable temporary directory outside the source checkout.")
+        try:
+            return capture_directory(temp)
+        except OSError as error:
+            if cached is not None:
+                raise
+            last_error = error
+    raise FileNotFoundError(
+        f"No usable temporary directory outside the source checkout: {last_error}"
+    )
 
 
 def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
-    temp = capture_tempdir(source)
-    output = capture_directory(temp)
+    output = create_capture(source)
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
             if args.product == "one":
@@ -334,8 +320,6 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                     "-jar",
                     str(args.jar),
                     f"--spring.config.location={args.config.as_uri()}",
-                    "--spring.config.additional-location=",
-                    "--spring.config.import=",
                     "--logging.config=classpath:logback-spring.xml",
                     f"--logging.file.path={work}",
                     f"--logging.file.name={Path(work, 'cx-flow.log')}",
@@ -436,11 +420,9 @@ def main() -> int:
             defer_termination = True
             if child is not None:
                 if os.name == "posix":
-                    # A foreground credential helper can survive the vendor process.
-                    try:
+                    # Kill any surviving credential helper if the process group still exists.
+                    with suppress(ProcessLookupError):
                         os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
                 else:
                     child.kill()
                 child.wait()

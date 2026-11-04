@@ -21,7 +21,6 @@ import {
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
-import { normalizeCheckmarxOne } from "../src/checkmarx-one.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
@@ -4054,38 +4053,15 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
     source: { provider: "checkmarx", source_key: selected.sourceKey },
     items: [{ evidence: { source_scan_id: "scan-a", source_data: { row } } }],
   });
-  const otherScan = normalizeCheckmarxOne(
-    JSON.stringify({
-      scanID: "scan-b",
-      totalCount: 1,
-      results: [{ ...row, similarityId: "18" }],
-    }),
-    selected.sourceRepositoryUrl,
-    "cloud",
-  );
-  for (const sibling of [
-    otherScan.findings[0]!,
-    {
-      source_finding_id: "sdk-id",
-      evidence: {
-        title: "Example",
-        severity: "low" as const,
-        source_scan_id: "scan-b",
-      },
-    },
-  ]) {
-    await expect(
-      prepareNormalizedExternalPublication(
-        {
-          read: 2,
-          excluded: [],
-          findings: [...first.preview.findings, sibling],
-        },
-        selected,
-        f.deps,
-      ),
-    ).rejects.toThrow(/same product, project and scan/i);
-  }
+  const sibling = sdkRow("sdk-id");
+  sibling.evidence.source_scan_id = "scan-b";
+  await expect(
+    prepareNormalizedExternalPublication(
+      sdkSelection([...first.preview.findings, sibling]),
+      selected,
+      f.deps,
+    ),
+  ).rejects.toThrow(/same product, project and scan/i);
   const replayWithReport = (change: Record<string, unknown>) =>
     prepareNormalizedExternalPublication(
       { ...first.preview, report: { ...first.preview.report, ...change } },
@@ -4101,8 +4077,7 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
   await expect(prepare()).rejects.toThrow(/does not match/i);
   expect(f.posts).toHaveLength(0);
   f.state.repositoryUrl = selected.sourceRepositoryUrl;
-  f.state.loseResponse = true;
-  await expect(first.publish()).rejects.toThrow("resume the saved request");
+  await f.loseResponse(first);
   await expect(replayWithReport({ scanId: "different-scan" })).rejects.toThrow(
     /does not match the retained report/i,
   );
@@ -4358,24 +4333,26 @@ const savedDependabotData = {
   sourceRepositoryUrl: "https://github.com/example/different",
 };
 
-const savedEndorData = {
-  format: "cxsast-xml",
-  runContext: {
-    versionControlProvenance: [
-      "opaque",
-      { repositoryUri: "https://github.com/example/project" },
-    ],
-  },
+const checkmarxFormat = { format: "cxsast-xml" };
+const exampleRepository = "https://github.com/example/project";
+const otherRepository = "https://github.com/example/other";
+const savedEndorData = (repositoryUri: string) => ({
+  ...checkmarxFormat,
+  runContext: { versionControlProvenance: ["opaque", { repositoryUri }] },
+});
+const endorCheckpoint = {
+  requiredProvider: "checkmarx",
+  selected: { ...options, provider: "endor" as const },
 };
 
 const wizBranchAsset = {
   nativeType: "github#repositoryBranch",
-  cloudProviderURL: "https://github.com/example/project/tree/main",
+  cloudProviderURL: exampleRepository + "/tree/main",
 };
 
 test.each([
   {
-    data: { format: "cxsast-xml", vulnerableAsset: wizBranchAsset },
+    data: { ...checkmarxFormat, vulnerableAsset: wizBranchAsset },
     selected: options,
     requiredProvider: "checkmarx",
     filename:
@@ -4383,38 +4360,29 @@ test.each([
     digest: "7c90e7bf4a7d9c64c7cbbc15fdcdf6a3ff0e14f50cda77c9b523d834cf337dd7",
   },
   {
-    data: savedEndorData,
-    selected: { ...options, provider: "endor" as const },
-    requiredProvider: "checkmarx",
+    ...endorCheckpoint,
+    data: savedEndorData(exampleRepository),
     filename:
       "4d59df5533b5d0acbbcc2e28884e597a52d8b55e354eb15539d6cfba37c79011.pending.json",
     digest: "d19b090ff4cd18329b37e74e674394deb2670c1d0dfc7bc088c02edcbb088cad",
   },
   {
+    ...endorCheckpoint,
     data: {
-      ...savedEndorData,
-      sourceRepositoryUrl: "https://github.com/example/project",
+      ...savedEndorData(exampleRepository),
+      sourceRepositoryUrl: exampleRepository,
     },
-    selected: { ...options, provider: "endor" as const },
-    requiredProvider: "checkmarx",
     filename:
       "624c404a8fcf0e8241c30d9b1a434d78aaa2c1e87d211465e0698821ab1c509f.pending.json",
     digest: "f77bce9f03733812b5fda88ae988193b54462baf78be95ba6b4de49658b103d9",
   },
   {
+    ...endorCheckpoint,
     data: {
-      ...savedEndorData,
-      sourceRepositoryUrl: "https://github.com/example/project",
-      runContext: {
-        versionControlProvenance: [
-          "opaque",
-          { repositoryUri: "https://github.com/example/other" },
-        ],
-      },
+      ...savedEndorData(otherRepository),
+      sourceRepositoryUrl: exampleRepository,
     },
-    conflictingUrl: "https://github.com/example/other",
-    selected: { ...options, provider: "endor" as const },
-    requiredProvider: "checkmarx",
+    conflictingUrl: otherRepository,
     filename:
       "70e7f4be8d0d9eb0306f18ea1a2b256641bee797b3626a8dfc2920d0a15abcd2.pending.json",
     digest: "8fedf62999d4c5f510706db4647ad3d847e8e5f6f5f3d75eb365da193c16ea1a",
@@ -4469,14 +4437,8 @@ test.each([
   },
 ])(
   "checks a saved $selected.provider request from before $requiredProvider checks",
-  async ({
-    selected,
-    data,
-    requiredProvider,
-    filename,
-    digest,
-    conflictingUrl,
-  }) => {
+  async (saved) => {
+    const { selected, data, requiredProvider, filename, digest } = saved;
     const f = await fixture();
     const environment: NodeJS.ProcessEnv = { ...f.environment };
     // These persisted keys came from the default deployment.
@@ -4539,8 +4501,10 @@ test.each([
       { mode: 0o600 },
     );
 
-    if (conflictingUrl) {
-      await expect(prepare()).rejects.toThrow(`belongs to "${conflictingUrl}"`);
+    if ("conflictingUrl" in saved && saved.conflictingUrl) {
+      await expect(prepare()).rejects.toThrow(
+        `belongs to "${saved.conflictingUrl}"`,
+      );
       expect(f.posts).toHaveLength(0);
       return;
     }
@@ -4614,150 +4578,90 @@ test.each(["wiz", "inspector"] as const)(
   },
 );
 
-test("binds a projected Checkmarx source when a different provider retries", async () => {
-  const f = await fixture();
-  const source = f.state.repositoryUrl;
-  const input = {
-    read: 1,
-    excluded: [],
-    findings: [
-      {
-        source_finding_id: "checkmarx-one:" + "a".repeat(64),
-        evidence: {
-          title: "Example",
-          severity: "low" as const,
-          source_data: { sourceRepositoryUrl: source },
-        },
-      },
-    ],
+const projectedId = "checkmarx-one:" + "a".repeat(64);
+
+function sdkRow(id: string, source_data?: Record<string, unknown>) {
+  const row = normalized(id);
+  return {
+    ...row,
+    evidence: validateExternalEvidence({ ...row.evidence, source_data }),
   };
-  const prepare = () =>
-    prepareNormalizedExternalPublication(input, options, f.deps);
-  f.state.repositoryUrl = "https://github.com/example/different";
-  await expect(prepare()).rejects.toThrow(
-    /does not match the selected Cloud repository/,
-  );
-  f.state.repositoryUrl = source;
-  f.state.loseResponse = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  f.state.repositoryUrl = "https://github.com/example/different";
-  await expect(prepare()).rejects.toThrow(
-    /does not match the selected Cloud repository/,
-  );
-  expect(f.posts).toHaveLength(1);
-  f.state.repositoryUrl = source;
-  expect((await (await prepare()).publish()).verified).toBe(1);
-  expect(f.posts[1]).toBe(f.posts[0]);
-});
+}
 
-test("a projected Checkmarx row binds its unformatted report repository under Wiz", async () => {
-  const f = await fixture();
-  const source = f.state.repositoryUrl;
-  const report = { sourceRepositoryUrl: source, scanId: "123" };
-  const prepare = (id: string) =>
-    prepareNormalizedExternalPublication(
-      {
-        read: 1,
-        excluded: [],
-        report,
-        findings: [
-          {
-            source_finding_id: id,
-            evidence: { title: "SDK finding", severity: "low" },
-          },
-        ],
-      },
-      options,
-      f.deps,
-    );
-  const projected = "checkmarx-one:" + "a".repeat(64);
-  f.state.repositoryUrl = "https://github.com/example/other";
-  expect((await prepare("opaque-sdk-id")).preview.requests).toHaveLength(1);
-  await expect(prepare(projected)).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  f.state.repositoryUrl = source;
-  f.state.loseResponse = true;
-  await expect((await prepare(projected)).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  f.state.repositoryUrl = "https://github.com/example/other";
-  await expect(prepare(projected)).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  expect(f.posts).toHaveLength(1);
-  f.state.repositoryUrl = source;
-  expect((await (await prepare(projected)).publish()).verified).toBe(1);
-  expect(f.posts[1]).toBe(f.posts[0]);
-});
+function sdkSelection(
+  findings: ExternalFindings["findings"],
+  report?: ExternalFindings["report"],
+): ExternalFindings {
+  return { read: findings.length, excluded: [], findings, report };
+}
 
-test("a saved Snyk import rechecks SARIF provenance on a projected Checkmarx occurrence", async () => {
-  const f = await fixture();
-  const source = f.state.repositoryUrl;
-  const { normalized } = await snykRepositoryEvidence("SARIF", source);
-  const finding = normalized.findings[0]!;
-  finding.source_finding_id = "checkmarx-one:" + "a".repeat(64);
-  const prepare = () =>
-    prepareNormalizedExternalPublication(
-      normalized,
-      { ...options, provider: "snyk" },
-      f.deps,
-    );
-  f.state.loseResponse = true;
-  await expect((await prepare()).publish()).rejects.toThrow(
-    "resume the saved request",
-  );
-  f.state.repositoryUrl += "-other";
-  await expect(prepare()).rejects.toThrow(`belongs to "${source}"`);
-  expect(f.posts).toHaveLength(1);
-  f.state.repositoryUrl = source;
-  expect((await (await prepare()).publish()).verified).toBe(1);
-  expect(f.posts[1]).toBe(f.posts[0]);
-});
+test.each(["row", "report", "Snyk SARIF"] as const)(
+  "keeps the projected Checkmarx repository from the %s across retries",
+  async (scope) => {
+    const f = await fixture();
+    const sourceRepositoryUrl = f.state.repositoryUrl;
+    const snyk = scope === "Snyk SARIF";
+    const selected = snyk ? { ...options, provider: "snyk" as const } : options;
+    const report = scope === "report" ? { sourceRepositoryUrl } : undefined;
+    const input = snyk
+      ? (await snykRepositoryEvidence("SARIF", sourceRepositoryUrl)).normalized
+      : sdkSelection(
+          [
+            sdkRow(
+              projectedId,
+              scope === "row" ? { sourceRepositoryUrl } : undefined,
+            ),
+          ],
+          report,
+        );
+    input.findings[0]!.source_finding_id = projectedId;
+    const prepare = (selection: ExternalFindings = input) =>
+      prepareNormalizedExternalPublication(selection, selected, f.deps);
+    f.state.repositoryUrl = otherRepository;
+    if (report)
+      expect(
+        (await prepare(sdkSelection([sdkRow("opaque-sdk-id")], report))).preview
+          .requests,
+      ).toHaveLength(1);
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    await f.loseResponse(await prepare());
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    expect(f.posts).toHaveLength(1);
+    f.state.repositoryUrl = sourceRepositoryUrl;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).verified).toBe(1);
+    expect(f.posts[1]).toBe(f.posts[0]);
+  },
+);
 
 test("Checkmarx projections under Wiz bind retained row URLs and native repository branch assets", async () => {
   const f = await fixture();
-  f.state.repositoryUrl = "https://github.com/example/other";
-  const report = { sourceRepositoryUrl: f.state.repositoryUrl };
-  const asset = {
-    source_finding_id: "wiz-finding",
-    evidence: {
-      title: "SDK finding",
-      severity: "low" as const,
-      source_data: { vulnerableAsset: wizBranchAsset },
-    },
-  };
-  const projected = {
-    ...asset,
-    source_finding_id: "checkmarx-one:" + "a".repeat(64),
-  };
+  const sourceRepositoryUrl = f.state.repositoryUrl;
+  f.state.repositoryUrl = otherRepository;
+  const report = { sourceRepositoryUrl: otherRepository };
   const prepare = (
     findings: ExternalFindings["findings"],
-    metadata?: ExternalFindings["report"],
+    metadata?: typeof report,
   ) =>
     prepareNormalizedExternalPublication(
-      { read: findings.length, excluded: [], findings, report: metadata },
+      sdkSelection(findings, metadata),
       options,
       f.deps,
     );
-  const mismatch = 'belongs to "https://github.com/example/project"';
+  const branch = { vulnerableAsset: wizBranchAsset };
+  const mismatch = `belongs to "${sourceRepositoryUrl}"`;
+  const projected = sdkRow(projectedId, branch);
   await expect(prepare([projected], report)).rejects.toThrow(mismatch);
   await expect(prepare([projected])).rejects.toThrow(mismatch);
-  const projectionOnly = {
-    ...projected,
-    evidence: { title: "Projection", severity: "low" as const },
-  };
-  for (const source_data of [
-    asset.evidence.source_data,
-    { sourceRepositoryUrl: "https://github.com/example/project" },
-  ]) {
-    const sibling = { ...asset, evidence: { ...asset.evidence, source_data } };
+  for (const data of [branch, { sourceRepositoryUrl }]) {
+    const sibling = sdkRow("wiz-finding", data);
     expect((await prepare([sibling], report)).preview.requests).toHaveLength(1);
-    await expect(prepare([projectionOnly, sibling], report)).rejects.toThrow(
-      mismatch,
-    );
+    await expect(
+      prepare([sdkRow(projectedId), sibling], report),
+    ).rejects.toThrow(mismatch);
   }
   expect(f.posts).toHaveLength(0);
 });
@@ -10808,165 +10712,141 @@ test.each([
   },
 );
 
-test("only a verified private Wiz checkpoint replays pre-Checkmarx evidence", async () => {
-  const f = await fixture();
-  const row = normalized();
-  const originalRepository = f.state.repositoryUrl;
-  const finding = {
-    ...row,
-    evidence: validateExternalEvidence({
-      ...row.evidence,
-      source_data: { format: "cxsast-xml" },
-    }),
-  };
-  const selection = {
-    read: 1,
-    excluded: [],
-    findings: [finding],
-    report: { sourceRepositoryUrl: originalRepository, scanId: "123" },
-  };
-  const source = { provider: options.provider, source_key: options.sourceKey };
-  const repository = { id: options.repository, repo_connector_id: "github" };
-  const checkpoint = {
-    format: "security.findings.v1",
-    apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
-    accountId: "synthetic-account",
-    contextVersion: "generation-a",
-    source,
-    repository,
+function privateInboxContext(context_version = "generation-a") {
+  return Response.json({
+    object: "security.finding_import_context",
+    context_version,
+    can_read: true,
+    can_upload: true,
+    can_create_import_jobs: true,
+    formats: ["security.findings.v1"],
+    limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
+  });
+}
+
+test.each([
+  {
+    data: checkmarxFormat,
+    report: { sourceRepositoryUrl: exampleRepository, scanId: "123" },
+    key: "0b6db48e67edf53d39403c9fd1897c34a179edf5b6cce9bffabc9f52f8757f33",
     sha256: "8b0e177506af75c363184d3627fed74325acfcada7e3ee8e9d81041c5db5b2d1",
-    uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
-    jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
-    fileId: "aifile_" + "a".repeat(32),
-  };
-  const directory = join(f.root, "state", "external-finding-publications");
-  const path = join(
-    directory,
-    "0b6db48e67edf53d39403c9fd1897c34a179edf5b6cce9bffabc9f52f8757f33.private-import.json",
-  );
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
-  let contextVersion = checkpoint.contextVersion;
-  const requests: unknown[] = [];
-  const prepare = (input: ExternalFindings = selection) =>
-    prepareNormalizedExternalPublication(input, options, {
-      environment: {
-        ...f.environment,
-        CODEX_SECURITY_CLOUD_BASE_URL: undefined,
-        CODEX_SECURITY_CLOUD_WEB_URL: undefined,
-      },
-      fetch: async (url, init) => {
-        const pathname = new URL(url).pathname;
-        if (pathname.endsWith("/repositories")) return f.deps.fetch(url, init);
-        if (pathname.endsWith("/finding-imports/context"))
-          return Response.json({
-            object: "security.finding_import_context",
-            context_version: contextVersion,
-            can_read: true,
-            can_upload: true,
-            can_create_import_jobs: true,
-            formats: ["security.findings.v1"],
-            limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
-          });
-        expect(pathname).toEndWith("/finding-imports/jobs");
-        expect(init.method).toBe("POST");
-        const job = JSON.parse(String(init.body));
-        requests.push(job);
-        return Response.json({
-          ...job,
-          object: "security.finding_import_job",
-          id: "import_" + "b".repeat(32),
-          status: "completed",
-          counts: {
-            total: 1,
-            discovered: 1,
-            created: 1,
-            updated: 0,
-            unchanged: 0,
-            error: 0,
-            unprocessed: 0,
-          },
-          poll_after_seconds: null,
-          error: null,
-        });
-      },
-    });
-  // The report identifies Checkmarx even when a projected row retains only a repository claim.
-  for (const [data, filename, sha256] of [
-    [
-      { vulnerableAsset: wizBranchAsset },
-      "7400c077334e75f2b1ca49f05eb5cc4f431b62a9f2063734f42a03d60500ea5e.private-import.json",
-      "bf944f1fec0d2f97675f35dc8db1bee753807879fa6077e2bd8c5169889ce7ae",
-    ],
-    [
-      { sourceRepositoryUrl: originalRepository },
-      "0c9c5eef708bb27f19dcaebb67832cc6dcd43bfbf9dee0f0d4c4d2da9145ffa8.private-import.json",
-      "2ae1422cd86875a7be2d73f2dc8f6833e494668f6e4be9982c403d336557ef9f",
-    ],
-  ] as const) {
-    const projected = {
-      ...selection,
-      report: { format: "cxsast-xml" },
-      findings: [
-        {
-          ...row,
-          evidence: validateExternalEvidence({
-            ...row.evidence,
-            source_data: data,
-          }),
-        },
-      ],
+  },
+  {
+    data: { vulnerableAsset: wizBranchAsset },
+    report: checkmarxFormat,
+    key: "7400c077334e75f2b1ca49f05eb5cc4f431b62a9f2063734f42a03d60500ea5e",
+    sha256: "bf944f1fec0d2f97675f35dc8db1bee753807879fa6077e2bd8c5169889ce7ae",
+  },
+  {
+    data: { sourceRepositoryUrl: exampleRepository },
+    report: checkmarxFormat,
+    key: "0c9c5eef708bb27f19dcaebb67832cc6dcd43bfbf9dee0f0d4c4d2da9145ffa8",
+    sha256: "2ae1422cd86875a7be2d73f2dc8f6833e494668f6e4be9982c403d336557ef9f",
+  },
+])(
+  "only a verified private Wiz checkpoint replays pre-Checkmarx evidence ($data)",
+  async ({ data, report, key, sha256 }) => {
+    const f = await fixture();
+    const selection = sdkSelection(
+      [sdkRow(normalized().source_finding_id, data)],
+      report,
+    );
+    const source = {
+      provider: options.provider,
+      source_key: options.sourceKey,
     };
-    await writeFile(
-      join(directory, filename),
-      JSON.stringify({ ...checkpoint, sha256 }),
-      { mode: 0o600 },
-    );
-    f.state.repositoryUrl += "-other";
-    await expect(prepare(projected)).rejects.toThrow(
-      `belongs to "${originalRepository}"`,
-    );
-    f.state.repositoryUrl = originalRepository;
-    expect((await prepare(projected)).preview.resumed).toBe(true);
-  }
-  contextVersion = "different-inbox";
-  await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
-  contextVersion = checkpoint.contextVersion;
-  f.state.repositoryUrl += "-other";
-  await expect(prepare()).rejects.toThrow(
-    "does not match the selected Cloud repository",
-  );
-  f.state.repositoryUrl = originalRepository;
-  const resumed = await prepare();
-  expect(resumed.preview.resumed).toBe(true);
-  expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
-  expect((await resumed.publish()).counts.created).toBe(1);
-  expect(requests).toEqual([
-    {
-      request_id: checkpoint.jobRequestId,
-      context_version: checkpoint.contextVersion,
+    const repository = { id: options.repository, repo_connector_id: "github" };
+    const checkpoint = {
+      format: "security.findings.v1",
+      apiBaseUrl: "https://chatgpt.com/backend-api/aardvark",
+      accountId: "synthetic-account",
+      contextVersion: "generation-a",
       source,
-      input: {
-        type: "file",
-        file_id: checkpoint.fileId,
-        format: checkpoint.format,
-      },
-      default_targets: [
-        {
-          type: "repository",
-          repo_id: repository.id,
-          repo_connector_id: repository.repo_connector_id,
+      repository,
+      sha256,
+      uploadRequestId: "ff52f1ac-ee15-4126-a3f4-bc9984fa0c51",
+      jobRequestId: "a942a3d4-ad70-4b4d-aaca-4e1e2b70cb20",
+      fileId: "aifile_" + "a".repeat(32),
+    };
+    const directory = join(f.root, "state", "external-finding-publications");
+    const path = join(directory, key + ".private-import.json");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
+    let contextVersion = checkpoint.contextVersion;
+    const requests: unknown[] = [];
+    const prepare = () =>
+      prepareNormalizedExternalPublication(selection, options, {
+        environment: {
+          ...f.environment,
+          CODEX_SECURITY_CLOUD_BASE_URL: undefined,
+          CODEX_SECURITY_CLOUD_WEB_URL: undefined,
         },
-      ],
-    },
-  ]);
-  await rm(path);
-  await expect(resumed.publish()).rejects.toThrow(
-    "requires the checkmarx provider",
-  );
-  await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
-  expect(requests).toHaveLength(1);
-});
+        fetch: async (url, init) => {
+          const pathname = new URL(url).pathname;
+          if (pathname.endsWith("/repositories"))
+            return f.deps.fetch(url, init);
+          if (pathname.endsWith("/finding-imports/context"))
+            return privateInboxContext(contextVersion);
+          expect(pathname).toEndWith("/finding-imports/jobs");
+          expect(init.method).toBe("POST");
+          const job = JSON.parse(String(init.body));
+          requests.push(job);
+          return Response.json({
+            ...job,
+            object: "security.finding_import_job",
+            id: "import_" + "b".repeat(32),
+            status: "completed",
+            counts: {
+              total: 1,
+              discovered: 1,
+              created: 1,
+              updated: 0,
+              unchanged: 0,
+              error: 0,
+              unprocessed: 0,
+            },
+            poll_after_seconds: null,
+            error: null,
+          });
+        },
+      });
+    contextVersion = "different-inbox";
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    contextVersion = checkpoint.contextVersion;
+    f.state.repositoryUrl = otherRepository;
+    await expect(prepare()).rejects.toThrow(/belongs to|does not match/);
+    f.state.repositoryUrl = exampleRepository;
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(resumed.preview.privateImport?.sha256).toBe(checkpoint.sha256);
+    expect((await resumed.publish()).counts.created).toBe(1);
+    expect(requests).toEqual([
+      {
+        request_id: checkpoint.jobRequestId,
+        context_version: checkpoint.contextVersion,
+        source,
+        input: {
+          type: "file",
+          file_id: checkpoint.fileId,
+          format: checkpoint.format,
+        },
+        default_targets: [
+          {
+            type: "repository",
+            repo_id: repository.id,
+            repo_connector_id: repository.repo_connector_id,
+          },
+        ],
+      },
+    ]);
+    await rm(path);
+    await expect(resumed.publish()).rejects.toThrow(
+      "requires the checkmarx provider",
+    );
+    await expect(prepare()).rejects.toThrow("requires the checkmarx provider");
+    expect(requests).toHaveLength(1);
+  },
+);
 
 test("a private preview recognizes a later repository checkpoint under its historical filename", async () => {
   const f = await fixture();
@@ -10984,15 +10864,7 @@ test("a private preview recognizes a later repository checkpoint under its histo
           });
         }
         expect(new URL(url).pathname).toEndWith("/finding-imports/context");
-        return Response.json({
-          object: "security.finding_import_context",
-          context_version: "generation-a",
-          can_read: true,
-          can_upload: true,
-          can_create_import_jobs: true,
-          formats: ["security.findings.v1"],
-          limits: { max_direct_file_bytes: 32768, max_record_bytes: 8192 },
-        });
+        return privateInboxContext();
       },
     },
   );

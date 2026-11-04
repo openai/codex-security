@@ -29,7 +29,7 @@ function scanKey(value: unknown, xml: boolean) {
 }
 
 /** A native payload can verify its occurrence ID. A projection can still identify its source. */
-export function checkmarxSource(
+function checkmarxSource(
   { source_finding_id: id, evidence }: ExternalFinding,
   provider?: Provider,
 ) {
@@ -56,210 +56,188 @@ export function checkmarxSource(
   if (projected) return "projection";
 }
 
-/** Bind explicitly retained URLs even when a projection cannot establish the provider. */
-export function projectedCheckmarxRepositoryUrl(
-  finding: ExternalFinding,
-  target: ExternalImportTarget,
-  reportProvenance = false,
-) {
-  if (!reportProvenance && !checkmarxSource(finding)) return;
-  const source = finding.evidence.source_data?.["sourceRepositoryUrl"];
-  return typeof source === "string"
-    ? declaredScannerRepositoryUrl(source, "Checkmarx", target)
-    : (finding.evidence.details?.repository?.url ?? undefined);
-}
+const mismatch =
+  "Checkmarx finding does not match the retained report format, scan or project.";
 
-function requireCheckmarx(provider: Provider) {
-  if (provider !== "checkmarx")
-    throw new Error(
-      "Retained Checkmarx evidence requires the checkmarx provider.",
-    );
-}
-
-function teamPath(value: string) {
-  return value
-    .replaceAll("\\", "/")
-    .replace(/^\/+|\/+$/gu, "")
-    .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
-}
-
-/** Compare each explicit claim, including selections that omit the original report. */
+/** Compare the claims present across the whole batch, including projected SDK rows. */
 function checkBatchScope(
-  findings: ExternalFindings["findings"],
+  findings: readonly ExternalFinding[],
+  formats: Iterable<string>,
   report: ExternalFindings["report"],
 ) {
-  let project = report?.["projectId"];
-  let projectName: unknown;
-  let team: unknown;
-  let scanner: unknown;
-  let instance: string | undefined;
-  function agree(current: unknown, value: unknown) {
-    if (current != null && value != null && current !== value)
+  function single(values: unknown[]) {
+    const claims = new Set(values.filter((value) => value != null));
+    if (claims.size > 1)
       throw new Error(
         report
-          ? "Checkmarx finding does not match the retained report format, scan or project."
+          ? mismatch
           : "Checkmarx occurrences must belong to the same product, project and scan.",
       );
-    return current ?? value;
+    return claims.values().next().value;
   }
-  function checkFormat(format: unknown) {
-    if (checkmarxFormat(format))
-      scanner = agree(
-        scanner,
+  const evidence = findings.map((finding) => finding.evidence);
+  const sources = [report, ...evidence.map((row) => row.source_data)].filter(
+    isRecord,
+  );
+  const scanner = single([
+    ...[report?.["format"], ...formats]
+      .filter(checkmarxFormat)
+      .map((format) =>
         format === "cxsast-xml" ? "CxSAST" : "Checkmarx One SAST",
+      ),
+    ...evidence.map((row) => row.details?.scanner_origin),
+    sources.some(checkmarxResultViewer) ? "CxSAST" : undefined,
+  ]);
+  const xml = scanner === "CxSAST";
+  if (xml || sources.some((data) => text(data["teamFullPathOnReportDate"]))) {
+    single(sources.map((data) => text(data["projectName"])));
+    single(
+      sources.map((data) =>
+        text(data["teamFullPathOnReportDate"])
+          ?.replaceAll("\\", "/")
+          .replace(/^\/+|\/+$/gu, "")
+          .replace(/[A-Z]/gu, (c) => c.toLowerCase()),
+      ),
+    );
+  }
+  const scopes = sources
+    .filter((data) => {
+      // An explicit deployment URL distinguishes an instance from opaque SDK metadata.
+      const instance = data["instance"];
+      return (
+        xml ||
+        (typeof instance === "string" &&
+          /^https?:$/u.test(URL.parse(instance)?.protocol ?? ""))
       );
-  }
-  checkFormat(report?.["format"]);
-  for (const finding of findings) {
-    checkFormat(checkmarxSource(finding, "checkmarx"));
-    const { evidence } = finding;
-    project = agree(project, evidence.source_data?.["projectId"]);
-    scanner = agree(scanner, evidence.details?.scanner_origin);
-  }
-  // A projected row can retain a viewer link even when it omits the product and path.
-  const sources = [
-    report,
-    ...findings.map(({ evidence }) => evidence.source_data),
-  ];
-  const xml = scanner === "CxSAST" || sources.some(checkmarxResultViewer);
-  const namedXml =
-    xml || sources.some((data) => text(data?.["teamFullPathOnReportDate"]));
-  if (xml) agree(scanner, "CxSAST");
-  let scan = scanKey(report?.["scanId"], xml);
-  for (const { evidence } of findings)
-    scan = agree(scan, scanKey(evidence.source_scan_id, xml));
-
-  for (const data of sources) {
-    if (!data) continue;
-    if (namedXml) {
-      projectName = agree(projectName, text(data["projectName"]));
-      const path = text(data["teamFullPathOnReportDate"]);
-      if (path) team = agree(team, teamPath(path));
-    }
-    if (!xml) {
-      // A retained deployment URL distinguishes this claim from opaque SDK metadata.
-      const value = data["instance"];
-      const protocol = typeof value === "string" && URL.parse(value)?.protocol;
-      if (protocol !== "http:" && protocol !== "https:") continue;
-    }
-    const scope = checkmarxXmlScope(data);
+    })
+    .map((data) => checkmarxXmlScope(data));
+  let instance: string | undefined;
+  for (const scope of scopes)
     instance = checkmarxXmlInstance(instance, scope.instance);
-    scan = agree(scan, scope.scanId);
-    project = agree(project, scope.projectId);
-  }
+  single([
+    ...sources.map((data) => data["projectId"]),
+    ...scopes.map((scope) => scope.projectId),
+  ]);
+  single([
+    scanKey(report?.["scanId"], xml),
+    ...evidence.map((row) => scanKey(row.source_scan_id, xml)),
+    ...scopes.map((scope) => scope.scanId),
+  ]);
 }
 
-/** The native reader also retains scope when a report has no accepted rows. */
-export function checkmarxReportScope(
+/** Identify report and row provenance once for both import destinations. */
+export function checkmarxSelection(
   provider: Provider,
   findings: ExternalFindings["findings"],
   report: ExternalFindings["report"],
   target: ExternalImportTarget,
   historical = false,
-): { url?: string } | undefined {
-  if (provider === "checkmarx") checkBatchScope(findings, report);
-  if (!report) return;
-  const format = report["format"];
-  if (!checkmarxFormat(format) || (historical && provider !== "checkmarx")) {
-    const source = report["sourceRepositoryUrl"];
-    if (
-      provider === "checkmarx" &&
-      "sourceRepositoryUrl" in report &&
-      "scanId" in report
-    )
-      throw new Error("Expected the original Checkmarx report format.");
-    if (
-      typeof source === "string" &&
-      (provider === "checkmarx" ||
-        checkmarxFormat(format) ||
-        findings.some((finding) => checkmarxSource(finding)))
-    )
-      return { url: declaredScannerRepositoryUrl(source, "Checkmarx", target) };
-    return checkmarxFormat(format) ? {} : undefined;
-  }
-  requireCheckmarx(provider);
-  const xml = format === "cxsast-xml";
-  const scan = scanKey(
-    requiredText(report["scanId"], "Checkmarx report scan ID"),
-    xml,
-  );
-  const project = xml
-    ? requiredText(report["projectId"], "CxSAST report project ID")
-    : undefined;
+) {
+  const selected = provider === "checkmarx";
+  const replay = historical && !selected;
+  const format = report?.["format"];
+  const nativeReport = checkmarxFormat(format);
+  const formats = new Map<ExternalFinding, string>();
   for (const finding of findings) {
-    const { evidence } = finding;
-    const data = evidence.source_data;
-    const rowFormat =
-      data && "format" in data
-        ? data["format"]
-        : checkmarxSource(finding, provider);
-    if (
-      rowFormat !== format ||
-      scanKey(evidence.source_scan_id, xml) !== scan ||
-      (project !== undefined && data?.["projectId"] !== project)
-    )
+    const kind = checkmarxSource(finding, provider);
+    if (kind) formats.set(finding, kind);
+  }
+  const validateUrl = (value: unknown) =>
+    declaredScannerRepositoryUrl(value, "Checkmarx", target);
+  function requireProvider() {
+    if (!selected)
       throw new Error(
-        "Checkmarx finding does not match the retained report format, scan or project.",
+        "Retained Checkmarx evidence requires the checkmarx provider.",
       );
   }
-  return {
-    url: declaredScannerRepositoryUrl(
-      report["sourceRepositoryUrl"],
-      "Checkmarx",
-      target,
-    ),
-  };
-}
-
-export const checkmarxReportRepositories = repositoryScopeValidator(
-  {
-    provider: "checkmarx",
-    label: "Checkmarx",
-    scope: "product, project and scan",
-  },
-  (provider, finding, target) => {
-    const { source_finding_id: id, evidence } = finding;
-    const data = evidence.source_data;
-    const format = checkmarxSource(finding, provider);
-    if (!checkmarxFormat(format) || !data) {
-      if (provider === "checkmarx" && nativeId.test(id))
+  if (selected) checkBatchScope(findings, formats.values(), report);
+  let reportUrl: string | undefined;
+  if (report && nativeReport && !replay) {
+    requireProvider();
+    const xml = format === "cxsast-xml";
+    const scan = scanKey(
+      requiredText(report["scanId"], "Checkmarx report scan ID"),
+      xml,
+    );
+    const project = xml
+      ? requiredText(report["projectId"], "CxSAST report project ID")
+      : undefined;
+    for (const finding of findings) {
+      const { evidence } = finding;
+      const data = evidence.source_data;
+      if (
+        (data && "format" in data ? data["format"] : formats.get(finding)) !==
+          format ||
+        scanKey(evidence.source_scan_id, xml) !== scan ||
+        (xml && data?.["projectId"] !== project)
+      )
+        throw new Error(mismatch);
+    }
+    reportUrl = validateUrl(report["sourceRepositoryUrl"]);
+  } else if (report) {
+    if (selected && "sourceRepositoryUrl" in report && "scanId" in report)
+      throw new Error("Expected the original Checkmarx report format.");
+    if (
+      typeof report["sourceRepositoryUrl"] === "string" &&
+      (selected || nativeReport || formats.size)
+    )
+      reportUrl = validateUrl(report["sourceRepositoryUrl"]);
+  }
+  const marked = new Set(nativeReport || reportUrl ? findings : formats.keys());
+  function projectedRepository({ evidence }: ExternalFinding) {
+    const source = evidence.source_data?.["sourceRepositoryUrl"];
+    const url =
+      typeof source === "string"
+        ? validateUrl(source)
+        : evidence.details?.repository?.url;
+    return url ? { url } : undefined;
+  }
+  const validateRows = repositoryScopeValidator(
+    {
+      provider: "checkmarx",
+      label: "Checkmarx",
+      scope: "product, project and scan",
+    },
+    (_, finding) => {
+      const { source_finding_id: id, evidence } = finding;
+      const data = evidence.source_data;
+      const kind = formats.get(finding);
+      if (checkmarxFormat(kind) && data) {
+        requireProvider();
+        const scan = requiredText(
+          evidence.source_scan_id,
+          "Checkmarx source scan ID",
+        );
+        const expected =
+          kind === "cxsast-xml"
+            ? checkmarxXmlId(data, scan)
+            : checkmarxOneId(data["row"]);
+        if (id !== expected)
+          throw new Error(
+            "Checkmarx source finding ID does not match the retained occurrence.",
+          );
+        return { url: validateUrl(data["sourceRepositoryUrl"]), scope: kind };
+      }
+      if (selected && nativeId.test(id))
         throw new Error(
           "Checkmarx source finding ID requires its original evidence.",
         );
-      const url =
-        provider === "checkmarx" && data && "sourceRepositoryUrl" in data
-          ? declaredScannerRepositoryUrl(
-              data["sourceRepositoryUrl"],
-              "Checkmarx",
-              target,
-            )
-          : projectedCheckmarxRepositoryUrl(finding, target);
-      return url ? { url } : undefined;
-    }
-    requireCheckmarx(provider);
-    const scan = requiredText(
-      evidence.source_scan_id,
-      "Checkmarx source scan ID",
-    );
-    const expected =
-      format === "cxsast-xml"
-        ? checkmarxXmlId(data, scan)
-        : checkmarxOneId(data["row"]);
-    if (id !== expected)
-      throw new Error(
-        "Checkmarx source finding ID does not match the retained occurrence.",
-      );
-    return {
-      url: declaredScannerRepositoryUrl(
-        data["sourceRepositoryUrl"],
-        "Checkmarx",
-        target,
-      ),
-      scope: JSON.stringify([
-        format,
-        format === "cxsast-xml" ? data["projectId"] : null,
-        scanKey(scan, format === "cxsast-xml"),
-      ]),
-    };
-  },
-);
+      if (selected && data && "sourceRepositoryUrl" in data)
+        return { url: validateUrl(data["sourceRepositoryUrl"]) };
+      return kind ? projectedRepository(finding) : undefined;
+    },
+  );
+  return {
+    reportUrl,
+    projections: selected ? new Set<ExternalFinding>() : marked,
+    repositories(sameRepositories?: (urls: Iterable<string>) => boolean) {
+      const rows =
+        replay || (!selected && !formats.size)
+          ? undefined
+          : validateRows(provider, findings, target, sameRepositories);
+      return (finding: ExternalFinding) =>
+        rows?.get(finding.source_finding_id) ??
+        (marked.has(finding) ? projectedRepository(finding) : undefined);
+    },
+  };
+}
