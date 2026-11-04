@@ -44,6 +44,9 @@
 - check resolved path types before scan registration ([#549](https://github.com/openai/codex-security/pull/549))
 - preserve worker activity when a session log is unreadable ([#970](https://github.com/openai/codex-security/pull/970))
 - preserve shell-escaped whitespace in repository paths ([#2163](https://github.com/openai/codex-security/pull/2163))
+- protect HF\_TOKEN and defer the Hugging Face scan preset ([#277](https://github.com/openai/codex-security/pull/277))
+- restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
+- simplify lifecycle and protocol test fixtures ([#2186](https://github.com/openai/codex-security/pull/2186))
 
 <!-- release-section: highlights:end -->
 
@@ -54,5 +57,6 @@
 Review migration steps for these breaking changes:
 
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
+- restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
 
 <!-- release-section: upgrades:end -->
