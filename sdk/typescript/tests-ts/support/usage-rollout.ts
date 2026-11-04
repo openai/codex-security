@@ -4,15 +4,6 @@ import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
-export async function waitForCostTracker(check: () => boolean): Promise<void> {
-  // Synthetic scans have no Codex process to keep the unref'ed poll timer alive.
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (check()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error("Timed out waiting for the cost tracker.");
-}
-
 export const scanThreadId = "scan-thread";
 export const lowerUuid7Turn = "019f9e4d-b3ba-7000-8000-000000000001";
 export const childUuid7Thread = "019f9e4d-b3ba-7000-8000-000000000002";
@@ -142,7 +133,7 @@ export function ownershipRollout(
     {
       type: "event_msg",
       timestamp: uuid7EventTimestamp,
-      payload: { type: "task_complete", turn_id: higherUuid7Turn },
+      payload: { type: "task_complete" },
     },
   ];
 }
@@ -201,37 +192,20 @@ export function parentMetadata(
     : { [field]: parentThreadId };
 }
 
-export function taskEvent(
-  type: "task_started" | "task_complete" | "turn_complete" | "turn_aborted",
-): string {
-  return JSON.stringify({
-    type: "event_msg",
-    payload: {
-      type,
-      turn_id: "fixture-turn",
-      started_at: 1_785_067_320,
-      ...(type === "task_started" ? {} : { completed_at: 1_785_067_321 }),
-      ...(type === "turn_aborted" ? { reason: "interrupted" } : {}),
-    },
-  });
-}
-
 export async function writeSession(
   home: string,
   threadId: string,
-  usage: Record<string, number> | null,
+  usage: Record<string, number>,
   {
     parent,
     cwd,
     timestamp,
     parentField = "source",
-    completed = false,
   }: {
     parent?: string;
     cwd?: string;
     timestamp?: string;
     parentField?: SessionParentField;
-    completed?: boolean;
   } = {},
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
@@ -249,19 +223,13 @@ export async function writeSession(
           ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
         },
       }),
-      ...(completed ? [taskEvent("task_started")] : []),
-      ...(usage === null
-        ? []
-        : [
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "token_count",
-                info: { total_token_usage: usage },
-              },
-            }),
-          ]),
-      ...(completed ? [taskEvent("task_complete")] : []),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: usage },
+        },
+      }),
       "",
     ].join("\n"),
   );

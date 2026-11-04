@@ -43,7 +43,7 @@ export async function testDeepScanLifecycle({
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
-    delayedReducerDoesNotReplaceStoppedState,
+    delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
     concurrentOwnershipReadsKeepReplacementResult,
     lateFailurePersistenceKeepsStoppedState,
@@ -53,7 +53,6 @@ export async function testDeepScanLifecycle({
     terminalDiscoveryWaitsForCleanup,
     orphanWorkerDirectoriesAreNotReused,
     ancestorNamesDoNotChooseWorkerSequence,
-    failedThreadRegistrationRetainsAcceptedThread,
   ]) {
     try {
       await test();
@@ -63,51 +62,6 @@ export async function testDeepScanLifecycle({
   }
   if (errors.length)
     throw new AggregateError(errors, "Deep Scan lifecycle regressions");
-
-  async function failedThreadRegistrationRetainsAcceptedThread() {
-    for (const retry of [false, true]) {
-      const fixture = await fixtureRun(config);
-      const store = new FakeStore(fixture.run);
-      const executor = new FakeExecutor();
-      const updateWorker = store.updateWorker.bind(store);
-      let acceptedThread: string | undefined;
-      store.updateWorker = async (update) => {
-        if (
-          update.kind === "discovery" &&
-          update.threadId &&
-          acceptedThread === undefined
-        ) {
-          acceptedThread = update.threadId;
-          throw new Error("synthetic initial thread registration failure");
-        }
-        return updateWorker(update);
-      };
-      const coordinator = createCoordinator(fixture, store, executor, {
-        clock: immediateClock,
-        retryDelaysMs: retry ? [0] : [],
-      });
-      coordinator.start();
-      await coordinator.settled();
-      assert.ok(acceptedThread);
-      const failure = store.workerUpdates.find(
-        (update) =>
-          update.kind === "discovery" &&
-          update.error?.includes(
-            "synthetic initial thread registration failure",
-          ),
-      );
-      assert.ok(
-        failure,
-        "the failed ownership write reached retry or terminal persistence",
-      );
-      assert.equal(failure.threadId, acceptedThread);
-      if (retry) {
-        assert.equal(executor.discoveryResumeThreadIds[0], acceptedThread);
-      } else {
-        assert.equal(store.workers.get(failure.id)?.threadId, acceptedThread);
-      }
-    }
-  }
 
   async function failedParentCancellationStopsActiveWorker() {
     for (const terminalReadFails of [false, true]) {
@@ -870,15 +824,15 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     }
   }
 
-  async function delayedReducerDoesNotReplaceStoppedState() {
+  async function delayedIterationDoesNotReplaceStoppedState() {
     for (const status of ["canceled", "failed"] as const) {
       const fixture = await fixtureRun(config);
       fixture.run.coordinatorGeneration = 1;
       const store = new FakeStore(fixture.run);
       const committed = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      const commit = store.commitDedup.bind(store);
-      store.commitDedup = async (input) => {
+      const commit = store.recordIteration.bind(store);
+      store.recordIteration = async (input) => {
         const response = await commit(input);
         committed.resolve();
         await release.promise;

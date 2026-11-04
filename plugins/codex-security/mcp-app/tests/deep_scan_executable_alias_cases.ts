@@ -81,7 +81,8 @@ export async function testConcurrentWorkerExecutableAliases({
       });
     }
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const kind of ["discovery", "dedup"] as const) {
+    {
+      const kind = "discovery";
       for (const resumeThreadId of [undefined, "resumed-thread"]) {
         await Promise.all(
           scans.map((scan) => {
@@ -115,7 +116,7 @@ export async function testConcurrentWorkerExecutableAliases({
           assert.equal(invocation.codexHome, scan.fixture.root);
           assert.equal(preflight.codexHome, scan.fixture.root);
           assert.equal(
-            invocation.thread.method === "thread/resume",
+            invocation.argv.includes("resume"),
             resumeThreadId !== undefined,
           );
           assertConfigOverrides(invocation.argv, {

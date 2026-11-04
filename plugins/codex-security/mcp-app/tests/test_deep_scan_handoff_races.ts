@@ -239,11 +239,9 @@ try {
         assert.equal(failureWrites, scenario === "ordinary failure" ? 1 : 0);
         if (scenario === "ordinary failure") {
           assert.ok(terminal?.error?.includes(diagnostic));
-          // Registration and the failure write retaining its accepted thread each
-          // check the lease before the coordinator's final ownership read.
           assert.equal(
             reads,
-            3,
+            2,
             "diagnostic text must not establish ownership loss",
           );
         } else {

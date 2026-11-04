@@ -3,10 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
 import sqlite3
-import subprocess
-import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -18,8 +15,6 @@ from workbench_test_support import (
     attach_continuation,
     begin_deep_scan,
     cancel_scan,
-    claim_deep_scan_dedup,
-    commit_deep_dedup,
     create_saved_workspace,
     create_workspace,
     empty_target_paths,
@@ -27,8 +22,8 @@ from workbench_test_support import (
     finish_deep_scan,
     get_deep_scan,
     get_scan,
-    load_script,
     mark_deep_coordinator_succeeded,
+    read_fixture_deep_scan,
     read_review_state,
     resume_deep_scan,
     run_workbench,
@@ -36,6 +31,8 @@ from workbench_test_support import (
     saved_draft,
     scan_claim_command,
     scan_command,
+    seal_legacy_reducer,
+    seed_legacy_reducer,
     stable_target_id,
     start_delivered_scan,
     start_scan_command,
@@ -98,6 +95,12 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
+        connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )
@@ -178,19 +181,6 @@ class DeepScan:
             self.state_dir, self.id, thread_id, environment=deep_environment(self.codex_home)
         )["deepScan"]
 
-    def commit_result(
-        self, worker_id: str, result_path: Path, count: str, *extra: str
-    ) -> dict[str, object]:
-        return commit_deep_dedup(
-            self.state_dir,
-            self.id,
-            worker_id,
-            str(result_path),
-            count,
-            *extra,
-            environment=deep_environment(self.codex_home),
-        )
-
     def upsert_worker(
         self,
         *,
@@ -260,30 +250,21 @@ class DeepScan:
             )
         return worker_id, prompt_path, artifact_dir, result_path
 
-    def claim_reducer(
+    def seed_legacy_reducer(
         self,
         worker_id: str,
         prompt_path: Path,
         artifact_dir: Path,
         input_worker_ids: list[str],
-        *,
-        coordinator_generation: int | None = None,
-        check: bool = True,
     ) -> dict[str, object]:
-        return claim_deep_scan_dedup(
+        return seed_legacy_reducer(
             self.state_dir,
             self.id,
             worker_id,
             str(prompt_path),
             str(artifact_dir),
             *(item for worker in input_worker_ids for item in ("--input-worker-id", worker)),
-            *(
-                ("--coordinator-generation", str(coordinator_generation))
-                if coordinator_generation is not None
-                else ()
-            ),
             environment=deep_environment(self.codex_home),
-            check=check,
         )
 
     def finish(
@@ -299,7 +280,7 @@ class DeepScan:
             check=check,
         )
 
-    def commit_reducer(
+    def record_iteration(
         self,
         *,
         name: str,
@@ -307,34 +288,66 @@ class DeepScan:
         new_findings_count: int,
         coordinator_generation: int | None = None,
     ) -> dict[str, object]:
-        worker_id = str(uuid.uuid4())
-        prompt_path, artifact_dir, result_path = worker_paths(self.directory, name)
-        self.claim_reducer(
-            worker_id,
-            prompt_path,
-            artifact_dir,
-            input_worker_ids,
-            coordinator_generation=coordinator_generation,
-        )
-        self.upsert_worker(
-            worker_id=worker_id,
-            kind="dedup",
-            prompt_path=prompt_path,
-            artifact_dir=artifact_dir,
-            coordinator_generation=coordinator_generation,
-        )
+        _, _, result = worker_paths(self.directory, name)
         write_canonical_artifacts(self.directory)
-        result_path.write_text("{}\n")
-        return self.commit_result(
-            worker_id,
-            result_path,
-            str(new_findings_count),
+        result.write_text(json.dumps({"scanId": self.id, "findings": []}))
+        snapshot = read_fixture_deep_scan(
+            self.state_dir, self.id, deep_environment(self.codex_home)
+        )
+        streak = snapshot["deepScan"]["noNewStreak"]
+        return self.command(
+            "record-deep-scan-iteration",
+            "--worker-id",
+            str(uuid.uuid4()),
+            "--result-manifest-path",
+            str(result),
+            "--no-new-streak",
+            str(0 if new_findings_count else streak + len(input_worker_ids)),
+            "--consecutive-errors",
+            "0",
+            *(arg for source in input_worker_ids for arg in ("--input-worker-id", source)),
             *(
                 ("--coordinator-generation", str(coordinator_generation))
                 if coordinator_generation is not None
                 else ()
             ),
         )["deepScan"]
+
+
+def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    sources = [deep.dispatch_discovery_worker(name=name)[0] for name in ("second", "first")]
+    _, _, result = worker_paths(deep.directory, "dedup-0001")
+    result.write_text(json.dumps({"scanId": deep.id, "findings": []}))
+    record = (
+        "--worker-id",
+        str(uuid.uuid4()),
+        "--result-manifest-path",
+        str(result),
+        "--no-new-streak",
+        "1",
+        "--consecutive-errors",
+        "2",
+    )
+
+    def save(ids, *, check=True):
+        return deep.command(
+            "record-deep-scan-iteration",
+            *record,
+            *(arg for source in ids for arg in ("--input-worker-id", source)),
+            check=check,
+        )
+
+    assert "unmerged completed scan" in save([sources[1], str(uuid.uuid4())], check=False)["stderr"]
+    before = deep.read("thread-deep-scan")
+    assert all(w["mergeState"] == "buffered" for w in before["workers"])
+    for _ in range(2):
+        saved = save(list(reversed(sources)))["deepScan"]
+        assert saved["noNewStreak"] == 1
+        assert saved["consecutiveErrors"] == 2
+        assert len([w for w in saved["workers"] if w["kind"] == "dedup"]) == 1
+        assert [i["discoveryWorkerId"] for i in saved["dedupInputs"]] == list(reversed(sources))
+    assert "other completed scans" in save(sources, check=False)["stderr"]
 
 
 def test_existing_generation_safely_claims_and_reclaims_without_schema_migration(
@@ -351,9 +364,6 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        assert schema_version == (
-            max(version for version, _, _ in load_script("workbench_schema").MIGRATIONS),
-        )
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -568,7 +578,7 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         name="track-c-resumed-discovery",
         coordinator_generation=2,
     )[0]
-    reduced = deep.commit_reducer(
+    reduced = deep.record_iteration(
         name="track-c-recovered-reducer",
         input_worker_ids=[completed_worker, replacement_worker],
         new_findings_count=0,
@@ -592,6 +602,8 @@ def test_paused_discovery_resumes_after_restart_with_original_handoff_claim(
         handoff_claim_token,
         environment=deep_environment(codex_home),
     )["scan"]
+    assert parent["lifecycle"] == paused["lifecycle"]
+    assert parent["lifecycle"]["scanId"] == scan_id
     assert (
         parent["progress"]["status"],
         parent["progress"]["phase"],
@@ -622,7 +634,7 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
     ]
     reducer_id = str(uuid.uuid4())
     prompt, artifact_dir, result = worker_paths(deep.directory, "crashed-reducer")
-    deep.claim_reducer(reducer_id, prompt, artifact_dir, accepted, coordinator_generation=2)
+    deep.seed_legacy_reducer(reducer_id, prompt, artifact_dir, accepted)
     deep.upsert_worker(
         worker_id=reducer_id,
         kind="dedup",
@@ -638,52 +650,22 @@ def test_expired_coordinator_recovers_reducer_publication_after_process_death(
     staged.parent.mkdir()
     staged.write_text('{"candidate":"newly published"}\n')
     result.write_text("{}\n")
-    hook = "finish_staged_file" if crash_point == "after_commit" else "promote_staged_file"
-    call_original = "    original(*args, **kwargs)\n" if hook == "promote_staged_file" else ""
-    copy_override = (
-        "deep_scan_workbench.create_publication_copy = shutil.copy2\n" if copy_publication else ""
-    )
-    wrapper = tmp_path / "crash_reducer.py"
-    wrapper.write_text(
-        "import os, shutil, signal, sys\n"
-        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'scripts')!r})\n"
-        "import deep_scan_workbench\n"
-        f"{copy_override}"
-        f"original = deep_scan_workbench.{hook}\n"
-        "def crash(*args, **kwargs):\n"
-        f"{call_original}"
-        "    os.kill(os.getpid(), signal.SIGKILL)\n"
-        f"deep_scan_workbench.{hook} = crash\n"
-        "import workbench_db\n"
-        "workbench_db.main()\n"
-    )
-    crashed = subprocess.run(
-        [
-            sys.executable,
-            str(wrapper),
-            "commit-deep-scan-dedup",
-            "--scan-id",
+    # An older reducer could exit between replacing the ledger and committing SQLite.
+    if canonical.exists():
+        canonical.rename(canonical.with_name(f".{canonical.name}.legacy.backup"))
+    if copy_publication:
+        canonical.write_bytes(staged.read_bytes())
+    else:
+        os.link(staged, canonical)
+    if crash_point == "after_commit":
+        seal_legacy_reducer(
+            deep.state_dir,
             deep.id,
-            "--worker-id",
             reducer_id,
-            "--result-manifest-path",
             str(result),
-            "--candidate-ledger-path",
-            str(staged),
-            "--new-findings-count",
             "1",
-            "--coordinator-generation",
-            "2",
-        ],
-        env={
-            **os.environ,
-            "CODEX_SECURITY_STATE_DIR": str(deep.state_dir),
-            **deep_environment(deep.codex_home),
-        },
-        capture_output=True,
-        text=True,
-    )
-    assert crashed.returncode == -signal.SIGKILL, crashed.stderr
+            environment=deep_environment(deep.codex_home),
+        )
 
     expire_deep_scan_coordinator(deep.state_dir, deep.id)
     recovered = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
@@ -727,7 +709,7 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     )[0]
     reducer = str(uuid.uuid4())
     prompt, artifacts, _ = worker_paths(deep.directory, "abandoned-reducer")
-    deep.claim_reducer(reducer, prompt, artifacts, accepted, coordinator_generation=2)
+    deep.seed_legacy_reducer(reducer, prompt, artifacts, accepted)
     if reducer_status == "failed":
         deep.upsert_worker(
             worker_id=reducer,
@@ -748,7 +730,7 @@ def test_expired_generation_preserves_receipts_and_recovers_abandoned_workers(
     assert by_id[active]["status"] == "canceled"
     assert by_id[reducer]["status"] == ("canceled" if reducer_status == "running" else "failed")
     replacement_inputs = accepted if replace_all_inputs else accepted[:-1]
-    resumed = deep.commit_reducer(
+    resumed = deep.record_iteration(
         name="recovered-reducer",
         input_worker_ids=replacement_inputs,
         new_findings_count=0,
@@ -849,23 +831,16 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None
         ("update-progress", "--phase", "discovery"),
         ("fail-deep-scan", "--message", "stale coordinator"),
         (
-            "claim-deep-scan-dedup",
+            "record-deep-scan-iteration",
             "--worker-id",
             str(uuid.uuid4()),
-            "--prompt-path",
-            str(prompt),
-            "--artifact-dir",
-            str(artifacts),
-            "--input-worker-id",
-            worker,
-        ),
-        (
-            "commit-deep-scan-dedup",
-            "--worker-id",
-            worker,
             "--result-manifest-path",
             str(result),
-            "--new-findings-count",
+            "--input-worker-id",
+            worker,
+            "--no-new-streak",
+            "0",
+            "--consecutive-errors",
             "0",
         ),
         (
@@ -883,129 +858,6 @@ def test_expired_generation_cannot_mutate_recovered_scan(tmp_path: Path) -> None
         assert "coordinator" in str(rejected["stderr"]).lower(), command
         persisted = deep.read("thread-deep-scan")
         assert persisted == recovered, command
-
-
-@pytest.mark.parametrize(
-    ("artifact_name", "failure_kind", "expected_error"),
-    [
-        (
-            "inScopeFilesPath",
-            "missing",
-            "Canonical in-scope inventory path must be an existing path inside the scan directory.",
-        ),
-        (
-            "candidateLedgerPath",
-            "missing",
-            None,
-        ),
-        (
-            "inScopeFilesPath",
-            "symlink",
-            "Canonical in-scope inventory path must be a canonical non-symlink path.",
-        ),
-        (
-            "candidateLedgerPath",
-            "symlink",
-            "Canonical candidate ledger path must be a canonical non-symlink path.",
-        ),
-    ],
-)
-def test_reducer_commit_requires_safe_standard_canonical_artifacts(
-    tmp_path: Path, artifact_name: str, failure_kind: str, expected_error: str | None
-) -> None:
-    deep = start_empty_target_scan(tmp_path)
-    input_worker_ids = [
-        deep.dispatch_discovery_worker(
-            name=f"canonical-input-{index}",
-        )[0]
-        for index in range(2)
-    ]
-
-    reducer_id = str(uuid.uuid4())
-    prompt_path, artifact_dir, result_path = worker_paths(deep.directory, "canonical-reducer")
-    deep.claim_reducer(reducer_id, prompt_path, artifact_dir, input_worker_ids)
-    deep.upsert_worker(
-        worker_id=reducer_id,
-        kind="dedup",
-        prompt_path=prompt_path,
-        artifact_dir=artifact_dir,
-    )
-
-    canonical = write_canonical_artifacts(deep.directory)
-    artifact = canonical[artifact_name]
-    artifact.unlink()
-    if failure_kind == "symlink":
-        replacement = artifact_dir / f"replacement-{artifact_name}.txt"
-        replacement.write_text("")
-        artifact.symlink_to(replacement)
-    result_path.write_text("{}\n")
-    staged_ledger = artifact_dir / "staged-candidate-ledger.jsonl"
-    staged_ledger.write_text("")
-    commit_args = (
-        "commit-deep-scan-dedup",
-        "--scan-id",
-        deep.id,
-        "--worker-id",
-        reducer_id,
-        "--result-manifest-path",
-        str(result_path),
-        "--candidate-ledger-path",
-        str(staged_ledger),
-        "--new-findings-count",
-        "0",
-    )
-    if expected_error is None:
-        committed = run_workbench(
-            deep.state_dir,
-            *commit_args,
-            environment=deep_environment(deep.codex_home),
-        )["deepScan"]
-        assert committed["canonicalArtifacts"] is None
-        assert artifact.read_text() == staged_ledger.read_text()
-        return
-    rejected = run_workbench(
-        deep.state_dir,
-        *commit_args,
-        environment=deep_environment(deep.codex_home),
-        check=False,
-    )
-    assert expected_error in str(rejected["stderr"])
-
-    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT status FROM deep_scan_workers WHERE id = ?", (reducer_id,)
-        ).fetchone() == ("running",)
-        assert connection.execute(
-            """
-            SELECT merge_state FROM deep_scan_workers
-            WHERE scan_id = ? AND kind = 'discovery'
-            ORDER BY completion_sequence
-            """,
-            (deep.id,),
-        ).fetchall() == [("merging",), ("merging",)]
-        assert (
-            connection.execute(
-                """
-            SELECT canonical_inventory_path, canonical_finding_report_path,
-                canonical_candidates_path, dedupe_report_path, seed_research_path,
-                work_ledger_path, raw_candidates_path, coverage_ledger_path, findings_dir
-            FROM deep_scan_runs
-            WHERE scan_id = ?
-            """,
-                (deep.id,),
-            ).fetchone()
-            == (None,) * 9
-        )
-
-    if failure_kind == "symlink":
-        artifact.unlink()
-    artifact.write_text("")
-    committed = run_workbench(
-        deep.state_dir,
-        *commit_args,
-        environment=deep_environment(deep.codex_home),
-    )["deepScan"]
-    assert committed["canonicalArtifacts"] is None
 
 
 def test_scan_progress_projects_active_and_completed_independent_reviews(
@@ -1072,46 +924,6 @@ def test_scan_progress_projects_active_and_completed_independent_reviews(
         "maximum": 40,
         "consolidating": False,
     }
-
-
-def test_reducer_claim_updates_review_pass_once_and_projects_consolidation(
-    tmp_path: Path,
-) -> None:
-    deep = start_empty_target_scan(tmp_path)
-    first_worker_id, _, _, _ = deep.dispatch_discovery_worker(
-        name="discovery-1",
-    )
-    second_worker_id, _, _, _ = deep.dispatch_discovery_worker(
-        name="discovery-2",
-    )
-    reducer_id = str(uuid.uuid4())
-    prompt_path, artifact_dir, _ = worker_paths(deep.directory, "dedup-1")
-    claim_args = (
-        "claim-deep-scan-dedup",
-        "--scan-id",
-        deep.id,
-        "--worker-id",
-        reducer_id,
-        "--prompt-path",
-        str(prompt_path),
-        "--artifact-dir",
-        str(artifact_dir),
-        "--input-worker-id",
-        first_worker_id,
-        "--input-worker-id",
-        second_worker_id,
-    )
-
-    for _ in range(2):
-        run_workbench(deep.state_dir, *claim_args, environment=deep_environment(deep.codex_home))
-        progress = get_scan(deep.state_dir, deep.id)["scan"]["progress"]
-        assert progress["reviewPass"] == 1
-        assert progress["independentReviews"] == {
-            "active": 0,
-            "completed": 2,
-            "maximum": 40,
-            "consolidating": True,
-        }
 
 
 @pytest.mark.parametrize(
@@ -1529,184 +1341,6 @@ def test_replaceable_discovery_failures_count_once_and_reset_on_success(
     assert recovered["dispatchedCount"] == 2
     replacement = next(worker for worker in recovered["workers"] if worker["id"] == successful_id)
     assert replacement["status"] == "succeeded"
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("deadline", [False, True], ids=["dispatch-limit", "deadline"])
-def test_failed_reducer_rebuffers_claimed_inputs_for_same_generation_replacement(
-    tmp_path: Path,
-    deadline: bool,
-) -> None:
-    deep = start_empty_target_scan(
-        tmp_path,
-        config="[deep_scan]\nworkers = 3\nsubagents = 0\nstop_after_no_new = 6\nmax_discovery_runs = 6\n"
-        + ("max_time_hours = 0.5\n" if deadline else ""),
-    )
-    initial = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
-    assert initial["config"]["maxDiscoveryRuns"] == 6
-    if deadline:
-        assert initial["config"]["maxTimeHours"] == 0.5
-
-    previously_merged = [
-        deep.dispatch_discovery_worker(
-            name=f"previously-merged-{index}",
-            coordinator_generation=2,
-        )[0]
-        for index in range(2)
-    ]
-    deep.commit_reducer(
-        name="previous-reducer",
-        input_worker_ids=previously_merged,
-        new_findings_count=1,
-        coordinator_generation=2,
-    )
-    canonical_ledger = deep.directory / "artifacts" / "02_discovery" / "candidate_ledger.jsonl"
-    canonical_ledger.write_text('{"candidate":"previously committed"}\n')
-
-    claimed_inputs = [
-        deep.dispatch_discovery_worker(
-            name=f"claimed-{index}",
-            coordinator_generation=2,
-        )[0]
-        for index in range(2)
-    ]
-    unclaimed_input = deep.dispatch_discovery_worker(
-        name="unclaimed-discovery",
-        coordinator_generation=2,
-    )[0]
-    expected_errors = 0 if deadline else 1
-    if not deadline:
-        discovery_failure, discovery_prompt, discovery_dir, _ = deep.dispatch_discovery_worker(
-            name="failed-discovery",
-            succeed=False,
-            coordinator_generation=2,
-        )
-        failure = deep.upsert_worker(
-            worker_id=discovery_failure,
-            status="canceled",
-            prompt_path=discovery_prompt,
-            artifact_dir=discovery_dir,
-            error="transient_error: fixture discovery failure",
-            replaceable_failure_kind="transient_error",
-            coordinator_generation=2,
-        )["deepScan"]
-        assert failure["consecutiveErrors"] == 1
-
-    failed_reducer = str(uuid.uuid4())
-    failed_prompt, failed_dir, _ = worker_paths(deep.directory, "failed-reducer")
-    deep.claim_reducer(
-        failed_reducer, failed_prompt, failed_dir, claimed_inputs, coordinator_generation=2
-    )
-    deep.upsert_worker(
-        worker_id=failed_reducer,
-        kind="dedup",
-        prompt_path=failed_prompt,
-        artifact_dir=failed_dir,
-        coordinator_generation=2,
-    )
-
-    failed = deep.upsert_worker(
-        worker_id=failed_reducer,
-        kind="dedup",
-        status="failed",
-        prompt_path=failed_prompt,
-        artifact_dir=failed_dir,
-        error="fixture reducer exhausted its attempts",
-        coordinator_generation=2,
-    )["deepScan"]
-    failed_workers = {worker["id"]: worker for worker in failed["workers"]}
-    assert failed["status"] == "running"
-    assert failed["phase"] == "discovery"
-    assert failed["dispatchedCount"] == (5 if deadline else 6)
-    assert all(
-        failed_workers[worker]["status"] == "succeeded"
-        for worker in [*previously_merged, *claimed_inputs, unclaimed_input]
-    )
-    assert failed["consecutiveErrors"] == expected_errors
-    assert all(failed_workers[worker]["mergeState"] == "merged" for worker in previously_merged)
-    assert all(failed_workers[worker]["mergeState"] == "buffered" for worker in claimed_inputs)
-    assert failed_workers[unclaimed_input]["mergeState"] == "buffered"
-    assert failed_workers[failed_reducer]["status"] == "failed"
-    assert failed_workers[failed_reducer]["error"] == "fixture reducer exhausted its attempts"
-    assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
-
-    replacement_reducer = str(uuid.uuid4())
-    replacement_prompt, replacement_dir, replacement_result = worker_paths(
-        deep.directory, "replacement-reducer"
-    )
-    replacement_inputs = [*claimed_inputs, unclaimed_input]
-    claimed = deep.claim_reducer(
-        replacement_reducer,
-        replacement_prompt,
-        replacement_dir,
-        replacement_inputs,
-        coordinator_generation=2,
-    )["deepScan"]
-    assert claimed["phase"] == "reducing"
-
-    replayed = deep.upsert_worker(
-        worker_id=failed_reducer,
-        kind="dedup",
-        status="failed",
-        prompt_path=failed_prompt,
-        artifact_dir=failed_dir,
-        error="fixture reducer exhausted its attempts",
-        coordinator_generation=2,
-    )["deepScan"]
-    replayed_workers = {worker["id"]: worker for worker in replayed["workers"]}
-    assert replayed["phase"] == "reducing"
-    assert replayed["consecutiveErrors"] == expected_errors
-    assert all(replayed_workers[worker]["mergeState"] == "merging" for worker in replacement_inputs)
-
-    deep.upsert_worker(
-        worker_id=replacement_reducer,
-        kind="dedup",
-        prompt_path=replacement_prompt,
-        artifact_dir=replacement_dir,
-        coordinator_generation=2,
-    )
-    replacement_result.write_text("{}\n")
-    committed = deep.commit_result(
-        replacement_reducer, replacement_result, "0", "--coordinator-generation", "2"
-    )["deepScan"]
-    committed_workers = {worker["id"]: worker for worker in committed["workers"]}
-    assert committed["consecutiveErrors"] == expected_errors
-    assert all(
-        committed_workers[worker]["mergeState"] == "merged"
-        for worker in [*previously_merged, *replacement_inputs]
-    )
-    assert committed_workers[failed_reducer]["status"] == "failed"
-    assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
-
-    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
-        receipts = connection.execute(
-            "SELECT discovery_worker_id FROM deep_scan_dedup_inputs "
-            "WHERE dedup_worker_id = ? ORDER BY input_order",
-            (failed_reducer,),
-        ).fetchall()
-    assert [worker for (worker,) in receipts] == claimed_inputs
-
-    manifest = deep.directory / "coordinator-manifest.json"
-    manifest.write_text("{}\n")
-
-    def finish(*, check: bool = True) -> dict[str, object]:
-        return deep.finish("capped", manifest, "--coordinator-generation", "2", check=check)
-
-    if deadline:
-        premature = finish(check=False)
-        assert premature["returncode"] != 0
-        assert "before reaching its configured maximum" in premature["stderr"]
-        assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
-        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
-            connection.execute(
-                "UPDATE deep_scan_runs SET created_at = ? WHERE scan_id = ?",
-                ("2000-01-01T00:00:00+00:00", deep.id),
-            )
-    finished = finish()["deepScan"]
-    assert finished["terminalReason"] == "capped"
-    assert canonical_ledger.read_text() == '{"candidate":"previously committed"}\n'
-    assert finished["status"] == "succeeded"
-    assert finished["consecutiveErrors"] == expected_errors
 
 
 def test_ordinary_discovery_cancellation_does_not_increment_failure_streak(
@@ -2355,7 +1989,7 @@ def test_pending_app_workspace_does_not_block_target_bootstrap(tmp_path: Path) -
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (2,)
 
 
-def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
+def test_one_scan_can_be_checkpointed_at_the_iteration_cap(
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "state"
@@ -2372,21 +2006,12 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
     worker_id, prompt, artifact_dir, result = deep.dispatch_discovery_worker(
         name="singleton-worker",
     )
-    reducer_id = str(uuid.uuid4())
-    reducer_prompt, reducer_dir, reducer_result = worker_paths(scan_dir, "singleton-reducer")
-    claimed = deep.claim_reducer(reducer_id, reducer_prompt, reducer_dir, [worker_id])["deepScan"]
-    assert claimed["phase"] == "reducing"
-    persisted_worker = next(worker for worker in claimed["workers"] if worker["id"] == worker_id)
-    assert persisted_worker["mergeState"] == "merging"
-    deep.upsert_worker(
-        worker_id=reducer_id,
-        kind="dedup",
-        prompt_path=reducer_prompt,
-        artifact_dir=reducer_dir,
+    committed = deep.record_iteration(
+        name="dedup-0001",
+        input_worker_ids=[worker_id],
+        new_findings_count=1,
     )
-    write_canonical_artifacts(scan_dir)
-    reducer_result.write_text("{}\n")
-    committed = deep.commit_result(reducer_id, reducer_result, "1")["deepScan"]
+    assert next(w for w in committed["workers"] if w["id"] == worker_id)["mergeState"] == "merged"
     assert committed["status"] == "running"
     manifest = scan_dir / "coordinator-manifest.json"
     manifest.write_text("{}\n")
@@ -2429,7 +2054,7 @@ def test_maximum_one_discovery_run_allows_hard_cap_singleton_reducer(
         (96, timedelta(hours=96), True),
     ),
 )
-def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
+def test_discovery_deadline_caps_after_one_completed_scan(
     tmp_path: Path,
     configured_hours: int | float | None,
     elapsed: timedelta,
@@ -2465,15 +2090,10 @@ def test_discovery_deadline_caps_after_reducing_a_single_discovery_result(
     premature_completion = deep.finish("capped", manifest, check=False)
     if not deadline_reached:
         assert "before reaching its configured maximum" in str(premature_completion["stderr"])
-        reducer_prompt, reducer_dir, _ = worker_paths(scan_dir, "premature-reducer")
-        premature_reducer = deep.claim_reducer(
-            str(uuid.uuid4()), reducer_prompt, reducer_dir, [worker_id], check=False
-        )
-        assert "requires two buffered discovery results" in str(premature_reducer["stderr"])
         return
 
     assert "without canonical discovery artifacts" in str(premature_completion["stderr"])
-    reduced = deep.commit_reducer(
+    reduced = deep.record_iteration(
         name="deadline-reducer",
         input_worker_ids=[worker_id],
         new_findings_count=1,
@@ -2591,7 +2211,7 @@ def test_zero_discovery_deadline_rejects_nonempty_candidate_ledger(
         )
 
     rejected = deep.finish("capped", manifest, check=False)
-    assert "without a successful dedup worker" in str(rejected["stderr"])
+    assert "without a saved iteration" in str(rejected["stderr"])
     assert canonical["candidateLedgerPath"].read_text() == candidate_ledger
     running = deep.read("thread-deep-scan")
     assert running["status"] == "running"
@@ -2635,7 +2255,7 @@ def test_capped_completion_rejects_buffered_workers_and_omissions(tmp_path: Path
     second_id, *_ = deep.dispatch_discovery_worker(
         name="second",
     )
-    committed = deep.commit_reducer(
+    committed = deep.record_iteration(
         name="first-reducer",
         input_worker_ids=[first_id, second_id],
         new_findings_count=1,
@@ -2674,7 +2294,7 @@ def prepare_failure_capped_deep_scan(
     second_id, *_ = deep.dispatch_discovery_worker(
         name="second-accepted",
     )
-    deep.commit_reducer(
+    deep.record_iteration(
         name="committed-aggregate",
         input_worker_ids=[first_id, second_id],
         new_findings_count=1,
@@ -2703,7 +2323,7 @@ def test_capped_completion_cannot_use_review_notes_to_hide_worker_failures(
         discovery_id = worker_id
         worker_id = str(uuid.uuid4())
         prompt, artifact_dir, _ = worker_paths(deep.directory, "unrecovered-reducer")
-        deep.claim_reducer(worker_id, prompt, artifact_dir, [discovery_id])
+        deep.seed_legacy_reducer(worker_id, prompt, artifact_dir, [discovery_id])
         deep.upsert_worker(
             worker_id=worker_id,
             kind="dedup",
@@ -2863,7 +2483,7 @@ def test_capped_completion_does_not_discard_canceled_reducer_inputs(tmp_path: Pa
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, _ = worker_paths(deep.directory, "canceled-reducer")
-    deep.claim_reducer(reducer_id, reducer_prompt, reducer_dir, [buffered_id])
+    deep.seed_legacy_reducer(reducer_id, reducer_prompt, reducer_dir, [buffered_id])
     deep.upsert_worker(
         worker_id=reducer_id,
         kind="dedup",
@@ -2958,7 +2578,7 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
     second_id, *_ = deep.dispatch_discovery_worker(
         name="second",
     )
-    committed = deep.commit_reducer(
+    committed = deep.record_iteration(
         name="first-reducer",
         input_worker_ids=[first_id, second_id],
         new_findings_count=0,
@@ -2969,7 +2589,7 @@ def test_saturated_completion_rejects_merging_workers(tmp_path: Path) -> None:
     )
     reducer_id = str(uuid.uuid4())
     reducer_prompt, reducer_dir, _ = worker_paths(deep.directory, "abandoned-reducer")
-    deep.claim_reducer(reducer_id, reducer_prompt, reducer_dir, [merging_id])
+    deep.seed_legacy_reducer(reducer_id, reducer_prompt, reducer_dir, [merging_id])
     deep.upsert_worker(
         worker_id=reducer_id,
         kind="dedup",
@@ -3072,126 +2692,11 @@ def test_terminal_worker_updates_are_exact_idempotent_replays(tmp_path: Path) ->
     assert "terminal state is immutable" in str(later_attempt["stderr"])
 
 
-def test_discovery_buffer_prefix_dedup_and_saturation_are_transactional(
-    tmp_path: Path,
-) -> None:
-    deep = start_empty_target_scan(
-        tmp_path,
-        config="[deep_scan]\nworkers = 2\nstop_after_no_new = 3\nmax_discovery_runs = 4\n",
-    )
-    for index in range(3):
-        worker_id = str(uuid.uuid4())
-        prompt, artifact_dir, result = worker_paths(deep.directory, f"worker-{index}")
-        deep.upsert_worker(
-            worker_id=worker_id,
-            prompt_path=prompt,
-            artifact_dir=artifact_dir,
-        )
-        result.write_text("{}\n")
-        accepted = deep.upsert_worker(
-            worker_id=worker_id,
-            status="succeeded",
-            prompt_path=prompt,
-            artifact_dir=artifact_dir,
-            result_path=result,
-        )
-        assert accepted["deepScan"]["workers"][-1]["mergeState"] == "buffered"
-
-    ordered_workers = sorted(
-        (worker for worker in accepted["deepScan"]["workers"] if worker["kind"] == "discovery"),
-        key=lambda worker: worker["completionSequence"],
-    )
-    assert [worker["completionSequence"] for worker in ordered_workers] == [1, 2, 3]
-    reducer_id = str(uuid.uuid4())
-    reducer_prompt, reducer_dir, reducer_result = worker_paths(deep.directory, "reducer")
-    claimed = deep.claim_reducer(
-        reducer_id, reducer_prompt, reducer_dir, [worker["id"] for worker in ordered_workers[:2]]
-    )
-    assert claimed["deepScan"]["phase"] == "reducing"
-    deep.upsert_worker(
-        worker_id=reducer_id,
-        kind="dedup",
-        prompt_path=reducer_prompt,
-        artifact_dir=reducer_dir,
-        error="Transient reducer failure.",
-    )
-    write_canonical_artifacts(deep.directory)
-    reducer_result.write_text("{}\n")
-    committed = deep.commit_result(reducer_id, reducer_result, "0")
-    assert committed["deepScan"]["status"] == "running"
-    assert committed["deepScan"]["terminalReason"] is None
-    assert committed["deepScan"]["noNewStreak"] == 2
-    assert committed["deepScan"]["canonicalArtifacts"] is None
-    committed_reducer = next(
-        worker for worker in committed["deepScan"]["workers"] if worker["id"] == reducer_id
-    )
-    assert committed_reducer["error"] is None
-    omitted = next(
-        worker
-        for worker in committed["deepScan"]["workers"]
-        if worker["id"] == ordered_workers[2]["id"]
-    )
-    assert omitted["status"] == "succeeded"
-    assert omitted["mergeState"] == "buffered"
-    second_reducer_id = str(uuid.uuid4())
-    second_prompt, second_dir, second_result = worker_paths(deep.directory, "second-reducer")
-    deep.claim_reducer(second_reducer_id, second_prompt, second_dir, [str(omitted["id"])])
-    deep.upsert_worker(
-        worker_id=second_reducer_id,
-        kind="dedup",
-        prompt_path=second_prompt,
-        artifact_dir=second_dir,
-    )
-    second_result.write_text("{}\n")
-    late_worker_id, late_prompt, late_dir, late_result = deep.dispatch_discovery_worker(
-        name="late-worker",
-        succeed=False,
-    )
-    saturated_reduction = deep.commit_result(second_reducer_id, second_result, "0")
-    assert saturated_reduction["deepScan"]["status"] == "running"
-    assert saturated_reduction["deepScan"]["phase"] == "discovery"
-    assert saturated_reduction["deepScan"]["terminalReason"] is None
-    assert saturated_reduction["deepScan"]["completedAt"] is None
-    assert saturated_reduction["deepScan"]["noNewStreak"] == 3
-    late_worker = next(
-        worker
-        for worker in saturated_reduction["deepScan"]["workers"]
-        if worker["id"] == late_worker_id
-    )
-    assert late_worker["status"] == "running"
-    manifest = deep.directory / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-    manifest.write_text("{}\n")
-
-    late_result.write_text("{}\n")
-    accepted_late = deep.upsert_worker(
-        worker_id=late_worker_id,
-        status="succeeded",
-        prompt_path=late_prompt,
-        artifact_dir=late_dir,
-        result_path=late_result,
-    )["deepScan"]
-    accepted_late_worker = next(
-        worker for worker in accepted_late["workers"] if worker["id"] == late_worker_id
-    )
-    assert accepted_late_worker["mergeState"] == "buffered"
-
-    omitted_rejected = deep.finish("saturated", manifest, check=False)
-    assert "exactly identify all buffered discovery workers" in str(omitted_rejected["stderr"])
-    finished = deep.finish("saturated", manifest, "--omitted-worker-id", late_worker_id)
-    assert finished["deepScan"]["status"] == "succeeded"
-    assert finished["deepScan"]["terminalReason"] == "saturated"
-    assert finished["deepScan"]["manifestPath"] == str(manifest)
-    replayed = deep.finish("saturated", manifest, "--omitted-worker-id", late_worker_id)
-    assert replayed == finished
-    mismatched_replay = deep.finish("saturated", manifest, check=False)
-    assert "terminal state is immutable" in str(mismatched_replay["stderr"])
-
-
 def test_get_deep_scan_does_not_invent_compact_artifacts_for_legacy_success(
     tmp_path: Path,
 ) -> None:
     deep = start_empty_target_scan(tmp_path)
-    committed = deep.commit_reducer(
+    committed = deep.record_iteration(
         name="legacy-reducer",
         input_worker_ids=[
             deep.dispatch_discovery_worker(

@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
-import { randomInt } from "node:crypto";
 import { mkdir, readFile, readdir } from "node:fs/promises";
-import { bunTestOptions } from "./bun-test-timeout.mts";
+import { bunTestTimeout } from "./bun-test-timeout.mts";
 import { partitionTests, type TestTimings } from "./test-shards.mts";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
@@ -46,15 +45,11 @@ const testArguments = [
   ...process.argv.slice(3),
   ...selected.map((file) => `./tests-ts/${file}`),
 ];
-const { seed: requestedSeed, timeout } = bunTestOptions(testArguments);
-const seed = requestedSeed ?? String(randomInt(2 ** 32));
-if (requestedSeed === undefined) testArguments.splice(1, 0, `--seed=${seed}`);
-console.log(`Bun test seed: ${seed}`);
 const child = spawn("bun", testArguments, {
   cwd: new URL("../", import.meta.url),
   env: {
     ...process.env,
-    CODEX_SECURITY_TEST_TIMEOUT_MS: timeout,
+    CODEX_SECURITY_TEST_TIMEOUT_MS: bunTestTimeout(testArguments),
   },
   stdio: "inherit",
   windowsHide: true,

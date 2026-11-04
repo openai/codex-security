@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
@@ -22,7 +22,6 @@ import {
   acquireCodexSecurityCredentialHomeLock,
   codexSecurityCredentialHome,
   executablePathForSpawn,
-  expandHome,
   requirePrivateCredentialHome,
   requireSecureCredentialHome,
   resolveCodexCommand,
@@ -250,44 +249,6 @@ export async function preflightReadOnlyProfileCodex(
   return { permissionProfileId, configOverrides };
 }
 
-/** @internal */
-export async function readNativeSessionSqliteHome(
-  command: CodexCommand,
-  environment: ProcessEnvironment,
-  cwd: string,
-  signal?: AbortSignal,
-  nativeConfig: JsonObject = {},
-): Promise<string | undefined> {
-  const preflight = await nativePermissionPreflight();
-  const sqliteHome = resolveCodexProfile(nativeConfig)["sqlite_home"];
-  const env = bundledCodexSdkEnvironment(
-    command.command,
-    Object.fromEntries(
-      Object.entries(environment).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    ),
-  );
-  return await withCodexPreflightLock(env, signal, async () => {
-    const config = await preflight.readDeepScanRuntimeConfig({
-      codexPath: executablePathForSpawn(command.command),
-      commandArgs: command.args,
-      cwd,
-      env,
-      signal: signal ?? new AbortController().signal,
-      context: "helper",
-      configOverrides:
-        typeof sqliteHome === "string"
-          ? [
-              `sqlite_home=${inlineToml(resolve(cwd, expandHome(sqliteHome, environment)))}`,
-            ]
-          : [],
-    });
-    return typeof config.sqlite_home === "string"
-      ? config.sqlite_home
-      : undefined;
-  });
-}
 export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,

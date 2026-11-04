@@ -103,6 +103,8 @@ EXPECTED_MIGRATIONS = [
     (58, "record the final Deep Scan reviewed surface count"),
     (59, "retain the launching Deep Scan service tier"),
     (60, "record classification rubric provenance"),
+    (61, "record scan launch attribution"),
+    (62, "project scan lifecycle snapshots"),
 ]
 
 
@@ -1103,129 +1105,93 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
-def test_scan_model_migration_preserves_existing_scans() -> None:
+@pytest.mark.parametrize("complete", [False, True])
+def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
     insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
-    insert_legacy_scan(connection, timestamp)
+    status = "complete" if complete else "running"
+    finished_at = "2026-07-01T01:00:00Z" if complete else None
+    insert_legacy_scan(connection, timestamp, status=status, completed_at=finished_at)
     connection.commit()
 
     apply_migrations(connection)
 
-    scan = connection.execute(
-        "SELECT status, model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
-        ("legacy-scan",),
-    ).fetchone()
-    assert scan["status"] == "running"
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", ("legacy-scan",)).fetchone()
+    assert scan["status"] == status
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+    assert scan["launch_surface"] is None
+    assert scan["launch_package_version"] is None
+    assert scan["launch_plugin_version"] is None
+    assert scan["launch_kind"] is None
+    (snapshot,) = connection.execute(
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?", ("legacy-scan",)
+    ).fetchone()
+    assert json.loads(snapshot) == {
+        "scanId": "legacy-scan",
+        "mode": "standard",
+        "startedAt": timestamp,
+        "status": "completed" if complete else "running",
+        "finishedAt": finished_at,
+        "hasReportableFindings": None,
+        "surface": None,
+        "packageVersion": None,
+        "pluginVersion": None,
+        "mock": None,
+    }
 
 
 @pytest.mark.parametrize(
-    ("before_version", "ownership_version"),
-    [(44, None), (50, None), (43, 44), (44, 44), (47, 47), (48, 48), (50, 50)],
+    ("recipe", "kind", "mode", "is_mock", "plugin_version", "registered_version"),
+    (
+        ('{"mock":true,"pluginVersion":"0.4.0"}', "mock", "standard", True, "0.4.0", None),
+        ('{"import":{},"pluginVersion":"0.5.0"}', "import", "import", False, "0.5.0", None),
+        ('{"mode":"standard","pluginVersion":"0.6.0"}', None, "standard", None, "0.6.0", None),
+        ('{"pluginVersion":"0.6.0"}', None, "standard", None, "0.7.0", "0.7.0"),
+        ('{"pluginVersion":"  "}', None, "standard", None, None, None),
+        ('{"pluginVersion":42}', None, "standard", None, None, None),
+        ('{"mode":"standard"}', None, "standard", None, None, None),
+        ('{"pluginVersion":', None, "standard", None, None, None),
+    ),
 )
-def test_worker_thread_history_backfills_and_survives_retries(
-    before_version: int, ownership_version: int | None
+@pytest.mark.parametrize(
+    "write_after_upgrade", [False, True], ids=["before-upgrade", "after-upgrade"]
+)
+def test_scan_lifecycle_migration_recognizes_saved_recipes(
+    recipe: str,
+    kind: str | None,
+    mode: str,
+    is_mock: bool | None,
+    plugin_version: str | None,
+    registered_version: str | None,
+    write_after_upgrade: bool,
 ) -> None:
-    published_ownership = ownership_version is not None
-    connection, apply_migrations = create_historical_database(before_version)
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection, apply_migrations = create_historical_database(62 if registered_version else 61)
+    if write_after_upgrade:
+        apply_migrations(connection)
+
     timestamp = "2026-07-01T00:00:00Z"
-    if published_ownership:
-        name = "retain deep scan worker session ownership"
-        statements = [
-            "CREATE TABLE deep_scan_worker_threads (\n            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n            sdk_thread_id TEXT NOT NULL,\n            PRIMARY KEY (worker_id, sdk_thread_id)\n        );",
-            "INSERT INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n        SELECT id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;",
-            "CREATE TRIGGER record_deep_scan_worker_thread_insert\n        AFTER INSERT ON deep_scan_workers\n        WHEN NEW.sdk_thread_id IS NOT NULL\n        BEGIN\n            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n            VALUES (NEW.id, NEW.sdk_thread_id);\n        END;",
-            "CREATE TRIGGER record_deep_scan_worker_thread_update\n        AFTER UPDATE OF sdk_thread_id ON deep_scan_workers\n        WHEN NEW.sdk_thread_id IS NOT NULL AND OLD.sdk_thread_id IS NOT NEW.sdk_thread_id\n        BEGIN\n            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)\n            VALUES (NEW.id, NEW.sdk_thread_id);\n        END;",
-        ]
-        for statement in statements:
-            connection.execute(statement)
-        record_migration(connection, ownership_version, name, timestamp)
-    insert_historical_row(connection, "workspaces", timestamp, id="workspace")
-    insert_legacy_scan(connection, timestamp, id="scan", workspace_id="workspace", mode="deep")
-    connection.execute(
-        """INSERT INTO deep_scan_runs (
-            scan_id, schema_version, workflow_version, status, phase, workers, subagents,
-            stop_after_no_new, max_discovery_runs, created_at, updated_at
-        ) VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10, ?, ?)""",
-        (timestamp, timestamp),
-    )
-    insert_worker = """INSERT INTO deep_scan_workers (
-        id, scan_id, kind, status, prompt_path, artifact_dir, sdk_thread_id, created_at, updated_at
-    ) VALUES (?, 'scan', 'discovery', 'running', '/prompt', '/artifacts', ?, ?, ?)"""
-    connection.execute(insert_worker, ("worker", "first-thread", timestamp, timestamp))
-    if published_ownership:
-        for thread_id in ("previous-thread", "first-thread"):
-            connection.execute(
-                "UPDATE deep_scan_workers SET sdk_thread_id = ? WHERE id = 'worker'", (thread_id,)
-            )
-    connection.commit()
-    apply_migrations(connection)
-    apply_migrations(connection)
-    previous = [("worker", "previous-thread")] if published_ownership else []
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            "SELECT worker_id, sdk_thread_id FROM deep_scan_worker_threads ORDER BY worker_id, sdk_thread_id"
-        )
-    ] == [("worker", "first-thread"), *previous]
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version >= 44 ORDER BY version"
-        )
-    ] == EXPECTED_MIGRATIONS[43:]
-    if published_ownership:
-        assert (
-            connection.execute(
-                "SELECT applied_at FROM schema_migrations WHERE version = 51"
-            ).fetchone()[0]
-            == timestamp
-        )
-    history = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
-    connection.commit()
-    apply_migrations(connection)
-    assert (
-        connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall() == history
-    )
-    for thread_id in ("second-thread", "second-thread", "first-thread"):
-        connection.execute(
-            "UPDATE deep_scan_workers SET sdk_thread_id = ? WHERE id = 'worker'", (thread_id,)
-        )
-    connection.execute(insert_worker, ("other-worker", "other-thread", timestamp, timestamp))
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            "SELECT worker_id, sdk_thread_id FROM deep_scan_worker_threads ORDER BY worker_id, sdk_thread_id"
-        )
-    ] == sorted(
-        [
-            ("other-worker", "other-thread"),
-            ("worker", "first-thread"),
-            ("worker", "second-thread"),
-            *previous,
-        ]
-    )
-    with pytest.raises(sqlite3.IntegrityError):
-        connection.execute(
-            "INSERT INTO deep_scan_worker_threads VALUES ('missing-scan', 'worker', 'thread')"
-        )
-    history = connection.execute(
-        "SELECT * FROM deep_scan_worker_threads ORDER BY sdk_thread_id"
-    ).fetchall()
-    connection.execute("DELETE FROM deep_scan_workers WHERE id = 'worker'")
-    assert (
-        connection.execute(
-            "SELECT * FROM deep_scan_worker_threads ORDER BY sdk_thread_id"
-        ).fetchall()
-        == history
-    )
-    connection.execute("DELETE FROM scans WHERE id = 'scan'")
-    assert connection.execute("SELECT * FROM deep_scan_worker_threads").fetchall() == []
-    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    with connection:
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        attribution = {"launch_plugin_version": registered_version} if registered_version else {}
+        insert_legacy_scan(connection, timestamp, **attribution)
+        connection.execute("UPDATE scans SET recipe_json = ? WHERE id = ?", (recipe, "legacy-scan"))
+
+    if not write_after_upgrade:
+        apply_migrations(connection)
+
+    stored_kind, snapshot = connection.execute(
+        "SELECT launch_kind, snapshot FROM scans JOIN scan_lifecycles ON scan_id = id"
+    ).fetchone()
+    assert stored_kind == kind
+    lifecycle = json.loads(snapshot)
+    assert lifecycle["mode"] == mode
+    assert lifecycle["mock"] is is_mock
+    assert lifecycle["surface"] is None
+    assert lifecycle["packageVersion"] is None
+    assert lifecycle["pluginVersion"] == plugin_version
 
 
 @pytest.mark.parametrize(
@@ -2140,6 +2106,10 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
+        # Recreate the historical schema before removing its recipe column.
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         rename_migration(connection, 22, "dynamic scan execution profiles")

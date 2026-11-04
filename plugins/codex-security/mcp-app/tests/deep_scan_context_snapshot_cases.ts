@@ -52,7 +52,7 @@ export async function testDeepScanContextSnapshots({
     fixture.executablePath,
     (await readFile(fixture.executablePath, "utf8")).replace(
       "process.env.FAKE_CODEX_MARKER",
-      "thread.params.cwd + '/invocation.json'",
+      "process.argv[process.argv.indexOf('--cd') + 1] + '/invocation.json'",
     ),
   );
   const previousPath = process.env.CODEX_CLI_PATH;
@@ -172,7 +172,7 @@ export async function testDeepScanContextSnapshots({
           const invocations: {
             kind: DeepScanWorkerKind;
             invocation: {
-              thread: { method: string };
+              argv: string[];
               stdin: string;
               deepConfig: string;
             };
@@ -262,25 +262,12 @@ export async function testDeepScanContextSnapshots({
             "after-edit",
           );
           assert.ok(second.status === "succeeded");
-          const reducerId = randomUUID();
-          const reduced = await runner().runReducer({
-            id: reducerId,
-            label: "reducer",
-            consumed: [first.worker, second.worker],
-          });
-          assert.ok(!("status" in reduced), "Reducer did not succeed");
-          assert.equal(
-            reduced.run.persistedWorkers?.find(
-              (worker) => worker.id === reducerId,
-            )?.attempt,
-            2,
-          );
-          assert.equal(invocations.length, 6);
+          assert.equal(invocations.length, 4);
           for (let offset = 0; offset < invocations.length; offset += 2) {
             const fresh = invocations[offset]!;
             const resumed = invocations[offset + 1]!;
-            assert.equal(fresh.invocation.thread.method, "thread/start");
-            assert.equal(resumed.invocation.thread.method, "thread/resume");
+            assert.equal(fresh.invocation.argv.includes("resume"), false);
+            assert.equal(resumed.invocation.argv.includes("resume"), true);
             for (const { invocation } of [fresh, resumed]) {
               assert.deepEqual(
                 { ...(parseToml(invocation.deepConfig).deep_scan as object) },
@@ -310,16 +297,9 @@ export async function testDeepScanContextSnapshots({
                 false,
               );
             }
-            if (fresh.kind === "discovery") {
-              assert.equal(context.userContext, userContext ?? null);
-              assert.equal(context.scanId, run.scanId);
-            } else {
-              assert.equal(Object.hasOwn(context, "userContext"), false);
-              assert.deepEqual(context.claimedWorkerIds, [
-                first.worker.id,
-                second.worker.id,
-              ]);
-            }
+            assert.equal(fresh.kind, "discovery");
+            assert.equal(context.userContext, userContext ?? null);
+            assert.equal(context.scanId, run.scanId);
             assert.equal(fresh.invocation.stdin.includes(editedContext), false);
             assert.equal(
               resumed.invocation.stdin.includes(editedContext),

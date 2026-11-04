@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { expect, test } from "bun:test";
-import { bunTestOptions } from "../scripts/bun-test-timeout.mts";
+import { bunTestTimeout } from "../scripts/bun-test-timeout.mts";
 import { partitionTests, type TestTimings } from "../scripts/test-shards.mts";
 import { readSubprocess } from "./support/shell.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -294,13 +294,13 @@ test.each([
   ["7000", ["--bail", "--timeout=7000"]],
 ] as const)("uses timeout %s when Bun receives %p", (expected, options) => {
   expect(
-    bunTestOptions([
+    bunTestTimeout([
       "test",
       "--timeout",
       defaultTimeoutMs,
       ...options,
       "./tests-ts/probe.test.ts",
-    ]).timeout,
+    ]),
   ).toBe(expected);
 });
 
@@ -309,8 +309,6 @@ test.each([
   [defaultTimeoutMs, [], "available", true],
   [defaultTimeoutMs, ["-t", "--timeout=5000"], "blocked directory", false],
   [defaultTimeoutMs, [], "blocked directory", true],
-  [defaultTimeoutMs, ["--seed=12345"], "available", false],
-  [defaultTimeoutMs, ["--seed", "789", "--seed=12345"], "available", false],
 ] as const)(
   "uses timeout %s with %p, %s reports and failure=%p",
   async (timeout, options, report, fail) => {
@@ -352,12 +350,6 @@ test("synthetic report probe --timeout=5000", () => {
       });
       const { status, stdout, stderr } = await readSubprocess(child);
       expect(status, stderr).toBe(fail ? 1 : 0);
-      const seed = /Bun test seed: (\d+)/u.exec(stdout)?.[1];
-      expect(seed).toBeDefined();
-      expect(stderr).toContain(`--seed=${seed}`);
-      if (options.some((option) => option === "--seed=12345")) {
-        expect(seed).toBe("12345");
-      }
       expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
       if (report === "available") {

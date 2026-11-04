@@ -33,9 +33,19 @@ const distModules = [
   "inspector-findings",
   "continuum-findings",
   "snyk-findings",
+  "snyk-rest-findings",
+  "snyk-rest-v1",
+  "snyk-token-origin",
   "scanner-repository-url",
   "semgrep-findings",
+  "semgrep-guardian-findings",
   "semgrep-platform-findings",
+  "hosted-git-remotes",
+  "hosted-git-repository",
+  "semgrep-platform-collector",
+  "hosted-scanner-http",
+  "hosted-scanner-v1",
+  "semgrep-platform-v1",
   "sonar-findings",
   "sonar-collector",
   "sonar-import",
@@ -161,7 +171,6 @@ const distModules = [
   "version",
   "windows-path",
   "worker-progress",
-  "zstd",
 ];
 
 export const packageDistFiles = distModules.flatMap((module) =>

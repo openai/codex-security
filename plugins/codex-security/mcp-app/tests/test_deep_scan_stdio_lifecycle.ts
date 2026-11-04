@@ -1,6 +1,11 @@
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
-import { assertConfigOverrides, assertNoError } from "./assertions.ts";
+import {
+  assertConfigOverrides,
+  assertNoError,
+  assertFlagPair,
+} from "./assertions.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -120,7 +125,7 @@ async function testDeepScanStdioLifecycle() {
     `[deep_scan]
 workers = 1
 subagents = 0
-stop_after_no_new = 1
+stop_after_no_new = 2
 max_discovery_runs = 2
 `,
   );
@@ -337,9 +342,13 @@ service_tier = "ultrafast"
       ),
       { code: "ENOENT" },
     );
-    assert.equal(startedWorker.thread.model, "gpt-5.5");
-    assert.equal(startedWorker.cyberAccessProgram, "daybreakRed");
+    assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
     assertConfigOverrides(startedWorker.argv, { service_tier: "ultrafast" });
+    assertFlagPair(
+      startedWorker.argv,
+      "--cyber-access-program",
+      "daybreak_red",
+    );
     assert.equal(
       startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
       true,
@@ -349,10 +358,6 @@ service_tier = "ultrafast"
       true,
     );
     assertReadOnlyWorkerInvocation(startedWorker.argv, codexHome);
-    assert.equal(
-      startedWorker.thread.permissions,
-      "codex_security_deep_scan_worker",
-    );
     assertWorkerArtifactEnvironment(
       startedWorker.argv,
       pluginRoot,
@@ -514,8 +519,7 @@ service_tier = "ultrafast"
 
     const [exitedWorker] = await waitForJsonLines(exitLogPath, 1);
     assert.equal(exitedWorker.pid, startedWorker.pid);
-    assert.equal(exitedWorker.method, "turn/interrupt");
-    assert.equal(exitedWorker.stdinEnded, true);
+    assert.match(exitedWorker.signal, /^SIG(?:INT|TERM)$/);
     await waitFor(
       () =>
         server
@@ -627,16 +631,12 @@ service_tier = "ultrafast"
       ),
       { code: "ENOENT" },
     );
-    assert.equal(failedWorker.thread.model, "gpt-5.6-sol");
+    assertFlagPair(failedWorker.argv, "--model", "gpt-5.6-sol");
     assert.equal(
       failedWorker.argv.includes('model_reasoning_effort="high"'),
       true,
     );
     assertReadOnlyWorkerInvocation(failedWorker.argv, codexHome);
-    assert.equal(
-      failedWorker.thread.permissions,
-      "codex_security_deep_scan_worker",
-    );
     assert.equal(
       activeFailureState.workers.some(
         (worker: PersistedDeepScanWorker) => worker.kind === "setup",
@@ -685,8 +685,7 @@ service_tier = "ultrafast"
     );
     const exitedWorkers = await waitForJsonLines(exitLogPath, 2);
     assert.equal(exitedWorkers[1].pid, failedWorker.pid);
-    assert.equal(exitedWorkers[1].method, "turn/interrupt");
-    assert.equal(exitedWorkers[1].stdinEnded, true);
+    assert.match(exitedWorkers[1].signal, /^SIG(?:INT|TERM)$/);
     await waitFor(
       () =>
         server
@@ -1008,12 +1007,14 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
-      assert.equal(completion.scan.progress.status, "complete");
-      assert.equal(completion.scan.reportAvailable, true);
+      assert.deepEqual(completion, {
+        scan: { progress: { status: "complete" }, reportAvailable: true },
+      });
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
         manifestPath,
+        reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
         completion,
       });
@@ -1098,10 +1099,6 @@ service_tier = "ultrafast"
         const afterRestart = index + restartStartIndex >= resumedStartIndex;
         assertConfigOverrides(execution.argv, { service_tier: "default" });
         assertReadOnlyWorkerInvocation(execution.argv, codexHome);
-        assert.equal(
-          execution.thread.permissions,
-          "codex_security_deep_scan_worker",
-        );
         assert.equal(execution.readCoreScanReference, true);
         const context = discoveryPromptContext(execution.stdin);
         if (context.workerLabel) {
@@ -1113,8 +1110,9 @@ service_tier = "ultrafast"
           pluginRoot,
           pythonWrapperPath,
         );
-        assert.equal(
-          execution.thread.model,
+        assertFlagPair(
+          execution.argv,
+          "--model",
           afterRestart ? "gpt-6.1-sol" : "gpt-5.6-sol",
         );
         assert.ok(
@@ -1199,6 +1197,10 @@ service_tier = "ultrafast"
       assert.equal(
         retry.result.structuredContent.completion.scan.reportAvailable,
         true,
+      );
+      assert.equal(
+        retry.result.structuredContent.reportPath,
+        path.join(retry.result.structuredContent.scanDir, "report.md"),
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1419,26 +1421,20 @@ async function testCliDeepScanEngine({
   const starts = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).slice(
     startIndex,
   );
-  assert.ok(
-    starts.some((entry) => discoveryPromptContext(entry.stdin).workerLabel),
-  );
-  assert.ok(
-    starts.some(
-      (entry) => discoveryPromptContext(entry.stdin).claimedWorkerIds,
-    ),
+  assert.deepEqual(
+    starts.map((entry) => discoveryPromptContext(entry.stdin).workerLabel),
+    ["discovery-0001", "discovery-0002"],
   );
   for (const entry of starts) {
     assertReadOnlyWorkerInvocation(entry.argv, codexHome);
-    assert.equal(entry.thread.model, "gpt-6.1-sol");
+    assertFlagPair(entry.argv, "--model", "gpt-6.1-sol");
     assert.ok(entry.argv.includes('model_reasoning_effort="max"'));
     assert.equal(entry.hasExpectedApiKey, true);
     assert.equal(entry.knowledgeBase, knowledgeBase);
     const context = discoveryPromptContext(entry.stdin);
     assert.deepEqual(context.severityRubric, severityRubric);
-    if (context.workerLabel) {
-      assert.deepEqual(context.includePaths, paths);
-      assert.equal(context.userContext, userContext);
-    }
+    assert.deepEqual(context.includePaths, paths);
+    assert.equal(context.userContext, userContext);
   }
   const count = (await readLogLines(environment.FAKE_CODEX_START_LOG!)).length;
   const unsealed = await readJson(
@@ -1469,6 +1465,7 @@ async function testCliDeepScanEngine({
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.scanId, completed.scanId);
     assert.equal(joined.result.structuredContent.completion, undefined);
+    assert.equal(joined.result.structuredContent.reportPath, undefined);
     assert.match(joined.result.structuredContent.instructions, /SDK/);
   } finally {
     await parent.stop();
@@ -1753,101 +1750,56 @@ async function writeFakeCodex(executablePath: string) {
     `#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-
-let buffer = "";
-let thread;
-let input;
-let cyberAccessProgram;
-let context;
-let apiKey;
-let interrupted = false;
-let threadId = \`stdio-fixture-\${process.pid}\`;
-const turnId = \`stdio-turn-\${process.pid}\`;
-const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
-const notify = (method, params) => send({ method, params });
-const terminal = (status) => notify("turn/completed", { threadId, turn: { id: turnId, status } });
-
-const runWorker = () => {
-  context = JSON.parse(input.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
-  const root = thread.cwd;
-  const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, "references", "core-scan.md"), "utf8").length > 0;
-  appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin: input, thread, cyberAccessProgram, readCoreScanReference, knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE, hasExpectedApiKey: apiKey === "synthetic-stdio-key" && process.env.CODEX_API_KEY === "synthetic-stdio-key" }) + "\\n");
-  if (!existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) return;
-  const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, "utf8");
-  if (phase !== "after-restart" && context.workerLabel !== "discovery-0001") return;
-  const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
-  if (context.claimedWorkerIds) {
-    const output = path.join(root, "deep_discovery", "dedup", context.reducerLabel, "output");
-    const firstResult = JSON.parse(readFileSync(path.join(root, "deep_discovery", "workers", "discovery-0001", "output", "result.json"), "utf8"));
-    writeFileSync(path.join(output, "result.json"), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
-  } else {
-    writeFileSync(path.join(root, "result.json"), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
+if (process.argv.includes('app-server')) {
+${jsonLineInputSource(`      if (message.method === 'initialized') continue;
+      let result;
+      if (message.method === 'initialize') {
+        result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
+      } else if (message.method === 'config/read') {
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: { extends: ':read-only', filesystem: { ':root': 'read', [process.env.FAKE_CODEX_DENIED_HOME]: { '.': 'deny' } }, network: { enabled: false } } } }, origins: {}, layers: null };
+      } else if (message.method === 'permissionProfile/list') {
+        result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: true }], nextCursor: null };
+      } else if (message.method === 'account/read') {
+        result = { account: null, requiresOpenaiAuth: true };
+      } else {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
+        continue;
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');`)}
+  process.stdin.on('end', () => process.exit(0));
+} else {
+const stdin = (await process.stdin.toArray()).join('');
+const context = JSON.parse(stdin.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
+const root = process.argv[process.argv.indexOf('--cd') + 1];
+const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, 'references', 'core-scan.md'), 'utf8').length > 0;
+appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin, readCoreScanReference, hasExpectedApiKey: process.env.CODEX_API_KEY === 'synthetic-stdio-key', knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }) + '\\n');
+console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-\${process.pid}\` }));
+if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
+  const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
+  if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
+    const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
+    writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
+    console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture completed' } }));
+    console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+    process.exit(0);
   }
-  notify("item/completed", { threadId, turnId, item: { id: "message-1", type: "agentMessage", text: "fixture completed" } });
-  terminal("completed");
-};
-
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  while (true) {
-    const newline = buffer.indexOf("\\n");
-    if (newline < 0) return;
-    const line = buffer.slice(0, newline).trim();
-    buffer = buffer.slice(newline + 1);
-    if (!line) continue;
-    const message = JSON.parse(line);
-    if (message.method === "initialized") continue;
-    let result;
-    if (message.method === "initialize") {
-      result = { userAgent: "fixture", codexHome: "/fixture", platformFamily: "unix", platformOs: "macos" };
-    } else if (message.method === "config/read") {
-      result = { config: { default_permissions: "codex_security_deep_scan_worker", permissions: { codex_security_deep_scan_worker: { extends: ":read-only", filesystem: { ":root": "read", [process.env.FAKE_CODEX_DENIED_HOME]: { ".": "deny" } }, network: { enabled: false } } } }, origins: {}, layers: null };
-    } else if (message.method === "permissionProfile/list") {
-      result = { data: [{ id: "codex_security_deep_scan_worker", description: null, allowed: true }], nextCursor: null };
-    } else if (message.method === "account/read") {
-      result = { account: null, requiresOpenaiAuth: true };
-    } else if (message.method === "account/login/start") {
-      apiKey = message.params.apiKey;
-      result = { type: "apiKey" };
-    } else if (message.method === "thread/read") {
-      result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + ".jsonl") } };
-    } else if (message.method === "thread/start" || message.method === "thread/resume") {
-      thread = message.params;
-      threadId = thread.threadId ?? threadId;
-      result = { thread: { id: threadId } };
-    } else if (message.method === "turn/start") {
-      cyberAccessProgram = message.params.cyberAccessProgram;
-      input = message.params.input[0].text;
-      send({ id: message.id, result: { turn: { id: turnId } } });
-      notify("turn/started", { threadId, turn: { id: turnId, status: "inProgress" } });
-      runWorker();
-      continue;
-    } else if (message.method === "turn/interrupt") {
-      if (message.params.threadId !== threadId || message.params.turnId !== turnId) throw new Error("Unexpected worker interruption IDs");
-      interrupted = true;
-      send({ id: message.id, result: {} });
-      terminal("interrupted");
-      continue;
-    } else {
-      send({ id: message.id, error: { code: -32601, message: "Method not found" } });
-      continue;
-    }
-    send({ id: message.id, result });
+}
+setInterval(() => {}, 1_000);
+const stop = (signal) => {
+  if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
+    const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
+    const checkpointDir = path.join(root, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
   }
-});
-process.stdin.on("end", () => {
-  if (interrupted) {
-    if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-      const reviewState = { surfaces: [], explicitExclusions: [], deferred: [] };
-      const checkpointDir = path.join(thread.cwd, "checkpoints");
-      mkdirSync(checkpointDir, { recursive: true });
-      writeFileSync(path.join(checkpointDir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"), JSON.stringify({ scanId: context.scanId, findings: [], reviewState }));
-    }
-    appendFileSync(process.env.FAKE_CODEX_EXIT_LOG, JSON.stringify({ pid: process.pid, method: "turn/interrupt", stdinEnded: true }) + "\\n");
-  }
+  appendFileSync(process.env.FAKE_CODEX_EXIT_LOG, JSON.stringify({ pid: process.pid, signal }) + '\\n');
   process.exit(0);
-});
+};
+process.once('SIGINT', () => stop('SIGINT'));
+process.once('SIGTERM', () => stop('SIGTERM'));
+}
 `,
   );
   await chmod(executablePath, 0o755);

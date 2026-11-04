@@ -7,26 +7,13 @@ import { pathToFileURL } from "node:url";
 const spawn = childProcess.spawn;
 let workerArgs;
 let workerProcess;
-let workerThreadMethod;
-let workerProgram;
-// Capture the native process that receives the worker turn, excluding preflight.
+// Capture actual worker arguments in this isolated coordinator process.
 const recordedSpawn = (command, args, options) => {
   const child = spawn(command, args, options);
-  if (!args.includes("app-server")) return child;
-  const write = child.stdin.write.bind(child.stdin);
-  let threadMethod;
-  child.stdin.write = (chunk, ...rest) => {
-    const message = JSON.parse(String(chunk));
-    if (message.method === "thread/start" || message.method === "thread/resume")
-      threadMethod = message.method;
-    if (message.method === "turn/start") {
-      workerArgs = args;
-      workerProcess = child;
-      workerThreadMethod = threadMethod;
-      workerProgram = message.params.cyberAccessProgram;
-    }
-    return write(chunk, ...rest);
-  };
+  if (args[0] === "exec") {
+    workerArgs = args;
+    workerProcess = child;
+  }
   return child;
 };
 for (const name of ["node:child_process", "child_process"])
@@ -65,22 +52,35 @@ try {
     const requestCount = requests.length;
     workerArgs = undefined;
     workerProcess = undefined;
-    workerThreadMethod = undefined;
-    workerProgram = undefined;
-    const result = await executor.run({
-      ...request,
-      promptPath: process.argv[3],
-      workingDirectory: process.cwd(),
-      subagents: 0,
-      signal: new AbortController().signal,
-    });
-    if (!workerArgs || !workerThreadMethod)
-      throw new Error(
-        "Native worker turn and thread request were not captured",
+    const signal = new AbortController().signal;
+    let threadId;
+    if (request.kind === "compare") {
+      await executor.compareFindings(
+        "Compare the reports.",
+        process.cwd(),
+        signal,
+        {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
       );
+    } else {
+      const result = await executor.run({
+        ...request,
+        promptPath: process.argv[3],
+        workingDirectory: process.cwd(),
+        subagents: 0,
+        signal,
+      });
+      threadId = result.threadId;
+    }
+    if (!workerArgs)
+      throw new Error("Native worker arguments were not captured");
     if (requests.length === requestCount)
       throw new Error("Worker completed without a synthetic Responses request");
-    // Release the worker's SQLite handles before
+    // Turn completion can precede exec's exit. Release its SQLite handles before
     // this fixture starts a separate app-server against the same Codex home.
     if (workerProcess.exitCode === null && workerProcess.signalCode === null)
       await once(workerProcess, "exit");
@@ -95,10 +95,9 @@ try {
     });
     process.stdout.write(
       JSON.stringify({
-        threadId: result.threadId,
-        resumed: workerThreadMethod === "thread/resume",
-        requestedProgram: workerProgram ?? null,
-        program: requests.at(-1)?.access_programs?.cyber ?? null,
+        threadId,
+        resumed: workerArgs.includes("resume"),
+        program: requests.at(-1)?.access_programs?.cyber,
         daybreak: config.daybreak ?? null,
         daybreakFeatures: Object.fromEntries(
           [

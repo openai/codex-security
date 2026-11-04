@@ -12,7 +12,7 @@ const optionalBunOptions = {
   config: { type: "string", short: "c" },
 } as const;
 
-export function bunTestOptions(testArguments: readonly string[]) {
+export function bunTestTimeout(testArguments: readonly string[]) {
   const parsingArguments = [...testArguments];
   let parsed;
   let bareOptional;
@@ -89,8 +89,5 @@ export function bunTestOptions(testArguments: readonly string[]) {
       parsingArguments[bareOptional.index] = `--${bareOptional.name}=`;
     }
   } while (bareOptional);
-  return {
-    timeout: parsed.values.timeout as string | undefined,
-    seed: parsed.values.seed as string | undefined,
-  };
+  return parsed.values.timeout as string | undefined;
 }

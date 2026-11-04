@@ -155,18 +155,13 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
     upsert_deep_worker.add_argument("--coordinator-generation", type=positive_int)
 
-    claim_deep_dedup = add_command(
-        "claim-deep-scan-dedup", "--scan-id", "--worker-id", "--prompt-path", "--artifact-dir"
+    iteration = add_command(
+        "record-deep-scan-iteration", "--scan-id", "--worker-id", "--result-manifest-path"
     )
-    claim_deep_dedup.add_argument("--input-worker-id", action="append", required=True)
-    claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
-
-    commit_deep_dedup = add_command(
-        "commit-deep-scan-dedup", "--scan-id", "--worker-id", "--result-manifest-path"
-    )
-    commit_deep_dedup.add_argument("--candidate-ledger-path")
-    commit_deep_dedup.add_argument("--new-findings-count", type=non_negative_int, required=True)
-    commit_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
+    iteration.add_argument("--input-worker-id", action="append", required=True)
+    iteration.add_argument("--no-new-streak", type=non_negative_int, required=True)
+    iteration.add_argument("--consecutive-errors", type=non_negative_int, required=True)
+    iteration.add_argument("--coordinator-generation", type=positive_int)
 
     finish_deep_scan = add_command("finish-deep-scan", "--scan-id")
     finish_deep_scan.add_argument(
@@ -195,6 +190,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
+
+    read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
+    read_scan_usage.add_argument("--validation-thread-id")
 
     add_command("get-scan-feedback", "--scan-id")
 
