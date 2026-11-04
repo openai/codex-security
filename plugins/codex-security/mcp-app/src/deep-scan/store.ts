@@ -17,7 +17,6 @@ import type {
   DeepScanWorkerKind,
   DeepScanMergeState,
   PersistedDeepScanDedupInput,
-  DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
   DeepScanRunState,
@@ -116,8 +115,7 @@ class DeepScanPersistenceError extends Error {
 
 const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
   "upsert-deep-scan-worker",
-  "claim-deep-scan-dedup",
-  "commit-deep-scan-dedup",
+  "record-deep-scan-iteration",
   "finish-deep-scan",
   "record-deep-scan-publication-failure",
 ]);
@@ -351,46 +349,24 @@ export class WorkbenchDeepScanStore {
         };
   }
 
-  async claimDedup(input: {
-    id: string;
+  async recordIteration(input: {
     scanId: string;
+    id: string;
     workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
+    resultPath: string;
+    noNewStreak: number;
+    consecutiveErrors: number;
   }): Promise<DeepScanRunState> {
     return parseDeepScan(
       await this.enqueueWrite(
-        [
-          "claim-deep-scan-dedup",
-          "--scan-id",
-          input.scanId,
-          "--worker-id",
-          input.id,
-          "--prompt-path",
-          input.promptPath,
-          "--artifact-dir",
-          input.artifactDir,
-          ...this.coordinatorLeaseArgs(input.scanId),
-          ...input.workerIds.flatMap((workerId) => [
-            "--input-worker-id",
-            workerId,
-          ]),
-        ],
-        true,
-      ),
-    );
-  }
-
-  async commitDedup(commit: DedupCommit): Promise<DeepScanRunState> {
-    return parseDeepScan(
-      await this.enqueueWrite(
-        workbenchArgs("commit-deep-scan-dedup", {
-          scanId: commit.scanId,
-          workerId: commit.id,
-          coordinatorGeneration: this.coordinatorGeneration(commit.scanId),
-          resultManifestPath: commit.resultManifestPath,
-          candidateLedgerPath: commit.candidateLedgerPath || undefined,
-          newFindingsCount: commit.newFindings,
+        workbenchArgs("record-deep-scan-iteration", {
+          scanId: input.scanId,
+          workerId: input.id,
+          inputWorkerId: input.workerIds,
+          resultManifestPath: input.resultPath,
+          noNewStreak: input.noNewStreak,
+          consecutiveErrors: input.consecutiveErrors,
+          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         }),
       ),
     );

@@ -82,6 +82,9 @@ zero. For example, changes after `0.1.23` propose `0.1.24`, or `0.2.0` if any
 included change is breaking. The category of a feature remains **Features**;
 the category does not imply a minor version bump.
 
+[Release 0.8.3](https://github.com/openai/codex-security/pull/2144) uses a patch
+version as a one-time exception. Its upgrade notes list the compatibility changes.
+
 The release PR updater recognizes breaking changes from a `!` in a
 Conventional Commit title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer,
 or the `breaking-change` label. `skip-release-notes` affects visibility, not

@@ -1,4 +1,3 @@
-import type { DeepReducerContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 
@@ -156,14 +155,14 @@ export interface DeepScanStore {
   updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker>;
-  claimDedup(input: {
-    id: string;
+  recordIteration(input: {
     scanId: string;
+    id: string;
     workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
-  }): Promise<DeepScanRunState | void>;
-  commitDedup(commit: DedupCommit): Promise<DeepScanRunState>;
+    resultPath: string;
+    noNewStreak: number;
+    consecutiveErrors: number;
+  }): Promise<DeepScanRunState>;
   selectFinalization?(input: {
     scanId: string;
     coordinatorGeneration?: number;
@@ -205,13 +204,12 @@ export interface DeepScanStore {
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
 export interface CodexWorkerRequest {
-  kind: DeepScanWorkerKind;
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -240,6 +238,12 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {

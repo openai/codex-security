@@ -194,85 +194,83 @@ export async function testCapturedCustomProviderSettings({
   syncBuiltinESMExports();
   try {
     for (const resume of [false, true]) {
-      for (const kind of ["discovery", "dedup"] as const) {
-        const results = await Promise.allSettled(
-          scans.map(async (scan) => {
-            await scan.executor.run({
-              kind,
-              promptPath: scan.promptPath,
-              workingDirectory: scan.fixture.root,
-              subagents: 0,
-              resumeThreadId: resume ? "fixture-resumed-thread" : undefined,
-              signal: new AbortController().signal,
-            });
-            const invocation = JSON.parse(
-              await readFile(scan.fixture.markerPath, "utf8"),
-            );
-            assert.equal(invocation.argv.includes("resume"), resume);
-            assert.equal(invocation.codexHome, scan.codexHome);
-            if (scan.mode === "legacy-native") {
-              assertFlagPair(invocation.argv, "--model", scan.parentModel);
-              assertConfigOverrides(invocation.argv, {
-                model_reasoning_effort: scan.parentEffort,
-              });
-            }
+      const results = await Promise.allSettled(
+        scans.map(async (scan) => {
+          await scan.executor.run({
+            kind: "discovery",
+            promptPath: scan.promptPath,
+            workingDirectory: scan.fixture.root,
+            subagents: 0,
+            resumeThreadId: resume ? "fixture-resumed-thread" : undefined,
+            signal: new AbortController().signal,
+          });
+          const invocation = JSON.parse(
+            await readFile(scan.fixture.markerPath, "utf8"),
+          );
+          assert.equal(invocation.argv.includes("resume"), resume);
+          assert.equal(invocation.codexHome, scan.codexHome);
+          if (scan.mode === "legacy-native") {
+            assertFlagPair(invocation.argv, "--model", scan.parentModel);
             assertConfigOverrides(invocation.argv, {
-              model_provider: scan.provider,
+              model_reasoning_effort: scan.parentEffort,
             });
-            const providers = parseToml(
-              invocation.argv
-                .filter((arg: string) => /^model_providers[.=]/u.test(arg))
-                .join("\n"),
-            ).model_providers;
-            if (scan.mode === "current-private") {
-              assert.equal(
-                providers,
-                undefined,
-                "preflight defaults must not override the private provider profile",
-              );
-              const profileIndex = invocation.argv.indexOf("--profile");
-              assert.notEqual(profileIndex, -1);
-              const profile = parseToml(
-                await readFile(
-                  path.join(
-                    scan.codexHome,
-                    `${invocation.argv[profileIndex + 1]}.config.toml`,
-                  ),
-                  "utf8",
+          }
+          assertConfigOverrides(invocation.argv, {
+            model_provider: scan.provider,
+          });
+          const providers = parseToml(
+            invocation.argv
+              .filter((arg: string) => /^model_providers[.=]/u.test(arg))
+              .join("\n"),
+          ).model_providers;
+          if (scan.mode === "current-private") {
+            assert.equal(
+              providers,
+              undefined,
+              "preflight defaults must not override the private provider profile",
+            );
+            const profileIndex = invocation.argv.indexOf("--profile");
+            assert.notEqual(profileIndex, -1);
+            const profile = parseToml(
+              await readFile(
+                path.join(
+                  scan.codexHome,
+                  `${invocation.argv[profileIndex + 1]}.config.toml`,
                 ),
-              );
-              assert.deepEqual(
-                JSON.parse(JSON.stringify(profile.model_providers)),
-                {
-                  [scan.provider]: scan.definition,
-                },
-              );
-            } else if (scan.mode === "legacy-native") {
-              assert.equal(
-                providers,
-                undefined,
-                "home-owned routing is resolved by native without a generated override",
-              );
-              const nativeConfig = parseToml(
-                await readFile(scan.configPath, "utf8"),
-              );
-              assert.equal(nativeConfig.model_provider, scan.provider);
-            } else {
-              assert.deepEqual(JSON.parse(JSON.stringify(providers)), {
+                "utf8",
+              ),
+            );
+            assert.deepEqual(
+              JSON.parse(JSON.stringify(profile.model_providers)),
+              {
                 [scan.provider]: scan.definition,
-              });
-            }
-          }),
-        );
-        const failures = results.flatMap((result) =>
-          result.status === "rejected" ? [result.reason] : [],
-        );
-        assert.equal(
-          failures.length,
-          0,
-          failures.map((error) => error.stack ?? error.message).join("\n"),
-        );
-      }
+              },
+            );
+          } else if (scan.mode === "legacy-native") {
+            assert.equal(
+              providers,
+              undefined,
+              "home-owned routing is resolved by native without a generated override",
+            );
+            const nativeConfig = parseToml(
+              await readFile(scan.configPath, "utf8"),
+            );
+            assert.equal(nativeConfig.model_provider, scan.provider);
+          } else {
+            assert.deepEqual(JSON.parse(JSON.stringify(providers)), {
+              [scan.provider]: scan.definition,
+            });
+          }
+        }),
+      );
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      assert.equal(
+        failures.length,
+        0,
+        failures.map((error) => error.stack ?? error.message).join("\n"),
+      );
       for (const scan of scans.filter(
         (scan) => !["legacy-native", "current-private"].includes(scan.mode),
       ))

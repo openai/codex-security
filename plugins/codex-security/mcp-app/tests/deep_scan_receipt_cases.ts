@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -13,7 +12,6 @@ import { readJson } from "./support/json.ts";
 import {
   coordinatorFixture,
   eventually,
-  FakeExecutor,
   promptContext,
   standardScanDraft,
   recordCodexSecurityWorkerScanDraft,
@@ -33,20 +31,12 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
     });
     const published = Promise.withResolvers<string>();
     const recorded = Promise.withResolvers<void>();
-    const archived = Promise.withResolvers<void>();
-    const restore = Promise.withResolvers<void>();
-    const reducer = new FakeExecutor();
     let recordedCount = 0;
     let retryAttempts = 0;
     let observedArchive = false;
     let restored = false;
     const executor = {
       async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
-        if (request.kind !== "discovery") {
-          await archived.promise;
-          restore.resolve();
-          return reducer.run(request);
-        }
         const info = await promptContext(request.promptPath);
         await request.onThreadStarted?.(randomUUID());
         const context = {
@@ -153,8 +143,6 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
             "{}\n",
           );
           observedArchive = true;
-          archived.resolve();
-          await Promise.race([restore.promise, once(signal, "abort")]);
           signal.throwIfAborted();
         },
       },
@@ -167,8 +155,6 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
       assert.equal(retryAttempts, 2, receipt);
       assert.equal(restored, true, receipt);
     } finally {
-      restore.resolve();
-      archived.resolve();
       recorded.resolve();
       coordinator.cancel("test cleanup");
     }

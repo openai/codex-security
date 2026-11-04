@@ -110,7 +110,7 @@ def test_legacy_execution_defers_new_persistence(tmp_path: Path, version: str) -
         )
         workers.append(worker)
     stages["discovery"] = introduced_metadata(state, scan_dir)
-    committed = deep.commit_reducer(
+    committed = deep.record_iteration(
         name="dedup-1",
         input_worker_ids=workers,
         new_findings_count=0,

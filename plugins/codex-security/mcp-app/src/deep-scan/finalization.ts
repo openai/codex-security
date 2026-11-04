@@ -1,7 +1,4 @@
-import {
-  deepReductionToScanDraft,
-  parseDeepReduction,
-} from "./artifact-validation.js";
+import { scanUnionToDraft, parseScanUnion } from "./artifact-validation.js";
 import {
   createScanArtifactContext,
   type RunArtifactWorkbench,
@@ -108,7 +105,7 @@ export async function readSelectedDeepScanDraft(
     );
   }
   const stored = JSON.parse(contents.toString("utf8"));
-  const draft = deepReductionToScanDraft(parseDeepReduction(stored, true));
+  const draft = scanUnionToDraft(parseScanUnion(stored));
   if (draft.scanId !== scanId || draft.complete === false) {
     throw new Error(
       "Deep Scan finalization requires the selected complete result for this scan.",

@@ -2,94 +2,62 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { importSource } from "../import-module.ts";
-import { proposal, scanId, workers } from "./accepted_source_bank.mjs";
+import { scanId, workers } from "./accepted_source_bank.mjs";
 
-export async function loadReducer() {
-  return importSource(
-    fileURLToPath(
-      new URL("../../src/artifact-deep-reducer.ts", import.meta.url),
-    ),
-  );
+const { mergeBatch } = await importSource(
+  fileURLToPath(new URL("../../src/deep-scan/iteration.ts", import.meta.url)),
+);
+
+async function compare(prompt, schema) {
+  const rows = JSON.parse(prompt.split("\n").at(-1));
+  if (schema.properties.reviews) return JSON.stringify({ reviews: [] });
+  const groups = new Map();
+  for (const { id, fix, locations } of rows) {
+    const group = groups.get(fix) ?? {
+      operation: fix,
+      failure: fix,
+      path: locations[0][0],
+      reports: [],
+    };
+    group.reports.push({ id, evidence: 0 });
+    groups.set(fix, group);
+  }
+  return JSON.stringify({ defects: [...groups.values()], uncertain: [] });
 }
 
-export async function prepareReplay(root, bank = workers) {
-  const workerRoot = path.join(root, "artifacts", "deep_discovery", "workers");
+export async function replay(root, batches) {
   const records = new Map();
-  for (const [i, worker] of bank.entries()) {
-    const output = path.join(workerRoot, worker.id, "output");
-    await mkdir(output, { recursive: true });
-    const resultPath = path.join(output, "result.json");
-    await writeFile(resultPath, JSON.stringify(worker.result) + "\n");
-    records.set(worker.id, {
-      id: worker.id,
-      resultPath,
-      completionSequence: i + 1,
-    });
-  }
-  return records;
-}
-
-export async function runBatch(
-  reducer,
-  root,
-  records,
-  ids,
-  index,
-  previous,
-  propose = proposal,
-) {
-  const output = path.join(
-    root,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    `dedup-${index}`,
-    "output",
-  );
-  await mkdir(output, { recursive: true });
-  const context = {
-    root: output,
-    repoRoot: root,
-    scanId,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot: root,
-      claimedWorkers: ids.map((id) => records.get(id)),
-      ...(previous ? { previousReducerResultPath: previous } : {}),
-    },
-  };
-  const inputs = await reducer.getCodexSecurityDeepReducerInputs(context);
-  const submitted = propose(inputs);
-  const receipt = await reducer.recordCodexSecurityDeepReduction(
-    context,
-    submitted,
-  );
-  const resultPath = path.join(output, "result.json");
-  return {
-    inputs,
-    submitted,
-    receipt,
-    resultPath,
-    result: JSON.parse(await readFile(resultPath, "utf8")),
-  };
-}
-
-export async function replay(reducer, root, batches, propose = proposal) {
-  const records = await prepareReplay(root);
-  const steps = [];
-  let previous;
-  for (const [index, batch] of batches.entries()) {
-    const step = await runBatch(
-      reducer,
+  for (const worker of workers) {
+    const artifactDir = path.join(
       root,
-      records,
-      batch,
-      index,
-      previous,
-      propose,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      worker.id,
+      "output",
     );
-    steps.push(step);
-    previous = step.resultPath;
+    await mkdir(artifactDir, { recursive: true });
+    const resultPath = path.join(artifactDir, "result.json");
+    await writeFile(resultPath, JSON.stringify(worker.result));
+    records.set(worker.id, { id: worker.id, artifactDir, resultPath });
   }
-  return { steps, result: steps.at(-1).result };
+  let result = { scanId, findings: [] };
+  for (const [index, ids] of batches.entries()) {
+    const inputs = await Promise.all(
+      ids.map(async (id) => {
+        const worker = records.get(id);
+        return {
+          ...worker,
+          result: JSON.parse(await readFile(worker.resultPath, "utf8")),
+        };
+      }),
+    );
+    await mergeBatch(result, inputs, root, compare, (error) => {
+      throw error;
+    });
+    const checkpoint = path.join(root, `iteration-${index}.json`);
+    await writeFile(checkpoint, JSON.stringify(result));
+    result = JSON.parse(await readFile(checkpoint, "utf8"));
+  }
+  return result;
 }

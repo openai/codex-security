@@ -26,6 +26,19 @@ from workbench_scan_usage import _timestamp as usage_timestamp
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_non_finite_json,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path.name}: expected a JSON object.")
+    return payload
+
+
 def javascript_utf8(value: str) -> bytes:
     """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
     return (

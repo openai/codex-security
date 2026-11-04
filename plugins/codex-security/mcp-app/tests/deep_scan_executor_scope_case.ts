@@ -114,128 +114,108 @@ export async function testLargeScopeTransport({
         },
       })) as typeof childProcess.spawn;
     syncBuiltinESMExports();
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumed of [false, true]) {
-        let control: number[] = [];
-        for (const count of [2, 16384]) {
-          const sizes = await Promise.all(
-            scanIds.map(async (scanId, index) => {
-              const workerRoot = path.join(
-                fixture.root,
-                `scan-${index} café`,
-                `${kind}-${resumed}`,
-              );
-              const output = path.join(workerRoot, "output");
-              const prompt = path.join(workerRoot, "prompt.md");
-              await mkdir(output, { recursive: true });
-              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
-              const includePaths = Array.from(
-                { length: count },
-                (_, row) =>
-                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
-              );
-              const run = {
-                scanId,
-                scanDir: workerRoot,
-                targetPath: fixture.root,
-                scope: ".",
-                includePaths,
-                filePaths: includePaths.filter((_, index) => index % 2 === 0),
-                startDisposition: resumed ? "resumed" : "created",
-                createdAt: "2026-01-01T00:01:00Z",
-                usageOwner: {
-                  threadId: `scope-parent-${index}`,
-                  turnId: "original-turn",
-                  startedAt: "2026-01-01T00:01:00Z",
-                },
-                executionSettings: {
-                  version: 1,
-                  settings: await captureDeepScanExecutionSettings(
-                    {
-                      usageOwner: {
-                        threadId: `scope-parent-${index}`,
-                        turnId: "original-turn",
-                        startedAt: "2026-01-01T00:01:00Z",
-                      },
-                    },
-                    trustedParentSandbox,
-                  ),
-                },
-              };
-              const captured = startDeepScanEngine({
-                run,
-                store: {},
-                registry: {},
-                runWorkbench: async () => ({}),
-                pluginRoot: fixture.root,
-                pythonCommand: process.env.PYTHON || "python3",
-                parentSandbox: trustedParentSandbox,
-                threadId: `scope-parent-${index}`,
-                parentTurn: {
-                  threadId: `scope-parent-${index}`,
-                  turnId: "original-turn",
-                },
-              });
-              const executor = await captured.options.prepareExecutor(run);
-              await executor.run(
-                workerRequest(prompt, output, {
-                  kind,
-                  ...(resumed
-                    ? { resumeThreadId: `scope-thread-${index}` }
-                    : {}),
-                  artifactContext: {
-                    root: output,
-                    layout: kind === "dedup" ? "reducer" : "worker",
-                    ...(kind === "dedup"
-                      ? {
-                          deepReducer: {
-                            scanRoot: workerRoot,
-                            claimedWorkers: [
-                              {
-                                id: "source-worker",
-                                resultPath: path.join(
-                                  workerRoot,
-                                  "accepted.json",
-                                ),
-                              },
-                            ],
-                          },
-                        }
-                      : {}),
-                  },
-                }),
-              );
-              const invocation = await readJson(output, "invocation.json");
-              assertFlagPair(
-                invocation.argv,
-                "--cyber-access-program",
-                index === 0 ? "standard" : "daybreak_blue",
-              );
-              assert.deepEqual(invocation.scopeInput.paths, includePaths);
-              assert.deepEqual(
-                invocation.scopeInput.filePaths,
-                includePaths.filter((_, index) => index % 2 === 0),
-              );
-              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
-              await assert.rejects(readFile(invocation.scopeInput.file), {
-                code: "ENOENT",
-              });
-              assert.equal(invocation.argv.includes("resume"), resumed);
-              const argument = nativeConfigOverrides(invocation.argv).find(
-                (value) => value.startsWith("mcp_servers="),
-              )!;
-              assert.ok(argument);
-              return Buffer.byteLength(argument);
-            }),
-          );
-          if (count === 2) control = sizes;
-          else
-            assert.deepEqual(
-              sizes,
-              control,
-              "scope size must not increase the native command arguments",
+    for (const resumed of [false, true]) {
+      let control: number[] = [];
+      for (const count of [2, 16384]) {
+        const sizes = await Promise.all(
+          scanIds.map(async (scanId, index) => {
+            const workerRoot = path.join(
+              fixture.root,
+              `scan-${index} café`,
+              `discovery-${resumed}`,
             );
-        }
+            const output = path.join(workerRoot, "output");
+            const prompt = path.join(workerRoot, "prompt.md");
+            await mkdir(output, { recursive: true });
+            await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
+            const includePaths = Array.from(
+              { length: count },
+              (_, row) =>
+                `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
+            );
+            const run = {
+              scanId,
+              scanDir: workerRoot,
+              targetPath: fixture.root,
+              scope: ".",
+              includePaths,
+              filePaths: includePaths.filter((_, index) => index % 2 === 0),
+              startDisposition: resumed ? "resumed" : "created",
+              createdAt: "2026-01-01T00:01:00Z",
+              usageOwner: {
+                threadId: `scope-parent-${index}`,
+                turnId: "original-turn",
+                startedAt: "2026-01-01T00:01:00Z",
+              },
+              executionSettings: {
+                version: 1,
+                settings: await captureDeepScanExecutionSettings(
+                  {
+                    usageOwner: {
+                      threadId: `scope-parent-${index}`,
+                      turnId: "original-turn",
+                      startedAt: "2026-01-01T00:01:00Z",
+                    },
+                  },
+                  trustedParentSandbox,
+                ),
+              },
+            };
+            const captured = startDeepScanEngine({
+              run,
+              store: {},
+              registry: {},
+              runWorkbench: async () => ({}),
+              pluginRoot: fixture.root,
+              pythonCommand: process.env.PYTHON || "python3",
+              parentSandbox: trustedParentSandbox,
+              threadId: `scope-parent-${index}`,
+              parentTurn: {
+                threadId: `scope-parent-${index}`,
+                turnId: "original-turn",
+              },
+            });
+            const executor = await captured.options.prepareExecutor(run);
+            await executor.run(
+              workerRequest(prompt, output, {
+                kind: "discovery",
+                ...(resumed ? { resumeThreadId: `scope-thread-${index}` } : {}),
+                artifactContext: {
+                  root: output,
+                  layout: "worker",
+                },
+              }),
+            );
+            const invocation = await readJson(output, "invocation.json");
+            assertFlagPair(
+              invocation.argv,
+              "--cyber-access-program",
+              index === 0 ? "standard" : "daybreak_blue",
+            );
+            assert.deepEqual(invocation.scopeInput.paths, includePaths);
+            assert.deepEqual(
+              invocation.scopeInput.filePaths,
+              includePaths.filter((_, index) => index % 2 === 0),
+            );
+            assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+            await assert.rejects(readFile(invocation.scopeInput.file), {
+              code: "ENOENT",
+            });
+            assert.equal(invocation.argv.includes("resume"), resumed);
+            const argument = nativeConfigOverrides(invocation.argv).find(
+              (value) => value.startsWith("mcp_servers="),
+            )!;
+            assert.ok(argument);
+            return Buffer.byteLength(argument);
+          }),
+        );
+        if (count === 2) control = sizes;
+        else
+          assert.deepEqual(
+            sizes,
+            control,
+            "scope size must not increase the native command arguments",
+          );
       }
     }
   } finally {

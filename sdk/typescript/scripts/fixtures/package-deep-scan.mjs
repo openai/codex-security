@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { startRpc } from "./package-rpc.mjs";
@@ -92,7 +92,7 @@ try {
   if (failures.length > 0)
     throw new AggregateError(failures, "Deep Scan package checks failed.");
   console.log(
-    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
+    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, worker checkpoints, finding union, restart before finalization, and sealed results.",
   );
 } catch (error) {
   for (const name of ["installed", "detached", "installed-direct"]) {
@@ -125,7 +125,7 @@ async function fixture(name, pluginRoot, executable, retry = false) {
   );
   await writeFile(
     join(home, "codex-security", "config.toml"),
-    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 2\n",
+    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
   );
   const env = Object.fromEntries(
     [
@@ -503,7 +503,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
-      stopAfterNoNew: 1,
+      stopAfterNoNew: 2,
       postScanPrompt,
       onWarning: (warning) => warnings.push(warning),
       outputDir: join(f.directory, "output"),
@@ -531,7 +531,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     await client.close();
   }
   await assertSavedState(f, scanId, owner);
-  await assertExecutions(f, scanId, 3);
+  await assertExecutions(f, scanId);
 }
 
 async function assertSavedState(f, scanId, owner) {
@@ -543,119 +543,8 @@ async function assertSavedState(f, scanId, owner) {
     owner,
   ]);
   assert.equal(deepScan.status, "succeeded");
-  if (deepScan.workflowVersion === "deep-security-scan/v2") {
-    const selected = deepScan.finalizationInput;
-    assert.ok(
-      selected,
-      "The completed v2 scan retains its finalization input.",
-    );
-    assert.equal(selected.version, 1);
-    assert.equal(selected.terminalReason, deepScan.terminalReason);
-    assert.deepEqual(selected.omittedWorkerIds, []);
-    await assertDigest(
-      resolve(deepScan.scanDir, selected.resultPath),
-      selected.resultSha256,
-    );
-    const workers = deepScan.workers.filter(
-      (worker) => worker.status === "succeeded",
-    );
-    assert.equal(workers.length, 3);
-    for (const worker of workers) {
-      const attempt = deepScan.attempts.find(
-        (entry) =>
-          entry.workerId === worker.id && entry.attempt === worker.attempt,
-      );
-      assert.ok(attempt, "Each accepted worker retains its execution attempt.");
-      assert.equal(attempt.status, "succeeded");
-      await assertDigest(
-        attempt.acceptedResultPath,
-        attempt.acceptedResultSha256,
-      );
-      if (worker.kind === "dedup") {
-        assert.equal(selected.resultSha256, attempt.acceptedResultSha256);
-      } else {
-        const input = deepScan.dedupInputs.find(
-          (entry) => entry.discoveryWorkerId === worker.id,
-        );
-        assert.ok(input, "The reducer retains each accepted discovery input.");
-        assert.equal(input.attempt, worker.attempt);
-        assert.equal(input.resultManifestSha256, attempt.acceptedResultSha256);
-        await assertDigest(
-          input.resultManifestPath,
-          input.resultManifestSha256,
-        );
-      }
-    }
-    assert.equal(deepScan.dedupInputs.length, 2);
-  }
-  console.log(
-    JSON.stringify({
-      fixture: basename(f.directory),
-      workflowVersion: deepScan.workflowVersion,
-      attempts: deepScan.attempts?.length ?? null,
-      selectedFinalization: deepScan.finalizationInput != null,
-    }),
-  );
-}
-
-async function assertDigest(path, expected) {
-  const bytes = await readFile(path);
-  assert.equal(createHash("sha256").update(bytes).digest("hex"), expected);
-}
-
-async function assertDraft(path) {
-  const document = JSON.parse(await readFile(path, "utf8"));
-  const findings = JSON.parse(
-    await readFile(join(dirname(path), "findings.json"), "utf8"),
-  );
-  assert.deepEqual(findings.findings, []);
-  assert.ok(document.scan.target);
-}
-
-async function readExecutions(f) {
-  try {
-    return (await readFile(f.env.PACKAGE_DEEP_TRACE, "utf8"))
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(JSON.parse);
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
-}
-
-async function assertExecutions(f, scanId, preflightsWithoutRetry = 4) {
-  const executions = await readExecutions(f);
-  for (const execution of executions) {
-    assert.equal(
-      await realpath(execution.python),
-      await realpath(f.env.PYTHON),
-    );
-  }
-  const workers = executions.filter((entry) => entry.phase === "worker");
-  const reducers = executions.filter((entry) => entry.phase === "reducer");
-  const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;
-  assert.equal(workers.length, 2 + incomplete);
-  assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
-  assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
-  assert.equal(reducers.length, 1);
-  assert.equal(
-    executions.filter(
-      (entry) => entry.phase === "preflight" && entry.args.includes("--stdio"),
-    ).length,
-    preflightsWithoutRetry + incomplete,
-  );
-  for (const execution of [...workers, ...reducers]) {
-    assert.equal(execution.scanId, scanId);
-    assert.equal(execution.home, f.home);
-    assert.equal(execution.hasApiKey, true);
-    assert.equal(
-      execution.args[execution.args.indexOf("--model") + 1],
-      "gpt-5.5",
-    );
-    assert.ok(execution.args.includes('approval_policy="never"'));
-  }
+  assert.equal(deepScan.workflowVersion, "deep-security-scan/v1");
+  assert.equal(deepScan.finalizationInput ?? null, null);
 }
 
 async function runInstalledDirectSdk(pluginRoot, executable) {
@@ -715,7 +604,7 @@ async function runInstalledDirectSdk(pluginRoot, executable) {
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
-      stopAfterNoNew: 1,
+      stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
       onScanRegistered(scan) {
         scanId = scan.scanId;
@@ -733,5 +622,58 @@ async function runInstalledDirectSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
+  await assertSavedState(f, scanId, owner);
   await assertExecutions(f, scanId);
+}
+
+async function assertDraft(path) {
+  const document = JSON.parse(await readFile(path, "utf8"));
+  const findings = JSON.parse(
+    await readFile(join(dirname(path), "findings.json"), "utf8"),
+  );
+  assert.deepEqual(findings.findings, []);
+  assert.ok(document.scan.target);
+}
+
+async function readExecutions(f) {
+  try {
+    return (await readFile(f.env.PACKAGE_DEEP_TRACE, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map(JSON.parse);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function assertExecutions(f, scanId) {
+  const executions = await readExecutions(f);
+  for (const execution of executions) {
+    assert.equal(
+      await realpath(execution.python),
+      await realpath(f.env.PYTHON),
+    );
+  }
+  const workers = executions.filter((entry) => entry.phase === "worker");
+
+  const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;
+  assert.equal(workers.length, 2 + incomplete);
+  assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
+  assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
+  assert.equal(
+    executions.filter((entry) => entry.phase === "preflight").length,
+    3 + incomplete,
+  );
+  for (const execution of workers) {
+    assert.equal(execution.scanId, scanId);
+    assert.equal(execution.home, f.home);
+    assert.equal(execution.hasApiKey, true);
+    assert.equal(
+      execution.args[execution.args.indexOf("--model") + 1],
+      "gpt-5.5",
+    );
+    assert.ok(execution.args.includes('approval_policy="never"'));
+  }
 }

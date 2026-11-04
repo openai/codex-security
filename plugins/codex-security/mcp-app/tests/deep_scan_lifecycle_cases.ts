@@ -1,16 +1,14 @@
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import {
-  claimDedupInputs,
   coordinatorFixture,
-  createCoordinator,
   FakeExecutor,
   runCoordinator,
 } from "./deep_scan_coordinator_fixture.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { importModule, importSource } from "./import-module.ts";
@@ -47,7 +45,7 @@ export async function testDeepScanLifecycle({
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
     canceledPublicationWaitsForHeartbeat,
-    delayedReducerDoesNotReplaceStoppedState,
+    delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
     concurrentOwnershipReadsKeepReplacementResult,
     lateFailurePersistenceKeepsStoppedState,
@@ -931,15 +929,15 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     }
   }
 
-  async function delayedReducerDoesNotReplaceStoppedState() {
+  async function delayedIterationDoesNotReplaceStoppedState() {
     for (const status of ["canceled", "failed"] as const) {
       const fixture = await fixtureRun(config);
       fixture.run.coordinatorGeneration = 1;
       const store = new FakeStore(fixture.run);
       const committed = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      const commit = store.commitDedup.bind(store);
-      store.commitDedup = async (input) => {
+      const commit = store.recordIteration.bind(store);
+      store.recordIteration = async (input) => {
         const response = await commit(input);
         committed.resolve();
         await release.promise;
@@ -1564,98 +1562,10 @@ export async function testStaleDiscoveryCheckpointRetriesBeforeAcceptance() {
     [1, 2],
     "a stale result must be retried before acceptance without aborting another worker",
   );
-  assert.equal(store.workers.size > 2, true);
+
   assert.equal(store.failureMessages.length, 0);
   const accepted = store.workerUpdates.filter(
     (worker) => worker.kind === "discovery" && worker.status === "succeeded",
   );
   assert.equal(accepted.length, 2);
-}
-
-export async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 3,
-    stopAfterNoNew: 10,
-    maxDiscoveryRuns: 5,
-  });
-  const originalExecutor = new FakeExecutor({
-    discoveryCandidateId: "candidate-1",
-    dedupEvidenceByCall: ["first reducer evidence", "final reducer evidence"],
-  });
-  const run = originalExecutor.run.bind(originalExecutor);
-  originalExecutor.run = async (request) => {
-    const outcome = await run(request);
-    if (request.kind === "discovery") {
-      const resultPath = path.join(
-        request.artifactContext!.root,
-        "result.json",
-      );
-      const result = await readJson(resultPath);
-      result.reviewState.deferred = [
-        { id: "remaining-review", reason: "Source review remains pending." },
-      ];
-      await writeJson(resultPath, result);
-    }
-    return outcome;
-  };
-  const original = createCoordinator(fixture, store, originalExecutor);
-  original.start();
-  assert.equal((await original.wait(undefined, 5_000))?.status, "succeeded");
-  assert.equal(store.dedupClaims.length >= 2, true);
-
-  store.run = {
-    ...store.run,
-    status: "running" as const,
-    terminalReason: undefined,
-    manifestPath: undefined,
-    persistedWorkers: structuredClone([...store.workers.values()]),
-    persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
-  };
-  const persistedInputs = structuredClone(store.run.persistedDedupInputs);
-  await Promise.all(
-    store.run.persistedWorkers!.map((worker) =>
-      rm(worker.promptPath, { force: true }),
-    ),
-  );
-  const replacementExecutor = new FakeExecutor();
-  const completedDrafts: ScanDraftInput[] = [];
-  const resumed = await runCoordinator(fixture, store, replacementExecutor, {
-    run: store.run,
-    onComplete: async (draft) =>
-      void completedDrafts.push(structuredClone(draft)),
-  });
-  assert.equal(resumed?.status, "succeeded", resumed?.error);
-
-  assert.equal(
-    (completedDrafts[0].reviewState.deferred as unknown[]).length,
-    5,
-    "resumed reduction must retain pending review from every merged worker",
-  );
-  const firstReducer = store.run.persistedWorkers!.find(
-    (worker) =>
-      worker.kind === "dedup" && worker.promptPath.includes("dedup-0001"),
-  );
-  assert.ok(firstReducer);
-  const firstResult = await readJson(firstReducer.resultManifestPath!);
-  assert.equal(
-    firstResult.findings[0]?.rootCause.summary,
-    "first reducer evidence",
-  );
-  const lastReducer = store.run.persistedWorkers!.findLast(
-    (worker) => worker.kind === "dedup" && worker.status === "succeeded",
-  );
-  const latestResult = await readJson(lastReducer!.resultManifestPath!);
-  assert.equal(
-    latestResult.findings[0]?.rootCause.summary,
-    "final reducer evidence",
-  );
-  assert.deepEqual(
-    completedDrafts.map((draft) => draft.findings),
-    [latestResult.findings],
-  );
-  assert.deepEqual(store.run.persistedDedupInputs, persistedInputs);
-  assert.equal(
-    replacementExecutor.discoveryCalls + replacementExecutor.dedupCalls,
-    0,
-  );
 }

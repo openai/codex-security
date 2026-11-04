@@ -232,24 +232,29 @@ def test_acceptance_rejects_mutable_result_behind_checkpoint_head(tmp_path: Path
     assert checkpoint.read_bytes() == content
 
 
-def test_claim_replay_preserves_original_inputs_after_concurrent_discovery(tmp_path: Path) -> None:
+def test_iteration_replay_preserves_original_inputs_after_concurrent_discovery(
+    tmp_path: Path,
+) -> None:
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
     deep = DeepScan(state, home, scan_id, scan_dir)
     inputs = [deep.dispatch_discovery_worker(name=f"discovery-{index}")[0] for index in range(2)]
-    prompt, artifacts, _ = worker_paths(scan_dir, "reducer")
+    _, _, result = worker_paths(scan_dir, "dedup-1")
+    result.write_text(json.dumps({"scanId": scan_id, "findings": []}))
     args = [
-        "claim-deep-scan-dedup",
+        "record-deep-scan-iteration",
         "--scan-id",
         scan_id,
         "--worker-id",
         str(uuid.uuid4()),
-        "--prompt-path",
-        str(prompt),
-        "--artifact-dir",
-        str(artifacts),
+        "--result-manifest-path",
+        str(result),
+        "--no-new-streak",
+        "2",
+        "--consecutive-errors",
+        "0",
     ]
     for worker in inputs:
         args.extend(["--input-worker-id", worker])

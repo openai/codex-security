@@ -1,6 +1,5 @@
 // Synthetic accepted artifacts. Expected fixes are independent of display identities.
 export const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
-export const bankVersion = "accepted-source-bank/v1";
 
 export const fixes = {
   owner: "Check document ownership before returning document contents.",
@@ -93,36 +92,11 @@ export const workers = [
   ]),
 ];
 
-export const sourceGroups = {
-  "worker-owner:0": "owner",
-  "worker-path:0": "path",
-  "worker-owner-duplicate:0": "owner",
-  "worker-bundled:0": "search-bundle",
-};
-
 export const sourceFixes = {
   "worker-owner:0": ["owner"],
   "worker-path:0": ["path"],
   "worker-owner-duplicate:0": ["owner"],
   "worker-bundled:0": ["sql", "html"],
-};
-
-// This history is distinct from the immutable accepted terminal bank above.
-// A newer rejection is authoritative for this logical worker's final result.
-export const rejectionHistory = {
-  workerId: "worker-rejected",
-  earlier: worker("worker-rejected", [finding("safe-query", fixes.sql)]).result,
-  latest: worker("worker-rejected", [], {
-    ...coverage(),
-    surfaces: [
-      {
-        label: "Search SQL",
-        disposition: "rejected",
-        notes:
-          "The driver binds parameters; the earlier interpolation claim was disproved.",
-      },
-    ],
-  }).result,
 };
 
 export function permutations(items) {
@@ -143,38 +117,4 @@ export function partitions(items) {
       ...rest,
     ]),
   );
-}
-
-export function originals(inputs) {
-  const sources = new Map();
-  for (const current of inputs.previous?.findings ?? []) {
-    for (const source of current.provenance.sourceFindings ?? [])
-      sources.set(source.id, source.finding);
-  }
-  for (const discovery of inputs.discoveries) {
-    discovery.result.findings.forEach((value, i) =>
-      sources.set(`${discovery.workerId}:${i}`, value),
-    );
-  }
-  return sources;
-}
-
-// Scripted proposals isolate host reconciliation from model variability.
-export function proposal(inputs, groupFor = (id) => sourceGroups[id]) {
-  const grouped = new Map();
-  for (const [id, value] of originals(inputs)) {
-    const group = groupFor(id);
-    if (!grouped.has(group)) grouped.set(group, { value, refs: [] });
-    grouped.get(group).refs.push(id);
-  }
-  return {
-    scanId,
-    complete: true,
-    findings: [...grouped].map(([group, { value, refs }]) => ({
-      ...structuredClone(value),
-      ruleId: "synthetic." + group,
-      identity: { anchor: group },
-      provenance: { source: "local_plugin", sourceFindingIds: refs },
-    })),
-  };
 }

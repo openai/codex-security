@@ -60,7 +60,6 @@ export function reconstructedWorkerCases({
 }) {
   return {
     testIsolatedReconstructedWorkers,
-    testReducerCoveragePersistenceBinding,
   };
   async function testIsolatedReconstructedWorkers() {
     const launchFailures: string[] = [];
@@ -556,153 +555,150 @@ export function reconstructedWorkerCases({
             "observer-codex",
           );
         }
-        for (const kind of ["discovery", "dedup"] as const) {
-          const launches = await Promise.allSettled(
-            scans.map(async (scan) => {
-              const resumeThreadId = [
-                "fresh",
-                "readopted-fresh",
-                "reconstructed-fresh",
-                "program-missing-fresh",
-              ].includes(phase)
-                ? undefined
-                : `fixture-${scan.name}-resumed`;
-              const result = await scan.executor.run({
-                kind,
-                promptPath: scan.promptPath,
-                workingDirectory: scan.fixture.root,
-                subagents: scan.name === "first" ? 0 : 2,
-                resumeThreadId,
-                continuationPrompt:
-                  "CAPTURE_SYNTHETIC_OPENAI_AUTH CAPTURE_SYNTHETIC_PROVIDER_AUTH NULL_USAGE continuation",
-                signal: new AbortController().signal,
+        const launches = await Promise.allSettled(
+          scans.map(async (scan) => {
+            const resumeThreadId = [
+              "fresh",
+              "readopted-fresh",
+              "reconstructed-fresh",
+              "program-missing-fresh",
+            ].includes(phase)
+              ? undefined
+              : `fixture-${scan.name}-resumed`;
+            const result = await scan.executor.run({
+              kind: "discovery",
+              promptPath: scan.promptPath,
+              workingDirectory: scan.fixture.root,
+              subagents: scan.name === "first" ? 0 : 2,
+              resumeThreadId,
+              continuationPrompt:
+                "CAPTURE_SYNTHETIC_OPENAI_AUTH CAPTURE_SYNTHETIC_PROVIDER_AUTH NULL_USAGE continuation",
+              signal: new AbortController().signal,
+            });
+            assert.equal(
+              result.threadId,
+              resumeThreadId ?? "fixture-thread-id",
+            );
+            const child = JSON.parse(
+              await readFile(scan.fixture.markerPath, "utf8"),
+            );
+            const preflight = JSON.parse(
+              await readFile(scan.fixture.preflightMarkerPath, "utf8"),
+            );
+            assert.equal(
+              await realpath(child.executable),
+              await realpath(scan.settings.codexOptions.codexPathOverride),
+            );
+            assert.equal(
+              child.codexCliPath,
+              scan.settings.codexOptions.codexPathOverride,
+            );
+            assert.equal(
+              child.codexHome,
+              scan.settings.codexOptions.env.CODEX_HOME,
+            );
+            assert.equal(preflight.codexHome, child.codexHome);
+            assert.equal(child.scanValue, `${scan.name}-${phase}`);
+            assert.equal(child.configPath, scan.configPath);
+            assert.deepEqual(child.openaiAuthentication, {
+              CODEX_API_KEY: `synthetic-${scan.name}-${phase}`,
+            });
+            assert.deepEqual(
+              child.providerAuthentication,
+              Object.fromEntries(
+                scan.providerKeys.map((key) => [
+                  key,
+                  `synthetic-${scan.name}-${phase}-${key}`,
+                ]),
+              ),
+            );
+            assertFlagPair(child.argv, "--model", scan.settings.model);
+            assertFlagPair(
+              child.argv,
+              "--cyber-access-program",
+              scan.accessProgram,
+            );
+            assertConfigOverrides(
+              child.argv,
+              Object.fromEntries(
+                Object.entries(scan.apiFeatures).map(([key, value]) => [
+                  `features.${key}`,
+                  value,
+                ]),
+              ),
+            );
+            assertConfigOverrides(preflight.argv, {
+              model: scan.settings.model,
+            });
+            for (const launch of [child, preflight]) {
+              assertConfigOverrides(launch.argv, {
+                model_provider: scan.config["model_provider"],
+                model_reasoning_summary: scan.config["model_reasoning_summary"],
+                service_tier: scan.config["service_tier"],
+                model_reasoning_effort: "ultra",
+                openai_base_url: scan.settings.codexOptions.baseUrl,
               });
+              const provider = launch.argv.filter((argument: string) =>
+                /^model_providers[.=]/u.test(argument),
+              );
+              assert.ok(
+                provider.length > 0,
+                "both preflight and worker launch receive provider configuration",
+              );
+              const providers = parseToml(provider.join("\n"))
+                .model_providers as Record<string, Record<string, unknown>>;
+              if (scan.expectedProvider)
+                assert.deepEqual(
+                  JSON.parse(JSON.stringify(providers)),
+                  scan.expectedProvider,
+                );
+              else
+                assert.deepEqual(Object.keys(providers.openrouter).sort(), [
+                  "base_url",
+                  "env_key",
+                  "name",
+                  "wire_api",
+                ]);
               assert.equal(
-                result.threadId,
-                resumeThreadId ?? "fixture-thread-id",
-              );
-              const child = JSON.parse(
-                await readFile(scan.fixture.markerPath, "utf8"),
-              );
-              const preflight = JSON.parse(
-                await readFile(scan.fixture.preflightMarkerPath, "utf8"),
-              );
-              assert.equal(
-                await realpath(child.executable),
-                await realpath(scan.settings.codexOptions.codexPathOverride),
-              );
-              assert.equal(
-                child.codexCliPath,
-                scan.settings.codexOptions.codexPathOverride,
-              );
-              assert.equal(
-                child.codexHome,
-                scan.settings.codexOptions.env.CODEX_HOME,
-              );
-              assert.equal(preflight.codexHome, child.codexHome);
-              assert.equal(child.scanValue, `${scan.name}-${phase}`);
-              assert.equal(child.configPath, scan.configPath);
-              assert.deepEqual(child.openaiAuthentication, {
-                CODEX_API_KEY: `synthetic-${scan.name}-${phase}`,
-              });
-              assert.deepEqual(
-                child.providerAuthentication,
-                Object.fromEntries(
-                  scan.providerKeys.map((key) => [
-                    key,
-                    `synthetic-${scan.name}-${phase}-${key}`,
-                  ]),
+                workerPermissionProfileOverride(launch.argv).includes(
+                  "glob_scan_max_depth",
                 ),
-              );
-              assertFlagPair(child.argv, "--model", scan.settings.model);
-              assertFlagPair(
-                child.argv,
-                "--cyber-access-program",
-                scan.accessProgram,
-              );
-              assertConfigOverrides(
-                child.argv,
-                Object.fromEntries(
-                  Object.entries(scan.apiFeatures).map(([key, value]) => [
-                    `features.${key}`,
-                    value,
-                  ]),
-                ),
-              );
-              assertConfigOverrides(preflight.argv, {
-                model: scan.settings.model,
-              });
-              for (const launch of [child, preflight]) {
-                assertConfigOverrides(launch.argv, {
-                  model_provider: scan.config["model_provider"],
-                  model_reasoning_summary:
-                    scan.config["model_reasoning_summary"],
-                  service_tier: scan.config["service_tier"],
-                  model_reasoning_effort: "ultra",
-                  openai_base_url: scan.settings.codexOptions.baseUrl,
-                });
-                const provider = launch.argv.filter((argument: string) =>
-                  /^model_providers[.=]/u.test(argument),
-                );
-                assert.ok(
-                  provider.length > 0,
-                  "both preflight and worker launch receive provider configuration",
-                );
-                const providers = parseToml(provider.join("\n"))
-                  .model_providers as Record<string, Record<string, unknown>>;
-                if (scan.expectedProvider)
-                  assert.deepEqual(
-                    JSON.parse(JSON.stringify(providers)),
-                    scan.expectedProvider,
-                  );
-                else
-                  assert.deepEqual(Object.keys(providers.openrouter).sort(), [
-                    "base_url",
-                    "env_key",
-                    "name",
-                    "wire_api",
-                  ]);
-                assert.equal(
-                  workerPermissionProfileOverride(launch.argv).includes(
-                    "glob_scan_max_depth",
-                  ),
-                  false,
-                  "a resumed bounded cap must not truncate an original uncapped deny glob, in either order",
-                );
-              }
-              const filesystem = (
-                parseToml(workerPermissionProfileOverride(child.argv))
-                  .permissions as Record<
-                  string,
-                  { filesystem: Record<string, unknown> }
-                >
-              )["codex_security_deep_scan_worker"].filesystem;
-              assert.deepEqual(
-                JSON.parse(JSON.stringify(filesystem)),
-                scan.expectedFilesystem,
-              );
-              assertReadOnlyWorkerPolicy(child.argv);
-              assertWorkerSubagentPolicy(
-                child.argv,
-                scan.name === "first" ? 0 : 2,
-              );
-              assert.equal(filesystem["/repo/.env"], "deny");
-              assert.equal(
-                child.argv.includes("resume"),
-                resumeThreadId !== undefined,
-              );
-              assert.equal(
-                child.stdin.includes("continuation"),
-                resumeThreadId !== undefined,
-              );
-            }),
-          );
-          for (const [index, launch] of launches.entries()) {
-            if (launch.status === "rejected") {
-              launchFailures.push(
-                `${scans[index].name}/${phase}/${kind}: ${launch.reason.message}`,
+                false,
+                "a resumed bounded cap must not truncate an original uncapped deny glob, in either order",
               );
             }
+            const filesystem = (
+              parseToml(workerPermissionProfileOverride(child.argv))
+                .permissions as Record<
+                string,
+                { filesystem: Record<string, unknown> }
+              >
+            )["codex_security_deep_scan_worker"].filesystem;
+            assert.deepEqual(
+              JSON.parse(JSON.stringify(filesystem)),
+              scan.expectedFilesystem,
+            );
+            assertReadOnlyWorkerPolicy(child.argv);
+            assertWorkerSubagentPolicy(
+              child.argv,
+              scan.name === "first" ? 0 : 2,
+            );
+            assert.equal(filesystem["/repo/.env"], "deny");
+            assert.equal(
+              child.argv.includes("resume"),
+              resumeThreadId !== undefined,
+            );
+            assert.equal(
+              child.stdin.includes("continuation"),
+              resumeThreadId !== undefined,
+            );
+          }),
+        );
+        for (const [index, launch] of launches.entries()) {
+          if (launch.status === "rejected") {
+            launchFailures.push(
+              `${scans[index].name}/${phase}/discovery: ${launch.reason.message}`,
+            );
           }
         }
         if (phase === "fresh") {
@@ -722,89 +718,6 @@ export function reconstructedWorkerCases({
     } finally {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
-      restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-    }
-  }
-
-  async function testReducerCoveragePersistenceBinding() {
-    const fixture = await fakeCodexFixture();
-    const previousPath = process.env.CODEX_CLI_PATH;
-    const previousMarker = process.env.FAKE_CODEX_MARKER;
-    process.env.CODEX_CLI_PATH = fixture.executablePath;
-    try {
-      const promptPath = path.join(fixture.root, "prompt.md");
-      const workingDirectory = path.join(fixture.root, "artifacts");
-      await mkdir(workingDirectory);
-      await writeFile(promptPath, "fixture reducer prompt\n");
-      const launches: Promise<void>[] = [];
-      for (const resume of [false, true]) {
-        for (const persistSourceCoverage of [false, true]) {
-          const markerPath = path.join(
-            fixture.root,
-            `coverage-${resume}-${persistSourceCoverage}.json`,
-          );
-          process.env.FAKE_CODEX_MARKER = markerPath;
-          const scanRoot = path.join(
-            fixture.root,
-            `scan-${resume}-${persistSourceCoverage}`,
-          );
-          const deepReducer = {
-            scanRoot,
-            claimedWorkers: [
-              {
-                id: "worker-1",
-                attempt: 2,
-                resultPath: path.join(
-                  scanRoot,
-                  "worker",
-                  "checkpoints",
-                  "accepted.json",
-                ),
-                artifactDir: path.join(scanRoot, "worker"),
-              },
-            ],
-            persistSourceCoverage,
-          };
-          const launch = new CodexSdkWorkerExecutor({
-            parentSandbox: trustedParentSandbox,
-            artifactContext: {
-              pluginRoot: fixture.root,
-              scanRoot: deepReducer.scanRoot,
-              repoRoot: fixture.root,
-              scanId: "fixture-scan-id",
-            },
-          }).run({
-            kind: "dedup",
-            promptPath,
-            workingDirectory,
-            subagents: 0,
-            signal: new AbortController().signal,
-            ...(resume
-              ? {
-                  resumeThreadId: "fixture-existing-thread",
-                  continuationPrompt: "continue the reducer\n",
-                }
-              : {}),
-            artifactContext: {
-              root: workingDirectory,
-              layout: "reducer",
-              deepReducer,
-            },
-          });
-          launches.push(
-            launch.then(async () => {
-              const invocation = JSON.parse(await readFile(markerPath, "utf8"));
-              assertConfigOverrides(invocation.argv, {
-                "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
-                  JSON.stringify(deepReducer),
-              });
-            }),
-          );
-        }
-      }
-      await Promise.all(launches);
-    } finally {
-      restoreEnv("CODEX_CLI_PATH", previousPath);
       restoreEnv("FAKE_CODEX_MARKER", previousMarker);
     }
   }

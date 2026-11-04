@@ -9,15 +9,14 @@ import { promisify } from "node:util";
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
-import { readJson, writeJson } from "./support/json.ts";
+import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
   typeof import("../src/deep-scan/coordinator.js") &
   typeof import("../src/deep-scan/store.js") &
   typeof import("../src/artifact-context.js") &
-  typeof import("../src/artifact-scan-draft.js") &
-  typeof import("../src/artifact-deep-reducer.js");
+  typeof import("../src/artifact-scan-draft.js");
 
 interface CoverageFixtureOptions {
   resume?: boolean;
@@ -98,7 +97,6 @@ const {
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
-  recordCodexSecurityDeepReduction,
 } = (await importModule({
   stdin: {
     contents: [
@@ -107,7 +105,6 @@ const {
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { getCodexSecurityCompletedScan, recordCodexSecurityWorkerScanDraft, recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
-      'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
@@ -759,37 +756,25 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await mkdir(artifactDir, { recursive: true });
     await writeFile(promptPath, "Synthetic reducer prompt.\n");
     const id = randomUUID();
-    await store.claimDedup({
-      id,
-      scanId: run.scanId,
-      workerIds: workers.map((worker) => worker.id),
-      artifactDir,
-      promptPath,
-    });
     const resultManifestPath = path.join(artifactDir, "result.json");
+    // Legacy accepted reducers omitted coverage entirely.
     const findings = retryFindings?.flat() ?? [];
-    const result = {
-      scanId: run.scanId,
-      findings,
-    };
-    await writeJson(resultManifestPath, result);
-    await store.commitDedup({
-      id,
-      scanId: run.scanId,
-      newFindings: findings.length,
+    await writeFile(
       resultManifestPath,
-    });
-    if (continueAfterResume) {
-      // A mutable v1 result can change after the workbench accepts it.
-      await writeJson(resultManifestPath, {
-        ...result,
-        sourceCoverage: { surfaces: [], explicitExclusions: [], deferred: [] },
-      });
-    }
+      JSON.stringify({ scanId: run.scanId, findings }),
+    );
     rawSources.set(
       resultManifestPath,
       await readFile(resultManifestPath, "utf8"),
     );
+    await store.recordIteration({
+      id,
+      scanId: run.scanId,
+      workerIds: workers.map((w) => w.id),
+      resultPath: resultManifestPath,
+      noNewStreak: findings.length ? 0 : workers.length,
+      consecutiveErrors: 0,
+    });
     run = await store.get(run.scanId, threadId);
   }
   let discoveryCalls = 0;
@@ -825,15 +810,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           request.artifactContext.root,
           index,
           !(extraReceiptRetry && index === 0 && discoveryCalls === 2),
-        );
-      } else {
-        await recordCodexSecurityDeepReduction(
-          {
-            ...request.artifactContext,
-            repoRoot: targetPath,
-            scanId: run.scanId,
-          },
-          { scanId: run.scanId, findings: retryFindings?.flat() ?? [] },
         );
       }
       return { threadId: thread, finalResponse: "Audit finished." };
@@ -893,31 +869,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     (worker) => worker.kind === "dedup",
   )) {
     assert.ok(worker.resultManifestPath);
-    if (!rawSources.has(worker.resultManifestPath)) {
-      const result = JSON.parse(
-        await readFile(worker.resultManifestPath, "utf8"),
-      );
-      assert.equal(
-        Object.hasOwn(result, "sourceCoverage"),
-        false,
-        "v1 reducers remain readable by earlier binaries",
-      );
-      for (const name of await readdir(
-        path.join(worker.artifactDir, "checkpoints"),
-      )) {
-        const checkpoint = JSON.parse(
-          await readFile(
-            path.join(worker.artifactDir, "checkpoints", name),
-            "utf8",
-          ),
-        );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          false,
-          "v1 checkpoints remain readable by earlier binaries",
-        );
-      }
-    }
+    const result = JSON.parse(
+      await readFile(worker.resultManifestPath, "utf8"),
+    );
+    assert.equal(
+      Object.hasOwn(result, "sourceCoverage"),
+      false,
+      "v1 reducers remain readable by earlier binaries",
+    );
   }
   if (stopBeforeDraft) {
     const recovered = await runWorkbench([

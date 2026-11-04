@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -19,7 +19,7 @@ const runtime = await importModule({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
-      'export { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } from "./src/artifact-deep-reducer.ts";',
+      'export { mergeBatch } from "./src/deep-scan/iteration.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
@@ -36,10 +36,6 @@ export async function publishCoverageFixture(
     continueAfterResume = false,
     immutableInputs = false,
     materialFindings = false,
-    discardMutableResults = false,
-    legacyAttempts = false,
-    splitSeededReducers = false,
-    selectedRecovery = false,
   } = {},
 ) {
   const {
@@ -49,8 +45,7 @@ export async function publishCoverageFixture(
     WorkbenchDeepScanStore,
     createScanArtifactContext,
     recordCodexSecurityScanDraftViaWorkbench,
-    recordCodexSecurityDeepReduction,
-    getCodexSecurityDeepReducerInputs,
+    mergeBatch,
     saveScanDraftCheckpoint,
   } = runtime;
   const targetPath = path.join(root, "target");
@@ -71,16 +66,11 @@ export async function publishCoverageFixture(
     path.join(codexHome, "codex-security", "config.toml"),
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
-  const runWorkbench = async (args, input, selectFinalization = false) => {
-    const script = path.join(pluginRoot, "scripts", "workbench_db.py");
-    const pythonArgs = selectFinalization
-      ? [
-          "-c",
-          "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
-          script,
-          ...args,
-        ]
-      : [script, ...args];
+  const runWorkbench = async (args, input) => {
+    const pythonArgs = [
+      path.join(pluginRoot, "scripts", "workbench_db.py"),
+      ...args,
+    ];
     const execution = exec(process.env.PYTHON || "python3", pythonArgs, {
       env: {
         ...process.env,
@@ -99,47 +89,53 @@ export async function publishCoverageFixture(
     "deep-security-scan/v1",
     "the prior reader starts the legacy workflow",
   );
-  if (selectedRecovery) {
-    ({ run } = await store.claimCoordinator({ scanId: run.scanId, threadId }));
-  } else {
-    // Seed an existing v1 run for legacy direct publication and in-memory coverage recovery.
-    await exec(process.env.PYTHON || "python3", [
-      "-c",
-      [
-        "import sqlite3, sys",
-        "with sqlite3.connect(sys.argv[1]) as db:",
-        "    db.execute(\"UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?\", (sys.argv[2],))",
-      ].join("\n"),
-      path.join(root, "state", "workbench.sqlite3"),
-      run.scanId,
-    ]);
-    run = await store.get(run.scanId, threadId);
-    assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
-  }
+  // Seed an existing v1 run for legacy direct publication and in-memory coverage recovery.
+  await exec(process.env.PYTHON || "python3", [
+    "-c",
+    [
+      "import sqlite3, sys",
+      "with sqlite3.connect(sys.argv[1]) as db:",
+      "    db.execute(\"UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?\", (sys.argv[2],))",
+    ].join("\n"),
+    path.join(root, "state", "workbench.sqlite3"),
+    run.scanId,
+  ]);
+  run = await store.get(run.scanId, threadId);
+  assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
   const rawSources = new Map();
-  const writeReduction = async (context) => {
-    const inputs = await getCodexSecurityDeepReducerInputs(context);
-    const sources = [
-      ...(inputs.previous?.findings ?? []),
-      ...inputs.discoveries.flatMap((source) => source.result.findings),
-    ];
-    const findings = [];
-    if (sources.length) {
-      const finding = structuredClone(sources[0]);
-      finding.provenance.sourceFindingIds = [
-        ...new Set(
-          sources.flatMap((source) => source.provenance.sourceFindingIds),
-        ),
-      ];
-      delete finding.provenance.sourceFindings;
-      findings.push(finding);
-    }
-    await recordCodexSecurityDeepReduction(context, {
-      scanId: run.scanId,
-      findings,
+  // Both reports describe the same extraction operation and provide its source.
+  const compare = async (prompt, schema) => {
+    const input = JSON.parse(prompt.split("\n").at(-1));
+    if (schema.properties.sources)
+      return JSON.stringify({
+        sources: input.map(({ id }) => ({
+          id,
+          same: true,
+          survivingPaths: [],
+        })),
+      });
+    if (schema.properties.reviews)
+      return JSON.stringify({
+        reviews: input.pairs.map(({ id }) => ({
+          pair: id,
+          decision: "same",
+          leftEvidence: 0,
+          rightEvidence: 0,
+        })),
+      });
+    return JSON.stringify({
+      defects: [
+        {
+          operation: "extract",
+          failure: "unconfined destination",
+          path: "source.py",
+          reports: input.map(({ id }) => ({ id, evidence: 0 })),
+        },
+      ],
+      uncertain: [],
     });
   };
   const writeDiscovery = async (artifactDir, index) => {
@@ -198,6 +194,16 @@ export async function publishCoverageFixture(
               },
               taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
               locations: [{ path: "source.py", startLine: 1, endLine: 1 }],
+              codeEvidence: [
+                {
+                  id: "extract",
+                  label: "Extraction",
+                  explanation: "Unconfined destination",
+                  path: "source.py",
+                  startLine: 1,
+                  code: "archive.extract(member, destination)",
+                },
+              ],
               remediation: materialRemediations[index],
               remediationTests: [materialRemediationTests[index]],
               provenance: { source: "local_plugin" },
@@ -250,10 +256,7 @@ export async function publishCoverageFixture(
         artifactDir,
         attempt: index === 0 ? 2 : 1,
       };
-      const writtenPath = await writeDiscovery(artifactDir, index);
-      const resultManifestPath = discardMutableResults
-        ? path.join(artifactDir, "result.json")
-        : writtenPath;
+      const resultManifestPath = await writeDiscovery(artifactDir, index);
       await writeFile(worker.promptPath, "Synthetic discovery prompt.\n");
       for (const status of ["queued", "running", "succeeded"]) {
         await store.updateWorker({
@@ -264,135 +267,67 @@ export async function publishCoverageFixture(
       }
       workers.push({ ...worker, resultPath: resultManifestPath });
     }
-    const batches = splitSeededReducers
-      ? [workers.slice(0, 2), workers.slice(2)]
-      : [workers];
-    let lastReducerId;
-    let lastReducerReference;
-    for (const [index, batch] of batches.entries()) {
-      const label = `dedup-${String(index + 1).padStart(4, "0")}`;
-      const artifactDir = path.join(
-        run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        "dedup",
-        label,
-        "output",
-      );
-      const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
-      await mkdir(artifactDir, { recursive: true });
-      await writeFile(promptPath, "Synthetic reducer prompt.\n");
-      const id = randomUUID();
-      const claimed = await store.claimDedup({
-        id,
-        scanId: run.scanId,
-        workerIds: batch.map((worker) => worker.id),
-        artifactDir,
-        promptPath,
-      });
-      if (discardMutableResults) {
-        await store.updateWorker({
-          id,
-          scanId: run.scanId,
-          kind: "dedup",
-          status: "running",
-          artifactDir,
-          promptPath,
-          attempt: 1,
-        });
-      }
-      const resultManifestPath = path.join(artifactDir, "result.json");
-      // Legacy accepted reducers omitted coverage entirely.
-      if (materialFindings) {
-        await writeReduction({
-          root: artifactDir,
-          repoRoot: targetPath,
-          scanId: run.scanId,
-          layout: "reducer",
-          deepReducer: {
-            scanRoot: run.scanDir,
-            claimedWorkers: batch.map((worker) => {
-              const input = claimed.persistedDedupInputs.find(
-                (input) =>
-                  input.dedupWorkerId === id &&
-                  input.discoveryWorkerId === worker.id,
-              );
-              return {
-                ...worker,
-                resultPath: input.resultManifestPath ?? worker.resultPath,
-                attempt: input.attempt ?? worker.attempt,
-              };
-            }),
-            persistSourceCoverage: selectedRecovery,
-            previousReducerResultPath: claimed.persistedMergeClaims?.find(
-              (claim) => claim.workerId === id,
-            )?.previousResultPath,
-          },
-        });
-      } else {
-        await writeFile(
-          resultManifestPath,
-          JSON.stringify({ scanId: run.scanId, findings: [] }),
+    const aggregate = { scanId: run.scanId, findings: [] };
+    let noNewStreak = 0;
+
+    const label = "dedup-0001";
+    const artifactDir = path.join(
+      run.scanDir,
+      "artifacts",
+      "deep_discovery",
+      "dedup",
+      label,
+      "output",
+    );
+    await mkdir(artifactDir, { recursive: true });
+    const id = randomUUID();
+    const state = await store.get(run.scanId, threadId);
+    const accepted = await Promise.all(
+      workers.map(async (worker) => {
+        const stored = state.persistedWorkers.find(
+          ({ id }) => id === worker.id,
         );
-      }
-      rawSources.set(
-        resultManifestPath,
-        await readFile(resultManifestPath, "utf8"),
-      );
-      const committed = await store.commitDedup({
-        id,
-        scanId: run.scanId,
-        newFindings: materialFindings && index === 0 ? 1 : 0,
-        resultManifestPath,
-      });
-      lastReducerReference = committed.persistedWorkers.find(
-        (worker) => worker.id === id,
-      ).resultManifestPath;
-      lastReducerId = id;
-    }
-    if (legacyAttempts) {
-      // Migrated discoveries and prior reducers can have frozen claims without attempt rows.
-      await exec(process.env.PYTHON || "python3", [
-        "-c",
-        [
-          "import sqlite3, sys",
-          "with sqlite3.connect(sys.argv[1]) as db:",
-          '    db.execute("DELETE FROM deep_scan_attempts WHERE worker_id != ?", (sys.argv[2],))',
-        ].join("\n"),
-        path.join(root, "state", "workbench.sqlite3"),
-        lastReducerId,
-      ]);
-    }
+        const resultPath = stored.acceptedResultPath ?? worker.resultPath;
+        const result = await validateDiscoveryArtifacts(
+          createDeepScanArtifacts(run.scanDir),
+          resultPath,
+          run.scanId,
+          {
+            artifactDir: worker.artifactDir,
+            resultSha256: stored.acceptedResultSha256,
+          },
+        );
+        return { ...worker, result, resultPath };
+      }),
+    );
+    for (const count of await mergeBatch(
+      aggregate,
+      accepted,
+      run.scanDir,
+      compare,
+      (error) => {
+        throw error;
+      },
+    ))
+      noNewStreak = count ? 0 : noNewStreak + 1;
+    const { sourceCoverage, ...legacy } = aggregate;
+    const resultManifestPath = path.join(artifactDir, "result.json");
+    const bytes = JSON.stringify(legacy);
+    await writeFile(resultManifestPath, bytes);
+    rawSources.set(resultManifestPath, bytes);
+    await store.recordIteration({
+      id,
+      scanId: run.scanId,
+      workerIds: workers.map(({ id }) => id),
+      resultPath: resultManifestPath,
+      noNewStreak,
+      consecutiveErrors: 0,
+    });
     run = await store.get(run.scanId, threadId);
-    if (discardMutableResults) {
-      for (const worker of run.persistedWorkers) {
-        const acceptedPath =
-          worker.acceptedResultPath ??
-          run.persistedDedupInputs.find(
-            (input) => input.discoveryWorkerId === worker.id,
-          )?.resultManifestPath ??
-          run.persistedMergeClaims.find(
-            (claim) => claim.previousWorkerId === worker.id,
-          )?.previousResultPath;
-        assert.ok(acceptedPath, "the real store retains an accepted reference");
-        assert.notEqual(acceptedPath, worker.resultManifestPath);
-        rawSources.set(acceptedPath, await readFile(acceptedPath, "utf8"));
-        rawSources.delete(worker.resultManifestPath);
-        await rm(worker.resultManifestPath);
-      }
-    }
-    if (selectedRecovery) {
-      run = await store.selectFinalization({
-        scanId: run.scanId,
-        reason: "capped",
-        manifestPath: path.join(run.scanDir, "scan-manifest.json"),
-        resultPath: lastReducerReference,
-        omittedWorkerIds: [],
-      });
-    }
   }
   let discoveryCalls = 0;
   const executor = {
+    compareFindings: (prompt, _cwd, _signal, schema) => compare(prompt, schema),
     async run(request) {
       assert.equal(
         resume && !continueAfterResume,
@@ -405,7 +340,10 @@ export async function publishCoverageFixture(
         discoveryCalls++;
         const index =
           Number(
-            path.basename(path.dirname(request.promptPath)).split("-").at(-1),
+            path
+              .basename(path.dirname(request.artifactContext.root))
+              .split("-")
+              .at(-1),
           ) - 1;
         if (index === 0 && !request.resumeThreadId)
           return {
@@ -413,119 +351,32 @@ export async function publishCoverageFixture(
             finalResponse: "Continue the unfinished audit.",
           };
         await writeDiscovery(request.artifactContext.root, index);
-      } else {
-        if (immutableInputs) {
-          const current = await store.get(run.scanId, threadId);
-          for (const claimed of request.artifactContext.deepReducer
-            .claimedWorkers) {
-            const accepted = current.persistedWorkers.find(
-              (worker) => worker.id === claimed.id,
-            );
-            assert.equal(
-              claimed.resultPath,
-              accepted.acceptedResultPath ?? accepted.resultManifestPath,
-              "the reducer uses the exact accepted input",
-            );
-            assert.equal(
-              claimed.artifactDir,
-              accepted.artifactDir,
-              "receipts retain their original output owner",
-            );
-          }
-        }
-        await writeReduction({
-          ...request.artifactContext,
-          repoRoot: targetPath,
-          scanId: run.scanId,
-        });
       }
       return { threadId: thread, finalResponse: "Audit finished." };
     },
   };
-  let publicationCalls = 0;
   const options = {
     run,
     store,
     executor,
     pluginRoot,
     retryDelaysMs: [1],
-    onComplete: async (draft, signal, publication) => {
-      publicationCalls++;
-      if (selectedRecovery && publicationCalls === 1)
-        throw new Error("Synthetic selected publication failure");
+    onComplete: async (draft, signal) => {
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
         runWorkbench,
         signal,
-        selectedRecovery ? publication : undefined,
       );
     },
   };
   const coordinator = new DeepScanCoordinator(options);
   coordinator.start();
-  let terminal;
-  if (selectedRecovery) {
-    await assert.rejects(
-      coordinator.wait(undefined),
-      /Synthetic selected publication failure/,
-    );
-    const pending = await store.get(run.scanId, threadId);
-    assert.equal(pending.status, "running");
-    assert.deepEqual(pending.finalizationInput, run.finalizationInput);
-    const worker = pending.persistedWorkers.find(
-      (worker) => worker.kind === "discovery",
-    );
-    const rejected = {
-      scanId: run.scanId,
-      complete: false,
-      findings: [],
-      reviewState: {
-        completeness: "complete",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-      },
-    };
-    await saveScanDraftCheckpoint(
-      { root: worker.artifactDir, repoRoot: targetPath, layout: "worker" },
-      rejected,
-    );
-    const replacement = path.join(worker.artifactDir, "result.json");
-    await writeFile(replacement, JSON.stringify(rejected));
-    await assert.rejects(
-      validateDiscoveryArtifacts(
-        createDeepScanArtifacts(run.scanDir),
-        replacement,
-        run.scanId,
-      ),
-      /only a checkpoint/,
-    );
-    const headPath = path.join(worker.artifactDir, "checkpoint-head.json");
-    const head = JSON.parse(await readFile(headPath, "utf8"));
-    for (const file of [
-      replacement,
-      headPath,
-      path.join(worker.artifactDir, "checkpoints", head.checkpoint),
-    ]) {
-      rawSources.set(file, await readFile(file, "utf8"));
-    }
-    const restarted = new DeepScanCoordinator({ ...options, run: pending });
-    restarted.start();
-    terminal = await restarted.wait(undefined);
-    assert.deepEqual(terminal.finalizationInput, run.finalizationInput);
-    assert.equal(publicationCalls, 2);
-  } else {
-    terminal = await coordinator.wait(undefined);
-  }
+  const terminal = await coordinator.wait(undefined);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(
     terminal.noNewStreak,
-    materialFindings
-      ? resume && !continueAfterResume && !splitSeededReducers
-        ? 0
-        : 1
-      : statuses.length,
+    statuses.length - (materialFindings ? 1 : 0),
     "source coverage must not change stopping policy",
   );
   assert.equal(
@@ -545,26 +396,9 @@ export async function publishCoverageFixture(
     const result = JSON.parse(await readFile(resultPath, "utf8"));
     assert.equal(
       Object.hasOwn(result, "sourceCoverage"),
-      selectedRecovery,
+      false,
       "coverage persistence follows the accepted workflow version",
     );
-    if (!rawSources.has(worker.resultManifestPath)) {
-      for (const name of await readdir(
-        path.join(worker.artifactDir, "checkpoints"),
-      )) {
-        const checkpoint = JSON.parse(
-          await readFile(
-            path.join(worker.artifactDir, "checkpoints", name),
-            "utf8",
-          ),
-        );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          selectedRecovery,
-          "checkpoint coverage follows the accepted workflow version",
-        );
-      }
-    }
   }
   await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
   for (const [file, bytes] of rawSources)
