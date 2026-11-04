@@ -72,6 +72,8 @@ test(async function testSchemasAreBoundAndExact() {
 
 test(async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
+  // Sandbox writable roots can have empty .git placeholders above an ordinary directory.
+  await mkdir(path.join(fixture.root, ".git"));
   await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
   await fixture.writeRepositoryFile("-source.py", "source\n");
   await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");
@@ -202,7 +204,7 @@ test(async function testNonUtf8InventoryPaths(t) {
   });
 });
 
-test(async function testPrepareListsIgnoredTrackedFilesOnce() {
+test(async function testPrepareWithIgnoredTrackedFiles() {
   const fixture = await createFixture("ignored tracked files");
   await runGit(fixture.repoRoot, "init", "-q");
   await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
@@ -232,12 +234,33 @@ test(async function testPrepareListsIgnoredTrackedFilesOnce() {
     }),
     { items: [{ path: "-generated/b.ts" }] },
   );
+
+  const previous = await readFile(fixture.scanInventory);
+  await fixture.writeRepositoryFile(".git/index", "invalid");
+  await assert.rejects(
+    inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    /git ls-files.*fatal:.*index/isu,
+  );
+  assert.deepEqual(await readFile(fixture.scanInventory), previous);
+
+  const savedGit = process.env.CODEX_SECURITY_GIT;
+  try {
+    process.env.CODEX_SECURITY_GIT = "";
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan);
+    assert.equal(
+      await readFile(fixture.scanInventory, "utf8"),
+      "./.gitignore\n",
+    );
+  } finally {
+    if (savedGit === undefined) delete process.env.CODEX_SECURITY_GIT;
+    else process.env.CODEX_SECURITY_GIT = savedGit;
+  }
 });
 
 test(async function testPrepareExcludesGitMetadata() {
   const fixture = await createFixture("nested repositories");
+  await runGit(fixture.repoRoot, "init", "-q");
   for (const [name, source] of [
-    [".git/config", "[core]\n"],
     ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
     ["vendor/lib/.git/hooks/example.py", "pass\n"],
     ["vendor/lib/handler.py", "pass\n"],
