@@ -1,3 +1,5 @@
+"""Exercise isolated script imports, CLI help, and finalization of the checked-in example bundle."""
+
 from __future__ import annotations
 
 import shutil

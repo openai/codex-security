@@ -32,7 +32,6 @@ import {
   DeepScanCoordinatorRegistry,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
-  DeepScanNonRetryableError,
   AsyncLock,
   classifyCodexWorkerError,
   codexWorkerTurnError,
@@ -724,15 +723,15 @@ async function testCancellationClearsRetryWait() {
     failFirstDiscoveryAttempt: true,
     blockDiscoveryAfterCalls: 1,
   });
-  const sleepStarted = Promise.withResolvers<void>();
+  const sleepStarted = Promise.withResolvers<DeepScanLogEvent>();
   const coordinator = createCoordinator(fixture, store, executor, {
     clock: undefined,
     log: (event) => {
-      if (event.event === "worker_retry_scheduled") sleepStarted.resolve();
+      if (event.event === "worker_retry_scheduled") sleepStarted.resolve(event);
     },
   });
   coordinator.start();
-  await sleepStarted.promise;
+  assert.equal((await sleepStarted.promise).reason, "transient worker failure");
   const callsAtCancellation = executor.discoveryCalls;
   coordinator.cancel("cancel retry wait");
   const terminal = await coordinator.wait(undefined, 5_000);
@@ -1132,7 +1131,11 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
     events.some((event) => event.event === "coordinator_cleanup_settled"),
   );
   assert.equal(
-    events.some((event) => event.event === "discovery_accepted"),
+    events.some(
+      (event) =>
+        event.event === "discovery_accepted" ||
+        event.event === "worker_succeeded",
+    ),
     false,
   );
   const worker = [...store.workers.values()].find(

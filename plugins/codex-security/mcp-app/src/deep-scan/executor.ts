@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
+  type BigIntStats,
   constants as fsConstants,
   existsSync,
   promises as fs,
@@ -75,6 +76,11 @@ export interface CodexSdkWorkerArtifactContext {
   pythonCommand?: string;
 }
 
+interface BoundCodexExecutable {
+  readonly path: string;
+  readonly identity: BigIntStats;
+}
+
 interface CodexSdkWorkerRuntimeSettings {
   hasProviderEnvKey?: boolean;
   environment?: Record<string, string>;
@@ -87,6 +93,8 @@ interface CodexSdkWorkerRuntimeSettings {
 
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
+  // Each live coordinator keeps the executable selected for its first worker.
+  private codexExecutable?: Promise<BoundCodexExecutable>;
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
 
   constructor(
@@ -143,10 +151,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {
     const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
-    const scopeInput = JSON.stringify({
-      paths: includePaths,
-      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
-    });
     const includePathsFile =
       !discovery || includePaths === undefined
         ? undefined
@@ -167,7 +171,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
       const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv));
+        workerRuntimeSettings(childEnv).catch((error: unknown) => {
+          // A failed read produced no snapshot. Let the next worker retry it.
+          this.runtimeSettings = undefined;
+          throw error;
+        }));
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -205,7 +213,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
       if (includePathsFile !== undefined) {
         // Keep host-bound inputs beside the prompt, outside the worker's output root.
-        await writePrivateFile(includePathsFile, scopeInput);
+        await writePrivateFile(
+          includePathsFile,
+          JSON.stringify({
+            paths: includePaths,
+            filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+          }),
+        );
       }
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
@@ -236,6 +250,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
+              tools: {
+                experimental_request_user_input: { enabled: false },
+                update_plan: { enabled: false },
+              },
               features: {
                 ...(isRecord(runtimeSettings.config.features) &&
                   runtimeSettings.config.features),
@@ -243,6 +261,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                 plugins: false,
                 view_image: false,
                 image_generation: false,
+                goals: false,
+                request_permissions_tool: false,
                 computer_use: false,
                 ...(request.kind === "compare" && {
                   shell_tool: false,
@@ -271,14 +291,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
-      const codexPath = resolveCodexPath(
+      const executable = await (this.codexExecutable ??= bindCodexExecutable(
         childEnv,
-        process.platform,
-        process.arch,
         originalCwd,
-      );
+      ).catch((error) => {
+        // A failed first lookup has not pinned an executable yet; allow startup retries.
+        this.codexExecutable = undefined;
+        throw error;
+      }));
+      await verifyBoundCodexExecutable(executable);
       const preflightOptions = {
-        codexPath,
+        codexPath: executable.path,
         cwd: request.workingDirectory,
         configOverrides,
         providerConfigOverrides: runtimeSettings.preflightProviderOverrides,
@@ -335,7 +358,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? request.prompt
           : await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
-        codexPathOverride: executablePathForSpawn(codexPath),
+        codexPathOverride: executablePathForSpawn(executable.path),
         env: childEnv,
         // Codex exec reads CODEX_API_KEY; the SDK maps apiKey to that variable.
         // Keep native credentials unless the worker has no configured account.
@@ -378,6 +401,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
 
       try {
+        // Detect updates during preflight before starting a fresh or resumed worker.
+        await verifyBoundCodexExecutable(executable);
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
           ...(request.kind !== "discovery" && { outputSchema: request.schema }),
@@ -668,6 +693,57 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function bindCodexExecutable(
+  env: NodeJS.ProcessEnv,
+  originalCwd: string,
+): Promise<BoundCodexExecutable> {
+  const path = resolveCodexPath(
+    env,
+    process.platform,
+    process.arch,
+    originalCwd,
+  );
+  return { path, identity: await codexExecutableIdentity(path) };
+}
+
+async function verifyBoundCodexExecutable(
+  executable: BoundCodexExecutable,
+): Promise<void> {
+  let identity: BigIntStats;
+  try {
+    identity = await codexExecutableIdentity(executable.path);
+  } catch (error) {
+    throw codexExecutableChangedError(executable.path, error);
+  }
+  if (
+    identity.dev !== executable.identity.dev ||
+    identity.ino !== executable.identity.ino ||
+    identity.size !== executable.identity.size ||
+    identity.mtimeNs !== executable.identity.mtimeNs ||
+    identity.ctimeNs !== executable.identity.ctimeNs
+  ) {
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableIdentity(path: string): Promise<BigIntStats> {
+  const metadata = await fs.stat(path, { bigint: true });
+  if (!metadata.isFile() || metadata.size === 0n) {
+    throw new Error("Codex executable is not a non-empty file.");
+  }
+  return metadata;
+}
+
+function codexExecutableChangedError(path: string, cause?: unknown): Error {
+  return new DeepScanNonRetryableError(
+    "Deep Scan cannot start this worker because the Codex executable " +
+      `"${path}" changed after this Deep Scan started or is no longer available. ` +
+      "This usually means Codex updated while the scan was running. Retry after the update " +
+      "finishes; completed work remains in the retained partial scan.",
+    { cause },
+  );
+}
+
 function mergeConfigTables(
   base: Record<string, unknown>,
   override: Record<string, unknown>,
@@ -923,7 +999,21 @@ export function resolveCodexPath(
           : resolveFromSearchPath(searchPath, executableName, originalCwd);
       if (fromSearchPath) return fromSearchPath;
     }
-    return absoluteCodexPath(configured, platform, originalCwd);
+    const configuredPath = absoluteCodexPath(configured, platform, originalCwd);
+    if (platform === "win32") {
+      // Match Node's spawn lookup before binding the actual file's identity.
+      const suffixBase = configuredPath.endsWith(".")
+        ? configuredPath
+        : `${configuredPath}.`;
+      const hasExtension = /\.[^.]+$/u.test(win32.basename(configuredPath));
+      const candidates = [
+        ...(hasExtension ? [configuredPath] : []),
+        `${suffixBase}com`,
+        `${suffixBase}exe`,
+      ];
+      return candidates.find(isExecutableFile) ?? configuredPath;
+    }
+    return configuredPath;
   }
 
   if (platform !== "win32") {

@@ -1,3 +1,5 @@
+"""Exercise UTC timestamps for workbench leases and deadlines with Python 3.10 semantics."""
+
 from __future__ import annotations
 
 import importlib
@@ -13,6 +15,8 @@ pytestmark = pytest.mark.cross_platform
 
 
 class Python310DateTime(datetime):
+    """Freeze the clock and reproduce Python 3.10's handling of Z-suffixed timestamps for lease tests."""
+
     @classmethod
     def fromisoformat(cls, value: str) -> datetime:
         if isinstance(value, str) and value.endswith(("Z", "z")):

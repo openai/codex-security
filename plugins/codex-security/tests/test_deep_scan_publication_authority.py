@@ -1,3 +1,5 @@
+"""Check coordinator ownership and receipt validation when publishing or replaying a deep scan."""
+
 from __future__ import annotations
 
 import copy
