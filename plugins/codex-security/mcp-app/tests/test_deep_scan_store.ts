@@ -69,6 +69,7 @@ async function testBeginProtocolAndParsing() {
     scanRoot: "/fixture/scans",
   });
   assert.equal(result.scanId, scanId);
+  assert.equal(result.discoveryStarted, false);
   assert.equal(result.serviceTier, "default");
   assert.deepEqual(result.config, {
     workers: 6,
@@ -1290,6 +1291,7 @@ function stateResult(
     deepScan: {
       scanId,
       status: "running",
+      discoveryStarted: false,
       targetPath: "/fixture/repository",
       scope: ".",
       userContext: null,

@@ -1,4 +1,5 @@
 import { jsonLineInputSource } from "./support/json-line-input-source.ts";
+import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import type { PersistedDeepScanWorker } from "../src/deep-scan/types.js";
 import { readJson, readJsonLines } from "./support/json.ts";
 import {
@@ -33,7 +34,9 @@ import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
 
-const pluginRoot = path.resolve(mcpAppRoot, "..");
+const pluginRoot = await realpath(
+  path.resolve(mcpAppRoot, "../../../sdk/typescript/_bundled_plugin"),
+);
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
 
@@ -49,11 +52,13 @@ async function testDeepScanStdioLifecycle() {
   const fixtureRoot = await temporaryDirectory("codex-security-deep-stdio-");
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
+  const expiredTargetPath = path.join(fixtureRoot, "expired-target");
   const stateDir = path.join(fixtureRoot, "state");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
   const projectConfigPath = path.join(fixtureRoot, "selected.yaml");
+  const expiredProjectConfigPath = path.join(fixtureRoot, "expired.yaml");
   const startLogPath = path.join(fixtureRoot, "fake-codex-started.jsonl");
   const exitLogPath = path.join(fixtureRoot, "fake-codex-exited.jsonl");
   const restartControlPath = path.join(
@@ -88,11 +93,14 @@ async function testDeepScanStdioLifecycle() {
 
   await mkdir(targetPath, { recursive: true });
   await mkdir(failedTargetPath, { recursive: true });
+  await mkdir(expiredTargetPath, { recursive: true });
   await mkdir(path.join(codexHome, "codex-security"), { recursive: true });
   for (const directory of [
     "scripts",
     "references",
     "schemas",
+    "shared",
+    "mcp/native",
     ".codex-plugin",
   ]) {
     await cp(
@@ -153,6 +161,10 @@ max_discovery_runs = 2
   );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(projectConfigPath, "scan: {max_time_minutes: 30}\n");
+  await writeFile(
+    expiredProjectConfigPath,
+    "scan: {mode: deep, max_time_minutes: 0.000001}\n",
+  );
   await writeFile(
     runtimeConfigPath,
     `model_reasoning_summary = "detailed"
@@ -256,6 +268,35 @@ service_tier = "ultrafast"
       [],
     );
 
+    const expired = await server.request(
+      5,
+      "tools/call",
+      toolCall(
+        "start_codex_security_deep_scan",
+        {
+          targetPath: expiredTargetPath,
+          projectConfigPath: expiredProjectConfigPath,
+        },
+        threadId,
+      ),
+    );
+    assertNoError(expired);
+    const expiredScanId = expired.result.structuredContent.scanId;
+    const expiredState = await getDeepScan({
+      environment,
+      scanId: expiredScanId,
+      threadId,
+    });
+    assert.equal(expiredState.terminalReason, "capped");
+    assert.equal(expiredState.dispatchedCount, 0);
+    assert.equal(
+      expired.result.structuredContent.completion.scan.reportAvailable,
+      true,
+    );
+    const coverage = await readFixtureCoverage(expiredState.scanDir, stateDir);
+    assert.match(coverage.deferred[0].reason, /discovery time limit elapsed/);
+    assert.deepEqual(await readLogLines(startLogPath), []);
+
     const targetRequest = {
       targetPath,
       scope: ".",
@@ -276,7 +317,10 @@ service_tier = "ultrafast"
       }),
     );
 
-    const scanId = await waitForScanId({ server });
+    const scanId = await waitForScanId({
+      server,
+      excludedScanIds: [expiredScanId],
+    });
     await waitForDeepScanWorker({ environment, scanId, threadId });
     const [startedWorker] = await waitForJsonLines(startLogPath, 1);
     assert.equal(startedWorker.hasExpectedApiKey, true);
@@ -534,7 +578,7 @@ service_tier = "ultrafast"
     const failedScanId = await waitForScanId({
       server,
       requestId: 20,
-      excludedScanIds: [scanId],
+      excludedScanIds: [expiredScanId, scanId],
     });
     await waitForDeepScanWorker({
       environment,
@@ -1641,6 +1685,7 @@ async function getDeepScan({
 async function waitForDeepScanWorker(input: Parameters<typeof getDeepScan>[0]) {
   await waitFor(async () => {
     const deepScan = await getDeepScan(input);
+    if (deepScan.status === "failed") throw new Error(deepScan.error);
     const worker = deepScan.workers.find(
       (candidate: PersistedDeepScanWorker) =>
         candidate.kind === "discovery" && candidate.status === "running",
@@ -1745,10 +1790,12 @@ import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 const args = process.argv.slice(2);
 const input = Buffer.concat(await process.stdin.toArray());
-const workbenchArgs = JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'));
+const workbenchArgs = args.at(-1).endsWith('workbench_db.py')
+  ? JSON.parse(input.subarray(0, input.indexOf(10)).toString('utf8'))
+  : [];
 const launchLog = process.env.FAKE_WORKBENCH_LAUNCH_LOG;
 const workerInstructionDigest = process.env._CODEX_SECURITY_WORKER_INSTRUCTION_DIGEST;
-appendFileSync(launchLog, JSON.stringify({ args, workbenchArgs, cwd: process.cwd(), workerInstructionDigest }) + '\\n');
+if (workbenchArgs.length) appendFileSync(launchLog, JSON.stringify({ args, workbenchArgs, cwd: process.cwd(), workerInstructionDigest }) + '\\n');
 const gate = launchLog + '.' + process.ppid + '.hold-claim';
 if (workbenchArgs[0] === 'claim-deep-scan-coordinator' && existsSync(gate)) {
   // Release the claim only after this host has reaped its measurement helper.
