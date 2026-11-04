@@ -25,16 +25,13 @@ names credential, secret, hardcoding, or private-key exposure.
 Mentions in resolved questions, intermediate responses, or deferred coverage
 do not count.
 
-Every location must cite a fixture file and an in-bounds line range. Each
-non-supporting location must match an exposure classified by that finding's
-taxonomy. The README sentence documenting public access can corroborate the
-response leak. The finding still needs the endpoint location and evidence.
-The grader rejects unrelated locations. Scope notes, exclusions,
-deferred work, and follow-up questions remain in the saved result but do not
-change the grade: final findings must independently satisfy every positive case.
-Supporting locations, including the production `expected_control` role, may
-cite benign context but cannot satisfy recall. Known credential-use
-sites may be cited as sinks; they cannot replace the exposed source location.
+Every location must cite a fixture file and an in-bounds line range. To count
+an exposure, the finding must cite its source and classify it correctly.
+Additional locations can cite a known use of the same credential, regardless
+of the role label. Supporting locations, including `expected_control`, can
+also cite benign context. The README sentence documenting public access can
+corroborate the response leak. Scope exclusions and deferred work do not satisfy
+recall.
 
 Each finding must also include nonempty `codeEvidence`. Every snippet must cite
 a fixture file and stay within its line bounds. For each exposure reported in a

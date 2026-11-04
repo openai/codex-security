@@ -247,6 +247,7 @@ for (const category of [
   "not-a-private-key",
   "non-hardcoded-credential",
   "non-sensitive-data-exposure",
+  "no sensitive information disclosure",
   "not-a-password-exposure",
   "non-token-exposure",
   "non-api-key-exposure",
@@ -379,6 +380,40 @@ test("accepts a secret's valid source range and sensitive-data category", () => 
   assert.equal(gradeResult(result, fixture).passed, true);
 });
 
+test("sensitive information disclosure requires a credential-specific CWE for source literals", () => {
+  const result = retainedResult();
+  for (const cwe of ["CWE-798", "CWE-200", "CWE-540"]) {
+    result.findings[0].taxonomy = {
+      category: "Sensitive information disclosure",
+      cwe: [cwe],
+    };
+    assert.equal(gradeResult(result, fixture).passed, cwe === "CWE-798", cwe);
+  }
+});
+
+test("response-specific categories identify the runtime leak with CWE-201", () => {
+  const result = retainedResult();
+  const index = fixture.positives.findIndex(
+    (expected) => expected.id === "runtime-disclosure",
+  );
+  const runtime = result.findings[index];
+  for (const category of [
+    "Sensitive information in response",
+    "Insertion of Sensitive Information Into Sent Data",
+    "sensitive-information-in-response",
+  ]) {
+    runtime.taxonomy = { category, cwe: ["CWE-201"] };
+    assert.equal(gradeResult(result, fixture).passed, true, category);
+    runtime.taxonomy.cwe = ["CWE-200"];
+    assert.equal(gradeResult(result, fixture).passed, false, category);
+  }
+  runtime.taxonomy = { category: "Response", cwe: ["CWE-201"] };
+  assert.equal(gradeResult(result, fixture).passed, false);
+  runtime.taxonomy.category = "Sensitive information in response";
+  result.findings[0].taxonomy.category = runtime.taxonomy.category;
+  assert.equal(gradeResult(result, fixture).cases[0].found, false);
+});
+
 for (const category of [
   "password-in-configuration",
   "token-exposure",
@@ -487,6 +522,23 @@ for (const cwe of ["CWE-312", "CWE-313"]) {
     assert.equal(report.cases[0].found, false);
   });
 }
+
+test("accepts cryptographic-key categories only for a matching CWE-321 exposure", () => {
+  const index = fixture.positives.findIndex(({ id }) => id === "private-key");
+  for (const [category, cwe, passes] of [
+    ["Embedded cryptographic key", "CWE-321", true],
+    ["cryptographic_keys", "CWE-321", true],
+    ["Embedded public cryptographic key", "CWE-321", false],
+    ["Not an embedded cryptographic key", "CWE-321", false],
+    ["Weak cryptographic key", "CWE-321", false],
+    ["Embedded cryptographic key", "CWE-200", false],
+    ["Embedded cryptographic key", "CWE-798", false],
+  ] as const) {
+    const result = retainedResult();
+    result.findings[index].taxonomy = { category, cwe: [cwe] };
+    assert.equal(gradeResult(result, fixture).passed, passes, category);
+  }
+});
 
 test("keeps password and cryptographic-key CWEs specific to those exposures", () => {
   for (const [index, expected] of fixture.positives.entries()) {
@@ -848,30 +900,31 @@ for (const role of ["supporting", "expected_control"]) {
   });
 }
 
-test("accepts real credential-use sinks without treating them as separate exposures", () => {
+test("accepts a credential-use location only alongside its matched exposure", () => {
   const result = retainedResult();
   for (const [index, expected] of fixture.positives.entries()) {
     if (expected.consumerLine === null) continue;
-    const sink = {
+    const use: SourceLocation = {
       path: expected.path,
       startLine: expected.consumerLine,
       endLine: expected.lineCount,
-      role: "sink",
     };
-    result.findings[index].locations.push(sink);
+    if (expected.id === "private-key") use.role = "Signing operation";
+    result.findings[index].locations.push(use);
     const onlyConsumer = retainedResult();
-    onlyConsumer.findings[index].locations = [sink];
+    onlyConsumer.findings[index].locations = [use];
     assert.equal(gradeResult(onlyConsumer, fixture).cases[index].found, false);
   }
   assert.equal(gradeResult(result, fixture).passed, true);
 
-  for (const location of [
-    { path: "README.md", startLine: 1 },
-    { path: "src/absent.py", startLine: 5 },
-    { path: "src/client.py", startLine: 1 },
-  ]) {
+  for (const [path, startLine, role] of [
+    ["README.md", 1, "sink"],
+    ["src/absent.py", 5, "sink"],
+    ["src/client.py", 1, "credential-use sink"],
+    ["src/client.py", 6, "Authentication use"],
+  ] as const) {
     const invalid = retainedResult();
-    invalid.findings[0].locations.push({ ...location, role: "sink" });
+    invalid.findings[0].locations.push({ path, startLine, role });
     assert.equal(gradeResult(invalid, fixture).falsePositiveCount, 1);
   }
 });
