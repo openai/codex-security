@@ -9,7 +9,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -958,7 +958,13 @@ def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
     }
 
 
-def _latest_successful_reducer(workers: list[Any]) -> Any | None:
+def _latest_iteration(workers: Iterable[Any]) -> Any | None:
+    def iteration_order(worker: Any) -> tuple[int, str, str]:
+        output = Path(worker["result_manifest_path"]).parent
+        label = output.parent.name if output.name == "output" else output.name
+        match = re.fullmatch(r"dedup-([0-9]+)", label)
+        return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
+
     return max(
         (
             worker
@@ -967,7 +973,7 @@ def _latest_successful_reducer(workers: list[Any]) -> Any | None:
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
         ),
-        key=lambda worker: (worker["completed_at"] or "", worker["id"]),
+        key=iteration_order,
         default=None,
     )
 
@@ -1004,7 +1010,7 @@ def _reducer_output_paths(
 
 
 def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
-    latest_reducer = _latest_successful_reducer(workers)
+    iteration = _latest_iteration(workers)
     yield "checkpoint-head.json", None
     for directory in ("checkpoint-heads", "checkpoints"):
         yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
@@ -1031,7 +1037,7 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
             yield from ((path, worker["kind"]) for path in checkpoints)
         if worker["result_manifest_path"] and (
             worker["kind"] == "discovery"
-            or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
+            or (iteration is not None and worker["id"] == iteration["id"])
         ):
             try:
                 yield (

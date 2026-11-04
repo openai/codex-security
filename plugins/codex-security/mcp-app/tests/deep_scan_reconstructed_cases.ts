@@ -432,7 +432,7 @@ export async function testReconstructedWorkers({
           "observer-codex",
         );
       }
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["discovery"] as const) {
         const launches = await Promise.allSettled(
           scans.map(async (scan) => {
             const resumeThreadId = ["fresh", "reconstructed-fresh"].includes(

@@ -27,6 +27,19 @@ from workbench_setup import require_target
 reject_non_finite_json = finalizer._reject_non_finite_json
 
 
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_non_finite_json,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path.name}: expected a JSON object.")
+    return payload
+
+
 def javascript_utf8(value: str) -> bytes:
     """Match Node's UTF-8 encoding of UTF-16 strings without changing stored text."""
     return (
@@ -55,22 +68,7 @@ path_within_scope = finalizer.path_within_scope
 
 
 def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | None:
-    # Publication follows the durable reducer sequence, not completion timestamps.
-    def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
-        return (int(match[1]) if match else 0, worker["id"])
-
-    return max(
-        (
-            worker
-            for worker in db.saved_results._saved_workers(connection, scan_id)
-            if worker["kind"] == "dedup"
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"]
-        ),
-        key=reducer_order,
-        default=None,
-    )
+    return db.deep_scan.final_deep_scan_reducer(connection, scan_id)
 
 
 def has_verified_selected_result(

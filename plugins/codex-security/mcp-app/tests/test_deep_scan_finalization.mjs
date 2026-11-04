@@ -22,7 +22,7 @@ const module = await importModule({
     contents: `export * from "./src/deep-scan/finalization.ts";
       export * from "./src/deep-scan/artifacts.ts";
       export * from "./src/artifact-scan-draft.ts";
-      export { parseDeepReduction } from "./src/deep-scan/artifact-validation.ts";
+      export { parseScanUnion } from "./src/deep-scan/artifact-validation.ts";
       export { legacyAcceptedFinding } from "./tests/legacy-accepted-finding.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
@@ -34,7 +34,7 @@ const {
   readSelectedDeepScanDraft,
   createDeepScanArtifacts,
   saveScanDraftCheckpoint,
-  parseDeepReduction,
+  parseScanUnion,
   parseScanDraft,
   legacyAcceptedFinding,
 } = module;
@@ -71,12 +71,11 @@ for (const rootCause of ["object", "text"]) {
       assert.deepEqual(draft.findings, saved.findings);
       assert.equal(await readFile(selected, "utf8"), contents);
       assert.throws(() => parseScanDraft(draft));
-      assert.throws(() => parseDeepReduction(saved));
 
       const invalid = structuredClone(saved);
       invalid.findings[0].attackPath.dataFlow.evidence_refs = ["missing"];
       assert.throws(
-        () => parseDeepReduction(invalid, true),
+        () => parseScanUnion(invalid),
         /attackPath\.dataFlow\.evidence_refs.*existing code-evidence IDs/,
       );
     } finally {

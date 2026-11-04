@@ -1,6 +1,6 @@
 import {
-  deepReductionToScanDraft,
-  parseDeepReduction,
+  scanUnionToDraft,
+  parseScanUnion,
 } from "./artifact-validation.js";
 import {
   createScanArtifactContext,
@@ -52,7 +52,7 @@ export async function publishSelectedDeepScan(input: {
     signal,
   );
   await input.publish(draft, signal, {
-    coordinatorGeneration: run.coordinatorGeneration,
+    coordinatorGeneration: run.coordinatorGeneration === 1 ? undefined : run.coordinatorGeneration,
     resultPath:
       selection.resultPath === null
         ? null
@@ -115,7 +115,7 @@ export async function readSelectedDeepScanDraft(
     );
   }
   const stored = JSON.parse(contents.toString("utf8"));
-  const draft = deepReductionToScanDraft(parseDeepReduction(stored, true));
+  const draft = scanUnionToDraft(parseScanUnion(stored));
   if (draft.scanId !== scanId || draft.complete === false) {
     throw new Error(
       "Deep Scan finalization requires the selected complete result for this scan.",
@@ -164,7 +164,7 @@ export async function resumeSelectedDeepScan(input: {
       finish: (selection) =>
         store.finish({
           ...selection,
-          coordinatorGeneration: run.coordinatorGeneration,
+          coordinatorGeneration: run.coordinatorGeneration === 1 ? undefined : run.coordinatorGeneration,
         }),
     });
   } catch (error) {

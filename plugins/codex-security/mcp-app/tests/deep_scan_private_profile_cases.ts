@@ -183,8 +183,6 @@ export async function testRestoredPrivateProfileHomes({
     for (const [kind, resumed] of [
       ["discovery", false],
       ["discovery", true],
-      ["dedup", false],
-      ["dedup", true],
     ] as const) {
       const launches: PromiseSettledResult<void>[] = await Promise.allSettled(
         owners.map(async (owner) => {

@@ -16,9 +16,9 @@ import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js
 
 import { restoreEnv } from "./support/fake-codex-source.ts";
 
-function mockWorkerSpawn(
+export function mockWorkerSpawn(
   executablePath: string,
-  onExec: (
+  onExec?: (
     child: ChildProcess,
     args: readonly string[],
     options: SpawnOptions,
@@ -40,7 +40,7 @@ function mockWorkerSpawn(
         : args,
       options,
     );
-    if (args[0] === "exec") onExec(child, args, options);
+    if (args[0] === "exec") onExec?.(child, args, options);
     return child;
   }) as typeof childProcess.spawn;
   syncBuiltinESMExports();
@@ -236,7 +236,7 @@ export async function testCompletedWorkerSettlesWithoutWaitingForProcessExit(
   fixtures: WorkerFixtures,
 ) {
   await completedWorkerSettlesWithoutWaitingForProcessExit(fixtures);
-  for (const kind of ["discovery", "dedup"] as const) {
+  for (const kind of ["discovery"] as const) {
     for (const resumed of [false, true]) {
       await completedWorkerSettlesWithoutWaitingForProcessExit(
         fixtures,
@@ -253,7 +253,7 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     fakeCodexFixture,
     trustedParentSandbox,
   }: WorkerFixtures,
-  kind?: DeepScanWorkerKind,
+  kind?: "discovery",
   resumed = false,
 ) {
   const fixture = await fakeCodexFixture();

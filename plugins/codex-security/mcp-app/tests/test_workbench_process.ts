@@ -52,7 +52,7 @@ await test("workbench scalar arguments reach the Python parser literally", async
       `import json, sys
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_cli import parse_args
-def main():
+def main(*, framed_input):
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
@@ -68,16 +68,16 @@ def main():
     ];
     const result = await executeParser(
       process.env.PYTHON?.trim() || "python3",
-      workbenchArgs("claim-deep-scan-dedup", {
+      workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
-        promptPath: "--prompt.md",
-        artifactDir: "",
+        resultManifestPath: "--result.json",
+        noNewStreak: 1,
+        consecutiveErrors: 0,
         inputWorkerId: workerIds,
       }),
     );
-    assert.equal(result.prompt_path, "--prompt.md");
-    assert.equal(result.artifact_dir, "");
+    assert.equal(result.result_manifest_path, "--result.json");
     assert.deepEqual(result.input_worker_id, workerIds);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -119,7 +119,7 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
 
       const executeFixture = await fixtureWorkbench(
         root,
-        'import json, sys\nassert sys.dont_write_bytecode\ndef main():\n    print(json.dumps({"scans": []}))\n',
+        'import json, sys\nassert sys.dont_write_bytecode\ndef main(*, framed_input):\n    print(json.dumps({"scans": []}))\n',
       );
       const result = await executeFixture(
         python,
@@ -167,7 +167,7 @@ await test("workbench can import dependencies installed in the Python user site"
     assert.equal(imported.trim(), "user-site dependency");
     const executeFixture = await fixtureWorkbench(
       root,
-      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main(*, framed_input):\n    print(json.dumps({"dependency": VALUE}))\n',
     );
     assert.deepEqual(await executeFixture(python, ["list-scans"]), {
       dependency: "user-site dependency",

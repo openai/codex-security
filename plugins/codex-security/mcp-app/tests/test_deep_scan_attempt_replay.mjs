@@ -19,7 +19,6 @@ const module = await importModule({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { DeepScanWorkerRunner } from "./src/deep-scan/worker-runner.ts";',
       'export { recordCodexSecurityWorkerScanDraft } from "./src/artifact-scan-draft.ts";',
-      'export { readDeepReductionSources } from "./src/artifact-deep-reducer.ts";',
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createDeepScanArtifacts, ensureDeepScanDirectories } from "./src/deep-scan/artifacts.ts";',
     ].join("\n"),
@@ -29,7 +28,6 @@ const {
   WorkbenchDeepScanStore,
   DeepScanWorkerRunner,
   recordCodexSecurityWorkerScanDraft,
-  readDeepReductionSources,
   DeepScanCoordinator,
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -62,7 +60,7 @@ async function testResponseLoss(responseLosses) {
   const store = new WorkbenchDeepScanStore(async (args) => {
     const result = await raw(args);
     const key =
-      args[0] === "commit-deep-scan-dedup"
+      args[0] === "record-deep-scan-iteration"
         ? "merge"
         : args[0] === "upsert-deep-scan-worker" &&
             args[args.indexOf("--status") + 1] === "succeeded"
@@ -77,7 +75,7 @@ async function testResponseLoss(responseLosses) {
       const receipt =
         key === "acceptance"
           ? result.deepScan.workerReceipt
-          : result.deepScan.committedMerge;
+          : result.deepScan.workers.find(worker => worker.id === args[args.indexOf("--worker-id")+1]);
       if (!receipts.has(operation)) receipts.set(operation, receipt);
       else
         assert.deepEqual(
@@ -135,45 +133,9 @@ async function testResponseLoss(responseLosses) {
       executor: {
         async run(request) {
           executions++;
-          if (request.kind === "dedup") {
-            const workers = request.artifactContext.deepReducer.claimedWorkers;
-            const prompt = await readFile(request.promptPath, "utf8");
-            const configuration = JSON.parse(
-              prompt.match(/```json\n([\s\S]*?)\n```/)[1],
-            );
-            assert.deepEqual(
-              configuration.claimedWorkerIds,
-              workers.map((worker) => worker.id),
-            );
-            const { discoveries } = await readDeepReductionSources(
-              request.artifactContext,
-            );
-            const evidence = await Promise.all(
-              discoveries.map(({ coverage }) =>
-                readFile(
-                  path.join(run.scanDir, coverage.surfaces[0].receiptRefs[0]),
-                  "utf8",
-                ),
-              ),
-            );
-            assert.deepEqual(evidence, [
-              "worker evidence\n",
-              "shared evidence\n",
-            ]);
-            assert.deepEqual(
-              workers.map((worker) => worker.attempt),
-              [1, 1],
-              "execution uses the immutable claim attempts",
-            );
-          }
           await request.onThreadStarted?.(`fixture-session-${executions}`);
-          const draft = {
-            scanId: run.scanId,
-            findings: [],
-            threatModel: { summary: "Synthetic fixture." },
-          };
+          const draft = {scanId:run.scanId, findings:[], threatModel:{summary:"Synthetic fixture."}};
           const output = request.artifactContext.root;
-          if (request.kind === "discovery") {
             const review = {
               id: "review",
               label: "Fixture",
@@ -207,12 +169,6 @@ async function testResponseLoss(responseLosses) {
               recursive: true,
             });
             await writeFile(path.join(output, ref), "worker evidence\n");
-          } else {
-            await writeFile(
-              path.join(output, "result.json"),
-              JSON.stringify(draft),
-            );
-          }
           return { threadId: `fixture-session-${executions}` };
         },
       },
@@ -243,60 +199,33 @@ async function testResponseLoss(responseLosses) {
     assert.equal(second.status, "succeeded", second.error?.message);
     // Acceptance receipts are operation-specific, so only the first discovery loses a response.
     await rm(path.join(discovery.worker.artifactDir, "result.json"));
-    const merged = await runner.runReducer({
-      id: randomUUID(),
-      label: "dedup-1",
-      consumed: [discovery.worker, second.worker].map((worker) => ({
-        ...worker,
-        resultPath: path.join(worker.artifactDir, "result.json"),
-        attempt: 99,
-      })),
+    const recover = async () => new DeepScanCoordinator({
+      run: await store.get(run.scanId, "fixture-owner"),
+      store, pluginRoot: plugin, executor: { run: async () => assert.fail("accepted recovery must not execute another model") }
     });
-    assert.equal(merged.error, undefined, merged.error?.stack);
-    const reducerOutput = merged.run.persistedWorkers.find(
-      (worker) => worker.id === merged.id,
-    ).artifactDir;
-    assert.notEqual(merged.resultPath, path.join(reducerOutput, "result.json"));
-    assert.equal(merged.newFindings, 0);
-    assert.equal(
-      merged.run.persistedDedupInputs.filter(
-        (input) => input.dedupWorkerId === merged.id,
-      ).length,
-      2,
-    );
-    assert.equal(counts.get("merge"), 2);
-    assert.equal(executions, 3);
-    assert.equal(run.workflowVersion, "deep-security-scan/v2");
-    assert.deepEqual(
-      JSON.parse(await readFile(merged.resultPath, "utf8")),
-      merged.result,
-    );
-    assert.equal(merged.result.sourceCoverage.completeness, undefined);
-    const snapshot = await store.get(run.scanId, "fixture-owner");
-    const resumed = new DeepScanCoordinator({
-      run: snapshot,
-      store,
-      pluginRoot: plugin,
-      executor: {
-        run: async () =>
-          assert.fail("accepted recovery must not execute another model"),
-      },
-    });
-    const beforeRecovery = await readFile(merged.resultPath, "utf8");
-    const recovered = await resumed.recoverAcceptedDiscoveries();
-    assert.deepEqual(
-      recovered.map((worker) => worker.resultPath),
-      [discovery.worker.resultPath, second.worker.resultPath],
-    );
-    await rm(path.join(reducerOutput, "result.json"));
-    const reducers = await resumed.recoverCompletedReducers(recovered);
-    assert.equal(reducers.resultPath, merged.resultPath);
-    assert.deepEqual(reducers.result, merged.result);
-    assert.equal(
-      await readFile(merged.resultPath, "utf8"),
-      beforeRecovery,
-      "recovery cannot rewrite accepted bytes",
-    );
+    const coordinator = await recover();
+    const recovered = await coordinator.recoverAcceptedDiscoveries();
+    assert.deepEqual(recovered.map(worker => worker.resultPath), [discovery.worker.resultPath, second.worker.resultPath]);
+    const result = {scanId:run.scanId,findings:[]};
+    assert.deepEqual(await coordinator.mergeAcceptedBatch(result, recovered), [0,0]);
+    const refs = result.sourceCoverage.surfaces.map(surface => surface.receiptRefs[0]);
+    assert.deepEqual(await Promise.all(refs.map(ref => readFile(path.join(run.scanDir,ref),"utf8"))), ["worker evidence\n","shared evidence\n"]);
+    const output = path.join(artifacts.dedupRoot,"dedup-1","output");
+    await mkdir(output,{recursive:true});
+    const resultPath = path.join(output,"result.json");
+    const bytes = JSON.stringify(result);
+    await writeFile(resultPath,bytes);
+    const id = randomUUID();
+    const persisted = await store.recordIteration({id,scanId:run.scanId,resultPath,workerIds:recovered.map(worker => worker.id),noNewStreak:2,consecutiveErrors:0});
+    assert.equal(counts.get("merge"),2);
+    assert.equal(executions,2);
+    assert.deepEqual(persisted.persistedDedupInputs.map(input=>input.attempt),[1,1]);
+    const frozen = persisted.persistedWorkers.find(worker=>worker.id===id).acceptedResultPath;
+    assert.notEqual(frozen,resultPath);
+    await rm(resultPath);
+    const resumed = await recover();
+    assert.deepEqual(await resumed.restoreUnion(resultPath,recovered), result);
+    assert.equal(await readFile(frozen,"utf8"),bytes);
     await writeFile(discovery.worker.resultPath, "\n", { flag: "a" });
     await assert.rejects(
       resumed.recoverAcceptedDiscoveries(),

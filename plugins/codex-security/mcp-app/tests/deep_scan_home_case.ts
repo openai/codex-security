@@ -54,7 +54,7 @@ export async function testHome(
             CODEX_HOME: fixture.root,
           })),
         );
-        for (const kind of ["discovery", "dedup"] as const) {
+        for (const kind of ["discovery"] as const) {
           for (const resumeThreadId of [undefined, "fixture-home-resume"]) {
             await executor.run({
               promptPath,
@@ -155,7 +155,7 @@ export async function testHome(
           CODEX_HOME: fixture.root,
         })),
       );
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["discovery"] as const) {
         for (const resumeThreadId of [undefined, "fixture-history-resume"]) {
           await executor.run({
             promptPath,

@@ -509,6 +509,26 @@
   },
   {
     "version": 61,
+    "name": "record scan launch attribution",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN launch_surface TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_package_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_plugin_version TEXT;",
+      "ALTER TABLE scans ADD COLUMN launch_kind TEXT CHECK (launch_kind IN ('scan', 'mock', 'import'));"
+    ]
+  },
+  {
+    "version": 62,
+    "name": "project scan lifecycle snapshots",
+    "statements": [
+      "CREATE TRIGGER classify_legacy_scan_recipe\nAFTER UPDATE OF recipe_json ON scans\nWHEN OLD.recipe_json IS NULL AND (NEW.launch_kind IS NULL OR NEW.launch_plugin_version IS NULL)\n     AND json_valid(NEW.recipe_json)\nBEGIN\n    UPDATE scans SET\n        launch_kind = COALESCE(launch_kind, CASE\n            WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import'\n            WHEN json_type(recipe_json, '$.mock') = 'true' THEN 'mock' END),\n        launch_plugin_version = COALESCE(launch_plugin_version, CASE\n            WHEN json_type(recipe_json, '$.pluginVersion') = 'text'\n                AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\n            THEN json_extract(recipe_json, '$.pluginVersion') END)\n    WHERE id = NEW.id;\nEND;",
+      "UPDATE scans\nSET launch_kind = CASE WHEN json_type(recipe_json, '$.import') = 'object' THEN 'import' ELSE 'mock' END\nWHERE launch_kind IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.import') = 'object' OR json_type(recipe_json, '$.mock') = 'true'\nEND;",
+      "UPDATE scans SET launch_plugin_version = json_extract(recipe_json, '$.pluginVersion')\nWHERE launch_plugin_version IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.pluginVersion') = 'text'\n        AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\nEND;",
+      "CREATE VIEW scan_lifecycles AS\nSELECT scans.id AS scan_id, json_object(\n    'scanId', scans.id,\n    'mode', CASE WHEN launch_kind = 'import' THEN 'import' ELSE scans.mode END,\n    'startedAt', scans.started_at,\n    'status', CASE WHEN canceled_at IS NOT NULL THEN 'canceled'\n                   WHEN scans.status = 'complete' THEN 'completed' ELSE scans.status END,\n    'finishedAt', COALESCE(canceled_at, completed_at),\n    'hasReportableFindings', json(CASE\n        WHEN scans.status = 'complete' AND canceled_at IS NULL\n        THEN (SELECT CASE WHEN reportable_findings_count > 0 THEN 'true' ELSE 'false' END\n              FROM scan_progress WHERE scan_id = scans.id) END),\n    'surface', launch_surface,\n    'packageVersion', launch_package_version,\n    'pluginVersion', launch_plugin_version,\n    'mock', json(CASE WHEN launch_kind = 'mock' THEN 'true'\n                      WHEN launch_kind IS NOT NULL THEN 'false' END)\n) AS snapshot\nFROM scans;"
+    ]
+  },
+  {
+    "version": 63,
     "name": "preserve original deep scan discovery context",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",
@@ -516,7 +536,7 @@
     ]
   },
   {
-    "version": 62,
+    "version": 64,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL,\n    status TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    end_reason TEXT,\n    error_message TEXT,\n    accepted_result_path TEXT,\n    accepted_result_sha256 TEXT,\n    receipt_json TEXT,\n    PRIMARY KEY (worker_id, attempt)\n);",
@@ -528,21 +548,21 @@
     ]
   },
   {
-    "version": 63,
+    "version": 65,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 64,
+    "version": 66,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 65,
+    "version": 67,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"

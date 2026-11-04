@@ -5,6 +5,7 @@ import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { DeepScanExecutionSettings } from "../src/deep-scan/recovery-settings.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { importModule } from "./import-module.ts";
 import {
@@ -192,7 +193,6 @@ try {
         await Promise.allSettled(handlers);
         assert.equal(registry.get(fixture.run.scanId), undefined);
         assert.equal(executor.discoveryCalls, 0);
-        assert.equal(executor.dedupCalls, 0);
         assert.deepEqual(store.workerUpdates, []);
         assert.deepEqual(store.finishCalls, []);
         assert.deepEqual(store.failureMessages, []);
@@ -213,10 +213,19 @@ try {
           assert.equal((await resumed.settled()).status, "succeeded");
         }
         for (const outcome of outcomes) {
+          const result = outcome as CallToolResult;
+          assert.equal(result.isError, true);
+          assert.deepEqual(result._meta, {
+            "codex/telemetry": { span: { target_id: fixture.run.scanId } },
+          });
+          if (stage === "takeover") {
+            // The remote coordinator's wait rejects after its lease claim.
+            assert.deepEqual(result.content, [
+              { type: "text", text: "Deep Scan coordinator host has closed." },
+            ]);
+          }
           assert.match(
-            outcome instanceof Error
-              ? outcome.message
-              : JSON.stringify(outcome),
+            JSON.stringify(result.content),
             /coordinator host has closed/,
           );
         }

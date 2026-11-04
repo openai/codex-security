@@ -3321,9 +3321,13 @@ export async function runCodexCommand(
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (
-        !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
-          error.code ?? "",
-        )
+        ![
+          "EPIPE",
+          "ECONNRESET",
+          "ENOTCONN",
+          "EOF",
+          "ERR_STREAM_DESTROYED",
+        ].includes(error.code ?? "")
       )
         processError = error;
     });

@@ -204,7 +204,7 @@ export async function testDurableWorkerRuntimeSnapshots({
   syncBuiltinESMExports();
   const request = (
     owner: (typeof owners)[number],
-    kind: "discovery" | "dedup",
+    kind: "discovery",
     resumed = false,
   ): CodexWorkerRequest => ({
     kind,
@@ -223,7 +223,7 @@ export async function testDurableWorkerRuntimeSnapshots({
             .map((owner) => rm(owner.originalRuntime, { recursive: true })),
         );
       }
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["discovery"] as const) {
         await Promise.all(
           owners.map(async (owner) => {
             const executor = restored
@@ -292,7 +292,7 @@ export async function testDurableWorkerRuntimeSnapshots({
     const previousCwd = process.cwd();
     try {
       process.chdir(referenced.root);
-      await executor.run(request(referenced, "dedup", true));
+      await executor.run(request(referenced, "discovery", true));
     } finally {
       process.chdir(previousCwd);
     }

@@ -119,46 +119,6 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   }
 }
 
-export async function testWorkerScopedCandidateSourceAggregation() {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 2,
-    stopAfterNoNew: 10,
-    maxDiscoveryRuns: 2,
-  });
-  const executor = new FakeExecutor({
-    discoveryCandidateId: "candidate-1",
-    canonicalCandidateId: "candidate-1",
-  });
-  const terminal = await runCoordinator(fixture, store, executor);
-  assert.equal(terminal?.terminalReason, "capped");
-  const manifest = await readJson(terminal.manifestPath);
-  const expectedWorkerIds = [...store.workers.values()]
-    .filter(
-      (worker) => worker.kind === "discovery" && worker.status === "succeeded",
-    )
-    .sort((left, right) => left.completionSequence! - right.completionSequence!)
-    .map((worker) => worker.id);
-  assert.deepEqual(
-    manifest.findings.map(
-      (finding: Record<string, unknown>) =>
-        (finding.provenance as { candidateId: string }).candidateId,
-    ),
-    ["candidate-1"],
-  );
-  assert.deepEqual(store.dedupClaims[0].workerIds, expectedWorkerIds);
-  const reducer = [...store.workers.values()].find(
-    (worker) => worker.kind === "dedup",
-  );
-  const reducerResult = await readJson(reducer!.resultManifestPath!);
-  assert.equal(reducerResult.scanId, fixture.run.scanId);
-  assert.deepEqual(reducerResult.findings, manifest.findings);
-  assert.equal(
-    executor.dedupCalls,
-    1,
-    "valid worker provenance must not retry the reducer",
-  );
-}
-
 export async function testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus() {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,

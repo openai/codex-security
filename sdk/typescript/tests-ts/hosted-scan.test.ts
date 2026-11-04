@@ -363,6 +363,7 @@ test.each(sealedScopes)(
     const executor = draftExecutor((request) => {
       expect(request.scope.paths).toEqual(normalized);
       expect(request.identity).toEqual(input.identity);
+      expect(request.runtime.environment["CODEX_SECURITY_SURFACE"]).toBe("sdk");
       expect(request).toMatchObject({
         model: input.model,
         reasoningEffort: input.reasoningEffort,
@@ -889,6 +890,9 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(
+            message.params.runtime.environment.CODEX_SECURITY_SURFACE,
+          ).toBe("cli");
           if (cancel) {
             expect(message.params).not.toHaveProperty("severityRubric");
             expect(message.params.prompt).not.toContain('"severityRubric"');
@@ -1039,18 +1043,22 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   const input = await fixture();
   delete input.scope;
   const events: string[] = [];
-  const result = await runHostedScan(input, {
-    executor: draftExecutor((request, options) => {
-      expect(request.scope.paths).toEqual(["."]);
-      options.onEvent?.(progressEvent);
-      options.onEvent?.(activityEvent);
-    }),
-    onEvent(event) {
+  const executor = draftExecutor((request, options) => {
+    expect(request.scope.paths).toEqual(["."]);
+    options.onEvent?.(progressEvent);
+    options.onEvent?.(activityEvent);
+  });
+  class Options {
+    get executor() {
+      return executor;
+    }
+    onEvent(event: ScanExecutionEvent) {
       events.push(event.type);
       if (event.type === "progress")
         throw new Error("Optional progress failed");
-    },
-  });
+    }
+  }
+  const result = await runHostedScan(input, new Options());
   expect(result.status, JSON.stringify(result)).toBe("completed");
   expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
@@ -1450,7 +1458,7 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const run = spyOn(hostedScan, "runHostedScan");
+    const run = spyOn(hostedScan, "runHostedScanInternal");
     try {
       const finished = runHostedScanProtocol(input, output, controller.signal);
       send(input, { id: "run", method: "run", params });

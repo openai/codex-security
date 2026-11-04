@@ -37,4 +37,4 @@ def main(*, select_finalization: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(select_finalization=os.environ.get("TEST_SELECT_FINALIZATION") == "1")
