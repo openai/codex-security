@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { readAcceptedDiscovery } from "./artifact-validation.js";
@@ -418,10 +418,26 @@ export class DeepScanWorkerRunner {
         preserveTimestamps: true,
         verbatimSymlinks: true,
         filter: async (source) => {
-          const entry = await fs.lstat(source);
-          return (
-            entry.isFile() || entry.isDirectory() || entry.isSymbolicLink()
-          );
+          try {
+            const entry = await fs.lstat(source);
+            if (entry.isSymbolicLink()) return true;
+            if (!entry.isDirectory() && !entry.isFile()) return false;
+            await fs.access(
+              source,
+              entry.isDirectory()
+                ? constants.R_OK | constants.X_OK
+                : constants.R_OK,
+            );
+            return true;
+          } catch (error) {
+            if (
+              ["EACCES", "EPERM", "ENOENT"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              return false;
+            throw error;
+          }
         },
       });
     } else {

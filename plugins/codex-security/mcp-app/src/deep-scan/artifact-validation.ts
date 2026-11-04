@@ -75,6 +75,7 @@ export async function validateDiscoveryArtifacts(
     expectedScanId,
     boundScope,
   );
+  validateRetainedCoverage(result.reviewState);
   await validateWorkerReceipts(artifacts.workersRoot, context, result);
   return result;
 }
@@ -164,6 +165,26 @@ async function validateWorkerReceipts(
   }
 }
 
+// Discard worker claims about host-assigned origins before reconciling occurrences.
+function clearWorkerOriginClaims(coverage: ScanDraftInput["reviewState"]) {
+  for (const field of [
+    "surfaces",
+    "deferred",
+    "explicitExclusions",
+    "openQuestions",
+    "resolvedDeferred",
+  ] as const) {
+    for (const value of coverage[field] ?? []) {
+      const row = asRecord(value);
+      const provenance = asRecord(row?.provenance);
+      if (!row || !provenance) continue;
+      for (const key of ["workerId", "attempt", "sourceId", "candidateId"])
+        delete provenance[key];
+      if (!Object.keys(provenance).length) delete row.provenance;
+    }
+  }
+}
+
 export async function readAcceptedDiscovery(
   artifacts: DeepScanArtifacts,
   worker: Omit<AcceptedDiscovery, "result" | "coverage">,
@@ -181,10 +202,22 @@ export async function readAcceptedDiscovery(
   );
   const { context } = draft;
   let result = draft.result;
-  const archived = await readArchivedWorkerCheckpoints(context, true).catch(
-    () => [],
+  clearWorkerOriginClaims(result.reviewState);
+  function usableCheckpoint({ input }: { input: ScanDraftInput }) {
+    try {
+      validateRetainedCoverage(input.reviewState);
+    } catch {
+      return false;
+    }
+    clearWorkerOriginClaims(input.reviewState);
+    return true;
+  }
+  const archived = (
+    await readArchivedWorkerCheckpoints(context, true).catch(() => [])
+  ).filter(usableCheckpoint);
+  const current = (await readAcceptedWorkerCheckpoints(context, result)).filter(
+    usableCheckpoint,
   );
-  const current = await readAcceptedWorkerCheckpoints(context, result);
   const history = [...current, ...archived];
   const receiptDigests = new Map<string, string>();
   const receiptSources = archived.length
@@ -223,6 +256,7 @@ export async function readAcceptedDiscovery(
       history,
       receiptDigests,
     );
+  validateRetainedCoverage(result.reviewState);
   await validateWorkerReceipts(artifacts.workersRoot, context, result);
   const accepted = { ...worker, result };
   return {

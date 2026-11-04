@@ -1136,6 +1136,10 @@ export async function reconcileAcceptedWorkerHistory(
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
   const initial = structuredClone(input);
+  // Legacy terminal drafts may lack the IDs assigned to their archived occurrences.
+  initial.reviewState.deferred = normalizeDeferred(
+    initial.reviewState.deferred,
+  );
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
   const archivePrefix = `${workerPrefix}attempts/`;
   const currentReceiptRefs = new Set(

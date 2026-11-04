@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, readFile, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  readFile,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import {
@@ -29,6 +36,10 @@ test(
         } else {
           await writeFile(note, contents);
           await utimes(note, savedTime, savedTime);
+          const blocked = path.join(request.workingDirectory, "private-note");
+          await writeFile(blocked, contents);
+          await chmod(blocked, 0);
+
           await symlink(
             "saved-analysis.txt",
             path.join(request.workingDirectory, "analysis-link"),
@@ -88,6 +99,10 @@ test(
         await readFile(path.join(archive, "analysis-link"), "utf8"),
         contents,
       );
+      if (process.getuid?.() !== 0)
+        await assert.rejects(lstat(path.join(archive, "private-note")), {
+          code: "ENOENT",
+        });
       assert.ok((await lstat(path.join(workspace, "worker.pipe"))).isFIFO());
       await assert.rejects(lstat(path.join(archive, "worker.pipe")), {
         code: "ENOENT",

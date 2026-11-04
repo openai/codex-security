@@ -1,8 +1,5 @@
-const { createDeepScanArtifacts } = await importSource(
-  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
-);
 import assert from "node:assert/strict";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,7 +19,7 @@ const { recordCodexSecurityWorkerScanDraft, readArchivedWorkerCheckpoints } =
   await importSource(
     fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
   );
-const { archiveDirectory } = await importSource(
+const { archiveDirectory, createDeepScanArtifacts } = await importSource(
   fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
 );
 
@@ -233,4 +230,46 @@ test("readable retry origin survives one unsafe unrelated archive", async (t) =>
     await readFile(path.join(archive, "result.json")),
     historical,
   );
+});
+
+test("retry coverage ignores projected origin claims and rejects invalid archived paths", async (t) => {
+  const f = await workerHistoryFixture(t, 3);
+  const row = {
+    reason: "Retained review",
+    provenance: { note: "Worker note" },
+  };
+  const draft = workerDraft([], {
+    complete: true,
+    reviewState: { surfaces: [], explicitExclusions: [], deferred: [row] },
+  });
+  await mkdir(f.output, { recursive: true });
+  await writeFile(f.resultPath, JSON.stringify(draft));
+  for (const attempt of [1, 2]) {
+    const saved = structuredClone(draft);
+    Object.assign(
+      saved.reviewState.deferred[0]!,
+      attempt === 1
+        ? {
+            provenance: {
+              note: "Worker note",
+              workerId: "stale",
+              attempt: 9,
+              sourceId: "stale",
+              candidateId: "stale",
+            },
+          }
+        : { paths: ["../outside"] },
+    );
+    const archive = path.join(f.workerRoot, "attempts", "attempt-0" + attempt);
+    await mkdir(archive, { recursive: true });
+    await writeFile(path.join(archive, "result.json"), JSON.stringify(saved));
+  }
+  const { coverage } = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
+  assert.equal(coverage.deferred.length, 1, JSON.stringify(coverage.deferred));
+  assert.equal(coverage.deferred[0].provenance.attempt, 1);
+  assert.equal(coverage.deferred[0].provenance.note, "Worker note");
 });

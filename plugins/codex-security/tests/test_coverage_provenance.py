@@ -373,6 +373,13 @@ def test_recovery_preserves_non_surface_occurrence_origins(
         archive.parent.mkdir(parents=True)
         prior = copy.deepcopy(draft)
         prior["reviewState"][field] = prior["reviewState"][field][:1]
+        if not string_questions:
+            prior["reviewState"][field][0]["provenance"] = {
+                "workerId": "stale",
+                "attempt": 9,
+                "sourceId": "stale",
+                "candidateId": "stale",
+            }
         archive.write_text(json.dumps(prior))
         originals[archive] = archive.read_bytes()
     projected = []

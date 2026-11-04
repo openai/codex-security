@@ -364,6 +364,13 @@ class SavedCoverageOrigins:
 
     def same_row(self, field, left, left_path, right, right_path, owner):
         left, right = self.row(field, left), self.row(field, right)
+        for row in (left, right):
+            provenance = row.get("provenance") if isinstance(row, dict) else None
+            if isinstance(provenance, dict):
+                for key in ("workerId", "attempt", "sourceId", "candidateId"):
+                    provenance.pop(key, None)
+                if not provenance:
+                    del row["provenance"]
         if field != "surfaces" or not isinstance(left, dict) or not isinstance(right, dict):
             return left == right
         left_refs = self.receipt_resolver(left_path, left, owner)

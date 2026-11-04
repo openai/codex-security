@@ -1,6 +1,3 @@
-const { createDeepScanArtifacts } = await importSource(
-  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
-);
 import assert from "node:assert/strict";
 import { cp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -9,6 +6,10 @@ import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { workerDraft, scanId } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
+
+const { createDeepScanArtifacts } = await importSource(
+  fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
+);
 
 const { readAcceptedDiscovery } = await importSource(
   fileURLToPath(
