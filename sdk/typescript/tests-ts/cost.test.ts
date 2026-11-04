@@ -3071,6 +3071,43 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test("reports a recurring secondary traversal error after a different sole traversal failure", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const tail = join(dirname(parent), "zz-next");
+    await filesystem.mkdir(tail);
+    const denied = logFailure("EACCES", "open", parent);
+    const io = logFailure("EIO", "scandir", tail);
+    const stale = logFailure("ESTALE", "scandir", tail);
+    const warnings: unknown[] = [];
+    const { tracker } = manualCostTracker(home, {
+      onActivity: () => {},
+      onError: (error) => warnings.push(error),
+    });
+    const poll = async (
+      directoryError: NodeJS.ErrnoException,
+      blockFile = false,
+    ) => {
+      await appendFile(parent, "{}\n");
+      using _listing = orderedLogDirectory(dirname(parent), directoryError);
+      using _opening = failLogReads((path) =>
+        path === parent && blockFile ? denied : undefined,
+      );
+      await tracker.refresh().catch((error) => {
+        if (tracker.recordTrackingError(error)) warnings.push(error);
+      });
+    };
+    try {
+      await tracker.refresh();
+      await poll(io, true);
+      await poll(stale);
+      await poll(io, true);
+      await poll(io, true);
+      expect(warnings).toEqual([io, denied, stale, io, denied]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test.each([
     ["EIO", "stat"],
     ["EACCES", "stat"],
@@ -3105,6 +3142,8 @@ describe("live scan cost tracking", () => {
     });
     const primary = logFailure("EACCES", "open", parent);
     const secondary = logFailure("EIO", "read");
+    const stale = logFailure("ESTALE", "read");
+    let workerError = secondary;
     const diagnostics: unknown[] = [];
     const { tracker } = manualCostTracker(home, {
       onSessionEvent: () => {},
@@ -3116,11 +3155,16 @@ describe("live scan cost tracking", () => {
       using _opening = failLogReads((path) => {
         if (path === parent) return primary;
         reads.push(path);
-        return secondary;
+        return path === worker ? workerError : secondary;
       });
       await expect(tracker.refresh()).rejects.toBe(primary);
       expect(reads.toSorted()).toEqual([worker, other].toSorted());
       expect(diagnostics).toEqual([secondary]);
+      workerError = stale;
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      workerError = secondary;
+      await expect(tracker.refresh()).rejects.toBe(primary);
+      expect(diagnostics).toEqual([secondary, stale, secondary]);
     } finally {
       await tracker.stop();
     }
@@ -3178,20 +3222,27 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test.each(["open", "read"])(
-    "reports a worker permission failure again after a sole %s EIO without recovery",
-    async (syscall) => {
+  test.each([
+    ["EACCES", "EIO", "open"],
+    ["EACCES", "EIO", "read"],
+    ["EIO", "ESTALE", "read"],
+  ] as const)(
+    "reports a worker %s again after a sole %s during %s without recovery",
+    async (code, soleCode, syscall) => {
       const { home, parent, worker } = await workerSessionFixture();
       const parentDenied = logFailure("EACCES", "open", parent);
-      const workerDenied = logFailure("EACCES", "open", worker);
-      const io = logFailure(
-        "EIO",
+      const workerError =
+        code === "EACCES"
+          ? logFailure(code, "open", worker)
+          : logFailure(code, "read");
+      const soleError = logFailure(
+        soleCode,
         syscall,
         syscall === "open" ? worker : undefined,
       );
       const failures = new Map([
         [parent, parentDenied],
-        [worker, workerDenied],
+        [worker, workerError],
       ]);
       const warnings: unknown[] = [];
       const { tracker } = manualCostTracker(home, {
@@ -3203,24 +3254,33 @@ describe("live scan cost tracking", () => {
           if (tracker.recordTrackingError(error)) warnings.push(error);
         });
       try {
+        if (code === "EIO") {
+          // Identify both logs first so the changed parent will be primary again.
+          await tracker.refresh();
+          await Promise.all(
+            [parent, worker].map((path) => appendFile(path, "{}\n")),
+          );
+        }
         using _listing = orderedLogDirectory(dirname(parent));
         using _opening = failLogReads((path) => failures.get(path));
         await refresh();
-        expect(warnings).toEqual([workerDenied, parentDenied]);
+        expect(warnings.splice(0)).toEqual([workerError, parentDenied]);
         failures.delete(parent);
-        failures.set(worker, io);
+        failures.set(worker, soleError);
         await refresh();
         await refresh();
-        failures.set(worker, workerDenied);
+        expect(warnings.splice(0)).toEqual([soleError, soleError]);
+        if (code === "EIO") {
+          // Make the original pathless read error secondary again.
+          await appendFile(parent, "{}\n");
+          failures.set(parent, parentDenied);
+        }
+        failures.set(worker, workerError);
         await refresh();
         await refresh();
-        expect(warnings).toEqual([
-          workerDenied,
-          parentDenied,
-          io,
-          io,
-          workerDenied,
-        ]);
+        expect(warnings).toEqual(
+          code === "EIO" ? [workerError, parentDenied] : [workerError],
+        );
       } finally {
         await tracker.stop();
       }

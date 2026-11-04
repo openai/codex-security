@@ -2202,12 +2202,17 @@ export class ScanCostTracker {
 
   /** Share failure episodes across roles, suppressing only repeated primary permission warnings. */
   public recordTrackingError(error: unknown): boolean {
-    if (!isRecord(error) || typeof error["path"] !== "string") return true;
+    if (
+      !isDeniedOpen(error) ||
+      !isRecord(error) ||
+      typeof error["path"] !== "string"
+    )
+      return true;
     const path = error["path"],
       key = trackingFailureKey(error, path);
     const previous = this.#reportedFailures.get(path);
     this.#reportedFailures.set(path, key);
-    return !isDeniedOpen(error) || previous !== key;
+    return previous !== key;
   }
 
   public start(threadId: string): void {
@@ -2297,7 +2302,18 @@ export class ScanCostTracker {
     const unreadable = new Map<SessionUsage, Failure>();
     let blocked: Failure | undefined;
     let traversalFailure: Failure | undefined;
-    let fatalFileFailure = false;
+    let fatalFileFailure: Failure | undefined;
+    const rejectPrimary = ({ error, path }: Failure): never => {
+      // A rejected refresh reports its primary error even when a native read
+      // omits the filename. Remember the same identity used for secondary errors.
+      // The API decides whether to report a repeated permission-denied open.
+      if (!isDeniedOpen(error))
+        this.#reportedFailures.set(
+          path ?? "traversal",
+          trackingFailureKey(error, path),
+        );
+      throw error;
+    };
     const nextDenied = this.#deniedOpens.entries().next().value;
     if (nextDenied) {
       this.#deniedOpens.delete(nextDenied[0]);
@@ -2319,11 +2335,7 @@ export class ScanCostTracker {
         return result;
       } catch (error) {
         if (isDeniedOpen(error)) this.#deniedOpens.set(path, error);
-        else if (denied) {
-          this.#deniedOpens.delete(path);
-          // A different read error can omit its path (for example, read EIO).
-          this.#reportedFailures.delete(path);
-        }
+        else this.#deniedOpens.delete(path);
         throw error;
       }
     };
@@ -2346,7 +2358,7 @@ export class ScanCostTracker {
           const failure = { path, error };
           if (session.threadId === null) {
             if (!observeHealthySessions || !isBlockedLogRead(error)) {
-              fatalFileFailure = true;
+              fatalFileFailure = failure;
               throw error;
             }
             blocked ??= failure;
@@ -2364,10 +2376,13 @@ export class ScanCostTracker {
       }
       this.#reportedFailures.delete("traversal");
     } catch (error) {
-      if (fatalFileFailure && !blocked) throw error;
-      if (this.#options.maxCostUsd !== undefined || unreadable.size === 0)
-        throw error;
-      traversalFailure = { error };
+      if (
+        (fatalFileFailure && !blocked) ||
+        this.#options.maxCostUsd !== undefined ||
+        unreadable.size === 0
+      )
+        return rejectPrimary(fatalFileFailure ?? { error });
+      traversalFailure = fatalFileFailure ?? { error };
     }
 
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
@@ -2422,7 +2437,7 @@ export class ScanCostTracker {
       exhaustedOpens === 2 ||
       failures.some(({ error }) => isDescriptorExhaustion(error));
     if (traversalFailure) {
-      if (!blocked) throw traversalFailure.error;
+      if (!blocked) return rejectPrimary(traversalFailure);
       failures.push(traversalFailure);
     }
     const reportSecondary = (primary: Failure) => {
@@ -2441,7 +2456,7 @@ export class ScanCostTracker {
     };
     if (blocked && !observeHealthySessions) {
       if (this.#options.maxCostUsd === undefined) reportSecondary(blocked);
-      throw blocked.error;
+      return rejectPrimary(blocked);
     }
 
     const usages = new Map(this.#receipts);
@@ -2477,7 +2492,7 @@ export class ScanCostTracker {
               );
           }
         } catch (error) {
-          if (!observeHealthySessions) throw error;
+          if (!observeHealthySessions) return rejectPrimary({ error, path });
           const failure = { path, error };
           blocked ??= failure;
           failures.push(failure);
@@ -2566,7 +2581,7 @@ export class ScanCostTracker {
     // Healthy sessions can report activity even when a read blocks the total.
     if (blocked) {
       reportSecondary(blocked);
-      throw blocked.error;
+      return rejectPrimary(blocked);
     }
     let usage: ScanTokenUsage | null = null;
     let complete = true;
