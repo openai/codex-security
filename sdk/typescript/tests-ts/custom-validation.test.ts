@@ -1285,6 +1285,7 @@ describe("custom validation", () => {
     expect(standard.match(/^1\. .+$/mu)?.[0]).toContain(
       "make-hosted-repo-scope-input",
     );
+    expect(standard).toContain("<scan_dir>/artifacts/message-board/");
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
     expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");

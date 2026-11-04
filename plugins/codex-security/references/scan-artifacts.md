@@ -21,6 +21,10 @@ Follow `artifact-storage.md` for storage selection, file authoring and shared th
 
 Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
+## Shared Notes
+
+Standard scans keep shared Markdown notes in `<artifacts_dir>/message-board/`. Follow the Standard workflow's storage instructions. Deep discovery workers relay observations by message and retain material observations in the reviewed surfaces of their normal worker checkpoints.
+
 ## Threat Model (Phase 1) Paths
 
 - Resolved SECURITY.md guidance: `<context_dir>/security_guidance.md`
