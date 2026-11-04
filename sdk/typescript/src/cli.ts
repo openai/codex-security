@@ -11554,6 +11554,19 @@ async function patchGitRecords(
     .split("\0");
 }
 
+async function patchObjectDirectory(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const objects = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    repository,
+    { trim: false },
+  );
+  return realpath(objects.replace(/\n$/u, ""));
+}
+
 async function retainPatchTrees(
   repository: string,
   checkout: string,
@@ -11562,15 +11575,9 @@ async function retainPatchTrees(
   gitDirectory?: string,
 ): Promise<void> {
   if (checkout === repository) return;
-  const objects = await dependencies.runRepositoryCommand(
-    "git",
-    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-    repository,
-    { trim: false },
-  );
   // A linked worktree shares its selected object database. Resolve that root
   // before appending the pack child so a checkout cannot redirect our output.
-  const objectDirectory = await realpath(objects.replace(/\n$/u, ""));
+  const objectDirectory = await patchObjectDirectory(repository, dependencies);
   const pack = join(objectDirectory, "pack");
   await mkdir(pack).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "EEXIST") throw error;
@@ -12062,20 +12069,26 @@ async function assessPatchRisk(
     await writeFile(patchPath, "", { encoding: "utf8", mode: 0o600 });
     const changedFiles = new Set<string>();
     const repositoryRoot = state?.root ?? request.repository;
-    const indexEnvironment = { GIT_INDEX_FILE: join(root, "index") };
+    const indexOptions = {
+      environment: { GIT_INDEX_FILE: join(root, "index") },
+      patchSnapshot: [
+        await patchObjectDirectory(repositoryRoot, dependencies),
+        root,
+      ],
+    };
     const writeTree = async (entries: Map<string, string>): Promise<string> => {
       await dependencies.runRepositoryCommand(
         "git",
         ["read-tree", "--empty"],
         repositoryRoot,
-        { environment: indexEnvironment },
+        indexOptions,
       );
       await dependencies.runRepositoryCommand(
         "git",
         ["update-index", "-z", "--index-info"],
         repositoryRoot,
         {
-          environment: indexEnvironment,
+          ...indexOptions,
           input: Buffer.from(
             [...entries].map(([path, entry]) => `${entry}\t${path}\0`).join(""),
             "latin1",
@@ -12086,7 +12099,7 @@ async function assessPatchRisk(
         "git",
         ["write-tree"],
         repositoryRoot,
-        { environment: indexEnvironment },
+        indexOptions,
       );
     };
     const pointers = new Map<
