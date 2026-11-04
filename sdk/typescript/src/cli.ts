@@ -9190,9 +9190,9 @@ async function patchPreflightRemoteSettings(
         "Patch publication cannot use a Git remote helper selected through remote.origin.vcs.",
       );
     if (
-      (key === "uploadpack" || key === "receivepack") &&
-      value !==
-        (key === "uploadpack" ? "git-upload-pack" : "git-receive-pack") &&
+      key !== "serveroption" &&
+      !(key === "uploadpack" && value === "git-upload-pack") &&
+      !(key === "receivepack" && value === "git-receive-pack") &&
       !(await operatorPatchConfig(
         entries[index]!,
         entries[index + 1]!,
@@ -9200,7 +9200,7 @@ async function patchPreflightRemoteSettings(
       ))
     )
       throw new CodexSecurityError(
-        `Patch publication cannot use a checkout-selected remote.origin.${key} command.`,
+        `Patch publication cannot use checkout-selected remote.origin.${key}. Configure this setting in your user Git configuration.`,
       );
     // ls-remote uses the upload service. Push uses the real origin's receive service.
     if (key !== "receivepack")
