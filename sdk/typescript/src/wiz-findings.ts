@@ -423,9 +423,12 @@ function records(payload: unknown): FindingInput {
   } as const;
   const selected: InputRecord[] = [];
   let found = false;
+  let countedCollection: string | undefined;
   for (const [root, kind] of Object.entries(collections)) {
+    if (!(root in data)) continue;
     const collection = asRecord(data[root]);
-    if (!collection) continue;
+    if (!collection)
+      throw new Error(`Wiz ${root} must be an object with a nodes array.`);
     found = true;
     if (!Array.isArray(collection["nodes"]))
       throw new Error(`Wiz ${root}.nodes must be an array.`);
@@ -433,8 +436,14 @@ function records(payload: unknown): FindingInput {
       throw new Error(
         "Wiz response has another page. Complete the requested pages or save the explicitly selected records in their named collection before publishing.",
       );
+    const total = collection["totalCount"];
+    if (typeof total === "number" && total > 0) countedCollection = root;
     for (const value of collection["nodes"]) selected.push({ value, kind });
   }
+  if (!selected.length && countedCollection)
+    throw new Error(
+      `Wiz ${countedCollection}.totalCount reports findings, but the export contains no finding nodes.`,
+    );
   if (found)
     return {
       records: selected,

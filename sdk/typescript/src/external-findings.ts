@@ -40,6 +40,48 @@ export interface ExternalFindings {
   }[];
 }
 
+export function hasNoExternalRecords(input: ExternalFindings): boolean {
+  return input.read === 0 && !input.findings.length && !input.excluded.length;
+}
+
+/** Classify a reader selection before deciding whether to store, publish, or report it. */
+export function externalImportDisposition(
+  input: ExternalFindings,
+): "ready" | "empty" | "excluded" | "failed" {
+  if (input.findings.length) return "ready";
+  const errors = input.report?.["errors"];
+  if (Array.isArray(errors) && errors.length) return "failed";
+  if (hasNoExternalRecords(input)) return "empty";
+  return input.read === input.excluded.length ? "excluded" : "failed";
+}
+
+/** No findings can be imported. The selection retains every reader exclusion and diagnostic. */
+export class NoPublishableFindingsError extends CodexSecurityError {
+  readonly summary: string;
+
+  constructor(public readonly selection: ExternalFindings) {
+    const diagnostics = reportForJson(selection.report)?.["errors"];
+    const summary =
+      externalImportDisposition(selection) === "empty"
+        ? "No supported findings are ready to publish: the report is empty."
+        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`;
+    const reasons = selection.excluded.map(
+      (item) => `Item ${item.position}: ${item.reason}`,
+    );
+    super([summary, ...reasons].join(" "));
+    this.summary = summary;
+  }
+}
+
+export function reportForJson(report: ExternalFindings["report"]) {
+  const errors = report?.["errors"];
+  if (!Array.isArray(errors)) return report;
+  const json = JSON.stringify(errors, (_key, entry: unknown) =>
+    entry instanceof Error ? { ...entry, message: entry.message } : entry,
+  );
+  return { ...report, errors: JSON.parse(json) as unknown[] };
+}
+
 const isScannerError = Error.isError ?? isNativeError;
 export const nativeErrorStackGetter = Object.getOwnPropertyDescriptor(
   new Error(),

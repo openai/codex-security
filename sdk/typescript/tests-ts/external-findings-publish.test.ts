@@ -42,6 +42,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { Database } from "bun:sqlite";
+import { NoPublishableFindingsError } from "../src/index.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   ExternalPublicationError,
@@ -894,6 +895,156 @@ async function fixture(
     },
   };
 }
+
+test("a zero-record report needs no Cloud account, destination lookup, confirmation, or submission", async () => {
+  const f = await fixture([]);
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const fetch = spyOn(f.cliDeps, "cloudFetch");
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    [...f.command, "--full-output", "--dry-run"],
+    f.cliDeps,
+  );
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  const { ok, data } = JSON.parse(cli.stdout.text());
+  expect(ok).toBe(true);
+  expect(data).toMatchObject({
+    status: "empty",
+    published: false,
+    dryRun: true,
+    read: 0,
+    ready: 0,
+    findings: [],
+    excluded: [],
+  });
+  expect(data).not.toHaveProperty("destination");
+  expect(data).not.toHaveProperty("accountId");
+  await expect(readdir(f.environment.CODEX_SECURITY_STATE_DIR)).rejects.toThrow(
+    "ENOENT",
+  );
+});
+
+test("an empty monitored Snyk capture finishes without an upload after catalog lookup", async () => {
+  const report = snykRestFixture("open-source");
+  report.pages = [{ startingAfter: null, responseJson: '{"data":[]}' }];
+  const f = await fixture(report, report.sourceRepositoryUrl);
+  const cli = createCliTest(main);
+  const args = f.command.map((arg) => (arg === "wiz" ? "snyk" : arg));
+  expect(await cli.runCli(args, f.cliDeps)).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "empty",
+    published: false,
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
+test("an entirely excluded report fails with all positions intact and a short diagnostic", async () => {
+  const f = await fixture(
+    Array.from({ length: 500 }, (_, index) =>
+      normalized(`id-\x1b[2J${index}`, "unsupported"),
+    ),
+  );
+  await rm(f.environment.CODEX_HOME, { recursive: true });
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli([...f.command, "--dry-run", "--full-output"], f.cliDeps),
+  ).toBe(2);
+  const output = JSON.parse(cli.stdout.text());
+  expect(output).toMatchObject({
+    ok: false,
+    error: { code: "IMPORT_FAILED" },
+    data: { status: "failed", read: 500, ready: 0 },
+  });
+  expect(
+    output.data.excluded.map((row: { position: number }) => row.position),
+  ).toEqual(Array.from({ length: 500 }, (_, index) => index + 1));
+  expect(output.data.excluded.at(-1)).toMatchObject({
+    source_finding_id: "id-\x1b[2J499",
+    reason: expect.any(String),
+  });
+  expect(cli.stderr.text()).not.toContain("Item 500");
+  expect(output.error.message).not.toContain("Item 500");
+  const terminal = createCliTest(main);
+  expect(
+    await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.cliDeps),
+  ).toBe(2);
+  expect(terminal.stderr.text()).toContain("Excluded item 1:");
+  expect(terminal.stderr.text()).toContain("Showing 5 of 500 exclusions");
+  expect(terminal.stderr.text()).not.toContain("Excluded item 6:");
+  expect(terminal.stderr.text()).not.toContain("\x1b");
+  const flags = [
+    ...f.command.slice(0, -1),
+    "jsonl",
+    "--full-output",
+    "--filter-output=findings",
+  ];
+  const filtered = createCliTest(main);
+  expect(await filtered.runCli(flags, f.cliDeps)).toBe(2);
+  const failure = JSON.parse(filtered.stdout.text());
+  expect(failure.data.excluded).toEqual(output.data.excluded);
+  expect(failure.meta.command).toBe("publish findings");
+  const limited = createCliTest(main);
+  expect(await limited.runCli([...flags, "--token-limit=5"], f.cliDeps)).toBe(
+    2,
+  );
+  expect(JSON.parse(limited.stdout.text())).toMatchObject({
+    ok: false,
+    data: expect.any(String),
+    meta: { nextOffset: 5 },
+  });
+  expect(f.posts).toHaveLength(0);
+});
+
+test("normalized SDK callers can distinguish an empty report from exclusions without authenticating", async () => {
+  for (const selection of [
+    { read: 0, findings: [], excluded: [] },
+    {
+      read: 1,
+      findings: [],
+      excluded: [
+        { position: 1, source_finding_id: null, reason: "Not an occurrence" },
+      ],
+    },
+  ]) {
+    const prepared = prepareNormalizedExternalPublication(selection, options, {
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      credentials: async () => {
+        throw new Error("Unexpected credential read");
+      },
+    });
+    await expect(prepared).rejects.toBeInstanceOf(NoPublishableFindingsError);
+    await expect(prepared).rejects.toMatchObject({ selection });
+  }
+});
+
+test("a failed scanner run is not an empty successful import", async () => {
+  const f = await fixture({
+    version: "1.100.0",
+    results: [],
+    errors: [{ message: "example scan error" }],
+  });
+  const command = f.command.map((argument) =>
+    argument === "wiz" ? "semgrep" : argument,
+  );
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        ...command,
+        "--source-repository-url",
+        "https://github.com/example/project",
+        "--yes",
+      ],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "failed",
+    error: expect.stringContaining("scan errors"),
+  });
+  expect(f.posts).toHaveLength(0);
+});
 
 async function hostedFixture(
   provider: "semgrep" | "snyk",

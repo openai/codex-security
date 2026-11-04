@@ -114,6 +114,8 @@ import {
   validateTrivyRepositoryUrl,
 } from "./trivy-import.js";
 import {
+  NoPublishableFindingsError,
+  reportForJson,
   snapshotSourceRepositories,
   type ExternalSourceRepository,
   snapshotImportOptions,
@@ -376,15 +378,6 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
     if (error.code === "ENOENT") return undefined;
     throw error;
   });
-}
-
-function reportForJson(report: ExternalFindings["report"]) {
-  const errors = report?.["errors"];
-  if (!Array.isArray(errors)) return report;
-  const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { ...entry, message: entry.message } : entry,
-  );
-  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 export function externalPublicationStateDirectory(
@@ -1415,6 +1408,9 @@ async function preparePublicationInput(
       "The source key must contain 1–512 UTF-8 bytes and no NUL characters. Use a stable scanner organization/project/branch namespace across imports.",
     );
   }
+  const environment = dependencies.environment ?? process.env;
+  dependencies.signal?.throwIfAborted();
+  requireExternalImports(environment);
   progress({ phase: "reading", completed: 0 });
   const trivyReportUrls =
     options.provider === "trivy" && typeof supplied !== "function"
@@ -1427,12 +1423,6 @@ async function preparePublicationInput(
   const catalogKey = trivyReportUrls
     ? (url: string) => cloudSourceKey(url, "github")
     : cloudRepositoryUrlKey;
-  function noFindings(parsed: ExternalFindings): never {
-    const diagnostics = reportForJson(parsed.report)?.["errors"];
-    throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
-    );
-  }
   function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
     checkTrivyReportProvider(options.provider, parsed.report);
@@ -1447,12 +1437,10 @@ async function preparePublicationInput(
       !input.unprovenOccurrenceCount &&
       !input.unprovenIdPrefixes?.length
     )
-      noFindings(parsed);
+      throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
   progress({ phase: "discovering", completed: 0 });
-  const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.
@@ -2622,7 +2610,7 @@ async function preparePublicationInput(
   }
   const saved = selected?.content ?? recovered;
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
-  if (!parsed.findings.length) noFindings(parsed);
+  if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   if (saved) {
     await retireIfReset(saved, () =>
       underLocks(lockKeys, async () => {
