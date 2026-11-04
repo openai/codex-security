@@ -1821,6 +1821,7 @@ const runtimeRefusals = [
   "Request rejected: cyber_policy.",
   "cyber_policy",
   "Quota exceeded. Check your plan and billing details.",
+  "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
   "You’ve hit your usage limit. Try again later.",
   "You’ve hit your usage limit for synthetic-model. Try again later.",
 ];

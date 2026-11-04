@@ -174,6 +174,10 @@ Keep the published notes easy to scan:
 - Start with a short overview and the main user-facing highlights. Use bold
   topic labels to make the bullets easy to skim. Put secondary improvements
   in a `<details>` block when they would crowd out upgrade guidance.
+- When bundled instructions change how scans discover or validate findings
+  or assign severity, describe the change in the highlights or upgrade notes.
+  Name the affected scan modes and behaviors or finding categories. If a
+  benchmark measured the effect, report the result and its scope.
 - Keep breaking changes and required upgrade actions visible. Long migration
   procedures can go in a clearly named `<details>` block under the relevant
   upgrade note. Keep code fences, tables, and lists intact.

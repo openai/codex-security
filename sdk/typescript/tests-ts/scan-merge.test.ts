@@ -247,8 +247,9 @@ describe("local scan merging", () => {
   test("round-trips aggregate references without copying original payloads into checkpoints", async () => {
     const directory = await mkdtemp(join(tmpdir(), "merge-references-"));
     try {
-      const a = child("a"),
-        b = child("b");
+      const alias = finding("alias", { severity: { level: "critical" } });
+      const a = child("a");
+      const b = child("b", [alias]);
       const first = merge([["a:0"]], [a], null).aggregate;
       const aggregate = {
         ...merge([["a:0", "b:0"]], [b], first).aggregate,
@@ -281,7 +282,21 @@ describe("local scan merging", () => {
       expect(stored).not.toHaveProperty("sourceFindings");
       expect(stored).not.toHaveProperty("revisions");
       expect(stored.sourceFindingIds).toEqual(["a:0", "b:0"]);
-      expect(await hydrateScanAggregate(directory, stored)).toEqual(aggregate);
+      const restored = await hydrateScanAggregate(directory, stored);
+      expect(restored).toEqual(aggregate);
+      const repeated = merge(
+        [["a:0", "b:0", "c:0"]],
+        [child("c", [alias])],
+        restored,
+      ).aggregate;
+      const exported = materializeScanAggregate(repeated);
+      expect(exported.findings).toHaveLength(1);
+      expect(exported.findings[0]!.severity).toEqual(alias.severity);
+      expect(exported.findings[0]!.provenance.sourceFindings).toEqual([
+        { id: "a:0", finding: a.sourceFindings[0]! },
+        { id: "b:0", finding: alias },
+        { id: "c:0", finding: alias },
+      ]);
       expect(
         scanAggregateRevisionArtifacts(aggregate, new Set(stored.revisionIds)),
       ).toEqual([]);
