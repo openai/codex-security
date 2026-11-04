@@ -60,6 +60,8 @@ export function validatePatchRiskAssessment(assessment: unknown): string[] {
       errors.push("merge cannot retain a failed validation");
     if (evidencePlan.length)
       errors.push("merge cannot retain an evidence plan");
+    if (assessment.regressionLikelihood.rating === "critical")
+      errors.push("merge cannot retain critical regression likelihood");
   } else if (workflowLabel !== recommendation) {
     errors.push("non-merge workflow label must match the recommendation");
   }
@@ -123,7 +125,9 @@ function readAssessment(path: string): unknown {
   const text =
     path === "-"
       ? decodePosixBytes(contents)
-      : decodeUtf8(contents).replace(/\r\n?/gu, "\n");
+      : decodeUtf8(contents)
+          .replace(/^\uFEFF/u, "")
+          .replace(/\r\n?/gu, "\n");
   try {
     return parseJson(text);
   } catch (error) {

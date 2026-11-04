@@ -42,6 +42,20 @@ export interface KnowledgeBaseSnapshot {
   readonly documents: Readonly<Record<string, string>>;
 }
 
+export async function knowledgeBaseProtectedRoots(
+  snapshot: KnowledgeBaseSnapshot,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return snapshot.protectedRoots === undefined
+    ? await Promise.all(
+        snapshot.sources.map(
+          async (source) =>
+            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        ),
+      )
+    : [...snapshot.protectedRoots];
+}
+
 /** @internal Extract once so campaign identity and workers use identical inputs. */
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
@@ -113,15 +127,13 @@ export async function readKnowledgeBaseSnapshot(
       extracted[filename] = text;
       index++;
     }
-    return {
+    const snapshot = {
       sources: [...sources],
-      protectedRoots: await Promise.all(
-        [...sources].map(
-          async (source) =>
-            (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        ),
-      ),
       documents: extracted,
+    };
+    return {
+      ...snapshot,
+      protectedRoots: await knowledgeBaseProtectedRoots(snapshot, signal),
     };
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
@@ -139,15 +151,7 @@ export async function prepareKnowledgeBase(
       "documents" in input
         ? input
         : await readKnowledgeBaseSnapshot(input, signal);
-    const protectedRoots =
-      snapshot.protectedRoots === undefined
-        ? await Promise.all(
-            snapshot.sources.map(
-              async (source) =>
-                (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-            ),
-          )
-        : [...snapshot.protectedRoots];
+    const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
       join(directory ?? tmpdir(), "codex-security-knowledge-"),
     );
@@ -222,6 +226,12 @@ async function discover(
         documents.push(document);
       }
     } else if (entry.isFile()) {
+      // Office keeps a "~$" owner file next to each open document.
+      if (entry.name.startsWith("~$")) continue;
+      // macOS writes "._" metadata files when copying to other filesystems.
+      if (entry.name.startsWith("._")) continue;
+      // LibreOffice keeps a ".~lock.<name>#" file next to each open document.
+      if (/^\.~lock\..+#$/s.test(entry.name)) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -267,23 +277,33 @@ async function extractPdf(
     });
     try {
       const document = await loadingTask.promise;
+      signal?.throwIfAborted();
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         signal?.throwIfAborted();
-        const content = await (await document.getPage(number)).getTextContent();
+        const page = await document.getPage(number);
         signal?.throwIfAborted();
-        pages.push(
-          content.items
-            .map((item) => ("str" in item ? item.str : ""))
-            .join(" "),
-        );
+        const content = await page.getTextContent();
+        signal?.throwIfAborted();
+        const parts: string[] = [];
+        for (const item of content.items) {
+          if (!("str" in item)) continue;
+          // Separate runs when the PDF supplies no whitespace, including across forms.
+          if (/^\S/u.test(item.str) && /\S$/u.test(parts.at(-1) ?? "")) {
+            parts.push(" ");
+          }
+          if (item.str) parts.push(item.str);
+          if (item.hasEOL) parts.push("\n");
+        }
+        pages.push(parts.join(""));
       }
       return pages.join("\n");
     } finally {
       await loadingTask.destroy();
+      signal?.throwIfAborted();
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
+    signal?.throwIfAborted();
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
       cause: error,
     });
@@ -315,6 +335,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     let documentElement = false;
     let deletedDepth = 0;
     let instructionText = false;
+    // Paragraph properties list tab stops as w:tab elements inside w:tabs.
+    let tabStops = false;
     const append = (value: string) => {
       if (deletedDepth > 0) return;
       const field = fields.at(-1);
@@ -334,7 +356,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth++;
       }
@@ -358,7 +381,9 @@ function extractDocx(path: string, bytes: Uint8Array): string {
           fields.at(-1)!.instructions = false;
         else if (type === "end") finishField(true);
       } else if (localName === "br" || localName === "cr") append("\n");
-      else if (localName === "tab") append("\t");
+      else if (localName === "tabs") tabStops = true;
+      else if (localName === "tab" && !tabStops) append("\t");
+      else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, isSelfClosing }) => {
       const localName = name.split(":").at(-1);
@@ -369,11 +394,13 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         append(content);
       }
       if (localName === "instrText") instructionText = false;
+      if (localName === "tabs") tabStops = false;
       if (!isSelfClosing && localName === "p") append("\n");
       if (
         localName === "del" ||
         localName === "delText" ||
-        localName === "delInstrText"
+        localName === "delInstrText" ||
+        localName === "moveFrom"
       ) {
         deletedDepth--;
       }

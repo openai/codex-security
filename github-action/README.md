@@ -1,25 +1,28 @@
 # Codex Security GitHub Action
 
 Run Codex Security scans in GitHub Actions. Scan a repository or pull request,
-check findings against a severity threshold, and export JSON, coverage, and
-SARIF reports.
+check findings against a severity threshold, and export JSON and SARIF reports.
 
 ## Quick start
 
-Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com and an OpenAI API key
+Use a GitHub-hosted Ubuntu 24.04 x64 runner on GitHub.com or GitHub Enterprise
+Cloud on `*.ghe.com`, and an OpenAI API key
 with access to the selected model. OpenAI is the default provider. See
 [Inference providers](#inference-providers) for Bedrock, OpenRouter, and Fireworks.
 
 Add your API key as a repository secret named `CODEX_SECURITY_API_KEY`, then
 save this workflow in `.github/workflows/codex-security.yml`.
-Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full SHA of an Action commit.
-The matching `action-vX.Y.Z` tag and distribution commit are listed in each
-product release after the CLI and Action have both passed release checks.
+Replace `REPLACE_WITH_REVIEWED_COMMIT` with the full distribution SHA from an
+`action-vX.Y.Z` release that includes automatic Ubuntu sandbox setup.
+For older pins, including `action-v0.6.0`, keep the [manual sandbox setup](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
 When using a fork, replace `openai` with the fork owner.
 
-This example requests Daybreak Blue. Use an API key from a project with Blue
-enabled; without Daybreak access, omit `cyber-access-program` or set it to
-`standard`. See [Daybreak access and refusals](#daybreak-access-and-refusals).
+The [repository workflow](examples/repository.yml) below uses `gpt-5.6-sol` and
+an estimated $5 cost limit. Change `max-cost` to adjust the budget, or remove it
+for no estimated cost limit. Requests already in progress can exceed the limit.
+Daybreak is optional; see [Daybreak access and refusals](#daybreak-access-and-refusals).
+
+<!-- action-workflow:repository:start -->
 
 ```yaml
 name: Codex Security repository
@@ -34,24 +37,25 @@ permissions:
 jobs:
   security:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+      - name: Scan the repository
+        id: security
+        uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
+          scope: repository
           model: gpt-5.6-sol
           effort: high
-          cyber-access-program: daybreak_blue
+          max-cost: "5"
+          fail-on-severity: none
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
+
+<!-- action-workflow:repository:end -->
 
 The workflow runs weekly on Mondays at 07:23 UTC. To run it manually, use
 **Actions → Codex Security repository → Run workflow**.
@@ -61,21 +65,51 @@ also fail the job. Intentional exclusions and investigation notes do not.
 
 ### Ubuntu sandbox setup
 
-Codex Security runs commands inside a sandbox to limit their filesystem and
-network access. On the Ubuntu 24.04 runner used above, that sandbox uses
-Bubblewrap (`bwrap`), and Ubuntu's AppArmor policy must allow it to create the
-required isolated environment.
+The Action checks that Codex can start its sandbox before using the scan
+credential. If sandbox startup fails on a GitHub-hosted Ubuntu 24.04 VM and Codex
+can load its configuration, the Action installs `bubblewrap` and
+`apparmor-profiles`, loads the supplied
+`bwrap-userns-restrict` AppArmor profile, and checks startup again.
 
-The setup step installs `bubblewrap` and `apparmor-profiles`, then uses
-`apparmor_parser -r` to load the supplied `bwrap-userns-restrict` profile. The
-profile permits Bubblewrap's sandbox setup while retaining Ubuntu's broader
-AppArmor restrictions. Keep this step before the Action: the CLI checks that
-its sandbox works before scanning and fails if it cannot start, for example
-with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
+Self-hosted runners and job containers must provide a working Codex sandbox.
+The Action checks sandbox startup in both, but does not install system packages
+or change AppArmor there. See the [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing).
 
-This setup is specific to the Linux runner. Local macOS scans use the built-in
-Seatbelt sandbox and do not need Bubblewrap. See the
-[sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+## Supported GitHub hosts and checkout URLs
+
+The Action supports GitHub.com and GitHub Enterprise Cloud on `*.ghe.com`.
+Checkout origins can use HTTPS, SCP-style SSH (`USER@HOST:OWNER/REPO.git`),
+or an `ssh://` URL, including an explicit port 22. Repository names and hostnames
+are compared without regard to case; a `.git` suffix and trailing slash are optional.
+
+On GitHub.com, `ssh://git@ssh.github.com:443/OWNER/REPO.git` is also supported.
+GitHub does not offer this SSH-over-443 endpoint for enterprises on `ghe.com`;
+see [GitHub's SSH-over-HTTPS guidance](https://docs.github.com/en/authentication/troubleshooting-ssh/using-ssh-over-the-https-port).
+
+### GitHub Enterprise Cloud
+
+The workflows in this guide also support GitHub Enterprise Cloud with data
+residency at `https://SUBDOMAIN.ghe.com`. The Action reads `GITHUB_SERVER_URL`
+from the runner and requires the checkout origin to match that host and
+`GITHUB_REPOSITORY`. No additional Action input or GitHub token is needed.
+Use a reviewed Action commit containing this support.
+
+Keep `persist-credentials: false` and use the triggering repository and revision.
+HTTPS origins work with the checkout step above. For SSH origins, GitHub uses
+the enterprise subdomain as the username, such as
+`example-enterprise@example-enterprise.ghe.com:example/repo.git`.
+See [GitHub's SSH guidance](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/network-details-for-ghecom#using-ssh-with-ghecom).
+
+Report artifacts use the runner's Actions artifact service. The separate
+`github/codeql-action/upload-sarif` step uses the enterprise's code scanning
+service and requires the permissions and availability described below.
+Enterprise policies must permit the referenced actions. For Bedrock OIDC,
+configure AWS trust for the enterprise issuer at
+`https://token.actions.SUBDOMAIN.ghe.com`; see
+[GitHub's feature differences](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency).
+
+GitHub Enterprise Server remains unsupported. The Linux x64 runtime and
+sandbox requirements apply on both supported GitHub Cloud hosts.
 
 ## Inference providers
 
@@ -83,12 +117,12 @@ Seatbelt sandbox and do not need Bubblewrap. See the
 The CLI configures the provider and validates its model requirements. The Action
 uses the same provider names and forwards only the selected provider's credentials:
 
-| `provider` | Step environment |
-| --- | --- |
-| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback |
-| `amazon-bedrock` | AWS credentials and region; see the OIDC example below |
-| `openrouter` | `OPENROUTER_API_KEY` |
-| `fireworks` | `FIREWORKS_API_KEY` |
+| `provider`         | Step environment                                       |
+| ------------------ | ------------------------------------------------------ |
+| `openai` (default) | `OPENAI_API_KEY`, or `CODEX_API_KEY` as a fallback     |
+| `amazon-bedrock`   | AWS credentials and region; see the OIDC example below |
+| `openrouter`       | `OPENROUTER_API_KEY`                                   |
+| `fireworks`        | `FIREWORKS_API_KEY`                                    |
 
 OpenAI retains the `gpt-5.6-sol` default. Other providers require an explicit
 model ID your credentials can access. For example, replace the scan step in the
@@ -139,11 +173,6 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -171,7 +200,9 @@ jobs:
 ```
 
 Replace the Action placeholder with a reviewed commit that includes Bedrock
-support. This example is report-only; the usual severity thresholds, summaries,
+support and [automatic Ubuntu sandbox setup](#ubuntu-sandbox-setup). For older
+pins, keep the [manual setup step](https://github.com/openai/codex-security/blob/action-v0.6.0/github-action/README.md#ubuntu-sandbox-setup).
+This example is report-only; the usual severity thresholds, summaries,
 annotations, artifacts, and SARIF outputs also work with Bedrock.
 
 Both `mode: standard` and `mode: deep` use the selected AWS credentials. Allow
@@ -194,8 +225,7 @@ Daybreak is optional. You can use the Action with a general-purpose model your
 credentials can access under standard safeguards. Some security tasks may trigger
 model refusals or API cybersecurity safety blocks. **If a refusal or safety
 block aborts the scan, the Action fails**, even with `fail-on-severity: none`.
-That setting controls failures caused by findings; it does not suppress scanner
-errors. Check the job summary and logs for the reason. A failed scan does not
+The findings setting does not suppress scanner errors. Check the job summary and logs for the reason. A failed scan does not
 mean the repository has no vulnerabilities.
 
 For authorized security work that needs reduced refusals,
@@ -218,35 +248,100 @@ use an approved model ID and AWS provisioning as described in
 
 ## Scan pull requests
 
-Use the same API-key secret and Action commit as above. Check out the PR head
-with full history so the Action can resolve the diff.
+Use the same API-key secret and Action commit as above. The
+[pull-request workflow](examples/pull-request.yml) checks out the PR head with
+full history and requires a completed scan of the event's snapshot. For each protected target branch,
+require its matching **Codex Security / <target-branch>** check (for example,
+**Codex Security / main** on `main`) from the GitHub Actions app as part of the
+branch's merge policy. An independent merge-time gate must require fresh scan
+qualification whenever the live base changes, including after this check passes.
+GitHub can reuse a successful head check after a base-only update, even with
+strict up-to-date checks when the new base is already an ancestor of the head.
+This example does not implement that merge-time gate: the named check alone
+cannot establish that the current merge diff was scanned. Require this check
+only for branches that do not use a merge queue. The Action
+does not support `merge_group` events, so this workflow cannot provide the required
+check for a merge queue.
+
+When migrating from the previous example, let the new target-specific check run,
+then replace the old **Codex Security** required check with the matching
+**Codex Security / <target-branch>** check. Keeping the old requirement leaves a
+check pending that this workflow no longer produces.
+
+The check name includes the target branch because GitHub can evaluate checks on
+the shared head commit when a test merge commit has no status. The workflow uses
+read-only pull request and Git-ref access on the triggering GitHub host to verify
+the event's head, target branch, and live base SHA before the scan and before
+accepting its result. The pull record's base SHA alone can lag the branch tip.
+Retargeted PRs get a new review. During a run, a changed snapshot fails verification;
+a stale rerun cannot cancel another event's scan.
+The concurrency group also includes the run ID because GitHub compares group
+names without case sensitivity. Separate workflow events can run concurrently.
+Run the workflow from the current PR event after retargeting. If the target has
+advanced since that event, update the PR branch to trigger a fresh review.
+See GitHub's [required-check evaluation](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
+and [rerun semantics](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs).
+
+When the required check must establish which workflow ran, use an
+[organization ruleset that requires a workflow](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-workflows-to-pass-before-merging)
+from a protected ref. Selecting the GitHub Actions app identifies the app, not a
+particular workflow or ref. Code owner approval for `.github/workflows/` and
+`CODEOWNERS`, together with dismissing stale approvals, protects edits in the PR
+being reviewed. It does not stop a workflow on another writable branch from
+creating a check with the same name and app on that PR's head, so it cannot
+substitute for the protected-ref workflow requirement.
+
+<!-- action-workflow:pull-request:start -->
 
 ```yaml
+# Required-check policy prerequisites, including merge-time freshness, are in the README.
 name: Codex Security PR
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: codex-security-pr-${{ github.event.pull_request.number }}
+  # Group names are case-insensitive; the run ID also separates case-only retargets.
+  group: codex-security-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
   security:
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    name: Codex Security
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    name: Scan changes
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      scan-status: ${{ steps.security.outputs.scan-status }}
+      skip-reason: ${{ steps.security.outputs.skip-reason }}
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
+      - &verify-current-pr
+        name: Verify the PR still matches this scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          current=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.head.sha, .base.ref, .base.sha] | @tsv')
+          expected=$(printf '%s\t%s\t%s' "$PR_HEAD_SHA" "$PR_BASE_REF" "$PR_BASE_SHA")
+          if [ "$current" != "$expected" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
+          base_ref=$(printf '%s' "$PR_BASE_REF" | jq -sRr @uri)
+          live_base=$(gh api --hostname "${GITHUB_SERVER_URL#https://}" "repos/$GITHUB_REPOSITORY/git/ref/heads/$base_ref" --jq '.object.sha')
+          if [ "$live_base" != "$PR_BASE_SHA" ]; then
+            echo 'The PR head or target changed. Run the workflow for the current PR snapshot.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -257,15 +352,56 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: diff
-          model: gpt-5.6-luna
-          effort: medium
+          model: gpt-5.6-sol
+          effort: high
+          max-cost: "5"
           fail-on-severity: high
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
+
+  required-review:
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security / ${{ github.event.pull_request.base.ref }}
+    needs: security
+    if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-24.04
+    steps:
+      - *verify-current-pr
+      - name: Require a completed review or an empty diff
+        env:
+          SCAN_JOB_RESULT: ${{ needs.security.result }}
+          SCAN_STATUS: ${{ needs.security.outputs.scan-status }}
+          SKIP_REASON: ${{ needs.security.outputs.skip-reason }}
+        run: |
+          test "$SCAN_JOB_RESULT" = success
+          if [ "$SCAN_STATUS" = completed ]; then
+            exit 0
+          fi
+          test "$SCAN_STATUS" = skipped
+          test "$SKIP_REASON" = empty-diff
 ```
 
-This job fails on reported high or critical findings, or on scanner and required
-reporting errors. File and line annotations are enabled by default.
+<!-- action-workflow:pull-request:end -->
+
+The scan job fails on high or critical findings, scanner errors, or required
+reporting errors. After a failure, a later step with `if: failure()` in the same
+job can read any validated reports through the Action outputs. Set
+`upload-artifacts: 'true'` to make those reports downloadable after the job ends.
+File and line annotations are enabled by default.
+
+The repository workflow above reruns when a PR's base branch changes, even when
+the head commit is unchanged. Title and body edits skip the scan and use a
+separate concurrency group and check name, preserving the active scan and its
+required **Codex Security** result.
+
+For `pull_request`, GitHub runs required ruleset workflows on `opened`,
+`synchronize`, and `reopened`. After retargeting a PR covered by that rule, push
+a new commit or close and reopen the PR to scan the new base.
+See [GitHub's supported ruleset triggers](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#supported-event-triggers).
+
+For scan-triggering events, the separate **Codex Security** job runs even if the
+scan job is skipped. It passes only after a successful scan job that reports a completed scan or a
+verified empty diff. A dry run, cancellation, or skipped scan job fails this
+required check.
 
 Use PR scanning for trusted contributors with branches in the calling repository.
 To scan Dependabot PRs, also configure `CODEX_SECURITY_API_KEY` as a
@@ -273,9 +409,10 @@ To scan Dependabot PRs, also configure `CODEX_SECURITY_API_KEY` as a
 The same workflow uses that secret for Dependabot runs and the Actions secret for
 other runs. Missing credentials fail with setup guidance.
 
-Fork PRs are skipped by this example. GitHub treats skipped jobs as successful
-for required checks; skipped does not mean scanned. `pull_request_target` and
-`workflow_run` are not supported.
+The scan job skips fork PRs, so the required check fails for those PRs. Repositories
+accepting fork contributions need an approved review process for them before
+using this check as a merge requirement. `pull_request_target` and `workflow_run`
+are not supported.
 
 The scanner uses applicable `SECURITY.md` guidance from the checked-out revision,
 including policy changes in the PR. Review those changes alongside the code.
@@ -289,27 +426,38 @@ Keep unrelated credentials and deployment steps in separate jobs.
   Names such as `src/[slug]/page.tsx` are literal paths; glob characters are not expanded.
   This requires repository scope.
 - For diff scans outside PR events, set `diff-base`.
-- Set `dry-run: 'true'` to check configuration without an API key or model calls.
-  Use a separate setup job; dry-run does not assess code or verify model access.
+- Set `dry-run: 'true'` with `fail-on-severity: none` to check configuration and
+  sandbox startup without an API key or model calls. Use a separate setup job;
+  dry-run does not assess code or verify model access.
 
 For a Deep scan of a repository or selected paths, add these inputs to the scan step:
 
 ```yaml
 with:
   mode: deep
-  max-time-hours: "2"
+  max-time-hours: "1"
 ```
 
 Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
 finalization can take additional time. It is unset by default, which uses the
 CLI's default of 96 hours. Set an explicit budget for Deep scans that leaves
-room for finalization within your job timeout.
+room for finalization within your job timeout. The one-hour discovery budget
+above leaves time for setup and finalization within the repository workflow's
+two-hour job timeout.
 
 ## Reports
 
-The Action writes a job summary and source annotations. Set
-`upload-artifacts: 'true'` for downloadable reports, retained for seven days by
-default. Reports can contain source code and vulnerability details.
+The Action lists the highest-severity findings first in the job summary and
+source annotations, preserving scan order within each severity level. Set
+`upload-artifacts: 'true'` to upload full reports and link them from the summary.
+Anyone signed in to GitHub with read access to the repository can download the
+reports, which can contain source code and vulnerability details. Set
+`retention-days` to change the default of seven days.
+
+The job summary includes the configured provider, reported input/cached/output
+token usage, and estimated USD cost, including a range when supplied by the CLI.
+Missing measurements or pricing appear as `unavailable`; measured zeros remain
+zero. Cost estimates are not billing totals.
 
 The Action uses the normal Actions job check. Its summary and final log message
 distinguish findings above the failure threshold from a scan that could not
@@ -318,19 +466,25 @@ are report-only; scanner and required reporting failures still fail the job.
 
 A completed scan means the configured analysis produced a valid result. Scope
 exclusions, deferred investigations, and other coverage notes remain in the
-coverage report; they do not create a separate scan outcome or bypass the
+review notes, they do not create a separate scan outcome or bypass the
 findings policy. Completion does not certify that every vulnerability was found.
 
 The Action follows the CLI outcome consistently:
 
-| CLI exit | Action result |
-| --- | --- |
-| `0` | `scan-status: completed`, `policy-status: passed`; the step succeeds. |
-| `1` | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
-| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails. |
+| CLI exit                      | Action result                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `0`                           | `scan-status: completed`, `policy-status: passed`; the step succeeds.          |
+| `1`                           | `scan-status: completed`, `policy-status: failed`; the step fails on findings. |
+| `2` or an interrupted process | `scan-status: failed`, `policy-status: not-evaluated`; the step fails.         |
 
-Usable reports retained after an execution failure remain available, but are not
-eligible for SARIF upload. Invalid or missing required reports, a changed
+A verified empty diff succeeds with `scan-status: skipped` and
+`skip-reason: empty-diff`, including when a severity threshold is configured.
+A dry run checks local setup and requires `fail-on-severity: none`.
+Use the [required PR check](#scan-pull-requests) to handle skipped scan jobs as
+well as the Action's own results.
+
+After an execution failure, the Action returns paths to usable reports and sets
+`sarif-upload-ready: false`. Invalid or missing required reports, a changed
 checkout, and requested artifact-upload or runtime-cleanup failures also fail
 the step. Empty diffs and dry runs use `scan-status: skipped`.
 
@@ -343,8 +497,10 @@ artifact upload that fails still fails the job.
 ### GitHub code scanning
 
 Grant the job `security-events: write` and, for private repositories,
-`actions: read`, alongside `contents: read`. Set `id: security` on the scan step,
-then add this step after it:
+`actions: read`, alongside `contents: read`. When extending the pull-request
+workflow, retain `pull-requests: read` in the job's permissions map for its
+snapshot checks; a job-level map replaces the workflow-level permissions.
+Set `id: security` on the scan step, then add this step after it:
 
 ```yaml
 - name: Upload security findings
@@ -368,12 +524,10 @@ for code scanning availability and permissions.
 ## Runtime
 
 The Action installs a pinned CLI release from npm using a committed dependency
-lock. It runs on Linux x64 with Node 24 and Python 3.11 or later; the Ubuntu 24.04
-runner supplies Node and Python. The setup step above installs Bubblewrap and
-loads Ubuntu's `bwrap-userns-restrict` AppArmor profile. This profile lets
-Bubblewrap create the sandbox's user namespace and denies capabilities to its
-child processes. It is loaded into the running kernel for the job's runner.
-Codex uses the system Bubblewrap from `PATH`.
+lock. It runs on Linux x64 with Node 24 and Python 3.11 or later.
+GitHub-hosted Ubuntu 24.04 VMs supply Node and Python. Codex uses the system
+Bubblewrap from `PATH`; see [Ubuntu sandbox setup](#ubuntu-sandbox-setup) for VM
+setup and requirements for self-hosted runners and job containers.
 
 npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
@@ -387,6 +541,21 @@ The Action uses the CLI’s validated JSON result for findings and scan status.
 If the CLI exits without a usable result, the Action reports failure and leaves
 report paths empty; it does not recover unvalidated files from disk.
 
+### Request attribution
+
+The Action adds `codex_security_integration=github_action` and
+`codex_security_provider` (the configured provider family) through the CLI's existing
+`responses_api_metadata` setting. These accompany the CLI's request attribution
+on model requests supported by the provider. This attribution contains no
+repository, workflow, run, actor, credential, or finding data.
+Native managed configuration may override the provider selection before inference.
+
+The Action continues to set `analytics.enabled=false`. Request metadata is
+separate from native analytics and does not create an additional telemetry
+request or publish scan results to Codex Security Cloud. Requests sent to other
+providers do not establish OpenAI-side usage reporting. Summaries, annotations,
+and artifact uploads retain their existing controls.
+
 ## Troubleshooting
 
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
@@ -394,64 +563,75 @@ report paths empty; it does not recover unvalidated files from disk.
 - **Authentication errors:** for OpenAI, check the repository secret and model access.
   For Bedrock, check the AWS identity, session expiry, region, and permission to
   invoke the exact model ID.
-- **Sandbox startup errors:** on Ubuntu 24.04, include the sandbox setup step
-  shown above. Installing Bubblewrap alone does not load the AppArmor profile.
-  A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
-  the sandbox could not configure its network namespace. Check that the profile
-  loaded successfully before running the Action.
+- **Sandbox startup errors:** for jobs running directly on GitHub-hosted Ubuntu
+  24.04 VMs, inspect the package-install and AppArmor diagnostics. On self-hosted
+  runners and in job containers, configure the sandbox before running the Action.
+  Installing Bubblewrap alone does not load Ubuntu's required AppArmor profile.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Failed scans:** inspect the CLI diagnostics for execution errors. Scope
-  exclusions and deferred investigations in the coverage report do not cause
+  exclusions and deferred investigations in the review notes do not cause
   execution failures or bypass the severity policy.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
 elapsed-time messages only.
 
+## Upgrading from Action 0.2.0
+
+`dry-run: 'true'` now requires `fail-on-severity: none`; put configuration checks
+in a separate job. A dry run does not perform the security review required
+by a severity-enforcing job.
+
+Once your Action pin includes automatic sandbox setup, remove the manual
+Bubblewrap/AppArmor step from jobs running directly on GitHub-hosted Ubuntu
+24.04 VMs. Self-hosted runners and job containers still require a preconfigured sandbox.
+
+The workflow examples use a model and cost limit supported by the pinned CLI.
+
 ## Development
 
-From the repository root:
+From the repository root, use Node.js 24 to check the committed files and audit
+both dependency locks.
 
 ```bash
 npm --prefix github-action ci --ignore-scripts --no-audit --no-fund
-npm --prefix github-action run docs
-npm --prefix github-action run build
 npm --prefix github-action run validate
-# Test the published CLI with synthetic scans; no model calls:
+npm --prefix github-action audit --audit-level=high
+npm --prefix github-action/runtime audit --omit=dev --audit-level=high
+```
+
+After editing Action inputs, outputs, or the workflows in `examples/*.yml`, run
+`npm --prefix github-action run docs` to regenerate the README. After changing
+bundled source or the runtime lock, run `npm --prefix github-action run build`.
+Review the generated README and `dist/*.cjs` changes, rerun validation, and
+commit them with their source changes.
+
+On Linux x64 with a working sandbox, run the published CLI integration and
+packaged smoke tests.
+
+```bash
 npm --prefix github-action/runtime ci --ignore-scripts --no-audit --no-fund
 npm --prefix github-action run test:cli
-# Linux x64 with Node 24; no model calls:
 node github-action/scripts/linux-smoke.mjs
 ```
 
-Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
 reproducibility. CI also tests the result adapter against the pinned CLI and its
-SARIF exporter using synthetic scans, runs the packaged Linux smoke test, and
-audits the Action and CLI dependency locks. The `@openai/codex-security` dependency in
-`runtime/package.json` is the installed CLI version source. Main keeps the last
-published CLI pin so its checks remain runnable while a release PR prepares the
-next product version. To upgrade that development pin, update it and regenerate
+SARIF exporter using synthetic scans. A local inference fixture checks request
+attribution and the analytics opt-out with synthetic credentials. These tests run
+without external model calls. The `@openai/codex-security` dependency in
+`runtime/package.json` is the installed CLI version source. Main keeps an already
+published CLI baseline so its checks remain runnable while a release PR prepares
+the next product version. This development pin does not necessarily track the
+latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
-Releases use the product version from `sdk/typescript/package.json`. Before npm
-publication, the release workflow exercises the Action's compatibility suite
-against the packed CLI candidate. After publication and provenance verification,
-the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, and fetches the locked runtime through
-Socket Firewall with an empty cache before running the CLI. The lock keeps
-public npm URLs for Action consumers. The workflow rebuilds the bundles and
-runs the Action checks in a job with read-only repository permissions.
-A fresh publisher takes only the tested runtime lock, rebuilds
-from the same source, and verifies the bundle hashes without executing the CLI.
-It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`.
-
-The Action distribution commit differs from the CLI source commit because the
-registry integrity lock is finalized after publication. Release metadata records
-both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm. Existing version tags are never moved.
-See [the release process](../RELEASING.md) for the orchestration and recovery flow.
+The `action-vX.Y.Z` release uses the same version as the corresponding
+`npm-vX.Y.Z` CLI release. Its distribution commit includes the built bundles and
+final runtime lock and differs from the CLI source commit. Pin the full Action
+distribution SHA listed in the Action release, which also includes its manifest,
+SBOM, and a link to the product changelog. See [the release process](../RELEASING.md)
+for publication, verification, and recovery instructions.
 
 <!-- prettier-ignore-start -->
 
@@ -471,15 +651,15 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `provider`             | `openai`                  | Inference provider, matching scan --provider: openai, openrouter, fireworks, or amazon-bedrock. Supply the selected provider's credentials to the step.                                                                      |
 | `model`                | Unset                     | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.                                         |
 | `cyber-access-program` | Unset                     | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
-| `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
+| `effort`               | `xhigh`                   | Reasoning effort passed to Codex; supported values depend on the model and provider.                                                                                                                                         |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
 | `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
 | `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail.                                                                         |
 | `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
-| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.                                                                                     |
+| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.                                                    |
 | `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
 | `annotations`          | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                                                                                                               |
-| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                                                                                                              |
+| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details.                                                                                     |
 | `artifact-name`        | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                                                                                                        |
 | `retention-days`       | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                                                                                                                |
 
@@ -491,7 +671,8 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                             |
 | `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                          |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                    |
+| `manifest-path`       | Absolute scan manifest path, including scan status and scope, or empty when unavailable or withheld.                                   |
+| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                              |
 | `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                          |
 | `scan-status`         | completed, failed, or skipped. Completed means analysis produced a valid result. Skipped is reserved for empty diffs or dry-run.       |
 | `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                               |

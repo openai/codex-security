@@ -1,3 +1,4 @@
+import type { Finding } from "../models.js";
 import { loadContractWithScanDirectory } from "../contract.js";
 import type { CodexSecuritySurface } from "../api.js";
 import { environmentEntry } from "../auth.js";
@@ -25,12 +26,14 @@ import {
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
 import { FindingsClient, type FindingsRequest } from "../findings-client.js";
+import type { waitForRetry } from "./retry.js";
 import type {
   FindingSearchScope,
   FindingSourceSnapshot,
 } from "../finding-retrieval.js";
 import {
   FindingWorkflow,
+  scanArtifactDigest,
   workflowDestination,
   workflowDigest,
 } from "../finding-workflow.js";
@@ -103,6 +106,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   reviewRunner?: Pick<CodexReviewRunner, "run">;
   resolveReviewEnvironment?: typeof comparisonEnvironment;
   fetch?: FindingsRequest;
+  waitForRetry?: typeof waitForRetry;
 };
 
 /** @internal */
@@ -211,6 +215,7 @@ async function deduplicateResolvedScan(
       options.findingsUrl!,
       options.signal,
       dependencies.fetch,
+      { wait: dependencies.waitForRetry },
     );
   const workflow =
     options.workflowId === undefined
@@ -220,7 +225,7 @@ async function deduplicateResolvedScan(
           environment,
           workbench,
           undefined,
-          repositoryPath,
+          { protectedRoot: repositoryPath },
         );
   if (workflow) {
     await workflow.protectArtifacts(scanDirectory);
@@ -228,7 +233,7 @@ async function deduplicateResolvedScan(
       ...(bindRepository ? { repositoryPath } : {}),
       scanId,
       scanDir: scanDirectory,
-      artifactDigest: workflowDigest(contract),
+      artifactDigest: scanArtifactDigest(contract),
       destination: local
         ? `sqlite:${codexSecurityStateDirectory(environment)}`
         : workflowDestination(options.findingsUrl!),
@@ -270,12 +275,12 @@ async function deduplicateResolvedScan(
         (saved.pendingWrite.local?.inputDigest !== local.inputDigest ||
           workflowDigest(saved.pendingWrite.local.source) !==
             workflowDigest(
-              await workflow!.sourceSnapshot(
-                repositoryPath,
-                saved.pendingWrite.local.gitDisabled,
-                (saved.pendingWrite.local.source["privateStatePaths"] ??
-                  []) as string[],
-              ),
+              await workflow!.sourceSnapshot(repositoryPath, {
+                gitDisabled: saved.pendingWrite.local.gitDisabled,
+                privateStatePaths: (saved.pendingWrite.local.source[
+                  "privateStatePaths"
+                ] ?? []) as string[],
+              }),
             ))
       ) {
         throw new CodexSecurityError(
@@ -327,7 +332,7 @@ async function deduplicateResolvedScan(
       }
     }
     const source = workflow
-      ? await workflow.sourceSnapshot(repositoryPath, false, privateStatePaths)
+      ? await workflow.sourceSnapshot(repositoryPath, { privateStatePaths })
       : undefined;
     const checkpoints = workflow
       ? new CheckpointedReviewRunner(
@@ -339,13 +344,11 @@ async function deduplicateResolvedScan(
           options.onDiagnostic,
         )
       : undefined;
-    const sourceRepositories = new Map<string, readonly string[]>(
-      contract.findings.findings.map((finding) => [
-        finding.findingId,
-        [contract.manifest.scan.target.targetId],
-      ]),
+    const selectedFindingIds = new Set(
+      contract.findings.findings.map((finding) => finding.findingId),
     );
-    const sourceSnapshots = new Map<string, FindingSourceSnapshot>();
+    const sourceRepositories = new Map<Finding, readonly string[]>();
+    const sourceSnapshots = new Map<Finding, FindingSourceSnapshot>();
     const deduplicator = new FindingDeduplicator(
       {
         potentialDuplicates: async (findingId) => {
@@ -364,17 +367,21 @@ async function deduplicateResolvedScan(
               ? neighborhood.repositoryIds![finding.findingId]
               : undefined;
             if (repositories !== undefined)
-              sourceRepositories.set(finding.findingId, repositories);
-            else if (scope.repositoryId !== undefined)
-              sourceRepositories.set(finding.findingId, [scope.repositoryId]);
+              sourceRepositories.set(finding, repositories);
+            else if (
+              scope.repositoryId !== undefined ||
+              selectedFindingIds.has(finding.findingId)
+            )
+              sourceRepositories.set(finding, [
+                scope.repositoryId ?? contract.manifest.scan.target.targetId,
+              ]);
             const snapshot = Object.hasOwn(
               neighborhood.sourceSnapshots ?? {},
               finding.findingId,
             )
               ? neighborhood.sourceSnapshots![finding.findingId]
               : undefined;
-            if (snapshot !== undefined)
-              sourceSnapshots.set(finding.findingId, snapshot);
+            if (snapshot !== undefined) sourceSnapshots.set(finding, snapshot);
           }
           return neighborhood;
         },
@@ -394,9 +401,7 @@ async function deduplicateResolvedScan(
       options.signal,
       options.concurrency,
     );
-    const reviewed = await deduplicator.run(
-      contract.findings.findings.map((finding) => finding.findingId),
-    );
+    const reviewed = await deduplicator.run([...selectedFindingIds]);
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
     const result: DeduplicateScanResult = { scanId, ...reviewed };
@@ -416,7 +421,11 @@ async function deduplicateResolvedScan(
     await client.storeDedupeGroups(result.duplicateGroups);
     return result;
   };
-  return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
+  const result = workflow
+    ? await workflow.run("dedupe", dedupe)
+    : await dedupe();
+  options.signal?.throwIfAborted();
+  return result;
 }
 
 async function modelConfigurationForReview(

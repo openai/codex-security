@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import builtins
 import runpy
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-    import tomli as tomllib
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -91,15 +86,11 @@ def test_config_and_storage_preserve_literal_home_spaces(tmp_path, monkeypatch, 
     assert (selected_state / "existing-state.txt").read_text(encoding="utf-8") == "selected state\n"
 
 
-def test_deep_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch):
-    real_import = builtins.__import__
-    monkeypatch.setitem(sys.modules, "tomli", tomllib)
+def test_toml_loader_uses_tomli_when_the_stdlib_module_is_missing(monkeypatch):
+    fallback = ModuleType("tomli")
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    monkeypatch.setitem(sys.modules, "tomli", fallback)
 
-    def import_without_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "tomllib":
-            raise ModuleNotFoundError("No module named 'tomllib'", name="tomllib")
-        return real_import(name, globals, locals, fromlist, level)
+    namespace = runpy.run_path(str(SCRIPTS / "workbench" / "runtime_toml.py"))
 
-    monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
-    namespace = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
-    assert namespace["tomllib"] is tomllib
+    assert namespace["tomllib"] is fallback

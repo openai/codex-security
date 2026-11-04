@@ -17,17 +17,13 @@ describe("scan navigation", () => {
   test.each(["show", "logs"])(
     "%s keeps saved output when optional navigation fails",
     async (command) => {
-      for (const failure of ["sync", "EPIPE", "ENOSPC"]) {
-        const result = await runCommand(process.execPath, [
-          join(import.meta.dir, "fixtures", "scan-navigation-output.mts"),
-          command,
-          failure,
-        ]);
-        expect(result.status, result.stderr).toBe(0);
-        expect(JSON.parse(result.stdout)).toMatchObject({ status: 0 });
-        expect(JSON.parse(result.stdout).output).toContain(completedId);
-        expect(result.stderr).toBe("");
-      }
+      const result = await runCommand(process.execPath, [
+        join(import.meta.dir, "fixtures", "scan-navigation-output.mts"),
+        command,
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("sync\nEPIPE\nENOSPC\n");
+      expect(result.stderr).toBe("");
     },
   );
 
@@ -155,6 +151,7 @@ describe("scan navigation", () => {
       const root = await temporaryDirectory("failed-scan-navigation-");
       try {
         const scanDir = join(root, "results");
+        await mkdir(scanDir);
         const repository = join(root, "repository");
         await mkdir(repository);
         const promptFile = join(root, "instructions.md");
@@ -188,6 +185,7 @@ describe("scan navigation", () => {
             [
               "scan",
               "--json",
+              "--verbose",
               ...(customPrompts
                 ? [
                     "--scan-prompt-file",
@@ -207,7 +205,10 @@ describe("scan navigation", () => {
         expect(cli.stderr.text()).toContain(
           "Last observed phase: reviewing files",
         );
-        expect(cli.stderr.text()).toContain(`Retained results: ${scanDir}`);
+        expect(cli.stderr.text()).toContain(`Output directory: ${scanDir}`);
+        expect(cli.stderr.text()).not.toContain("partial_output=");
+        expect(cli.stderr.text()).not.toContain("Partial output was kept");
+        expect(cli.stderr.text()).not.toContain("Retained results:");
         expect(cli.stderr.text()).toContain(`scans show ${latestId}`);
         expect(cli.stderr.text()).toContain(`scans logs ${latestId}`);
         expect(cli.stderr.text()).toContain("Inspect the saved scan status");

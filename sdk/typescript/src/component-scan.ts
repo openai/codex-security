@@ -1,14 +1,15 @@
 import { notify } from "./value.js";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, sep } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
   DEFAULT_DEPENDENCIES,
   scanAuthentication,
+  scanCodexHome,
   selectedScanEnvironment,
-  selectedProviderEnvironment,
   type CodexSecuritySurface,
+  type ScanAuthentication,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -21,10 +22,14 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   scanModelProvider,
-  scanProviderEnvironmentKey,
+  scanProviderEnvKey,
   type CodexSecurityConfig,
 } from "./config.js";
-import type { ScanCost, ScanSessionEvent } from "./cost.js";
+import type {
+  ScanCost,
+  ScanSessionEvent,
+  ScanUsageObservation,
+} from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import { errorMessage } from "./errors.js";
@@ -83,11 +88,13 @@ export interface ComponentReceipt {
 }
 
 type ComponentScanUpdate =
+  | { type: "authentication"; value: ScanAuthentication }
   | { type: "progress"; value: ScanProgress }
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
   | { type: "usage"; value: Readonly<ScanTokenUsage> }
+  | { type: "usage-observation"; value: Readonly<ScanUsageObservation> }
   | { type: "workers"; value: ScanWorkerStatus }
   | { type: "warning"; value: string };
 
@@ -139,24 +146,27 @@ export async function runComponentScans(
   let environment = options.environment;
   if (auth !== undefined && auth !== "auto") {
     const source = environment ?? process.env;
-    const configuration = await mergedCodexConfig(options.config ?? {});
+    const configuration = await mergedCodexConfig(
+      options.config ?? {},
+      scanCodexHome(source),
+    );
     const provider = scanModelProvider(configuration);
-    const authentication = scanAuthentication(
+    const providerEnvKey = scanProviderEnvKey(configuration);
+    scanAuthentication(
       source,
       auth,
       provider,
       hasCommandAuth(configuration),
       false,
-      scanProviderEnvironmentKey(configuration),
+      providerEnvKey,
     );
-    environment = {
-      ...selectedScanEnvironment(source, auth, provider),
-      ...selectedProviderEnvironment(
-        configuration,
-        selectedScanEnvironment(source, auth),
-        authentication,
-      ),
-    };
+    environment = selectedScanEnvironment(
+      source,
+      auth,
+      provider,
+      providerEnvKey,
+      configuration,
+    );
   }
   const repository = await normalizeRepository(
     options.repository,
@@ -233,11 +243,15 @@ export async function runComponentScans(
             options.onScanEvent === undefined
               ? {}
               : {
+                  onAuthentication: (value) =>
+                    emit({ type: "authentication", value }),
                   onProgress: (value) => emit({ type: "progress", value }),
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
                   onUsage: (value) => emit({ type: "usage", value }),
+                  onUsageObservation: (value) =>
+                    emit({ type: "usage-observation", value }),
                   onWorkerStatus: (value) => emit({ type: "workers", value }),
                   onWarning: (value) => emit({ type: "warning", value }),
                 };
@@ -246,7 +260,7 @@ export async function runComponentScans(
               ...options.scanOptions,
               ...observers,
               mode: options.scanOptions?.mode ?? "standard",
-              target: receipt.paths,
+              target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
               signal: options.signal,
             });

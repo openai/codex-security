@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { captureCli } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -49,6 +49,24 @@ function option(helpText: string, flag: string): string {
 }
 
 describe("CLI help", () => {
+  test.each(["scan", "patch", "verify-fix"])(
+    "%s advertises hosted mode without entering the protocol",
+    async (command) => {
+      const text = await help([command, "--host", "--help"]);
+      expect(option(text, "--host")).toContain("JSON-RPC stdin/stdout");
+      expect(option(text, "--host")).toContain("use alone");
+      if (command !== "scan") {
+        expect(option(text, "--verification-mode")).toContain("static");
+        expect(option(text, "--verification-mode")).toContain("standard");
+        const schema = JSON.parse(await help([command, "--schema", "--json"]));
+        expect(schema.options.properties.verificationMode.enum).toEqual([
+          "static",
+          "standard",
+        ]);
+      }
+    },
+  );
+
   test("groups the common workflow ahead of setup and integrations", async () => {
     const text = await help(["--help"]);
     const sections = text.split(/\n(?=[A-Z][^\n]+:\n)/u);
@@ -75,34 +93,54 @@ describe("CLI help", () => {
 
   test("shows semantic values, repeatable inputs, choices, and scan defaults", async () => {
     const text = await help(["scan", "--help"]);
+    expect(text).toContain("Usage: codex-security scan [repository]");
     expect(text).not.toMatch(/<(?:array|string|number)>/u);
     expect(option(text, "--path")).toContain("<path>");
     expect(option(text, "--path")).toMatch(/repeat/iu);
     expect(option(text, "--codex")).toContain("<key=value>");
     expect(option(text, "--codex")).toMatch(/repeat/iu);
     expect(option(text, "--max-cost")).toContain("<usd>");
+    expect(option(text, "--owner-suggestions")).toContain(
+      "owner-suggestions.json",
+    );
     expect(option(text, "--mode")).toContain("<mode>");
     expect(option(text, "--mode")).toContain("standard");
     expect(option(text, "--mode")).toContain("deep");
     expect(option(text, "--provider")).toContain("amazon-bedrock");
+    for (const label of [
+      "--model <model>",
+      "--provider <provider>",
+      "--effort <effort>",
+      "--max-time-hours <hours>",
+      "--max-time <minutes>",
+    ])
+      expect(text).toContain(label);
+    const { model, reasoningEffort } =
+      scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+    expect(text).toContain(model);
+    expect(text).toContain(reasoningEffort);
+    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("CODEX_SECURITY_STATE_DIR");
+    expect(text).not.toContain("openai:gpt");
+    expect(text).toContain("--path src --path tests");
+    expect(text).not.toContain("codex-security scan . --path src,tests");
+    expect(text).toMatch(
+      /^  codex-security scan \. --working-tree(?:\s+#.*)?$/mu,
+    );
     for (const [flag, value] of [
       ["--workers", DEFAULT_DEEP_SCAN_SETTINGS.workers],
       ["--subagents", DEFAULT_DEEP_SCAN_SETTINGS.subagents],
       ["--stop-after-no-new", DEFAULT_DEEP_SCAN_SETTINGS.stopAfterNoNew],
       ["--max-discovery-runs", DEFAULT_DEEP_SCAN_SETTINGS.maxDiscoveryRuns],
     ] as const) {
+      expect(option(text, flag)).toContain("<count>");
       expect(option(text, flag)).toMatch(
         new RegExp(`default: ${value}\\b`, "iu"),
       );
     }
   });
 
-  test("uses repeatable flags and bare booleans in copyable examples", async () => {
-    const scan = await help(["scan", "--help"]);
-    expect(scan).toContain("--path src --path tests");
-    expect(scan).toMatch(
-      /^  codex-security scan \. --working-tree(?:\s+#.*)?$/mu,
-    );
+  test("uses bare booleans in copyable publish examples", async () => {
     const publish = await help(["publish", "scan", "--help"]);
     expect(publish).not.toMatch(/--dry-run true\b/u);
     expect(publish).toMatch(
@@ -130,11 +168,8 @@ describe("CLI help", () => {
       const text = await help([command, "--help"]);
       expect(option(text, "--format")).not.toMatch(/\bjsonl?\b/u);
       expect(option(text, "--json")).toBe("");
-      const schema = captureCli(main, "stdout");
-      expect(
-        await schema.run([command, "--schema", "--json"], dependencies()),
-      ).toBe(0);
-      expect(JSON.parse(schema.text())).toEqual(expect.any(Object));
+      const schema = JSON.parse(await help([command, "--schema", "--json"]));
+      expect(schema).toEqual(expect.any(Object));
     },
   );
 
@@ -149,7 +184,14 @@ describe("CLI help", () => {
 
   test("documents raw export formats without promising output transforms", async () => {
     const text = await help(["export", "--help"]);
+    expect(text).toContain("Usage: codex-security export [scan-dir]");
+    expect(text).toContain("--artifact <artifact>");
+    expect(text).toContain("--scan <scan-id>");
+    expect(text).toContain("--source-root <path>");
+    expect(text).toContain("threatmodel.md");
     expect(option(text, "--export-format")).toContain("<format>");
+    expect(option(text, "--export-format")).toContain("sarif");
+    expect(text).toContain("--avit-template <file>");
     for (const flag of [
       "--format",
       "--json",
@@ -166,7 +208,9 @@ describe("CLI help", () => {
       options: {
         properties: {
           artifact: { enum: ["findings", "threat-model"], default: "findings" },
-          exportFormat: { enum: ["csv", "json", "sarif", "md"] },
+          exportFormat: {
+            enum: ["csv", "json", "sarif", "md", "servicenow-avit"],
+          },
         },
       },
     });
@@ -235,13 +279,19 @@ describe("CLI help", () => {
   test.each([60, 80])(
     "wraps descriptions at %i columns without breaking examples",
     async (columns) => {
-      for (const command of [
-        [],
-        ["scan"],
-        ["login"],
-        ["publish", "scan"],
-        ["scan", "import"],
-      ]) {
+      for (const [command, examples] of [
+        [[], []],
+        [["scan"], [/^  codex-security scan \.(?:\s+#.*)?$/mu]],
+        [
+          ["login"],
+          [
+            /^    ssh -L 1455:localhost:1455 user@remote$/mu,
+            /^    codex-security login$/mu,
+          ],
+        ],
+        [["publish", "scan"], []],
+        [["scan", "import"], []],
+      ] as const) {
         const text = await help([...command, "--help"], columns);
         expect(text).not.toMatch(/\u001b\[/u);
         for (const line of text.split("\n")) {
@@ -257,12 +307,8 @@ describe("CLI help", () => {
             Math.max(columns, indent + longestToken),
           );
         }
+        for (const example of examples) expect(text).toMatch(example);
       }
-      const text = await help(["scan", "--help"], columns);
-      expect(text).toMatch(/^  codex-security scan \.(?:\s+#.*)?$/mu);
-      const login = await help(["login", "--help"], columns);
-      expect(login).toMatch(/^    ssh -L 1455:localhost:1455 user@remote$/mu);
-      expect(login).toMatch(/^    codex-security login$/mu);
     },
   );
 });
