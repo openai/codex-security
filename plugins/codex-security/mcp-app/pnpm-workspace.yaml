@@ -1,3 +1,8 @@
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - openai
+  - "@openai/*"
+trustLockfile: true
+
 allowBuilds:
   esbuild: false
-minimumReleaseAge: 10080

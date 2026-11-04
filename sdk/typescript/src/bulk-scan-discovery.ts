@@ -3,7 +3,6 @@ import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { checkbox, confirm, input, search, Separator } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
 import { createAuthenticatedGitHub } from "./github.js";
@@ -17,6 +16,7 @@ const GITHUB_REPOSITORIES_QUERY = `
         after: $cursor
         isArchived: false
         isFork: false
+        ownerAffiliations: [OWNER]
         orderBy: { field: PUSHED_AT, direction: DESC }
       ) {
         nodes {
@@ -120,6 +120,7 @@ export function createBulkScanDiscoveryDependencies(options: {
 export async function runBulkScanWizard(
   dependencies: BulkScanDiscoveryDependencies,
   signal?: AbortSignal,
+  defaultOutputDir = "./security-scans",
 ): Promise<BulkScanWizardResult | null> {
   const { prompt } = dependencies;
   if (!prompt.isInteractive()) {
@@ -145,25 +146,30 @@ export async function runBulkScanWizard(
     return null;
   }
 
-  prompt.write(`\nFound ${discovered.length} repositories.\n`);
-  const repositories = await selectGitHubRepositories(discovered, prompt);
+  prompt.write(`\nFound ${formatRepositoryCount(discovered.length)}.\n`);
+  const repositories = await selectGitHubRepositories(
+    discovered,
+    prompt,
+    signal,
+  );
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
     expandHome(
       await prompt.input(
         "Where should scan results be saved?",
-        "./security-scans",
+        defaultOutputDir,
+        signal,
       ),
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
   await validateWizardOutput(outputDir);
   prompt.write(
-    `\nReady to scan ${repositories.length} repositories?\n` +
+    `\nReady to scan ${formatRepositoryCount(repositories.length)}?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
-  if (!(await prompt.confirm("Start scanning?"))) {
+  if (!(await prompt.confirm("Start scanning?", false, signal))) {
     prompt.write("\nScan canceled.\n");
     return null;
   }
@@ -211,31 +217,42 @@ async function selectGitHubOwner(
     return await prompt.select(
       "Which account or organization should we scan?",
       owners.map((owner) => ({ label: owner, value: owner })),
+      undefined,
+      signal,
     );
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
   return personal;
 }
 
+function formatRepositoryCount(count: number): string {
+  return count === 1 ? "1 repository" : `${count} repositories`;
+}
+
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
+  signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
+  const allLabel =
+    repositories.length === 1
+      ? "All repositories"
+      : `All ${formatRepositoryCount(repositories.length)}`;
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
     const choice = await prompt.select(
       "Select repositories to scan (type to filter)",
       [
         {
-          label: selected.size
-            ? `Done (${selected.size} selected)`
-            : `All ${repositories.length} repositories`,
+          label: selected.size ? `Done (${selected.size} selected)` : allLabel,
           value: "",
         },
         ...repositories
           .filter(({ fullName }) => !selected.has(fullName))
           .map(({ fullName }) => ({ label: fullName, value: fullName })),
       ],
+      undefined,
+      signal,
     );
     if (!choice) break;
     selected.add(choice);
@@ -286,8 +303,7 @@ async function discoverGitHubRepositories(
 function repositoryId(fullName: string): string {
   const id = fullName.replace("/", "--");
   if (id.length <= 128) return id;
-  const hash = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
-  return `${id.slice(0, 111)}-${hash}`;
+  return `${id.slice(0, 111)}-${createHash("sha256").update(fullName).digest("hex").slice(0, 16)}`;
 }
 
 async function validateWizardOutput(outputDir: string): Promise<void> {
@@ -315,7 +331,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
   }
 }
 
-function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
+export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
   const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {
@@ -335,12 +351,17 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false, signal) =>
-      confirm({ message, default: defaultValue }, context(signal)),
-    input: (message, defaultValue, signal) =>
-      input({ message, default: defaultValue }, context(signal)),
-    checkbox: (message, options, presentation, signal) =>
-      checkbox(
+    async confirm(message, defaultValue = false, signal) {
+      const { confirm } = await import("@inquirer/prompts");
+      return confirm({ message, default: defaultValue }, context(signal));
+    },
+    async input(message, defaultValue, signal) {
+      const { input } = await import("@inquirer/prompts");
+      return input({ message, default: defaultValue }, context(signal));
+    },
+    async checkbox(message, options, presentation, signal) {
+      const { checkbox, Separator } = await import("@inquirer/prompts");
+      return checkbox(
         {
           message,
           choices: [
@@ -356,9 +377,11 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
           required: presentation?.required,
         },
         context(signal),
-      ),
-    select: (message, options, presentation, signal) =>
-      search(
+      );
+    },
+    async select(message, options, presentation, signal) {
+      const { search } = await import("@inquirer/prompts");
+      return search(
         {
           message,
           ...(presentation?.header === undefined
@@ -383,6 +406,7 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
               })),
         },
         context(signal),
-      ),
+      );
+    },
   };
 }

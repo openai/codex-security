@@ -1,23 +1,15 @@
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
+import { pythonExecutable } from "./support/python.js";
 import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runNodePython } from "./support/python-probe.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoriesSync(true);
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+afterEach(temporaryDirectories.cleanup);
 
 function git(directory: string, ...args: string[]): void {
   const result = spawnSync("git", ["-C", directory, ...args], {
@@ -27,20 +19,8 @@ function git(directory: string, ...args: string[]): void {
   expect(result.status, result.stderr).toBe(0);
 }
 
-function pythonExecutable(): string | null {
-  return (
-    process.env["PYTHON"] ??
-    Bun.which("python3") ??
-    Bun.which("python") ??
-    Bun.which("py")
-  );
-}
-
 test("writes nested Git pointers as UTF-8 independently of the locale", () => {
-  const root = realpathSync(
-    mkdtempSync(join(tmpdir(), "codex-security-nested-git-utf8-")),
-  );
-  temporaryDirectories.push(root);
+  const root = temporaryDirectories.create("codex-security-nested-git-utf8-");
   const repository = join(root, "repository");
   const nested = join(repository, "nested-漢字");
   const checkout = join(root, "checkout");
@@ -62,18 +42,10 @@ test("writes nested Git pointers as UTF-8 independently of the locale", () => {
     "pathlib.Path.open = locale_open",
     "target.copy_git_worktree_files(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), ())",
   ].join("\n");
-  const result = spawnSync(
+  const result = runNodePython(
     python!,
-    [
-      "-I",
-      "-B",
-      "-c",
-      probe,
-      join(PLUGIN_ROOT, "scripts"),
-      repository,
-      checkout,
-    ],
-    { encoding: "utf8", windowsHide: true },
+    ["-c", probe, join(PLUGIN_ROOT, "scripts"), repository, checkout],
+    { windowsHide: true },
   );
 
   expect(result.status, result.stderr).toBe(0);
