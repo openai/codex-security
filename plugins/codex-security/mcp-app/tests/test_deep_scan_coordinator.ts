@@ -12,7 +12,7 @@ import type {
   CodexWorkerRequest,
   CodexWorkerResult,
 } from "../src/deep-scan/types.js";
-import { mock } from "node:test";
+import { after, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
@@ -1091,13 +1091,13 @@ async function testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess() {
     },
   });
   coordinator.start();
-  await store.discoveryBlocked.promise;
+  await store.discoveryUpdate.entered;
 
   // The real cancel command persists this state before signaling the coordinator.
   store.run.status = "canceled";
   for (const worker of store.workers.values()) worker.status = "canceled";
   coordinator.cancel("fixture persisted cancellation");
-  store.discoveryGate.resolve();
+  store.discoveryUpdate.release();
 
   let terminalSettled = false;
   const terminalPromise = coordinator
@@ -2692,84 +2692,85 @@ async function testQuotaFailureStopsDispatchBeforeWorkerShutdown() {
   }
 }
 
-try {
-  await testDeepScanLifecycle({
-    fixtureRun,
-    FakeStore,
-    FakeExecutor,
-    createCoordinator,
-    DeepScanCoordinatorRegistry,
-    immediateClock,
-  });
-  await testQuotaFailureStopsDispatchBeforeWorkerShutdown();
-  await testStandardWorkersReceiveExistingFalsePositiveFeedback();
-  await testConcurrentCheckpointKeepsExistingIteration();
-  await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();
-  await testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot();
-  await testWorkerScopedCandidateSourceAggregation();
-  await testRetryKeepsLogicalWorker();
-  await testSandboxDiagnosticSurvivesArtifactRetries();
-  await testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus();
-  await testDiscoveryDeadlineReducesSingleBufferedFinding();
-  await testDiscoveryAcceptedAtDeadlineIsReduced();
-  await testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence();
-  await testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence();
-  await testSingletonHardCapReduction();
-  await testExhaustedRetryFailsScan();
-  await testPolicyRefusalReplacesDiscoveryImmediately();
-  await testTransientDiscoveryErrorsRetainRecovery();
-  await testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold();
-  await testRecoverableWorkerErrorsCannotFailScan();
-  await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
-  await testExhaustedInvalidDiscoveryArtifactsAreReplaced();
-  await testExhaustedMalformedDiscoveryDoesNotRemainPublishable();
-  await testTransientExecutionFailureResumesWorkerThread();
-  await testConfigurationFailureDoesNotRetry();
-  await testConfigurationFailureDoesNotRetry("Request blocked by cyberPolicy.");
-  await testFailureManifestWriteDoesNotMaskOriginalError();
-  await testFinishPersistenceFailureRewritesManifestAsFailure();
-  await testLongWorkerErrorIsPreservedAtPersistenceBoundary();
-  await testDiscoveryPhasePersistenceFailureStopsDispatch();
-  await testCancellationClearsRetryWait();
-  await testGenericDiagnosticsPreserveMissingResultRetries();
-  await testMissingDiscoveryResultResumesExistingThread();
-  await testMissingDiscoveryResultResumesExistingThread(true);
-  await testIncompleteEvidenceRetriesBeforePublication();
-  await testInvalidArtifactsRetry();
-  await testSharedReceiptSurvivesWorkerRetry();
-  await testCancellationAfterCommittedAggregateRemainsCanceled();
-  await testRejectedFinishDoesNotOverwriteReplacementManifest();
-  await testWaiterDetachAndCancellation();
-  await testCancellationDropsUnvalidatedDiscoveryResult();
-  await testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess();
-  await testRegistryEvictionAndExternalFailure();
-  await testStoppedPublicationFailurePreservesOriginalDiagnostic();
-  await testStoppedPublicationFailurePreservesPrefixedDiagnostic();
-  await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
-  await testStaleMutationObservesReplacement();
-  await testStoreConfirmedReplacementSurvivesReadFailure();
-  await testStoreConfirmationSurvivesReplayAndThreadMetadata();
-  await testCoordinatorHeartbeatsStopAfterOwnershipChanges();
-  await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
-  await testRemoteObserverRetriesTransientPersistenceFailures();
-  await testJoinAndOrphanRules();
-  await testResumeDoesNotRequireHistoricalWorkerPrompt("failed");
-  await testResumeDoesNotRequireHistoricalWorkerPrompt("canceled");
-  await testPausedDiscoverySurvivesCoordinatorRestart(false);
-  await testPausedDiscoverySurvivesCoordinatorRestart();
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime();
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true);
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(false, 2.5);
-  await testResumedDiscoveryDeadlineUsesPersistedCreationTime(true, 96);
-  await testResumedManifestPreservesCompletedReducer(false, false);
-  await testResumedManifestPreservesCompletedReducer();
-  await testResumedManifestPreservesCompletedReducer(true);
-  await testResumedManifestPreservesCompletedReducer(false, true, [
-    "api",
-    "background jobs",
-  ]);
-  await testPersistedErrorLimitStopsBeforeRescheduling();
-  await testRestartRestoresDispatchOrderAfterMixedResults();
-} finally {
-  await temporaryDirectories.cleanup();
+function registerCases<T extends unknown[]>(
+  check: (...args: T) => Promise<void>,
+  cases: T[],
+) {
+  for (const args of cases)
+    test(`${check.name} ${JSON.stringify(args)}`, () => check(...args));
 }
+
+after(() => temporaryDirectories.cleanup());
+test("Deep Scan lifecycle", testDeepScanLifecycle);
+test(testQuotaFailureStopsDispatchBeforeWorkerShutdown);
+test(testStandardWorkersReceiveExistingFalsePositiveFeedback);
+test(testConcurrentCheckpointKeepsExistingIteration);
+test(testDiscoveryWorkersKeepOneContextAfterPersistedUpdate);
+test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
+test(testWorkerScopedCandidateSourceAggregation);
+test(testRetryKeepsLogicalWorker);
+test(testSandboxDiagnosticSurvivesArtifactRetries);
+test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
+test(testDiscoveryDeadlineReducesSingleBufferedFinding);
+test(testDiscoveryAcceptedAtDeadlineIsReduced);
+test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
+test(testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence);
+test(testSingletonHardCapReduction);
+test(testExhaustedRetryFailsScan);
+test(testPolicyRefusalReplacesDiscoveryImmediately);
+test(testTransientDiscoveryErrorsRetainRecovery);
+test(testConsecutiveCybersecurityRefusalsFailAtConfiguredThreshold);
+test(testRecoverableWorkerErrorsCannotFailScan);
+test(testSuccessfulDiscoveryResetsConsecutiveFailureThreshold);
+test(testExhaustedInvalidDiscoveryArtifactsAreReplaced);
+test(testExhaustedMalformedDiscoveryDoesNotRemainPublishable);
+test(testTransientExecutionFailureResumesWorkerThread);
+registerCases(testConfigurationFailureDoesNotRetry, [
+  [],
+  ["Request blocked by cyberPolicy."],
+]);
+test(testFailureManifestWriteDoesNotMaskOriginalError);
+test(testFinishPersistenceFailureRewritesManifestAsFailure);
+test(testLongWorkerErrorIsPreservedAtPersistenceBoundary);
+test(testDiscoveryPhasePersistenceFailureStopsDispatch);
+test(testCancellationClearsRetryWait);
+test(testGenericDiagnosticsPreserveMissingResultRetries);
+registerCases(testMissingDiscoveryResultResumesExistingThread, [[], [true]]);
+test(testIncompleteEvidenceRetriesBeforePublication);
+test(testInvalidArtifactsRetry);
+test(testSharedReceiptSurvivesWorkerRetry);
+test(testCancellationAfterCommittedAggregateRemainsCanceled);
+test(testRejectedFinishDoesNotOverwriteReplacementManifest);
+test(testWaiterDetachAndCancellation);
+test(testCancellationDropsUnvalidatedDiscoveryResult);
+test(testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess);
+test(testRegistryEvictionAndExternalFailure);
+test(testStoppedPublicationFailurePreservesOriginalDiagnostic);
+test(testStoppedPublicationFailurePreservesPrefixedDiagnostic);
+test(testTerminalReadFailureIsNotRecordedAsPublicationFailure);
+test(testStaleMutationObservesReplacement);
+test(testStoreConfirmedReplacementSurvivesReadFailure);
+test(testStoreConfirmationSurvivesReplayAndThreadMetadata);
+test(testCoordinatorHeartbeatsStopAfterOwnershipChanges);
+test(testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead);
+test(testRemoteObserverRetriesTransientPersistenceFailures);
+test(testJoinAndOrphanRules);
+registerCases(testResumeDoesNotRequireHistoricalWorkerPrompt, [
+  ["failed"],
+  ["canceled"],
+]);
+registerCases(testPausedDiscoverySurvivesCoordinatorRestart, [[false], []]);
+registerCases(testResumedDiscoveryDeadlineUsesPersistedCreationTime, [
+  [],
+  [true],
+  [false, 2.5],
+  [true, 96],
+]);
+registerCases(testResumedManifestPreservesCompletedReducer, [
+  [false, false],
+  [],
+  [true],
+  [false, true, ["api", "background jobs"]],
+]);
+test(testPersistedErrorLimitStopsBeforeRescheduling);
+test(testRestartRestoresDispatchOrderAfterMixedResults);

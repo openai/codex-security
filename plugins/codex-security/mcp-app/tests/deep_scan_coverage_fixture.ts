@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
-import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
@@ -21,8 +20,7 @@ type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
 interface CoverageFixtureOptions {
   resume?: boolean;
   continueAfterResume?: boolean;
-  stopAfterDraft?: boolean;
-  stopBeforeDraft?: boolean;
+  outcome?: "completion" | "recovery" | "no parent" | "frozen recovery";
   receiptRetry?: boolean;
   firstCheckpointReceipt?: "shared" | "worker";
   sameAttemptCloseout?: boolean;
@@ -41,7 +39,6 @@ interface CoverageFixtureOptions {
   otherWorkerCandidateIds?: string[];
   retryFindings?: JsonObject[][];
   questionRows?: (string | JsonObject)[];
-  interruptPublication?: boolean;
 }
 interface ProjectedRecord {
   id?: string;
@@ -138,8 +135,7 @@ export async function publishCoverageFixture(
   {
     resume = false,
     continueAfterResume = false,
-    stopAfterDraft = false,
-    stopBeforeDraft = false,
+    outcome = "completion",
     receiptRetry = false,
     firstCheckpointReceipt,
     sameAttemptCloseout = false,
@@ -158,7 +154,6 @@ export async function publishCoverageFixture(
     otherWorkerCandidateIds = ["candidate-1"],
     retryFindings,
     questionRows,
-    interruptPublication = false,
   }: CoverageFixtureOptions = {},
 ) {
   const targetPath = path.join(root, "target");
@@ -183,7 +178,7 @@ export async function publishCoverageFixture(
   const runWorkbench = async (args: string[]) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
     const command = [workbenchPath, ...args];
-    if (interruptPublication && args[0] === "fail-scan") {
+    if (outcome === "frozen recovery" && args[0] === "fail-scan") {
       command.unshift(
         "-c",
         `
@@ -832,7 +827,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     threadId,
     retryDelaysMs: extraReceiptRetry ? [1, 1] : [1],
     onComplete: async (draft, signal, publication) => {
-      if (stopBeforeDraft)
+      if (outcome === "no parent")
         throw new Error("Synthetic stop before parent draft.");
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
@@ -854,7 +849,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   assert.equal(
     terminal.status,
-    stopBeforeDraft ? "failed" : "succeeded",
+    outcome === "no parent" ? "failed" : "succeeded",
     terminal.error ?? "Unexpected Deep Scan terminal status.",
   );
   if (!retryFindings) {
@@ -886,7 +881,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       "v1 reducers remain readable by earlier binaries",
     );
   }
-  if (stopBeforeDraft) {
+  if (outcome === "no parent") {
     const recovered = await runWorkbench([
       "recover-scan-results",
       "--scan-id",
@@ -897,7 +892,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const published = await readFile(coveragePath, "utf8");
     await runWorkbench(["recover-scan-results", "--scan-id", run.scanId]);
     assert.equal(await readFile(coveragePath, "utf8"), published);
-  } else if (stopAfterDraft) {
+  } else if (outcome !== "completion") {
     const stopped = await runWorkbench([
       "fail-scan",
       "--scan-id",
@@ -905,7 +900,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       "--message",
       "Synthetic stop after parent draft.",
     ]);
-    assert.equal(stopped.scan.resultsRecoveryNeeded, interruptPublication);
+    assert.equal(
+      stopped.scan.resultsRecoveryNeeded,
+      outcome === "frozen recovery",
+    );
     const recovered = await runWorkbench([
       "recover-scan-results",
       "--scan-id",
@@ -931,7 +929,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const coverage = await readFixtureCoverage(run.scanDir);
     assert.deepEqual(
       coverage.deferred.map((row) => row.id),
-      stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
+      outcome === "completion" ? [] : ["scan-stopped"],
     );
     if (sameAttemptCloseout) {
       assert.deepEqual(
