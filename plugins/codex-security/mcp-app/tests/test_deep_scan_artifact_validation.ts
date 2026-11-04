@@ -806,6 +806,17 @@ async function testCoveragePublicationParity(root: string) {
     path.join(output, "artifacts/review.md"),
     "Review evidence.\n",
   );
+  // Older retained coverage recorded the normalized scan-owned receipt.
+  const historical = structuredClone(original);
+  historical.reviewState.surfaces[0].receiptRefs = ["artifacts/./review.md"];
+  historical.reviewState.surfaces[0].provenance = {
+    scanReceiptRefs: ["artifacts/review.md"],
+  };
+  const projected = scanCoverage(
+    { ...worker, result: historical },
+    worker.artifacts.scanDir,
+  );
+  assert.deepEqual(projected.surfaces[0].receiptRefs, ["artifacts/review.md"]);
   for (const ref of [
     "artifacts/review.md",
     "artifacts/./review.md",

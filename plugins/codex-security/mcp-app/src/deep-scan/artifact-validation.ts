@@ -281,7 +281,8 @@ export function scanCoverage(
     const ref = posix.normalize(receipt);
     return ref.startsWith(archivePrefix) ||
       ref.startsWith(`${artifactPrefix}/`) ||
-      scanRefs?.has(receipt)
+      scanRefs?.has(receipt) ||
+      scanRefs?.has(ref)
       ? ref
       : `${artifactPrefix}/${ref}`;
   };

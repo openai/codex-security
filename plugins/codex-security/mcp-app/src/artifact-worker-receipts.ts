@@ -26,9 +26,10 @@ export function workerCoverageReceiptLocation(
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(worker)}/`;
   const normalized = components.join("/");
   const outputPrefix = `${workerPrefix}output/`;
-  const shared =
-    isObject(surface.provenance) &&
-    (surface.provenance.scanReceiptRefs as string[] | undefined)?.includes(ref);
+  const recorded = isObject(surface.provenance)
+    ? (surface.provenance.scanReceiptRefs as string[] | undefined)
+    : undefined;
+  const shared = recorded?.includes(ref) || recorded?.includes(normalized);
   if (archived && !shared && normalized.startsWith(outputPrefix)) {
     return {
       context,
