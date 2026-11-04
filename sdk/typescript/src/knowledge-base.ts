@@ -231,9 +231,7 @@ async function discover(
       // macOS writes "._" metadata files when copying to other filesystems.
       if (entry.name.startsWith("._")) continue;
       // LibreOffice keeps a ".~lock.<name>#" file next to each open document.
-      if (entry.name.startsWith(".~lock.") && entry.name.endsWith("#")) {
-        continue;
-      }
+      if (/^\.~lock\..+#$/s.test(entry.name)) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
