@@ -66,6 +66,14 @@ test("Azure credentials stay isolated from other providers", () => {
   expect(
     selectedScanEnvironment(keys, "auto", "openrouter"),
   ).not.toHaveProperty("AZURE_OPENAI_API_KEY");
+  expect(
+    selectedScanEnvironment(keys, "chatgpt", "gateway", undefined, {
+      model_provider: "gateway",
+      model_providers: {
+        gateway: { env_http_headers: { "x-api-key": "AZURE_OPENAI_API_KEY" } },
+      },
+    }),
+  ).not.toHaveProperty("AZURE_OPENAI_API_KEY");
   expect(() =>
     scanAuthentication({ OPENAI_API_KEY: "other" }, "auto", "azure"),
   ).toThrow(/AZURE_OPENAI_API_KEY/u);

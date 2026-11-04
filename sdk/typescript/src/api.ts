@@ -2285,7 +2285,10 @@ export class CodexSecurity {
                 session.apiKey,
             }),
       };
-      if (mode === "deep" && options.auth !== "chatgpt") {
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" || authentication.method === "command")
+      ) {
         // A managed worker can select another declared native provider. Its
         // private snapshot below retains only variables named by those tables.
         const key = AZURE_CODEX_PROVIDER.env_key;
@@ -6152,7 +6155,9 @@ export function selectedScanEnvironment(
   if (config !== undefined) {
     environment = azureProviderEnvironment(
       environment,
-      auth === "chatgpt" && !isExternalModelProvider(modelProvider)
+      auth === "chatgpt" &&
+        !isExternalModelProvider(modelProvider) &&
+        !hasCommandAuth(config)
         ? {}
         : config,
     );

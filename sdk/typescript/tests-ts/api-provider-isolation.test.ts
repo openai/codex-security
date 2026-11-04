@@ -935,6 +935,93 @@ for (const mode of ["standard", "deep"] as const) {
   );
 }
 
+test.each(["selected", "alternate"] as const)(
+  "Deep workers receive the %s provider's Azure header when command authentication wins over ChatGPT",
+  async (headerProvider) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scan = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scan, { mode: 0o700 });
+    const provider = {
+      name: "Synthetic gateway",
+      base_url: "https://gateway.example.test/v1",
+      wire_api: "responses",
+    };
+    const header = {
+      env_http_headers: { "x-api-key": "AZURE_OPENAI_API_KEY" },
+    };
+    const headerValue = "synthetic-header-value";
+    const report = join(root, "worker-environment.json");
+    const plugin = await createPluginProbe(root, report);
+    const client = new TestClient(
+      {
+        pluginPath: plugin,
+        codexOverrides: {
+          model_provider: "gateway",
+          model_providers: {
+            gateway: {
+              ...provider,
+              auth: { command: process.execPath, args: ["--version"] },
+              ...(headerProvider === "selected" ? header : {}),
+            },
+            alternate: {
+              ...provider,
+              ...(headerProvider === "alternate" ? header : {}),
+            },
+          },
+        },
+      },
+      {
+        environment: {
+          CODEX_HOME: join(root, "home"),
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          AZURE_OPENAI_API_KEY: headerValue,
+          OPENAI_API_KEY: "synthetic-unrelated-key",
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scan,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) =>
+          codexFactory(async () => {
+            const environment = options.env!;
+            expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+            expect(environment["AZURE_OPENAI_API_KEY"]).toBe(
+              headerProvider === "selected" ? headerValue : undefined,
+            );
+            const status = await nativeRequest(
+              environment,
+              repository,
+              [],
+              "mcpServerStatus/list",
+              { serverName: "codex-security", detail: "toolsAndAuthOnly" },
+            );
+            expect(status.data[0].toolsError).toBeNull();
+            const worker = JSON.parse(await readFile(report, "utf8"));
+            expect(worker.inherited.AZURE_OPENAI_API_KEY).toBe(
+              headerProvider === "selected" ? headerValue : null,
+            );
+            expect(worker.recovered).toEqual({
+              AZURE_OPENAI_API_KEY: headerValue,
+            });
+            throw new Error("synthetic worker credentials checked");
+          })(),
+      },
+    );
+    try {
+      const options = { mode: "deep", auth: "chatgpt" } as const;
+      const preflight = await client.preflight(repository, options);
+      expect(preflight.authentication.method).toBe("command");
+      await expect(client.run(repository, options)).rejects.toThrow(
+        "synthetic worker credentials checked",
+      );
+    } finally {
+      await client.close();
+    }
+  },
+  30_000,
+);
+
 test("workers preserve native provider inheritance without an explicit selection", async () => {
   const root = await temporaryDirectory();
   const home = join(root, "native-home");
