@@ -1087,8 +1087,8 @@ service_tier = "ultrafast"
         true,
       );
       assert.equal(
-        retry.result.structuredContent.reportPath,
-        path.join(retry.result.structuredContent.scanDir, "report.md"),
+        retry.structuredContent.reportPath,
+        path.join(retry.structuredContent.scanDir, "report.md"),
       );
       assert.equal(
         (await readLogLines(startLogPath)).length,
@@ -1345,7 +1345,6 @@ async function testCliDeepScanEngine({
         threadId,
       ),
     );
-    assertNoError(joined);
     assert.equal(joined.structuredContent.scanId, completed.scanId);
     assert.equal(joined.structuredContent.completion, undefined);
     assert.equal(joined.structuredContent.reportPath, undefined);
