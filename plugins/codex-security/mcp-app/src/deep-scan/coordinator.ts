@@ -346,12 +346,15 @@ export class DeepScanCoordinator {
 
   private async run(): Promise<void> {
     try {
+      // A replacement coordinator must honor a worker failure committed before handoff.
+      if (this.state.error) throw new Error(this.state.error);
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
       this.setupComplete = true;
       const loopResult = await this.runIterations();
       if (this.canceled || this.externallyFailed) return;
+      this.abortController.signal.throwIfAborted();
       const draft = loopResult.result
         ? scanUnionToDraft(loopResult.result)
         : scanDraftInputSchema.parse({
@@ -415,7 +418,7 @@ export class DeepScanCoordinator {
       }
       const message = errorMessage(error);
       const persistedMessage = deepScanErrorMessage(error);
-      if (!this.setupComplete) {
+      if (!this.setupComplete && !this.state.error) {
         this.log({
           event: "setup_failed",
           scanId: this.state.scanId,

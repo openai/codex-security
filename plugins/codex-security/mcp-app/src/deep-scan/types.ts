@@ -45,6 +45,7 @@ export type DeepScanWorkerMutation = Omit<
   "completionSequence" | "consecutiveErrors" | "mergeState"
 > & {
   scanId: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 

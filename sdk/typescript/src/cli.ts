@@ -303,6 +303,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
@@ -8223,6 +8224,7 @@ async function matchAllScans(
     const input: ScanComparisonInput = {
       before,
       after: afterFindings,
+      ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
     const matching =

@@ -2388,7 +2388,7 @@ export class ScanCostTracker {
             if (session.threadId !== null) unreadable.set(session, error);
             else if (isRecord(error) && typeof error["syscall"] === "string") {
               blockingReadError ??= error;
-              if (!observeHealthySessions || !isDeniedLogRead(error))
+              if (!observeHealthySessions || !isBlockedLogRead(error))
                 break directories;
             } else collectionErrors.push(error);
           }
@@ -2450,7 +2450,7 @@ export class ScanCostTracker {
     } while (included.size !== previousSize);
     for (const [session, error] of unreadable) {
       if (session.threadId !== null && included.has(session.threadId)) {
-        if (isDeniedLogRead(error)) blockingReadError ??= error;
+        if (isBlockedLogRead(error)) blockingReadError ??= error;
         else collectionErrors.push(error);
       }
     }
@@ -4032,10 +4032,12 @@ function subtractTokenUsage(
   });
 }
 
-function isDeniedLogRead(error: unknown): boolean {
+function isBlockedLogRead(error: unknown): boolean {
   return (
     isRecord(error) &&
-    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["code"] === "EACCES" ||
+      error["code"] === "EPERM" ||
+      error["code"] === "EIO") &&
     (error["syscall"] === "open" || error["syscall"] === "read")
   );
 }
