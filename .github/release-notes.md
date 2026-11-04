@@ -86,6 +86,7 @@
 - preserve archived deep scans and streamline progress reads ([#2314](https://github.com/openai/codex-security/pull/2314))
 - show direct coordinator events in verbose CLI scans ([#2323](https://github.com/openai/codex-security/pull/2323))
 - report completed audits and batch consolidation ([#2305](https://github.com/openai/codex-security/pull/2305))
+- reject unpublishable worker report metadata ([#2319](https://github.com/openai/codex-security/pull/2319))
 
 <!-- release-section: highlights:end -->
 
