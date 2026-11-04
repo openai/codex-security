@@ -24,8 +24,13 @@ function run(command, args, options) {
 /**
  * @param {string} consumer
  * @param {NodeJS.ProcessEnv} environment
+ * @param {string} expectedVersion
  */
-export async function verifyInstalledPackage(consumer, environment) {
+export async function verifyInstalledPackage(
+  consumer,
+  environment,
+  expectedVersion = "latest",
+) {
   const installedRoot = join(
     consumer,
     "node_modules",
@@ -35,6 +40,9 @@ export async function verifyInstalledPackage(consumer, environment) {
     await readFile(join(installedRoot, "package.json"), "utf8"),
   );
   assert.equal(manifest.name, packageName);
+  if (expectedVersion !== "latest") {
+    assert.equal(manifest.version, expectedVersion);
+  }
   console.log(
     `Checking ${packageName}@${manifest.version} on ${process.platform}/${process.arch}, Node ${process.version}.`,
   );
@@ -79,20 +87,34 @@ export async function verifyInstalledPackage(consumer, environment) {
   assert.match(run(codex.command, ["--version"], options), /^codex-cli\s+\d/u);
 
   const pluginRoot = join(installedRoot, "_bundled_plugin");
+  await verifyInstalledPlugin(pluginRoot, environment);
+  console.log(
+    `Validated published ${packageName}@${manifest.version}: npm CLI shim, public SDK, bundled Codex, and plugin initialization.`,
+  );
+}
+
+/**
+ * @param {string} pluginRoot
+ * @param {NodeJS.ProcessEnv} environment
+ */
+export async function verifyInstalledPlugin(pluginRoot, environment) {
   const configuration = JSON.parse(
     await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
   );
   const server = configuration.mcpServers["codex-security"];
-  const launcher = join(pluginRoot, server.command);
+  const launcher =
+    server.command === "node"
+      ? process.execPath
+      : join(pluginRoot, server.command);
+  const windowsLauncher =
+    process.platform === "win32" && server.command !== "node";
   const initialized = run(
-    process.platform === "win32"
-      ? (environment.ComSpec ?? "cmd.exe")
-      : launcher,
-    process.platform === "win32"
+    windowsLauncher ? (environment.ComSpec ?? "cmd.exe") : launcher,
+    windowsLauncher
       ? ["/d", "/s", "/c", "call", `${launcher}.cmd`, ...server.args]
       : server.args,
     {
-      ...options,
+      env: environment,
       cwd: pluginRoot,
       input: `${JSON.stringify({
         jsonrpc: "2.0",
@@ -109,12 +131,9 @@ export async function verifyInstalledPackage(consumer, environment) {
   const response = JSON.parse(initialized.trim());
   assert.equal(response.id, 1);
   assert.equal(response.result.serverInfo.name, "codex-security");
-  console.log(
-    `Validated published ${packageName}@${manifest.version}: npm CLI shim, public SDK, bundled Codex, and plugin initialization.`,
-  );
 }
 
-async function smokePublishedPackage() {
+async function smokePublishedPackage(version = "latest") {
   const consumer = await mkdtemp(join(tmpdir(), "codex-security-published-"));
   try {
     await writeFile(
@@ -136,7 +155,7 @@ async function smokePublishedPackage() {
         "--no-audit",
         "--no-fund",
         "--registry=https://registry.npmjs.org",
-        `${packageName}@latest`,
+        `${packageName}@${version}`,
       ],
       {
         cwd: consumer,
@@ -147,18 +166,22 @@ async function smokePublishedPackage() {
 
     const smokeHome = join(consumer, "home");
     await mkdir(smokeHome);
-    await verifyInstalledPackage(consumer, {
-      ...process.env,
-      HOME: smokeHome,
-      USERPROFILE: smokeHome,
-      XDG_CONFIG_HOME: join(smokeHome, ".config"),
-      XDG_CACHE_HOME: join(smokeHome, ".cache"),
-      APPDATA: join(smokeHome, "AppData", "Roaming"),
-      LOCALAPPDATA: join(smokeHome, "AppData", "Local"),
-      CODEX_HOME: join(smokeHome, ".codex"),
-      CODEX_SECURITY_STATE_DIR: join(smokeHome, ".codex-security"),
-      CODEX_MCP_NODE_PATH: process.execPath,
-    });
+    await verifyInstalledPackage(
+      consumer,
+      {
+        ...process.env,
+        HOME: smokeHome,
+        USERPROFILE: smokeHome,
+        XDG_CONFIG_HOME: join(smokeHome, ".config"),
+        XDG_CACHE_HOME: join(smokeHome, ".cache"),
+        APPDATA: join(smokeHome, "AppData", "Roaming"),
+        LOCALAPPDATA: join(smokeHome, "AppData", "Local"),
+        CODEX_HOME: join(smokeHome, ".codex"),
+        CODEX_SECURITY_STATE_DIR: join(smokeHome, ".codex-security"),
+        CODEX_MCP_NODE_PATH: process.execPath,
+      },
+      version,
+    );
   } finally {
     await rm(consumer, {
       recursive: true,
@@ -170,5 +193,5 @@ async function smokePublishedPackage() {
 }
 
 if (isMain(import.meta.url)) {
-  await smokePublishedPackage();
+  await smokePublishedPackage(process.argv[2]);
 }

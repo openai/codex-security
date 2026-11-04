@@ -212,6 +212,7 @@ test.each([false, true])(
         signal: expect.any(AbortSignal),
       });
       expect(dependencies?.runWorkbench).toBe(deps.runWorkbench);
+      expect(dependencies?.surface).toBe("cli");
       return result;
     };
     expect(
@@ -305,9 +306,10 @@ test("dedupe requires a scan selector and reports SDK failures", async () => {
 
 test("dedupe defaults to local storage without a findings URL", async () => {
   const deps = dependencies();
-  deps.deduplicateScan = async (scanId, options) => {
+  deps.deduplicateScan = async (scanId, options, dependencies) => {
     expect(scanId).toBe("latest");
     expect(options.findingsUrl).toBeUndefined();
+    expect(dependencies?.surface).toBe("cli");
     return {
       scanId,
       uniqueFindingIds: [],
@@ -320,27 +322,88 @@ test("dedupe defaults to local storage without a findings URL", async () => {
   ).toBe(0);
 });
 
-test("dedupe forwards cancellation and removes signal handlers", async () => {
-  for (const [signal, expectedCode] of [
-    ["SIGINT", 130],
-    ["SIGTERM", 143],
-  ] as const) {
-    const signals = new FakeSignals();
-    const deps = dependencies();
-    deps.addSignalListener = (name, listener) => signals.add(name, listener);
-    deps.removeSignalListener = (name, listener) =>
-      signals.remove(name, listener);
-    deps.deduplicateScan = async (_scanId, options) => {
-      signals.emit(signal);
-      options.signal!.throwIfAborted();
-      throw new Error("Cancellation must throw");
-    };
-    const { stdout, stderr, runCli } = createCliTest(main);
-
-    expect(await runCli(args, deps)).toBe(expectedCode);
+test.each([
+  ["local", [], "requires --scan or --workflow-id"],
+  [
+    "service",
+    ["--findings-url", "http://127.0.0.1:3000"],
+    "requires --scan or --workflow-id",
+  ],
+])(
+  "dedupe does not emit an ok: true envelope when a scan is missing: %s",
+  async (_label, flags, expected) => {
+    const { stdout, stderr } = createCliTest(main);
+    expect(
+      await main(
+        ["dedupe", ...flags, "--json", "--full-output"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Deduplication canceled");
-    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
-    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
-  }
+    expect(stderr.text()).toContain(expected);
+  },
+);
+
+test("dedupe does not emit an ok: true envelope for a failed structured dedupe run", async () => {
+  const deps = dependencies();
+  deps.deduplicateScan = async () => {
+    throw new Error("Finding has not been indexed");
+  };
+  const { stdout, stderr } = createCliTest(main);
+  expect(
+    await main([...args, "--full-output"], stdout.stream, stderr.stream, deps),
+  ).toBe(2);
+  expect(stdout.text()).toBe("");
+  expect(stderr.text()).toContain("Finding has not been indexed");
 });
+
+test.each([
+  ["JSON", ["--json"]],
+  ["JSON full output", ["--json", "--full-output"]],
+  ["JSONL full output", ["--format", "jsonl", "--full-output"]],
+])(
+  "dedupe forwards cancellation and removes signal handlers: %s",
+  async (_label, outputFlags) => {
+    for (const [signal, expectedCode] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      for (const [findingsFlags, expectedDiagnostic] of [
+        [
+          [],
+          "Deduplication canceled. Completed local preparation is saved for retry.",
+        ],
+        [
+          ["--findings-url", "http://127.0.0.1:3000"],
+          "Deduplication canceled. Remote writes may have completed.",
+        ],
+      ] as const) {
+        const signals = new FakeSignals();
+        const deps = dependencies();
+        deps.addSignalListener = (name, listener) =>
+          signals.add(name, listener);
+        deps.removeSignalListener = (name, listener) =>
+          signals.remove(name, listener);
+        deps.deduplicateScan = async (_scanId, options) => {
+          signals.emit(signal);
+          options.signal!.throwIfAborted();
+          throw new Error("Cancellation must throw");
+        };
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        expect(
+          await runCli(
+            ["dedupe", "--scan", "latest", ...findingsFlags, ...outputFlags],
+            deps,
+          ),
+        ).toBe(expectedCode);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toBe(`codex-security: ${expectedDiagnostic}\n`);
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      }
+    }
+  },
+);

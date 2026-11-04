@@ -1,3 +1,4 @@
+/* Generated from plugin windows-path.ts. Run `pnpm generate:models`. */
 import { parse } from "node:path";
 
 const UNSAFE_COMPONENT = /[<>:"|?*\u0000-\u001f]|[ .]$/u;

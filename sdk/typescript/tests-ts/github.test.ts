@@ -4,9 +4,10 @@ import {
   captureCli,
 } from "./support/cli-run.js";
 import { resolving } from "./support/promises.js";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Octokit } from "@octokit/core";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
@@ -19,6 +20,7 @@ import {
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import type { OnCodex } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
+import { nodeCommand } from "./support/shell.js";
 
 function alert(number: number, ref = "refs/heads/main") {
   return {
@@ -302,6 +304,86 @@ describe("GitHub code scanning import", () => {
       createAuthenticatedGitHub("github.com", { token: " " }),
     ).rejects.toThrow("must not be empty");
   });
+
+  test("normalizes the hostname used for GitHub CLI credential lookup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-github-auth-"));
+    try {
+      const repository = join(root, "repository");
+      const script = join(root, "gh.mjs");
+      await mkdir(repository);
+      await symlink(
+        nodeCommand().command,
+        join(root, process.platform === "win32" ? "gh.exe" : "gh"),
+        "file",
+      );
+      await writeFile(
+        script,
+        `import assert from "node:assert/strict";
+import { basename } from "node:path";
+assert.deepEqual([basename(process.argv[1]), ...process.argv.slice(2)], ["auth", "token", "--hostname", process.env.EXPECTED_GITHUB_HOST]);
+console.log("SYNTHETIC_CLI_TOKEN");
+process.exit(0);`,
+      );
+      for (const host of [
+        "GitHub.Com",
+        "Example.GHE.COM",
+        "GitHub.Example.Com:8443",
+      ]) {
+        const client = await createAuthenticatedGitHub(host, {
+          currentDirectory: repository,
+          environment: {
+            PATH: root,
+            SystemRoot: process.env["SystemRoot"],
+            NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+            EXPECTED_GITHUB_HOST: host.toLowerCase(),
+          },
+        });
+        expect(await client.auth()).toMatchObject({
+          token: "SYNTHETIC_CLI_TOKEN",
+        });
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["github.com", "https://api.github.com", "/graphql"],
+    ["GitHub.Com", "https://api.github.com", "/graphql"],
+    ["example.ghe.com", "https://api.example.ghe.com", "/graphql"],
+    ["Example.GHE.COM", "https://api.example.ghe.com", "/graphql"],
+    [
+      "github.example.test",
+      "https://github.example.test/api/v3",
+      "/api/graphql",
+    ],
+    [
+      "GitHub.Example.Com:8443",
+      "https://github.example.com:8443/api/v3",
+      "/api/graphql",
+    ],
+  ])(
+    "selects the REST and GraphQL endpoints for hostname %s",
+    async (host, baseUrl, graphqlPath) => {
+      const client = await createAuthenticatedGitHub(host, {
+        token: "SYNTHETIC_SDK_TOKEN",
+        environment: {},
+      });
+      expect(client.request.endpoint("GET /user")).toMatchObject({
+        url: `${baseUrl}/user`,
+      });
+      await client.graphql("query { viewer { login } }", {
+        request: {
+          fetch: async (url: string | URL | Request) => {
+            expect(String(url)).toBe(
+              `${new URL(baseUrl).origin}${graphqlPath}`,
+            );
+            return Response.json({ data: { viewer: { login: "synthetic" } } });
+          },
+        },
+      });
+    },
+  );
 });
 
 describe("GitHub import CLI", () => {

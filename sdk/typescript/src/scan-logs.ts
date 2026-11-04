@@ -70,18 +70,9 @@ export function readSavedScanLogs(
 // zstd, so they still read plain rollouts only.
 const readsCompressedSessions = typeof zlib.createZstdDecompress === "function";
 
-interface SessionLog {
-  threadId: string;
-  parentThreadId: string | null;
-  startedAt: number | null;
-  workingDirectory: string | null;
-  path: string;
-}
+type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
-async function* scanSessions(
-  codexHome: string,
-  directory = "sessions",
-): AsyncGenerator<SessionLog> {
+async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(
     join(codexHome, directory),
     readsCompressedSessions,
@@ -106,10 +97,7 @@ async function* scanSessions(
   }
 }
 
-export async function findScanSession(
-  codexHome: string,
-  threadId: string,
-): Promise<SessionLog | null> {
+export async function findScanSession(codexHome: string, threadId: string) {
   for await (const session of scanSessions(codexHome)) {
     if (session.threadId === threadId) return session;
   }
@@ -139,6 +127,7 @@ export async function readScanLogs(options: ScanLogOptions) {
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
+  let children: Map<string | undefined, SessionLog[]> | undefined;
 
   const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
@@ -150,14 +139,16 @@ export async function readScanLogs(options: ScanLogOptions) {
   const traversed = new Set(options.executionThreadIds ?? included);
   for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
-    for (const [session] of logs.values()) {
+    // Parentless workers can only belong to the root, in discovery order.
+    children ??= Map.groupBy(
+      logs.values().map(([session]) => session),
+      (session) => session.parentThreadId ?? root?.threadId,
+    );
+    for (const session of children.get(parentId) ?? []) {
       if (
         !traversed.has(session.threadId) &&
         (session.parentThreadId === parentId ||
-          (root !== undefined &&
-            parent === root &&
-            session.parentThreadId === null &&
-            belongsToScan(session, root, options)))
+          (parent !== undefined && belongsToScan(session, parent, options)))
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);

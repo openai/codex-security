@@ -25,22 +25,20 @@ export type ClaimResolution =
       url?: string;
     };
 
-export interface CompletedCreateEvidence {
+interface CreateEvidence {
   source: "event";
-  status: "completed";
   rawLine: string;
   ownerFindingId?: string;
   argumentsValid: boolean;
   resolution: ClaimResolution;
 }
 
-export interface FailedCreateEvidence {
-  source: "event";
+export interface CompletedCreateEvidence extends CreateEvidence {
+  status: "completed";
+}
+
+export interface FailedCreateEvidence extends CreateEvidence {
   status: "failed";
-  rawLine: string;
-  ownerFindingId?: string;
-  argumentsValid: boolean;
-  resolution: ClaimResolution;
   error: string;
 }
 
@@ -68,31 +66,27 @@ export function collectPublicationEvents(
     const argumentsValid =
       owner !== undefined &&
       hasExpectedPublicationArguments(publication, owner, arguments_);
-    if (item["status"] === "completed") {
-      evidence.push({
-        source: "event",
-        status: "completed",
-        rawLine,
-        ...(owner === undefined ? {} : { ownerFindingId: owner.findingId }),
-        argumentsValid,
-        resolution: resolvePublicationClaims(item["result"]),
-      });
-      continue;
-    }
-
-    const error = item["error"];
-    evidence.push({
+    const completed: CompletedCreateEvidence = {
       source: "event",
-      status: "failed",
+      status: "completed",
       rawLine,
       ...(owner === undefined ? {} : { ownerFindingId: owner.findingId }),
       argumentsValid,
       resolution: resolvePublicationClaims(item["result"]),
-      error:
-        isRecord(error) && typeof error["message"] === "string"
-          ? error["message"]
-          : failureMessage,
-    });
+    };
+    if (item["status"] === "completed") {
+      evidence.push(completed);
+    } else {
+      const error = item["error"];
+      evidence.push({
+        ...completed,
+        status: "failed",
+        error:
+          isRecord(error) && typeof error["message"] === "string"
+            ? error["message"]
+            : failureMessage,
+      });
+    }
   }
 
   return evidence;
@@ -280,20 +274,8 @@ function isCanonicalUuid(value: string): boolean {
 function linearIssueReferenceFromUrl(
   value: string,
 ): { id: string; workspace: string } | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
   // Recognize every scheme linearIssueReference parses, so a plain HTTP URL
   // still resolves to the issue it names instead of an unrecognized claim.
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.hostname !== "linear.app"
-  ) {
-    return undefined;
-  }
   try {
     const reference = linearIssueReference(value);
     return reference.workspace === undefined
