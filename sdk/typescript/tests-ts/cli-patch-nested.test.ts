@@ -3,13 +3,15 @@ import { hash } from "node:crypto";
 import {
   mkdir,
   readFile,
+  readdir,
+  realpath,
   readlink,
   rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { dependencies } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -28,6 +30,86 @@ describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
+
+  test.each([
+    "external link",
+    "dangling link",
+    "regular file",
+    "linked worktree",
+  ])(
+    "nested risk snapshots validate the parent pack directory: %s",
+    async (kind) => {
+      const { directory, git } = await publicationRepository();
+      const linked = kind === "linked worktree";
+      const checkout = linked
+        ? await fixtures.create("patch-linked-worktree-")
+        : directory;
+      if (linked) git("worktree", "add", "--detach", checkout, "HEAD");
+      const parentGit = repositoryGit(checkout);
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      const childGit = repositoryGit(nested);
+      childGit("init", "--quiet");
+      childGit(
+        "-c",
+        "user.name=Synthetic",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Nested baseline",
+      );
+      parentGit("add", "nested");
+      parentGit("commit", "-m", "Record nested checkout");
+
+      const outside = await fixtures.create("patch-external-pack-");
+      const pack = parentGit(
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "objects/pack",
+      );
+      const objectDirectory = await realpath(dirname(pack));
+      await rm(pack, { recursive: true });
+      if (kind === "regular file") await writeFile(pack, "synthetic");
+      else if (!linked) {
+        await symlink(
+          outside,
+          pack,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        if (kind === "dangling link") await rm(outside, { recursive: true });
+      }
+      const model = mock(async () => 0);
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: checkout,
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (args.includes("pack-objects"))
+              expect(options?.patchSnapshot).toEqual([objectDirectory]);
+            return runGitRepositoryCommand(tool, args, cwd, options);
+          },
+          onCodex: model,
+        },
+      );
+      if (linked) {
+        expect(model, outcome.stderr).toHaveBeenCalled();
+        expect(
+          (await readdir(pack)).some((file) => file.endsWith(".pack")),
+        ).toBe(true);
+      } else {
+        expect(model, outcome.stderr).not.toHaveBeenCalled();
+        expect(outcome.stderr).toContain("pack");
+        if (kind === "dangling link")
+          await expect(readdir(outside)).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        else expect(await readdir(outside)).toEqual([]);
+      }
+    },
+  );
 
   test.each([
     "published",

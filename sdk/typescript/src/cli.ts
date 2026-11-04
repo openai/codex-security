@@ -10791,13 +10791,27 @@ async function retainPatchTrees(
     repository,
     { trim: false },
   );
-  const pack = join(objects.replace(/\n$/u, ""), "pack");
-  await mkdir(pack, { recursive: true });
+  // A linked worktree shares its selected object database. Resolve that root
+  // before appending the pack child so a checkout cannot redirect our output.
+  const objectDirectory = await realpath(objects.replace(/\n$/u, ""));
+  const pack = join(objectDirectory, "pack");
+  await mkdir(pack).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+  });
+  if (
+    !(await lstat(pack)).isDirectory() ||
+    relative(pack, await realpath(pack)) !== ""
+  )
+    throw new CodexSecurityError(
+      `Git pack output must be a directory inside the selected object database: ${pack}`,
+    );
   await dependencies.runRepositoryCommand(
     "git",
     [...source, "pack-objects", "--revs", join(pack, "pack")],
     repository,
     {
+      // Grant the selected database, never a path resolved through the pack child.
+      patchSnapshot: [objectDirectory],
       environment: NESTED_PATCH_GIT_ENVIRONMENT,
       input: trees.join("\n") + "\n",
     },
