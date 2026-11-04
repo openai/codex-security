@@ -2011,11 +2011,11 @@ export class CodexSecurity {
     this.#requireOpen();
     if (options.mock) return await this.#runMock(repository, options);
     const costAbortController = new AbortController();
-    const signal = AbortSignal.any([
+    const callerSignal = AbortSignal.any([
       this.#abortController.signal,
-      costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const signal = AbortSignal.any([callerSignal, costAbortController.signal]);
     const budgetAbortController = new AbortController();
     const budgetSignal = AbortSignal.any([
       signal,
@@ -3655,13 +3655,18 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
+      // Capture who stopped the scan before cleanup can fire another signal.
+      const callerCancellation =
+        callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
+          ? callerSignal
+          : undefined;
+      let failure =
+        signal.aborted && callerCancellation === undefined
+          ? signal.reason
+          : error;
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
-      let failure =
-        signal.reason instanceof ScanCostLimitExceededError
-          ? signal.reason
-          : error;
       if (
         failure instanceof ScanCostLimitExceededError &&
         snapshot?.cost &&
@@ -3678,8 +3683,7 @@ export class CodexSecurity {
         budgetRecovery !== null &&
         budgetRecovery.threadId !== null &&
         activeScan !== null &&
-        !this.#abortController.signal.aborted &&
-        options.signal?.aborted !== true
+        !callerSignal.aborted
       ) {
         try {
           const completion = await workbench(
@@ -3713,10 +3717,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            callerSignal,
             true,
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
@@ -3798,7 +3799,7 @@ export class CodexSecurity {
             workbench,
             activeScan,
             options,
-            signal,
+            callerCancellation,
             failure,
             snapshot?.cost,
           );
@@ -6118,7 +6119,7 @@ async function stopRegisteredScan(
   workbench: typeof runWorkbench,
   activeScan: { id: string; options: WorkbenchCommandOptions },
   options: ScanOptions,
-  signal: AbortSignal,
+  callerSignal: AbortSignal | undefined,
   error: unknown,
   cost?: Readonly<ScanCost> | null,
 ): Promise<void> {
@@ -6127,11 +6128,11 @@ async function stopRegisteredScan(
   const canceled =
     error instanceof ScanExecutionError
       ? error.result.status === "canceled"
-      : signal.aborted &&
-        !(signal.reason instanceof ScanCostLimitExceededError) &&
+      : callerSignal?.aborted &&
+        !(callerSignal.reason instanceof ScanCostLimitExceededError) &&
         !(
-          signal.reason instanceof DOMException &&
-          signal.reason.name === "TimeoutError"
+          callerSignal.reason instanceof DOMException &&
+          callerSignal.reason.name === "TimeoutError"
         );
   if (canceled) {
     try {
