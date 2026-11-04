@@ -6,7 +6,7 @@ import json
 import os
 
 import pytest
-import test_deep_scan_successful_publication
+from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     read_review_state,
     saved_draft,
@@ -16,7 +16,7 @@ from workbench_test_support import (
     write_result_draft,
 )
 
-publication_scan = test_deep_scan_successful_publication.historical_publication_scan
+publication_scan = historical_publication_scan
 
 
 def canonical_disposition(scan, disposition, complete_marker):

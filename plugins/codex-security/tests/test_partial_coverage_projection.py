@@ -7,13 +7,15 @@ import os
 from argparse import Namespace
 
 import pytest
-from test_checkpoint_publication_authority import publication_scan as publication_scan
+from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     read_review_state,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
 )
+
+publication_scan = historical_publication_scan
 
 
 @pytest.fixture

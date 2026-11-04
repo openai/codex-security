@@ -474,28 +474,11 @@ async function testSemanticScanDraftCompletion() {
       candidate_id: "candidate-0123456789abcdef",
       cwe_ids: ["CWE-89"],
     };
-    await assert.rejects(
-      readFile(
-        path.join(
-          scanDirectory,
-          "artifacts",
-          "02_discovery",
-          "in_scope_files.txt",
-        ),
-      ),
-      { code: "ENOENT" },
-    );
-    await assert.rejects(
-      readFile(
-        path.join(
-          scanDirectory,
-          "artifacts",
-          "02_discovery",
-          "candidate_ledger.jsonl",
-        ),
-      ),
-      { code: "ENOENT" },
-    );
+    for (const name of ["in_scope_files.txt", "candidate_ledger.jsonl"])
+      await assert.rejects(
+        readFile(path.join(scanDirectory, "artifacts", "02_discovery", name)),
+        { code: "ENOENT" },
+      );
 
     const codeEvidence = {
       id: "fixture-sql-sink",
@@ -883,28 +866,20 @@ async function testSemanticScanDraftCompletion() {
     assert.ok(results.manifest.scan.sealedAt);
     assert.ok(results.manifest.scan.artifacts.length > 0);
     assert.equal(results.findings.findings.length, 1);
-    assert.equal(results.findings.findings[0].ruleId, finding.ruleId);
-    assert.deepEqual(results.findings.findings[0].taxonomy, finding.taxonomy);
-    assert.deepEqual(
-      results.findings.findings[0].provenance,
-      finding.provenance,
-    );
-    assert.equal(results.findings.findings[0].remediation, finding.remediation);
-    assert.deepEqual(
-      results.findings.findings[0].remediationTests,
-      finding.remediationTests,
-    );
-    assert.deepEqual(
-      results.findings.findings[0].preventiveControls,
-      finding.preventiveControls,
-    );
-    assert.equal(
-      results.findings.findings[0].extensions.candidateId,
-      candidate.candidate_id,
-    );
-    assert.ok(results.findings.findings[0].findingId);
-    assert.ok(results.findings.findings[0].occurrenceId);
-    assert.ok(results.findings.findings[0].fingerprints.primary);
+    const savedFinding = results.findings.findings[0];
+    assert.equal(savedFinding.ruleId, finding.ruleId);
+    assert.equal(savedFinding.remediation, finding.remediation);
+    for (const field of [
+      "taxonomy",
+      "provenance",
+      "remediationTests",
+      "preventiveControls",
+    ] as const)
+      assert.deepEqual(savedFinding[field], finding[field]);
+    assert.equal(savedFinding.extensions.candidateId, candidate.candidate_id);
+    assert.ok(savedFinding.findingId);
+    assert.ok(savedFinding.occurrenceId);
+    assert.ok(savedFinding.fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.manifest.scan.mode, "repository");
     assert.deepEqual(results.review, { excludedPaths: [] });
@@ -1868,7 +1843,7 @@ async function testParentToolList() {
         "codex/sandbox-state-meta"
       ],
       {},
-      "The parent MCP must advertise actual parent sandbox-state metadata.",
+      `The parent MCP must advertise actual parent sandbox-state metadata.`,
     );
     const tools = (await client.listTools()).tools;
     for (const tool of tools) {
@@ -1890,7 +1865,7 @@ async function testParentToolList() {
       false,
       "The parent MCP must not expose a bound discovery worker's threat-model tool.",
     );
-    for (const name of [
+    const scanTools = [
       "prepare_codex_security_review_items",
       "list_codex_security_review_items",
       "record_codex_security_discovery_candidates",
@@ -1899,6 +1874,9 @@ async function testParentToolList() {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+    ];
+    for (const name of [
+      ...scanTools,
       "get_codex_security_finding_issues",
       "record_codex_security_finding_issues",
       "complete_codex_security_scan",
@@ -1917,19 +1895,8 @@ async function testParentToolList() {
       );
     }
 
-    for (const tool of tools.filter(
-      (entry) =>
-        names.has(entry.name) &&
-        [
-          "prepare_codex_security_review_items",
-          "list_codex_security_review_items",
-          "record_codex_security_discovery_candidates",
-          "list_codex_security_candidates",
-          "record_codex_security_candidate_validations",
-          "record_candidate_attack_paths",
-          "record_codex_security_scan_draft",
-          "get_codex_security_completed_scan",
-        ].includes(entry.name),
+    for (const tool of tools.filter((entry) =>
+      scanTools.includes(entry.name),
     )) {
       assert.equal(
         tool.inputSchema.required?.includes("scanId"),
@@ -1946,7 +1913,7 @@ async function testParentToolList() {
         assert.equal(
           Object.hasOwn(tool.inputSchema.properties ?? {}, forbidden),
           false,
-          `${tool.name} must not accept a model-selected artifact destination.`,
+          `${tool.name} must not accept a model-selected artifact destination (${forbidden}).`,
         );
       }
       if (tool.name === "record_codex_security_scan_draft")

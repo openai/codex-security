@@ -8,7 +8,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_checkpoint_publication_authority import publication_scan as publication_scan
+from publication_fixtures import historical_publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
@@ -18,6 +18,8 @@ from workbench_test_support import (
     select_checkpoint,
     write_checkpoint,
 )
+
+publication_scan = historical_publication_scan
 
 
 @pytest.mark.parametrize("reordered", [False, True])

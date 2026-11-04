@@ -11,7 +11,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-import test_deep_scan_successful_publication
+from publication_fixtures import historical_publication_scan
 from workbench_test_support import (
     interrupt_publication,
     read_review_state,
@@ -23,7 +23,7 @@ from workbench_test_support import (
     write_result_draft,
 )
 
-publication_scan = test_deep_scan_successful_publication.historical_publication_scan
+publication_scan = historical_publication_scan
 
 
 def captured_head(scan_dir, directory):

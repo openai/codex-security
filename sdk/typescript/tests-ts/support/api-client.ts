@@ -2,8 +2,37 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { preparedRuntime } from "./api-events.js";
 import { CodexSecurity } from "../../src/api.js";
-import type { JsonObject } from "../../src/config.js";
+import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  type JsonObject,
+} from "../../src/config.js";
 import { throwing } from "./errors.js";
+
+export const EXTERNAL_PROVIDER_CASES = [
+  [
+    "OpenRouter",
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "anthropic/claude-sonnet-4.5",
+    OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "Fireworks AI",
+    "fireworks",
+    "FIREWORKS_API_KEY",
+    "accounts/fireworks/models/qwen3-235b-a22b",
+    FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
+  ],
+] as const;
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
