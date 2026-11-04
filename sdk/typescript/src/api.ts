@@ -3999,6 +3999,7 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
+          const canceled = explicitlyCanceled(callerCancellation);
           await stopRegisteredScan(
             workbench,
             activeScan,
@@ -4006,8 +4007,7 @@ export class CodexSecurity {
             this.#dependencies.hostedScan
               ? hostedScanFailureStatus(failure, callerCancellation) ===
                   "canceled"
-              : !selectedDeepFinalization &&
-                explicitlyCanceled(callerCancellation),
+              : canceled && !selectedDeepFinalization,
             failure,
             snapshot?.cost,
           );
@@ -5721,11 +5721,8 @@ export async function runScanEvents(
     if (options.signal.reason instanceof ScanCostLimitExceededError) {
       throw options.signal.reason;
     }
-    if (
-      options.signal.aborted &&
-      !(error instanceof ScanInterruptedError) &&
-      !(error instanceof ScanExecutionError)
-    ) {
+    if (error instanceof ScanExecutionError) throw error;
+    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
         options.scanDir,
