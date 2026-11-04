@@ -1,6 +1,6 @@
 import { constants, type BigIntStats, type Stats } from "node:fs";
-import { lstat, open, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, open, readdir, type FileHandle } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ContractValidationError, abortReason } from "./errors.js";
 import type {
@@ -10,7 +10,10 @@ import type {
 } from "./models.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 import { bundledPluginRoot } from "./runtime.js";
-import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
+import {
+  safeRelativePath,
+  safeScopePath as sharedSafeScopePath,
+} from "./contract-values.js";
 export {
   DEFERRED_PATH_LOCATION,
   SEALED_DEFERRED_PATH_RULE,
@@ -135,6 +138,62 @@ export async function requireScanFile(
       ),
     signal,
   );
+}
+
+// The manifest has already passed loadContract's seal and artifact collision checks.
+export async function hasSealedReport(
+  scanDirectory: string,
+  manifest: ScanManifest,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const reportName = /^[rR][eE][pP][oO][rR][tT]\.[mM][dD]$/u;
+  try {
+    signal?.throwIfAborted();
+    const artifact = manifest.scan.artifacts
+      .map(({ path }) => safeRelativePath(path, "sealed artifact path"))
+      .find((path) => reportName.test(path));
+    if (!artifact) return false;
+    if (artifact === "report.md") return true;
+
+    const report = await requireScanFile(
+      scanDirectory,
+      "report.md",
+      "report.md",
+      signal,
+    );
+    const entries = await readdir(dirname(report));
+    signal?.throwIfAborted();
+    if (entries.filter((name) => reportName.test(name)).length !== 1)
+      return false;
+
+    const artifactPath = await requireScanFile(
+      scanDirectory,
+      artifact,
+      "sealed report",
+      signal,
+    );
+    const file = await open(
+      artifactPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const [metadata, opened] = await Promise.all([
+        lstat(report, { bigint: true }),
+        file.stat({ bigint: true }),
+      ]);
+      const sameFile =
+        opened.isFile() &&
+        metadata.isFile() &&
+        (await sameCheckedFileDevice(file, { path: report, metadata }, opened));
+      signal?.throwIfAborted();
+      return sameFile;
+    } finally {
+      await file.close();
+    }
+  } catch {
+    signal?.throwIfAborted();
+    return false;
+  }
 }
 
 export async function readScanFile(
