@@ -2057,13 +2057,14 @@ history. Inspect its saved status before choosing resume or rerun, and supply
 the original custom prompt files for reruns. Structured history and log output
 and command selection defaults are unchanged.
 
-Recipes save settings and authentication choice, not credentials. Reruns use the
-current checkout/context files and do not reload project files. Rerun and resume
-restore explicit `openai_base_url`, `chatgpt_base_url`, and custom
-`model_providers` settings from the scan's private replay profile. Keep any
-credentials those settings reference available when replaying. Settings inherited
-from a named file profile are reloaded from that file. If an older scan
-omitted your endpoint, start a new scan with the original `--codex` override.
+Reruns use the current checkout/context files and do not reload project files.
+The readable scan recipe records your authentication choice. A separate private
+replay profile stores explicit `openai_base_url`, `chatgpt_base_url`, and custom
+`model_providers` settings, including any credentials written directly in
+`http_headers`. If you use `env_key` or `env_http_headers`, the profile stores
+the variable names. Set those variables when you rerun or resume. Settings
+inherited from a named file profile are reloaded from that file. If an older
+scan omitted your endpoint, start a new scan with the original `--codex` override.
 
 When routing through environment variables, set them for each launch, including
 rerun and resume. Deep workers inherit `CODEX_OSS_BASE_URL` and `CODEX_OSS_PORT`
