@@ -107,6 +107,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
+import type { DeepScanDiagnostic } from "./deep-scan.js";
 import {
   formatDeepScanReviews,
   type DeepScanProgress,
@@ -237,6 +238,7 @@ import {
 } from "./github-advisories.js";
 import {
   collectSnykIssues,
+  snykRestApiVersion,
   SNYK_REST_ISSUES_FORMAT,
 } from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
@@ -1291,6 +1293,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
+    onDeepScanDiagnostic?: (event: DeepScanDiagnostic) => void,
   ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
@@ -1400,8 +1403,11 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
   };
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) =>
-    new CodexSecurity(config, undefined, { surface: "cli" }),
+  createSecurity: (config, onDeepScanDiagnostic) =>
+    new CodexSecurity(config, undefined, {
+      surface: "cli",
+      onDeepScanDiagnostic,
+    }),
   environment: process.env,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
@@ -1656,7 +1662,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          providerEnvKey,
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -4245,7 +4250,7 @@ export async function main(
       output: z
         .object({
           format: z.literal(SNYK_REST_ISSUES_FORMAT),
-          apiVersion: z.string(),
+          apiVersion: z.literal(snykRestApiVersion),
           apiOrigin: z.string(),
           organizationId: z.string(),
           projectId: z.string(),
@@ -4723,11 +4728,10 @@ export async function main(
                     config,
                     scanCodexHome(dependencies.environment),
                   );
-                  if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider(effectiveConfig),
+                      config: effectiveConfig,
                       command: "policy",
                       signal,
                     },
@@ -9781,24 +9785,25 @@ function diagnosticValue(value: unknown): string {
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
-    provider: unknown;
+    config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanAuthMode | undefined> {
-  const { auth, provider, signal } = options;
+  const { auth, config, signal } = options;
   if (
     errorOutput.isTTY !== true ||
-    isExternalModelProvider(provider) ||
+    hasCommandAuth(config) ||
+    scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
   const authentication = scanAuthentication(
     dependencies.environment,
     auth,
-    provider,
+    scanModelProvider(config),
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -10061,7 +10066,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              config: effectiveConfiguration,
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -10189,7 +10194,12 @@ async function executeScan(
         progress.startTimer("Preparing scan");
       }
     }
-    security = dependencies.createSecurity(config);
+    security = dependencies.createSecurity(
+      config,
+      verbose && arguments_.mode === "deep"
+        ? (fields) => diagnostic("deep_scan.coordinator", fields)
+        : undefined,
+    );
     if (arguments_.mock) {
       errorOutput.write(
         "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
