@@ -87,12 +87,12 @@ export function testCodeModeFrameDiagnosticBoundaries(
 export function testWorkerErrorClassificationPreservesExplicitFailures({
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
-  isCodexCybersecurityPolicyRefusal,
+  codexWorkerTurnError,
 }: Pick<
   typeof import("../src/deep-scan/errors.js"),
   | "classifyCodexWorkerError"
   | "DeepScanNonRetryableError"
-  | "isCodexCybersecurityPolicyRefusal"
+  | "codexWorkerTurnError"
 >) {
   const explicit = new DeepScanNonRetryableError(
     "Explicitly rejected worker permission profile.",
@@ -112,7 +112,9 @@ export function testWorkerErrorClassificationPreservesExplicitFailures({
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
     assert.equal(classified.name, "Error");
-    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+    assert.ok(
+      codexWorkerTurnError(message) instanceof DeepScanNonRetryableError,
+    );
 
     const explicitRefusal = new DeepScanNonRetryableError(message);
     assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
@@ -129,7 +131,7 @@ export function testWorkerErrorClassificationPreservesExplicitFailures({
     ]) {
       const unrelated = new Error(unrecognized);
       assert.equal(classifyCodexWorkerError(unrelated), unrelated);
-      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
+      assert.equal(codexWorkerTurnError(unrecognized).name, "Error");
     }
   }
 

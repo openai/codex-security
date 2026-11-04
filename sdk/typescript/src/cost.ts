@@ -2453,7 +2453,7 @@ export class ScanCostTracker {
               if (session.threadId === null) {
                 if (path.endsWith(".zst")) this.#sessions.delete(path);
                 else {
-                  if (!observeHealthySessions || !isDeniedLogRead(error))
+                  if (!observeHealthySessions || !isBlockedLogRead(error))
                     throw error;
                   blocked ??= failure;
                 }
@@ -4446,10 +4446,12 @@ function subtractTokenUsage(
   });
 }
 
-function isDeniedLogRead(error: unknown): boolean {
+function isBlockedLogRead(error: unknown): boolean {
   return (
     isRecord(error) &&
-    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["code"] === "EACCES" ||
+      error["code"] === "EPERM" ||
+      error["code"] === "EIO") &&
     (error["syscall"] === "open" || error["syscall"] === "read")
   );
 }

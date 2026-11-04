@@ -12,7 +12,6 @@ import {
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
-  isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDiscoveryPrompt } from "./templates.js";
 import type {
@@ -225,6 +224,7 @@ export class DeepScanWorkerRunner {
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
+      let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -254,7 +254,21 @@ export class DeepScanWorkerRunner {
             workingDirectory: input.artifactDir,
             subagents: run.config.subagents,
             signal,
-            onNonRetryableError: this.options.onNonRetryableError,
+            onNonRetryableError: (error) => {
+              if (signal.aborted || terminalFailure) return;
+              terminalFailure = this.options.store
+                .updateWorker({
+                  ...baseMutation,
+                  threadId: activeThreadId,
+                  status: "failed",
+                  error: deepScanErrorMessage(error),
+                  terminalFailure: true,
+                })
+                .then(() => ({ status: "failed", error }));
+              // Await this write after executor cleanup, even if it rejects first.
+              void terminalFailure.catch(() => {});
+              this.options.onNonRetryableError?.(error);
+            },
             resumeThreadId: resumableThreadId,
             continuationPrompt:
               resumePrompt && run.severityRubric
@@ -297,6 +311,7 @@ export class DeepScanWorkerRunner {
           return auditEvidence(accepted);
         };
         const audit = await runAcceptedAudit({ signal, execute, accept });
+        if (terminalFailure) return terminalFailure;
         if (audit.status === "checkpoint") {
           throw withWorkerDiagnostics(
             new Error(
@@ -322,20 +337,17 @@ export class DeepScanWorkerRunner {
         };
       } catch (error) {
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
+        if (terminalFailure) return terminalFailure;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
         const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
-        const policyRefusal =
-          retryable && isCodexCybersecurityPolicyRefusal(normalized);
-        if (policyRefusal || !retryable || attempt === maximumAttempts) {
+        if (!retryable || attempt === maximumAttempts) {
           const replaceableFailureKind = retryable
-            ? policyRefusal
-              ? "policy_refusal"
-              : validationStarted
-                ? "invalid_discovery_artifacts"
-                : "transient_error"
+            ? validationStarted
+              ? "invalid_discovery_artifacts"
+              : "transient_error"
             : undefined;
           await this.options.store.updateWorker({
             ...baseMutation,

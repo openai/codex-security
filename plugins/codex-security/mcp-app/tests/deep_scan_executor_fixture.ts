@@ -35,7 +35,7 @@ const executor = await importModule({
     // Expose the environment snapshot only for tests.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export { isCodexCybersecurityPolicyRefusal, classifyCodexWorkerError, DeepScanNonRetryableError, codexWorkerTurnError } from "./errors.js";
+export { classifyCodexWorkerError, DeepScanNonRetryableError, codexWorkerTurnError } from "./errors.js";
 export { captureDeepScanExecutionSettings, retainDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./recovery-settings.js";
 export { WorkbenchDeepScanStore } from "./store.js";
 export { parseDeepScan } from "./response.js";`,
@@ -55,10 +55,8 @@ export const {
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
   codexWorkerTurnError,
-
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = executor;
 export const CodexSdkWorkerExecutor: typeof Executor =

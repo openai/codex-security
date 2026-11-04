@@ -21,6 +21,7 @@ from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
 from workbench_coverage_receipts import matches_worker_checkpoint
 from workbench_saved_results import _worker_checkpoint_head
+from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -414,6 +415,11 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
         "coordinatorGeneration": run["coordinator_generation"],
         "status": run["status"],
         "phase": run["phase"],
+        # Older coordinators could persist discovery on the parent before dispatching.
+        "discoveryStarted": (
+            PHASES.index(scan["phase"]) >= PHASES.index("discovery")
+            or run["phase"] in {"discovery", "reducing"}
+        ),
         "config": {
             "workers": run["workers"],
             "subagents": run["subagents"],
@@ -1374,6 +1380,12 @@ def upsert_deep_scan_worker(
         existing = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE id = ?", (worker_id,)
         ).fetchone()
+        if args.terminal_failure and (
+            args.status != "failed" or not optional_text(args.error_message)
+        ):
+            raise SystemExit(
+                "A terminal worker failure requires failed status and an error message."
+            )
         replaceable_failure_kind = args.replaceable_failure_kind
         if replaceable_failure_kind is not None and (
             args.kind != "discovery"
@@ -1675,6 +1687,13 @@ def record_deep_scan_iteration(
             "UPDATE scan_progress SET deep_review_pass = COALESCE(deep_review_pass, 0) + 1, updated_at = ? WHERE scan_id = ?",
             (now, scan_id),
         )
+        if args.terminal_failure:
+            # Persist the first terminal cause with its worker. An adopting coordinator
+            # completes the normal failure path after active workers have settled.
+            connection.execute(
+                "UPDATE deep_scan_runs SET error_message = ? WHERE scan_id = ? AND error_message IS NULL",
+                (error_message, scan_id),
+            )
     return deep_scan_result(connection, scan_id)
 
 
@@ -1833,6 +1852,8 @@ def finish_deep_scan_locked(
             connection.commit()
             return deep_scan_result(connection, scan_id)
         require_running_deep_scan(connection, scan_id)
+        if run["error_message"] is not None:
+            raise SystemExit(run["error_message"])
         if (
             args.terminal_reason == "saturated"
             and run["consecutive_no_new"] < run["stop_after_no_new"]
@@ -2009,6 +2030,9 @@ def fail_deep_scan_locked(
             "status"
         ] != "running":
             raise SystemExit("Only a running Deep Scan can be failed or interrupted.")
+        # Cleanup can report a later error after a worker committed the terminal cause.
+        if run["status"] == "running" and run["error_message"] is not None:
+            message = run["error_message"]
         if run["manifest_path"] not in {None, manifest_path}:
             raise SystemExit("Deep Scan coordinator manifest path is immutable.")
         if args.staged_manifest_path and manifest_path:
@@ -2128,7 +2152,7 @@ def cancel_from_parent_scan(connection: sqlite3.Connection, scan_id: str, timest
     connection.execute(
         """
         UPDATE deep_scan_runs
-        SET status = 'canceled', phase = 'terminal', cancel_requested = 1,
+        SET status = 'canceled', phase = 'terminal', cancel_requested = 1, error_message = NULL,
             terminal_reviewed_surface_count = NULL, completed_at = ?, updated_at = ?
         WHERE scan_id = ? AND status IN ('running', 'succeeded')
         """,

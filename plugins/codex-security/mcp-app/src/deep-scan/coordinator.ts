@@ -81,6 +81,10 @@ export interface CoordinatorOptions {
     run: DeepScanRunState,
     signal: AbortSignal,
   ) => Promise<DeepScanRunState>;
+  checkFreshTarget?: (
+    run: DeepScanRunState,
+    signal: AbortSignal,
+  ) => Promise<void>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -344,6 +348,8 @@ export class DeepScanCoordinator {
   private async run(): Promise<void> {
     let finalizationFailure: { error: unknown } | undefined;
     try {
+      // A replacement coordinator must honor a worker failure committed before handoff.
+      if (this.state.error) throw new Error(this.state.error);
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
@@ -351,9 +357,18 @@ export class DeepScanCoordinator {
         await this.completeSelectedFinalization();
         return;
       }
+      if (this.options.checkFreshTarget && isFreshRun(this.state)) {
+        await this.options.checkFreshTarget(
+          this.state,
+          this.discoveryAbortController.signal,
+        );
+      }
+      if (this.canceled || this.externallyFailed) return;
+
       this.setupComplete = true;
       const loopResult = await this.runIterations();
       if (this.canceled || this.externallyFailed) return;
+      this.abortController.signal.throwIfAborted();
       const draft = loopResult.result
         ? scanUnionToDraft(loopResult.result)
         : scanDraftInputSchema.parse({
@@ -433,7 +448,7 @@ export class DeepScanCoordinator {
       }
       const message = errorMessage(error);
       const persistedMessage = deepScanErrorMessage(error);
-      if (!this.setupComplete) {
+      if (!this.setupComplete && !this.state.error) {
         this.log({
           event: "setup_failed",
           scanId: this.state.scanId,
@@ -1153,6 +1168,15 @@ function workerLabelSequence(
 
 function cloneState(state: DeepScanRunState): DeepScanRunState {
   return { ...state, config: { ...state.config } };
+}
+
+function isFreshRun(state: DeepScanRunState): boolean {
+  return (
+    !state.discoveryStarted &&
+    state.dispatchedCount === 0 &&
+    !state.persistedWorkers?.some((worker) => worker.kind !== "setup") &&
+    (state.persistedDedupInputs?.length ?? 0) === 0
+  );
 }
 
 function discoverySequence(artifactDir: string): bigint {

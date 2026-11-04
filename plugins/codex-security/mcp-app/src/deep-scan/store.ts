@@ -325,6 +325,7 @@ export class WorkbenchDeepScanStore {
           : []),
         ...(update.threadId ? ["--sdk-thread-id", update.threadId] : []),
         ...(update.error ? [`--error-message=${update.error}`] : []),
+        ...(update.terminalFailure ? ["--terminal-failure"] : []),
         ...(update.replaceableFailureKind
           ? ["--replaceable-failure-kind", update.replaceableFailureKind]
           : []),

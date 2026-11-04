@@ -117,6 +117,7 @@ export interface DeepScanWorkerMutation {
   threadId?: string;
   resultManifestPath?: string;
   error?: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 }
 
@@ -126,7 +127,7 @@ export type DeepScanReplaceableFailureKind =
 /** The authoritative worker record returned after SQLite commits the change. */
 export interface PersistedDeepScanWorker extends Omit<
   DeepScanWorkerMutation,
-  "scanId" | "replaceableFailureKind"
+  "scanId" | "terminalFailure" | "replaceableFailureKind"
 > {
   acceptedResultPath?: string;
   acceptedResultSha256?: string;
