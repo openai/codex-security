@@ -3,9 +3,11 @@
 set -euo pipefail
 
 # Keep the legacy i386 socket interface available on amd64.
-jq -e 'any(.archMap[]; .architecture == "SCMP_ARCH_X86_64" and (.subArchitectures | index("SCMP_ARCH_X86"))) and
-  ([.syscalls[] | select(.names | index("socketcall")) | del(.names, .comment)] == [{"action":"SCMP_ACT_ALLOW"}])' \
-  docker/codex-security-seccomp.json > /dev/null
+jq -e '
+  any(.archMap[]; .architecture == "SCMP_ARCH_X86_64" and (.subArchitectures | index("SCMP_ARCH_X86"))) and
+  any(.syscalls[]; (.names | index("socketcall")) and .action == "SCMP_ACT_ALLOW" and
+    all(.args, .includes, .excludes; length == 0))
+' docker/codex-security-seccomp.json > /dev/null
 
 # Resolve the environment on the host; these checks need no running container.
 for compose_file in compose.yaml compose.runner.yaml; do

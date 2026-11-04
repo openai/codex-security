@@ -82,6 +82,9 @@ zero. For example, changes after `0.1.23` propose `0.1.24`, or `0.2.0` if any
 included change is breaking. The category of a feature remains **Features**;
 the category does not imply a minor version bump.
 
+[Release 0.8.3](https://github.com/openai/codex-security/pull/2144) uses a patch
+version as a one-time exception. Its upgrade notes list the compatibility changes.
+
 The release PR updater recognizes breaking changes from a `!` in a
 Conventional Commit title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer,
 or the `breaking-change` label. `skip-release-notes` affects visibility, not
@@ -171,6 +174,10 @@ Keep the published notes easy to scan:
 - Start with a short overview and the main user-facing highlights. Use bold
   topic labels to make the bullets easy to skim. Put secondary improvements
   in a `<details>` block when they would crowd out upgrade guidance.
+- When bundled instructions change how scans discover or validate findings
+  or assign severity, describe the change in the highlights or upgrade notes.
+  Name the affected scan modes and behaviors or finding categories. If a
+  benchmark measured the effect, report the result and its scope.
 - Keep breaking changes and required upgrade actions visible. Long migration
   procedures can go in a clearly named `<details>` block under the relevant
   upgrade note. Keep code fences, tables, and lists intact.

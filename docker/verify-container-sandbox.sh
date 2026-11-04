@@ -31,6 +31,7 @@ import os
 import socket
 from unittest import TestCase
 
+check = TestCase()
 socket.socket(socket.AF_INET).close()
 try:
     socket.socket(socket.AF_INET6).close()
@@ -39,23 +40,22 @@ except OSError as exc:
         raise
 # A fresh user and network namespace grants CAP_NET_RAW only in this isolated namespace.
 socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP).close()
-with TestCase().assertRaises(PermissionError):
-    socket.socket(socket.AF_INET, 10 | socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC, 0)  # SOCK_PACKET
-with TestCase().assertRaises(PermissionError):
-    socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM)
+packet_type = 10 | socket.SOCK_NONBLOCK | socket.SOCK_CLOEXEC  # Linux SOCK_PACKET with flags
+check.assertRaises(PermissionError, socket.socket, socket.AF_INET, packet_type, 0)
+check.assertRaises(PermissionError, socket.socket, socket.AF_PACKET, socket.SOCK_DGRAM)
 for endpoint in socket.socketpair():
     endpoint.close()
 socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE).close()
 
-with TestCase().assertRaises(PermissionError):
-    socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_USERSOCK)
-with TestCase().assertRaises(PermissionError):
-    socket.socketpair(socket.AF_TIPC, socket.SOCK_SEQPACKET)
+check.assertRaises(PermissionError, socket.socket, socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_USERSOCK)
+check.assertRaises(PermissionError, socket.socketpair, socket.AF_TIPC, socket.SOCK_SEQPACKET)
 
 libc = ctypes.CDLL(None, use_errno=True)
-assert libc.ptrace(0, 0, None, None) == -1 and ctypes.get_errno() == errno.EPERM  # PTRACE_TRACEME
+result = libc.ptrace(0, 0, None, None)  # PTRACE_TRACEME operates on the calling process.
+check.assertEqual((result, ctypes.get_errno()), (-1, errno.EPERM), "ptrace")
 for call in (libc.process_vm_readv, libc.process_vm_writev):
-    assert call(os.getpid(), None, 0, None, 0, 0) == -1 and ctypes.get_errno() == errno.EPERM
+    result = call(os.getpid(), None, 0, None, 0, 0)
+    check.assertEqual((result, ctypes.get_errno()), (-1, errno.EPERM), call.__name__)
 PYTHON
 cd "$(dirname "$(readlink -f /usr/local/bin/codex-security)")"
 exec npm exec --offline -- codex sandbox /usr/bin/true

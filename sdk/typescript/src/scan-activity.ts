@@ -371,30 +371,63 @@ function sessionCallArguments(
   return isRecord(parsed) ? parsed : {};
 }
 
+const WINDOWS_DRIVE = /^(?:(?:\\\\|\/\/)[?.][\\/])?[a-z]:(?=[\\/])/i;
+const UNC_SERVER = /^(?:\\\\|\/\/)(?:[?.][\\/]UNC[\\/])?[^\\/]+/i;
+
+function windowsActivityRoot(path: string): string {
+  // Inspect the original separators: a POSIX directory name can begin with a backslash.
+  const root =
+    WINDOWS_DRIVE.exec(path)?.[0] ?? UNC_SERVER.exec(path)?.[0] ?? "";
+  return root
+    .replaceAll("\\", "/")
+    .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+}
+
+function repositoryPathMatcher(repository: string) {
+  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
+  const root = windowsActivityRoot(repository);
+  const directory = prefix.slice(root.length);
+
+  // A recorded UNC path can refer to either an SMB share or a case-sensitive
+  // WebDAV collection. Keep every component after the server exact.
+  return (raw: string, value = raw.replaceAll("\\", "/")): string | null => {
+    if (
+      value.startsWith(prefix) ||
+      (root !== "" &&
+        value.startsWith(directory, root.length) &&
+        windowsActivityRoot(raw) === root)
+    ) {
+      return value.slice(prefix.length);
+    }
+    return null;
+  };
+}
+
 function commandRepositoryPaths(command: string, repository: string): string[] {
   const paths = new Set<string>();
-  const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
+  const roots = [
+    "$CODEX_SECURITY_REPOSITORY",
+    "${CODEX_SECURITY_REPOSITORY}",
+    repository,
+  ].map(repositoryPathMatcher);
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     const singleQuoted = value.startsWith("'") && value.endsWith("'");
     if ((value.startsWith('"') && value.endsWith('"')) || singleQuoted) {
       value = value.slice(1, -1);
     }
-    value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
+    const raw = value.replaceAll('\\"', '"');
+    value = raw.replaceAll("\\", "/");
     if (process.platform === "win32" && !singleQuoted) {
       value = value.replace(
         /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
         "$CODEX_SECURITY_REPOSITORY/",
       );
     }
-    for (const prefix of [
-      "$CODEX_SECURITY_REPOSITORY/",
-      "${CODEX_SECURITY_REPOSITORY}/",
-      `${repositoryPrefix}/`,
-    ]) {
-      if (!value.startsWith(prefix)) continue;
-      const path = value
-        .slice(prefix.length)
+    for (const relativeTo of roots) {
+      const relative = relativeTo(raw, value);
+      if (relative === null) continue;
+      const path = relative
         .replace(/["'\r\n].*$/u, "")
         .trim()
         .replace(/\/+$/u, "")
@@ -416,14 +449,11 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
-  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
+  const relativeTo = repositoryPathMatcher(repository);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const normalized = candidate.replaceAll("\\", "/");
-    if (normalized.startsWith(prefix)) {
-      const path = normalized.slice(prefix.length);
-      if (!path.split("/").includes("..")) paths.add(path);
-    }
+    const path = relativeTo(candidate);
+    if (path !== null && !path.split("/").includes("..")) paths.add(path);
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
   return [...paths];
