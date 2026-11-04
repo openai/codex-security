@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
-import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
