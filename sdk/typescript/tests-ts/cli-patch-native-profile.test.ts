@@ -516,11 +516,12 @@ const attempts=paths.map(path=>{
         );
         const results = JSON.parse(attempts);
         expect(results).toHaveLength(paths.length);
-        const denied = ["EACCES", "EPERM", "EROFS", "ENOENT"];
+        const denied = ["EACCES", "EPERM", "EROFS", "ENOENT", "ENOTDIR"];
         for (const [index, path] of paths.entries()) {
           const [create, child, write] = results[index];
-          // A pre-existing native placeholder makes recursive mkdir a no-op.
-          expect([...denied, "ok"]).toContain(create);
+          // Recursive mkdir finds a protected directory on Windows and a file
+          // placeholder inside the Linux mount namespace.
+          expect([...denied, "EEXIST", "ok"]).toContain(create);
           expect(denied).toContain(child);
           expect(denied).toContain(write);
           if (process.platform === "win32")
