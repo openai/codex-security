@@ -52,13 +52,30 @@ try {
     const requestCount = requests.length;
     workerArgs = undefined;
     workerProcess = undefined;
-    const result = await executor.run({
-      ...request,
-      promptPath: process.argv[3],
-      workingDirectory: process.cwd(),
-      subagents: 0,
-      signal: new AbortController().signal,
-    });
+    const signal = new AbortController().signal;
+    let threadId;
+    if (request.kind === "compare") {
+      await executor.compareFindings(
+        "Compare the reports.",
+        process.cwd(),
+        signal,
+        {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      );
+    } else {
+      const result = await executor.run({
+        ...request,
+        promptPath: process.argv[3],
+        workingDirectory: process.cwd(),
+        subagents: 0,
+        signal,
+      });
+      threadId = result.threadId;
+    }
     if (!workerArgs)
       throw new Error("Native worker arguments were not captured");
     if (requests.length === requestCount)
@@ -78,7 +95,7 @@ try {
     });
     process.stdout.write(
       JSON.stringify({
-        threadId: result.threadId,
+        threadId,
         resumed: workerArgs.includes("resume"),
         program: requests.at(-1)?.access_programs?.cyber,
         daybreak: config.daybreak ?? null,

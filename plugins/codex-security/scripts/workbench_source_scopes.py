@@ -74,7 +74,13 @@ def safe_source_path(target: Path, value: str) -> Path | None:
 
 
 def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
-    result = git_command(repository, *arguments, text=False, offline=True)
+    result = git_command(
+        repository,
+        *arguments,
+        text=False,
+        offline=True,
+        environment_overrides={"GIT_NO_REPLACE_OBJECTS": "1"},
+    )
     return result.stdout if result.returncode == 0 else None
 
 
