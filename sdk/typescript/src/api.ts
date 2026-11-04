@@ -2770,6 +2770,7 @@ export class CodexSecurity {
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
+        knowledgeSnapshot: scanKnowledge,
         resolveModelInstructionsFile: () =>
           executionModelInstructionsFile(
             workerConfig,
@@ -3153,7 +3154,11 @@ export class CodexSecurity {
             : {}),
         },
       );
-      if (!registered.resumed && scanKnowledge !== undefined) {
+      if (
+        !options.registeredScan &&
+        !registered.resumed &&
+        scanKnowledge !== undefined
+      ) {
         await saveScanKnowledge(scanDir, scanKnowledge);
       }
       if (

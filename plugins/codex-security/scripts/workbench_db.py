@@ -1512,6 +1512,29 @@ def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Pa
     return scan_dir
 
 
+def save_native_scan_knowledge(scan_dir: Path, snapshot: str, recipe: dict[str, Any]) -> None:
+    inputs = recipe.get("scanInputs")
+    identity = inputs.get("knowledgeBase") if isinstance(inputs, dict) else None
+    if not isinstance(snapshot, str) or not isinstance(identity, dict):
+        raise SystemExit("Missing native scan knowledge identity.")
+    contents = snapshot.encode()
+    if hashlib.sha256(contents).hexdigest() != identity.get("sha256"):
+        raise SystemExit("The supplied knowledge snapshot differs from the scan recipe.")
+    name = ".scan-knowledge.json"
+    try:
+        write_scan_local_bytes(
+            scan_dir, name, contents, owner_read_write=True, replace_existing=False
+        )
+    except FileExistsError:
+        # An interruption after publication but before the recipe commit can leave the snapshot.
+        descriptor = open_scan_local_file_descriptor(scan_dir, name, "saved scan knowledge")
+        with os.fdopen(descriptor, "rb") as saved:
+            if saved.read(len(contents) + 1) != contents:
+                raise SystemExit(
+                    "The existing scan knowledge snapshot differs from this launch."
+                ) from None
+
+
 def register_cli_scan(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -1598,6 +1621,8 @@ def register_cli_scan(
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
+                if registration.get("knowledgeSnapshot") is not None:
+                    save_native_scan_knowledge(scan_dir, registration["knowledgeSnapshot"], recipe)
                 connection.execute(
                     "UPDATE scans SET recipe_json = ?, continuation_thread_id = ?, "
                     "updated_at = ? WHERE id = ?",

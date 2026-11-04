@@ -6,7 +6,8 @@ import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
 import { join } from "node:path";
-import { workflowDigest } from "./finding-workflow.js";
+import { workflowDigest, workflowJson } from "./finding-workflow.js";
+import type { KnowledgeBaseSnapshot } from "./knowledge-base.js";
 import { modelInstructionsFileDigest } from "./scan-inputs.js";
 
 /** Bind registration and resume metadata to this prepared execution. */
@@ -23,6 +24,7 @@ export async function registerScan(options: {
   surface: "sdk" | "cli" | "plugin";
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
+  knowledgeSnapshot?: KnowledgeBaseSnapshot;
   resolveModelInstructionsFile?: () => Promise<string | undefined>;
   expectation: ScanExpectation;
   scanDir: string;
@@ -91,6 +93,10 @@ export async function registerScan(options: {
                   scanId: scanOptions.registeredScan.scanId,
                   threadId: scanOptions.registeredScan.threadId,
                   claimToken: scanOptions.registeredScan.handoffClaimToken,
+                  knowledgeSnapshot:
+                    resumed || options.knowledgeSnapshot === undefined
+                      ? undefined
+                      : workflowJson(options.knowledgeSnapshot),
                 }),
             ...(scanOptions.workflowId === undefined
               ? {}

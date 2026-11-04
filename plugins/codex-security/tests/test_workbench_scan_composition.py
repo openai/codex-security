@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -877,6 +878,72 @@ def test_completed_native_result_does_not_prevent_new_scans(native_scan_completi
         created = result["scan"]
     assert created["scanId"] != started["scan"]["scanId"]
     assert created["progress"]["status"] == "running"
+
+
+def test_native_knowledge_snapshot_survives_interrupted_recipe_binding(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "native-owner",
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--scan-root",
+        str(tmp_path / "scans"),
+    )["scan"]
+    bind = (
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        scan["scanDir"],
+        "--registration-json-stdin",
+    )
+    snapshot = json.dumps({"sources": ["guide.md"], "documents": {"guide.md": "Original context."}})
+    original_recipe = recipe(target, "deep")
+    original_recipe["scanInputs"] = {
+        "knowledgeBase": {"sha256": hashlib.sha256(snapshot.encode()).hexdigest()}
+    }
+    registration = {
+        "recipe": original_recipe,
+        "scanId": scan["scanId"],
+        "threadId": "native-owner",
+        "claimToken": scan["handoffClaimToken"],
+        "knowledgeSnapshot": snapshot,
+    }
+    path = Path(scan["scanDir"]) / ".scan-knowledge.json"
+    rejected = run_workbench(
+        state, *bind, input_text=json.dumps({**registration, "claimToken": None}), check=False
+    )
+    assert "owned by another continuation" in rejected["stderr"]
+    assert not path.exists()
+    first = run_workbench(state, *bind, input_text=json.dumps(registration))
+    assert "knowledgeSnapshot" not in first["recipe"]
+    original = path.read_bytes()
+    assert original == snapshot.encode()
+
+    # Simulate the filesystem publication surviving a rollback of the recipe transaction.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET recipe_json = NULL WHERE id = ?", (scan["scanId"],))
+    different = snapshot.replace("Original context.", "Changed context.")
+    changed = {**registration, "knowledgeSnapshot": different}
+    rejected = run_workbench(state, *bind, input_text=json.dumps(changed), check=False)
+    assert "differs from the scan recipe" in rejected["stderr"]
+    changed["recipe"] = {
+        **original_recipe,
+        "scanInputs": {"knowledgeBase": {"sha256": hashlib.sha256(different.encode()).hexdigest()}},
+    }
+    rejected = run_workbench(state, *bind, input_text=json.dumps(changed), check=False)
+    assert "existing scan knowledge snapshot differs" in rejected["stderr"]
+    assert path.read_bytes() == original
+    recovered = run_workbench(state, *bind, input_text=json.dumps(registration))
+    assert recovered["recipe"] == first["recipe"]
+    rejoined = run_workbench(state, *bind, input_text=json.dumps(changed))
+    assert rejoined["recipe"] == first["recipe"]
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("rejoin_context", [None, "Different optional context."])

@@ -1,4 +1,5 @@
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
+import { restoreScanKnowledge } from "../src/scan-inputs.js";
 import { restoreReplayProfile } from "../src/provider-profile.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -893,6 +894,17 @@ process.exit(0);
                 args.includes("--parent-scan-id") ? "deep_pass" : undefined,
               );
               const scanId = result["scanId"] as string;
+              if (queuedNativeKnowledge && scanId === registeredScan?.scanId) {
+                // Native rejoin can observe the recipe as soon as registration commits.
+                const saved = await restoreScanKnowledge(
+                  scanDir,
+                  repo,
+                  (result["recipe"] as JsonObject)["scanInputs"],
+                );
+                expect(Object.values(saved.documents)).toEqual([
+                  "Original synthetic architecture.\n",
+                ]);
+              }
               // A rejoining native caller keeps the original saved recipe.
               registrations.set(scanId, {
                 ...result,
