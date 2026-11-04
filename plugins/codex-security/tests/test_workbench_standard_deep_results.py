@@ -262,7 +262,7 @@ def test_stopped_scan_recovers_latest_numbered_iteration_after_upgrade(
         result = directory / "result.json"
         with scan.connection:
             scan.connection.execute(
-                "UPDATE deep_scan_workers SET kind = 'dedup', artifact_dir = ?, "
+                "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none', artifact_dir = ?, "
                 "result_manifest_path = ? WHERE id = ?",
                 (str(directory), str(result), original.parent.name),
             )
