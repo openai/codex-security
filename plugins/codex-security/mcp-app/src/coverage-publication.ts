@@ -62,6 +62,11 @@ export function coverageReceiptComponents(value: string): string[] {
   }
 }
 
+export function validateWorkerReport(report: JsonObject): void {
+  for (const field of ["findings", "scope", "threatModel"] as const)
+    requirePublicationJson(report[field], field);
+}
+
 export function validateRetainedCoverage(coverage: JsonObject): void {
   for (const field of [
     "surfaces",
