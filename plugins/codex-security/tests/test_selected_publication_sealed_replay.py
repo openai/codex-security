@@ -8,7 +8,6 @@ from argparse import Namespace
 
 import pytest
 from test_accepted_publication_references import accept_reducer
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_db import BUDGET_COST
 
 

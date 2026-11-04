@@ -12,7 +12,6 @@ import pytest
 from test_accepted_publication_references import accept_reducer
 from test_checkpoint_publication_authority import save_disposition
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state
 
 

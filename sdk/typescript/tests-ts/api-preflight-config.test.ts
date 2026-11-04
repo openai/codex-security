@@ -8,14 +8,11 @@ import {
 } from "../src/api.js";
 import {
   mergedCodexConfig,
-  CHEAPERINFERENCE_CODEX_PROVIDER,
-  FIREWORKS_CODEX_PROVIDER,
-  OPENROUTER_CODEX_PROVIDER,
   scanModelProvider,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
-import { TestClient } from "./support/api-client.js";
+import { EXTERNAL_PROVIDER_CASES, TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { parse as parseToml } from "smol-toml";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -23,29 +20,6 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-preflight-",
 );
-const EXTERNAL_PROVIDER_CASES = [
-  [
-    "OpenRouter",
-    "openrouter",
-    "OPENROUTER_API_KEY",
-    "anthropic/claude-sonnet-4.5",
-    OPENROUTER_CODEX_PROVIDER,
-  ],
-  [
-    "Fireworks AI",
-    "fireworks",
-    "FIREWORKS_API_KEY",
-    "accounts/fireworks/models/qwen3-235b-a22b",
-    FIREWORKS_CODEX_PROVIDER,
-  ],
-  [
-    "Cheaper Inference",
-    "cheaperinference",
-    "CHEAPER_INFERENCE_API_KEY",
-    "gpt-5.4",
-    CHEAPERINFERENCE_CODEX_PROVIDER,
-  ],
-] as const;
 
 afterEach(cleanup);
 

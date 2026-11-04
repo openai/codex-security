@@ -10,7 +10,6 @@ import pytest
 from test_accepted_publication_references import accept_reducer
 from test_budget_selection_publication import assert_budget_seal_receipt
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import published_bytes, saved_selection
 from test_workbench_db import BUDGET_COST
 from workbench_test_support import read_review_state

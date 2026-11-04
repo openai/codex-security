@@ -21,7 +21,7 @@ import {
   workerPermissionProfileOverride,
 } from "./assertions.ts";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { fakeCodexFixture as createFixture } from "./test_deep_scan_executor.ts";
+import type { fakeCodexFixture as createFixture } from "./deep_scan_executor_fixture.ts";
 
 interface Dependencies {
   CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;

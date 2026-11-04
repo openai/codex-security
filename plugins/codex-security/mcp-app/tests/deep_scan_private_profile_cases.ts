@@ -12,7 +12,7 @@ import {
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import type { fakeCodexFixture as createFixture } from "./test_deep_scan_executor.ts";
+import type { fakeCodexFixture as createFixture } from "./deep_scan_executor_fixture.ts";
 
 interface Dependencies {
   CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;

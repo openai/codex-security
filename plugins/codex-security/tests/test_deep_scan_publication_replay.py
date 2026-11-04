@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 from test_accepted_publication_references import accept_reducer
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_publication_stop_interleavings import saved_selection
 
 _CRASH_PUBLICATION = """

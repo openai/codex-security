@@ -6,7 +6,6 @@ from argparse import Namespace
 
 import pytest
 from test_checkpoint_publication_authority import save_disposition
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 
 def snapshot(connection, scan_dir):
