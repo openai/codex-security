@@ -159,7 +159,8 @@ export async function readExternalFindings(
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
-  if (options.provider === "sonar") {
+  const { provider } = options;
+  if (provider === "sonar") {
     const url = options.sourceRepositoryUrl;
     const findings = await readSonarFindings(path, url ?? "", target);
     const binding = findings.report?.["repositoryUrl"];
@@ -168,7 +169,7 @@ export async function readExternalFindings(
       sourceRepositories: typeof binding === "string" ? [{ url: binding }] : [],
     };
   }
-  if (options.provider === "opengrep") {
+  if (provider === "opengrep") {
     const sourceRepositoryUrl = options.sourceRepositoryUrl ?? "";
     return {
       findings: await readOpenGrepFindings(
@@ -179,7 +180,6 @@ export async function readExternalFindings(
       sourceRepositories: [{ url: sourceRepositoryUrl }],
     };
   }
-  const provider = options.provider;
   if (provider === "snyk" || provider === "endor") {
     const snyk = provider === "snyk";
     const input = await (snyk ? readSnykReport : readScannerJson)(path);
@@ -196,7 +196,7 @@ export async function readExternalFindings(
           ));
     return { findings, sourceRepositories };
   }
-  if (options.provider === "semgrep") {
+  if (provider === "semgrep") {
     const input = await readSemgrepReport(path);
     const findings = normalizeSemgrepFindings(
       input,
@@ -212,13 +212,13 @@ export async function readExternalFindings(
       sourceRepositories.push({ url: options.sourceRepositoryUrl });
     return { findings, sourceRepositories };
   }
-  if (options.provider === "github")
+  if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (
-    options.provider === "inspector" ||
-    options.provider === "continuum" ||
-    options.provider === "blackduck" ||
-    options.provider === "veracode"
+    provider === "inspector" ||
+    provider === "continuum" ||
+    provider === "blackduck" ||
+    provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
@@ -226,14 +226,14 @@ export async function readExternalFindings(
       continuum: readContinuumFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
-    }[options.provider];
+    }[provider];
     return {
       findings: await read(path, url, target, options.inspectorProjectMap),
       sourceRepositories: [{ url }],
     };
   }
   // A new reader must choose its parser before reaching the Wiz replay path.
-  options.provider satisfies "wiz";
+  provider satisfies "wiz";
   const wiz =
     target === "local"
       ? await readLocalWizFindings(path)

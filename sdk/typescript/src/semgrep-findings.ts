@@ -224,17 +224,19 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
+  const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
+  const verifiedUrls = new Set([repositoryUrl]);
   const entries = readSarifRuns(input, "Semgrep", (context) => {
     for (const { url: declared } of sarifRunRepositories(
       context.run,
       "Semgrep",
     )) {
-      if (
-        cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
-      )
+      if (verifiedUrls.has(declared)) continue;
+      if (cloudRepositoryUrlKey(declared) !== repositoryKey)
         throw new Error(
           "SARIF source repository does not match the declared source repository URL.",
         );
+      verifiedUrls.add(declared);
     }
     if (
       !isSemgrepSarifDriver(
