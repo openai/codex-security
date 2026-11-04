@@ -9101,6 +9101,7 @@ function directPatchDigest(
 }
 
 interface PatchPublication {
+  sshCommand?: string;
   context: GitPatchState["context"];
   branch: string;
   directory: string;
@@ -9145,6 +9146,7 @@ async function patchPublicationDestination(
   repository: string,
   branch: string,
   dependencies: CliDependencies,
+  approvedSshCommand?: string,
 ) {
   const run = (
     command: "git" | "gh" | "glab",
@@ -9215,6 +9217,13 @@ async function patchPublicationDestination(
     throw new CodexSecurityError(
       "Patch publication requires a network push URL for origin.",
     );
+  // A branch-conditional include can change core.sshCommand after the patch
+  // branch is created. Reuse the trusted transport selected before the turn.
+  const getSshCommand = async () =>
+    (approvedSshCommand ??= await publicationSshCommand(
+      repository,
+      dependencies,
+    ));
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -9295,6 +9304,7 @@ async function patchPublicationDestination(
         requestUrl,
         repository,
         dependencies,
+        getSshCommand,
       );
       if (selected && "lookupError" in selected) {
         lookupError ??= selected.lookupError;
@@ -9327,6 +9337,7 @@ async function patchPublicationDestination(
     gitlab,
     command,
     existing: found,
+    getSshCommand,
   };
 }
 
@@ -9398,6 +9409,7 @@ async function githubPatchRepository(
   requestUrl: URL,
   repository: string,
   dependencies: CliDependencies,
+  getSshCommand: () => Promise<string>,
 ): Promise<
   | { repository?: { id: string; url: string }; lookupError?: unknown }
   | undefined
@@ -9421,7 +9433,7 @@ async function githubPatchRepository(
     if (ssh && patchApiHostname(hostname) !== requestUrl.hostname) {
       const sshHost = hostname.replace(/^\[|\]$/gu, "");
       const username = uri ? decodeURIComponent(url.username) : url.username;
-      const sshCommand = await publicationSshCommand(repository, dependencies);
+      const sshCommand = await getSshCommand();
       const settings = await run("git", [
         "-c",
         `alias.codex-security-ssh-config=!${sshCommand} -G`,
@@ -9967,6 +9979,7 @@ async function preparePatchPublication(
       );
     });
   }
+  let sshCommand: string | undefined;
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -9976,6 +9989,8 @@ async function preparePatchPublication(
     existing = Boolean(destination.existing);
     for (const remote of destination.remotes) {
       if (existing) break;
+      const ssh = isSshPatchRemote(remote);
+      if (ssh) sshCommand = await destination.getSshCommand();
       existing = (
         await withResolvedPatchRemote(
           remote,
@@ -10009,14 +10024,7 @@ async function preparePatchPublication(
               {
                 environment: {
                   ...environment,
-                  ...(isSshPatchRemote(remote)
-                    ? {
-                        GIT_SSH_COMMAND: await publicationSshCommand(
-                          repository,
-                          dependencies,
-                        ),
-                      }
-                    : {}),
+                  ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
                   GIT_CONFIG_PARAMETERS: [
                     dependencies.environment["GIT_CONFIG_PARAMETERS"],
                     config,
@@ -10132,6 +10140,7 @@ async function preparePatchPublication(
     ignoredFiles,
     ignoredDigests,
     untrackedRepositoryDigests,
+    sshCommand,
     tree,
     root,
     context,
@@ -10280,13 +10289,26 @@ async function publishPatchBranch(
   body: string,
   stderr: Writable,
   dependencies: CliDependencies,
+  approvedSshCommand?: string,
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   let retryable = true;
   try {
-    const { remote, target, remotes, gitlab, command, existing } =
-      await patchPublicationDestination(repository, branch, dependencies);
+    const {
+      remote,
+      target,
+      remotes,
+      gitlab,
+      command,
+      existing,
+      getSshCommand,
+    } = await patchPublicationDestination(
+      repository,
+      branch,
+      dependencies,
+      approvedSshCommand,
+    );
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
     if (existing) {
@@ -10319,6 +10341,7 @@ async function publishPatchBranch(
             base,
             repository,
             dependencies,
+            getSshCommand,
           );
           if (lookup && "lookupError" in lookup) throw lookup.lookupError;
           const hosted = lookup?.repository;
@@ -10378,14 +10401,21 @@ async function publishPatchBranch(
           branch,
           dependencies,
         );
-      await run("git", [
-        "push",
-        ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
-        "--set-upstream",
-        `--force-with-lease=refs/heads/${branch}:`,
-        "origin",
-        branch,
-      ]);
+      await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "push",
+          ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
+          "--set-upstream",
+          `--force-with-lease=refs/heads/${branch}:`,
+          "origin",
+          branch,
+        ],
+        repository,
+        remotes.some(isSshPatchRemote)
+          ? { environment: { GIT_SSH_COMMAND: await getSshCommand() } }
+          : undefined,
+      );
       url = await run(
         command,
         gitlab
@@ -11035,7 +11065,14 @@ async function createPatchPullRequest(
     }
     throw error;
   }
-  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+  return publishPatchBranch(
+    repository,
+    branch,
+    body,
+    stderr,
+    dependencies,
+    publication.sshCommand,
+  );
 }
 
 async function requireCleanPatchPullRequestBase(
