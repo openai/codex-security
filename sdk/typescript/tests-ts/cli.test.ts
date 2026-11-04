@@ -5730,6 +5730,22 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("Running scan");
   });
 
+  test("explains the resolved cost limit in a dry-run plan", async () => {
+    const { stdout, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", "repo", "--max-cost", "5", "--dry-run", "--json"],
+        dependencies(),
+      ),
+    ).toBe(0);
+    const plan = JSON.parse(stdout.text());
+    expect(plan.maxCostUsd).toBe(5);
+    expect(plan.costLimitNote).toContain("short-context API prices");
+    expect(plan.costLimitNote).toContain("In-flight requests");
+    expect(plan.costLimitNote).toContain("ChatGPT allowance");
+  });
+
   test("renders dry-run output with Incur structured formats", async () => {
     for (const [format, marker] of [
       ["toon", "dryRun: true"],

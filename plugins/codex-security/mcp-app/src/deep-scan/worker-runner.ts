@@ -130,6 +130,7 @@ export class DeepScanWorkerRunner {
     let validatedResultSha256: string | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
+      workerLabel,
       promptPath,
       promptRoot,
       artifactDir,
@@ -215,6 +216,7 @@ export class DeepScanWorkerRunner {
 
   private async runWorkerWithRetries(input: {
     workerId: string;
+    workerLabel: string;
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
@@ -268,7 +270,14 @@ export class DeepScanWorkerRunner {
               resumePrompt && run.severityRubric
                 ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
                 : resumePrompt,
-            artifactContext: { root: input.artifactDir, layout: "worker" },
+            artifactContext: {
+              root: input.artifactDir,
+              layout: "worker",
+              discoveryBoard: {
+                root: this.options.artifacts.peerNotesRoot,
+                author: input.workerLabel,
+              },
+            },
             onThreadStarted: async (threadId) => {
               activeThreadId = threadId;
               lastThreadId = threadId;

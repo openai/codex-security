@@ -269,14 +269,15 @@ def _read_saved_result(
         return draft, _digest(draft), int(observed)
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(
-            draft.get("reviewState", draft.get("sourceCoverage", draft.get("coverage", {})))
-            if kind == "dedup"
-            else draft.get("reviewState", draft.get("coverage")),
-            dict,
-        )
+    if _is_source_order_snapshot(relative):
+        return draft, _digest(draft), metadata.st_mtime_ns
+    coverage = (
+        draft.get("sourceCoverage", draft.get("coverage", {}))
+        if kind == "dedup"
+        else draft.get("coverage")
+    )
+    if not isinstance(draft.get("findings"), list) or not isinstance(
+        draft.get("reviewState", coverage), dict
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
     frozen_digest = _digest(draft)
@@ -287,6 +288,11 @@ def _read_saved_result(
     ):
         # Direct snapshots retain their accepted bytes, but supply no host receipt ownership.
         clear_scan_receipt_refs(draft)
+    if kind == "dedup" and normalize_review:
+        # The host keeps grouping state in iteration checkpoints for resume only.
+        for finding in draft["findings"]:
+            if isinstance(finding, dict) and isinstance(finding.get("provenance"), dict):
+                finding["provenance"].pop("deepScanRepairGroups", None)
     if normalize_review and "coverage" in draft and "reviewState" not in draft:
         draft["reviewState"] = draft.pop("coverage")
     return draft, frozen_digest, metadata.st_mtime_ns
@@ -959,13 +965,16 @@ def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
     }
 
 
-def _latest_iteration(workers: Iterable[Any]) -> Any | None:
-    def iteration_order(worker: Any) -> tuple[int, str, str]:
-        output = Path(worker["result_manifest_path"]).parent
-        label = output.parent.name if output.name == "output" else output.name
-        match = re.fullmatch(r"dedup-([0-9]+)", label)
-        return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
 
+def _iteration_order(worker: Any) -> tuple[int, str, str]:
+    result = worker["result_manifest_path"]
+    output = Path(result).parent if result else Path(worker["artifact_dir"])
+    label = output.parent.name if output.name == "output" else output.name
+    match = re.fullmatch(r"dedup-([0-9]+)", label)
+    return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
+
+
+def _latest_iteration(workers: Iterable[Any]) -> Any | None:
     return max(
         (
             worker
@@ -974,7 +983,7 @@ def _latest_iteration(workers: Iterable[Any]) -> Any | None:
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
         ),
-        key=iteration_order,
+        key=_iteration_order,
         default=None,
     )
 

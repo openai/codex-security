@@ -12,6 +12,7 @@ export function createDeepScanArtifacts(scanDir: string) {
     deepRoot,
     workersRoot: join(deepRoot, "workers"),
     dedupRoot: join(deepRoot, "dedup"),
+    peerNotesRoot: join(deepRoot, "peer-notes"),
   };
 }
 
@@ -22,6 +23,7 @@ export async function ensureDeepScanDirectories(
     artifacts.deepRoot,
     artifacts.workersRoot,
     artifacts.dedupRoot,
+    artifacts.peerNotesRoot,
   ]) {
     await fs.mkdir(path, { recursive: true });
   }

@@ -2067,6 +2067,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 artifactContext: {
                   root: fixture.root,
                   layout: "worker",
+                  discoveryBoard: {
+                    root: path.join(fixture.root, `board-${index}`),
+                    author: `discovery-${index}`,
+                  },
                 },
               }),
             );
@@ -2428,6 +2432,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               path.join(fixture.root, `plugin-${index}`),
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
               "worker",
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_BOARD_ROOT":
+              path.join(fixture.root, `board-${index}`),
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_DISCOVERY_WORKER": `discovery-${index}`,
           });
           const servers = nativeConfigOverrides(invocation.argv)
             .map((value) => parseToml(value))
