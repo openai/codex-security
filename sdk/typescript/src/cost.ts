@@ -2200,19 +2200,14 @@ export class ScanCostTracker {
     }
   }
 
-  /** Record primary permission warnings using the same episode as secondary ones. */
+  /** Share failure episodes across roles, suppressing only repeated primary permission warnings. */
   public recordTrackingError(error: unknown): boolean {
-    if (
-      !isDeniedOpen(error) ||
-      !isRecord(error) ||
-      typeof error["path"] !== "string"
-    )
-      return true;
+    if (!isRecord(error) || typeof error["path"] !== "string") return true;
     const path = error["path"],
-      key = trackingFailureKey(error);
+      key = trackingFailureKey(error, path);
     const previous = this.#reportedFailures.get(path);
     this.#reportedFailures.set(path, key);
-    return previous !== key;
+    return !isDeniedOpen(error) || previous !== key;
   }
 
   public start(threadId: string): void {
@@ -2324,7 +2319,11 @@ export class ScanCostTracker {
         return result;
       } catch (error) {
         if (isDeniedOpen(error)) this.#deniedOpens.set(path, error);
-        else this.#deniedOpens.delete(path);
+        else if (denied) {
+          this.#deniedOpens.delete(path);
+          // A different read error can omit its path (for example, read EIO).
+          this.#reportedFailures.delete(path);
+        }
         throw error;
       }
     };

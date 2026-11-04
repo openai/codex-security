@@ -3178,6 +3178,55 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(["open", "read"])(
+    "reports a worker permission failure again after a sole %s EIO without recovery",
+    async (syscall) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const parentDenied = logFailure("EACCES", "open", parent);
+      const workerDenied = logFailure("EACCES", "open", worker);
+      const io = logFailure(
+        "EIO",
+        syscall,
+        syscall === "open" ? worker : undefined,
+      );
+      const failures = new Map([
+        [parent, parentDenied],
+        [worker, workerDenied],
+      ]);
+      const warnings: unknown[] = [];
+      const { tracker } = manualCostTracker(home, {
+        onSessionEvent: () => {},
+        onError: (error) => warnings.push(error),
+      });
+      const refresh = () =>
+        tracker.refresh().catch((error) => {
+          if (tracker.recordTrackingError(error)) warnings.push(error);
+        });
+      try {
+        using _listing = orderedLogDirectory(dirname(parent));
+        using _opening = failLogReads((path) => failures.get(path));
+        await refresh();
+        expect(warnings).toEqual([workerDenied, parentDenied]);
+        failures.delete(parent);
+        failures.set(worker, io);
+        await refresh();
+        await refresh();
+        failures.set(worker, workerDenied);
+        await refresh();
+        await refresh();
+        expect(warnings).toEqual([
+          workerDenied,
+          parentDenied,
+          io,
+          io,
+          workerDenied,
+        ]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("shares a permission failure across replay and growth until a read succeeds", async () => {
     const { home, worker } = await workerSessionFixture();
     const diagnostics: unknown[] = [];
