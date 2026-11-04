@@ -2482,7 +2482,8 @@ def test_finding_history_scopes_related_location_veto_to_repository_identity(
     direct = compare_scan_pair(state_dir, old[0], current[0], check=False)
     assert (direct["returncode"] == 0) == (not replacement and not mixed_neighbor)
     if mixed_neighbor:
-        assert compare_scan_pair(state_dir, old[1], current[1], check=False)["returncode"] == 0
+        # Both older scans recorded the prior origin, including the retained directory.
+        assert compare_scan_pair(state_dir, old[1], current[1], check=False)["returncode"] != 0
     compared = compare_scan_pair(state_dir, *current)
     expected = int(replacement or mixed_neighbor or not related)
     assert compared["summary"]["persisting"] == expected
