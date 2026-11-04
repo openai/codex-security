@@ -12,7 +12,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join, normalize, relative, resolve } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -1131,6 +1138,67 @@ describe("CLI", () => {
     expect(onRun).not.toHaveBeenCalled();
   });
 
+  test("installs hooks with trusted Git in the selected checkout using the caller's configuration", async () => {
+    await using temp = await scopedTemporaryDirectory("trusted-hook-git-");
+    const root = await realpath(temp.path);
+    const caller = join(root, "caller");
+    const target = join(root, "target");
+    const component = join(target, "component");
+    const alias = join(caller, "target-link");
+    const hooks = join(root, "owned hooks");
+    const otherHooks = join(root, "other hooks");
+    const config = join(root, "gitconfig");
+    const git = Bun.which("git")!;
+    for (const args of [
+      ["init", "-q", caller],
+      ["init", "-q", target],
+      ["-C", caller, "config", "core.hooksPath", otherHooks],
+      ["config", "--file", config, "core.hooksPath", hooks],
+    ]) {
+      const result = await runCommand(git, args);
+      expect(result.status, result.stderr).toBe(0);
+    }
+    await mkdir(component);
+    await symlink(
+      target,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const directory of [caller, target]) {
+      await writeFile(
+        join(directory, process.platform === "win32" ? "git.exe" : "git"),
+        "",
+        { mode: 0o700 },
+      );
+    }
+    for (const selected of [component, join(alias, "component")]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const status = await runCli(
+        ["install-hook", selected, "--json"],
+        dependencies({
+          currentDirectory: caller,
+          environment: {
+            PATH: [caller, target, dirname(git)].join(delimiter),
+            SystemRoot: process.env["SystemRoot"],
+            GIT_CONFIG_GLOBAL: config,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_DIR: join(caller, ".git"),
+          },
+        }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      expect(normalize(JSON.parse(stdout.text()).hook)).toBe(
+        join(hooks, "pre-commit"),
+      );
+    }
+    expect(await readFile(join(hooks, "pre-commit"), "utf8")).toContain(
+      "--working-tree",
+    );
+    await expect(stat(join(otherHooks, "pre-commit"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -1147,6 +1215,7 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
+        environment: { ...process.env },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1343,7 +1412,10 @@ describe("CLI", () => {
           expect(
             await captureCli(main, "stdout").run(
               ["install-hook", "."],
-              dependencies({ currentDirectory: repository }),
+              dependencies({
+                currentDirectory: repository,
+                environment: { PATH: dirname(Bun.which("git")!) },
+              }),
             ),
           ).toBe(0);
         } finally {
@@ -5660,6 +5732,22 @@ describe("CLI", () => {
       ...fakePreflight("repo"),
     });
     expect(stderr.text()).not.toContain("Running scan");
+  });
+
+  test("explains the resolved cost limit in a dry-run plan", async () => {
+    const { stdout, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", "repo", "--max-cost", "5", "--dry-run", "--json"],
+        dependencies(),
+      ),
+    ).toBe(0);
+    const plan = JSON.parse(stdout.text());
+    expect(plan.maxCostUsd).toBe(5);
+    expect(plan.costLimitNote).toContain("short-context API prices");
+    expect(plan.costLimitNote).toContain("In-flight requests");
+    expect(plan.costLimitNote).toContain("ChatGPT allowance");
   });
 
   test("renders dry-run output with Incur structured formats", async () => {
