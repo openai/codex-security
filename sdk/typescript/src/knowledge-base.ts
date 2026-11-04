@@ -230,6 +230,8 @@ async function discover(
       // Office keeps a "~$" owner file next to each open document.
       if (entry.name.startsWith("~$")) continue;
       if (entry.name.startsWith("._") && (await isAppleDouble(path))) continue;
+      // LibreOffice keeps a ".~lock.<name>#" file next to each open document.
+      if (/^\.~lock\..+#$/s.test(entry.name)) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
         const bytes = await readFile(path, {
           flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
