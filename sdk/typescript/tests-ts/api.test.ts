@@ -3053,6 +3053,8 @@ if __name__ == "__main__":
       createCodex.mock.lastCall?.[0]?.config?.["mcp_servers"],
     ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
+    expect(prompt).toContain("build the queue once");
+    expect(prompt).not.toContain("For this hosted scan");
     expect(prompt).toContain("Do not call scan-start or completion tools");
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");

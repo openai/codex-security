@@ -141,6 +141,7 @@ export async function prepareEval(
   const auditBriefs = [
     "baseline-auditor.md",
     "focused-investigator.md",
+    "standard-search-rules.md",
     "validate-scan-findings.md",
   ].filter((name) => core.includes(name));
   for (const name of [
@@ -161,14 +162,23 @@ export async function prepareEval(
   for (const name of ["schemas", "examples/completed-scan"]) {
     await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
   }
+  const workflowInstructions = auditBriefs.includes("standard-search-rules.md")
+    ? [
+        "Subagent allowance: 0. Perform the core workflow sequentially, including file batches and final validation.",
+        "This caller has no scan directory or scan tools. Apply your search rules with offline source tools, keep the full queue in context and review it serially.",
+      ]
+    : [
+        "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
+        "This caller has no scan tools.",
+      ];
   const prompt = [
     "Perform a static security review of the repository below.",
     `Repository and authorized scope: ${repo}, all current files.`,
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
     `For this generated read-only fixture, the caller handles policy discovery. It checked the root and every nested directory. Apply inherited policy using this complete list of repository-relative SECURITY.md files: ${JSON.stringify(policyFiles)}. The fixture has no plugin helper.`,
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
-    "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
-    "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
+    ...workflowInstructions,
+    "Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
     "Follow the production core workflow below. Inspect source with offline read-only tools; do not execute application code or contact services.",
     core,
   ].join("\n\n");

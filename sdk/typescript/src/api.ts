@@ -3053,7 +3053,7 @@ export class CodexSecurity {
         modelProvider,
         options.ownerSuggestions,
         severityRubric,
-        standard,
+        standard ? { hosted } : undefined,
       );
       checkOpen();
       const feedback = await workbench(
@@ -5670,7 +5670,7 @@ function scanPrompt(
   modelProvider?: unknown,
   ownerSuggestions = false,
   severityRubric?: SeverityRubricSnapshot,
-  standard = false,
+  standard?: { hosted: boolean },
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -5713,7 +5713,10 @@ function scanPrompt(
       discoveryPrompt ??
         `Follow ${skillPath}. Resolve Markdown links and bare reference filenames from the file that names them. Resolve plugin resources such as schemas/ and examples/ from ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT")}.`,
       `The SDK has already registered this scan. Use ${JSON.stringify(scanId)} and ${scanDir}. Do not call scan-start or completion tools. Return the unsealed result to the SDK.`,
-      "This Standard scan authorizes its independent baseline auditor and focused investigators. Review the source yourself if workers are unavailable.",
+      standard.hosted
+        ? "For this hosted scan, keep matching file batches, worker returns and pending decisions in context. Use the supplied scope inventory when present. Ask workers to return their evidence in messages. After each return, checkpoint original candidate evidence and counterevidence under stable IDs in reviewState.deferred using the bound draft tool or the SDK file handoff. Skip the Standard queue and decision files and their helpers."
+        : 'When the installed Standard workflow uses a file queue, generate repository-specific search rules and build the queue once. Dispatch independent batches of one to five related files with the native spawn_agent tool (fork_turns: "none"). Call it directly, outside functions.exec. Keep dispatching until every queued path has a completed review. Review batches yourself only if the caller requires serial work or the native tool is unavailable.',
+      "Follow the installed workflow for recording reviewer returns and validation decisions. A caller-supplied validation handoff takes precedence.",
       `Resolve inherited SECURITY.md in the scan shell when reviewing each starting scope, or the repository root for a repository-wide scan. Read starting paths from the supplied scope file when present. Use the resolve-security-md helper described in ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/references/security-guidance.md")}.`,
       `At the first usable threat model, checkpoint with record_codex_security_scan_draft from [$codex-security](mcp://codex-security). Follow ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/security-scan/references/scan-results.md")} for checkpoints and the SDK handoff.`,
       'At discovery start, emit a standalone progress line, for example CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}. For a scoped scan, emit it immediately after the inventory helper succeeds and before reviewing files or dispatching workers. Replace 8 with the actual file count from the helper or the host estimate for a repository-wide scan. Emit progress again after meaningful batches and on later phase changes with the actual phase and count of distinct fully reviewed paths. Do not create receipts for progress.',

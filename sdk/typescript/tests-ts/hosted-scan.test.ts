@@ -416,6 +416,9 @@ test.skipIf(process.platform !== "linux").each([
     const outputCopy = join(input.outputDirectory, "scoped-source-input.jsonl");
     let inventory = "";
     const run: ScanExecutor["run"] = async (request) => {
+      expect(request.prompt).toContain("pending decisions in context");
+      expect(request.prompt).toContain("reviewState.deferred");
+      expect(request.prompt).not.toContain("build the queue once");
       const commands = request.prompt.split("\n");
       const [primary, recovery] = commands.filter((line) =>
         line.includes("--helper make-hosted-repo-scope-input "),

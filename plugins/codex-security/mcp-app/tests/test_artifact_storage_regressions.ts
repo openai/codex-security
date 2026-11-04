@@ -625,6 +625,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "artifacts/02_discovery/candidate_ledger.jsonl",
         "artifacts/02_discovery/in_scope_files.txt",
         "artifacts/01_context/false_positive_feedback.json",
+        "artifacts/01_context/standard-queue.json",
+        "artifacts/02_discovery/standard-returns",
+        "artifacts/04_validation/standard-decisions.json",
         "artifacts/deep_discovery",
       ]) {
         for (const suffix of ["/note.txt", ""]) {

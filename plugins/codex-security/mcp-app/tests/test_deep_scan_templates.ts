@@ -29,6 +29,10 @@ const discoveryInput = {
 const rendered = renderDiscoveryPrompt({ ...discoveryInput });
 assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
+assert.match(
+  rendered,
+  /Keep matching file batches, worker returns and pending decisions in context/,
+);
 assert.match(rendered, /record_codex_security_scan_draft/);
 assert.match(rendered, /reviewState\.deferred/);
 const discoveryContext = firstJsonBlock(rendered);
