@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import test from "node:test";
 
 const builder = new URL(
@@ -23,34 +24,21 @@ test("concurrent runtime builds preserve complete native wrapper exports", async
     }
   `;
   await Promise.all(
-    Array.from(
-      { length: 3 },
-      () =>
-        new Promise<void>((resolve, reject) => {
-          const child = spawn(
-            process.execPath,
-            ["--input-type=module", "--eval", source],
-            {
-              stdio: ["ignore", "pipe", "pipe"],
-            },
-          );
-          let output = "";
-          child.stdout.on("data", (data) => {
-            output += data;
-          });
-          child.stderr.on("data", (data) => {
-            output += data;
-          });
-          child.once("error", reject);
-          child.once("close", (code) => {
-            try {
-              assert.equal(code, 0, output);
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          });
-        }),
-    ),
+    Array.from({ length: 3 }, async () => {
+      const child = spawn(
+        process.execPath,
+        ["--input-type=module", "--eval", source],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      for (const stream of [child.stdout, child.stderr])
+        stream.on("data", (chunk) => {
+          output += chunk;
+        });
+      const [code] = await once(child, "close");
+      assert.equal(code, 0, output);
+    }),
   );
 });
