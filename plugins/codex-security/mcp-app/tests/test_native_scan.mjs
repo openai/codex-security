@@ -994,6 +994,7 @@ test("native prompt sources follow selected and saved path semantics before exec
       delete process.env[key];
     process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
     for (const [promptFile, scenario] of [
+      "model_catalog_json",
       "model_instructions_file",
       "experimental_compact_prompt_file",
     ].flatMap((promptFile) =>

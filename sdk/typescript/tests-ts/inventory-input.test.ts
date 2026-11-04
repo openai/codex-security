@@ -990,8 +990,13 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       const f = fixture();
       const contents = binary ? Buffer.from("\0selected\n") : "selected\n";
       f.write("inside/source.py", contents);
+      f.write("inside/changed.py", Buffer.from("\0binary"));
+      f.write("src/nested/changed.py", "original\n");
       f.write("safe.py", "before\n");
       const base = f.commit();
+      f.write("src/nested/changed.py", "modified\n");
+      f.commit();
+      git(f.repo, "update-index", "--skip-worktree", "src/nested/changed.py");
       f.write("src/nested/source.py", "staged\n");
       git(f.repo, "add", "src/nested/source.py");
       f.write("safe.py", "after\n");
@@ -1000,6 +1005,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       if (location !== "inside") {
         mkdirSync(destination);
         writeFileSync(join(destination, "source.py"), contents);
+        writeFileSync(join(destination, "changed.py"), Buffer.from("\0binary"));
       }
       rmSync(join(f.repo, "src", "nested"), { recursive: true });
       symlinkSync(destination, join(f.repo, "src", "nested"), "junction");
@@ -1014,7 +1020,9 @@ for (const location of ["outside", "repository-extra", "inside"]) {
           "--diff-mode",
           "local-patch",
         ]),
-      ).toBe(`safe.py\n${retained ? "src/nested/source.py\n" : ""}`);
+      ).toBe(
+        `safe.py\nsrc/nested/changed.py\n${retained ? "src/nested/source.py\n" : ""}`,
+      );
       expect(
         f.rows("make-diff-rank-input", [
           "--base",
@@ -1024,6 +1032,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
         ]),
       ).toEqual([
         { path: "safe.py", area: "diff", preview: "after" },
+        { path: "src/nested/changed.py", area: "diff", preview: "" },
         ...(location !== "inside" || !binary
           ? [
               {

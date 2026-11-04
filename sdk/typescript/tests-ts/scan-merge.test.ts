@@ -43,6 +43,31 @@ const root = fileURLToPath(
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
+const codeEvidence = [
+  {
+    id: "sink",
+    label: "Renderer",
+    path: "src/render.js",
+    startLine: 1,
+    code: "render(input)",
+    explanation: "An input reaches the renderer.",
+  },
+];
+const sameReview = {
+  pair: 0,
+  decision: "same",
+  reason: "One renderer",
+  leftEvidence: 0,
+  rightEvidence: 0,
+};
+const sameSource = {
+  id: 0,
+  fixA: "encode in render",
+  fixB: "encode in render",
+  survivingPaths: [],
+  same: true,
+};
+
 const mergeOptions = { contextPath: join(root, "merge-context.json") };
 const merge = reconcileScanMerge.bind(undefined, parent);
 let mergeScans: Awaited<ReturnType<typeof createScanMerger>>;
@@ -639,7 +664,9 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
   });
 
   test("keeps an uncertain earlier finding separate from a confirmed later match", async () => {
-    const inputs = ["a", "b", "c"].map((id) => child(id, [finding(id)]));
+    const inputs = ["a", "b", "c"].map((id) =>
+      child(id, [finding(id, { codeEvidence })]),
+    );
     let calls = 0;
     let retries = 0;
     let evidence: JsonObject | undefined;
@@ -650,6 +677,8 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
       new AbortController().signal,
       async (prompt) => {
         const input = JSON.parse(prompt.split("\n").at(-1)!);
+        if (input.pairs) return { reviews: [sameReview] };
+        if (Array.isArray(input)) return { sources: [sameSource] };
         if (++calls === 1) return { matches: [], uncertain: [] };
         if (input.content) evidence = JSON.parse(input.content);
         return {
@@ -704,6 +733,105 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
       ),
     );
   });
+
+  test.each([
+    "same",
+    "survivor",
+    "unavailable",
+    "contradiction",
+    "uncited",
+  ] as const)(
+    "checks every disputed original before attaching another report (%s)",
+    async (outcome) => {
+      const earlier = child("a", [finding("a", { codeEvidence })]);
+      const attached = child("b", [
+        finding("b", { codeEvidence, summary: "An additional entry point." }),
+      ]);
+      const previous = merge(
+        [["a:0", "b:0"]],
+        [earlier, attached],
+        null,
+      ).aggregate;
+      const incoming = child("c", [finding("c", { codeEvidence })]);
+      const turns: string[] = [];
+      const result = await mergeScans(
+        parent,
+        [incoming],
+        previous,
+        new AbortController().signal,
+        async (prompt) => {
+          const input = JSON.parse(prompt.split("\n").at(-1)!);
+          if (input.pairs) {
+            turns.push("reviews");
+            if (outcome === "unavailable")
+              throw new Error("Comparison unavailable.");
+            return {
+              reviews: [
+                { ...sameReview, leftEvidence: outcome === "uncited" ? 8 : 0 },
+              ],
+            };
+          }
+          if (Array.isArray(input)) {
+            turns.push("sources");
+            expect(
+              input.map(({ B }: { B: { summary: string } }) => B.summary),
+            ).toEqual([
+              earlier.draft.findings[0]!.summary,
+              attached.draft.findings[0]!.summary,
+            ]);
+            const second = { ...sameSource, id: 1 };
+            if (outcome === "contradiction")
+              return {
+                sources: [sameSource, second, { ...second, same: false }],
+              };
+            return {
+              sources: [
+                sameSource,
+                {
+                  ...second,
+                  survivingPaths:
+                    outcome === "survivor"
+                      ? ["An additional entry point."]
+                      : [],
+                },
+              ],
+            };
+          }
+          return {
+            matches: [
+              {
+                beforeOccurrenceIds: ["b:0"],
+                afterOccurrenceIds: ["c:0"],
+                confidence: "high",
+                reason: "Possible shared correction.",
+              },
+            ],
+            uncertain: [],
+            related: [],
+            request: null,
+          };
+        },
+        mergeOptions,
+      );
+      expect(turns).toEqual(
+        outcome === "unavailable" || outcome === "uncited"
+          ? ["reviews"]
+          : ["reviews", "sources"],
+      );
+      expect(
+        result.aggregate.findings.map((f) => f.provenance.sourceFindingIds),
+      ).toEqual(
+        outcome === "same"
+          ? [["a:0", "b:0", "c:0"]]
+          : [["a:0", "b:0"], ["c:0"]],
+      );
+      expect(result.newFindingScanIds).toEqual(outcome === "same" ? [] : ["c"]);
+      if (outcome === "unavailable")
+        expect(result.aggregate.scope?.limitations).toContain(
+          "Deep Scan could not check disputed duplicates: Comparison unavailable.",
+        );
+    },
+  );
 
   test("retains uncertain observations and does not return partial results after a later comparison fails", async () => {
     const inputs = [child("a"), child("b"), child("c")];

@@ -271,15 +271,13 @@ const draft_finding = z.looseObject({
           .array(nonEmptyText)
           .meta({ uniqueItems: true })
           .describe(
-            "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once.",
+            "IDs of the Standard scan findings grouped into this Deep scan finding.",
           ),
       )
       .optional(),
     sourceFindings: z
       .array(z.strictObject({ id: nonEmptyText, finding: z.looseObject({}) }))
-      .describe(
-        "Original source payloads retained by the host for lossless semantic merges.",
-      )
+      .describe("Original Standard scan findings retained by the host.")
       .optional(),
     source: nonEmptyText.describe(
       "The actual finding producer. Use local_plugin only for a finding discovered by this plugin.",

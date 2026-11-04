@@ -132,7 +132,7 @@ Merging findings does not clear pending review work. If the discovery deadline a
 
 Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage.
 
-Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's execution status, configured scope, and additional exclusions before classifying an absent finding as resolved.
+Comparison uses the later scan's execution status, configured scope and additional exclusions before classifying an absent finding as resolved.
 
 - scan mode and inventory strategy
 - included and excluded paths

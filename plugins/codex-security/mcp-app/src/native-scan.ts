@@ -16,6 +16,7 @@ import {
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
 import {
+  MODEL_FILE_SETTINGS,
   mergedCodexConfig,
   scanModelConfiguration,
   type JsonObject,
@@ -473,15 +474,13 @@ export async function prepareNativeScan(
       ),
     )),
   ];
-  for (const promptPath of [
-    executionPaths["model_instructions_file"],
-    executionPaths["experimental_compact_prompt_file"],
-  ]) {
-    if (typeof promptPath !== "string") continue;
-    const destination = await realpath(promptPath).catch(nullIfMissingFile);
+  for (const key of MODEL_FILE_SETTINGS) {
+    const modelFile = executionPaths[key];
+    if (typeof modelFile !== "string") continue;
+    const destination = await realpath(modelFile).catch(nullIfMissingFile);
     protectedRoots.push(
-      ...(await gitProtectionRoots(promptPath, signal)),
-      dirname(promptPath),
+      ...(await gitProtectionRoots(modelFile, signal)),
+      dirname(modelFile),
       ...(destination === null ? [] : [dirname(destination)]),
     );
   }

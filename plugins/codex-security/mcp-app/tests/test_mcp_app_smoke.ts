@@ -22,6 +22,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+function assertScanTarget(meta: unknown, scanId: string) {
+  assert.deepEqual(meta, {
+    "codex/telemetry": { span: { target_id: scanId } },
+  });
+}
+
 const continuationOptions = [
   { label: "Continue", description: "Continue the current workflow." },
   { label: "Cancel", description: "Leave the current workflow paused." },
@@ -514,6 +520,10 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
         _meta: { "openai/threadId": `fixture-path-launch-${index}` },
       });
       assertNoError(launched);
+      assertScanTarget(
+        launched.result._meta,
+        launched.result.structuredContent.scan.scanId,
+      );
       assert.equal(
         launched.result.structuredContent.scan.targetPath,
         canonicalTarget,
@@ -584,6 +594,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability(
       arguments: { targetPath: target },
     });
     assert.equal(withoutOwner.result.isError, true);
+    assert.equal(withoutOwner.result._meta, undefined);
     assert.match(
       withoutOwner.result.content[0].text,
       /owning Codex thread context/,
@@ -604,7 +615,6 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability(
       },
     });
     assertNoError(started);
-    assert.equal(started.result._meta, undefined);
     const result = started.result.structuredContent;
     assert.equal(result.startDisposition, "created");
     assert.match(result.scanId, /^[0-9a-f-]{36}$/);
@@ -633,6 +643,12 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability(
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
     for (const response of [started, joined]) {
+      assertScanTarget(response.result._meta, result.scanId);
+      assert.deepEqual(
+        response.result.structuredContent.scan.lifecycle,
+        result.scan.lifecycle,
+      );
+      assert.equal(result.scan.lifecycle.status, "running");
       assert.match(
         response.result.content[0].text,
         /references\/scan-runtime\.md/,
@@ -2063,6 +2079,7 @@ try {
     .map((item: { text: string }) => item.text)
     .join(" ");
   assert.equal(missingPersistedDeepScan.result.isError, true);
+  assert.equal(missingPersistedDeepScan.result._meta, undefined);
   assert.equal(missingPersistedDeepScan.result.structuredContent, undefined);
   assert.match(missingPersistedDeepScanText, /Codex Security scan not found/);
   assert.match(
@@ -2458,6 +2475,7 @@ try {
     false,
   );
   const scanId = startedWorkspace.results.scanId;
+  assertScanTarget(started.result._meta, scanId);
   assert.equal(startedWorkspace.results.progress.phase, "preflight");
   assert.equal(startedWorkspace.results.progress.status, "running");
   assert.equal(startedWorkspace.results.handoffStatus, "pending");
@@ -2761,9 +2779,10 @@ try {
   );
   const refreshed = await testServer.callTool(10, {
     name: "get_codex_security_scan",
-    arguments: { scanId },
+    arguments: { scanId: scanId.toUpperCase() },
   });
   assertNoError(refreshed);
+  assertScanTarget(refreshed.result._meta, scanId);
   const results = refreshed.result.structuredContent.scan;
   assert.equal(results.findings.length, 2);
   assert.equal(results.findingCount, 2);
@@ -3252,13 +3271,15 @@ try {
     arguments: { scanId: canceledScanId },
   });
   assertNoError(canceledFromNativeRoute);
+  assertScanTarget(canceledFromNativeRoute.result._meta, canceledScanId);
 
   const canceled = await testServer.callTool(172, {
     name: "cancel_codex_security_scan",
-    arguments: { scanId: canceledScanId },
+    arguments: { scanId: canceledScanId.toUpperCase() },
     _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(canceled);
+  assertScanTarget(canceled.result._meta, canceledScanId);
   assert.equal(
     canceled.result.structuredContent.workspace.results.progress.status,
     "canceled",
@@ -3285,6 +3306,16 @@ try {
   assertNoError(fallbackStarted);
   const fallbackScanId =
     fallbackStarted.result.structuredContent.workspace.results.scanId;
+  const oldCancellation = await testServer.callTool(2211, {
+    name: "cancel_codex_security_scan_from_app",
+    arguments: { scanId: canceledScanId },
+  });
+  assertNoError(oldCancellation);
+  assert.equal(
+    oldCancellation.result.structuredContent.workspace.results.scanId,
+    fallbackScanId,
+  );
+  assertScanTarget(oldCancellation.result._meta, canceledScanId);
   const fallbackClaimToken = `recovery_${randomUUID()}`;
   const fallbackClaimed = await testServer.callTool(2012, {
     name: "claim_codex_security_scan_handoff_delivery",
@@ -3612,6 +3643,7 @@ try {
     },
   });
   assertNoError(rotatedFailure);
+  assertScanTarget(rotatedFailure.result._meta, fallbackScanId);
   assert.equal(
     rotatedFailure.result.structuredContent.scan.failureMessage,
     failureMessage,

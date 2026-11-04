@@ -18,6 +18,8 @@ for (const continuation of ["resume", "registered"] as const) {
       mode: "deep" as const,
     };
     const result = await registerScan({
+      surface: "sdk",
+      packageVersion: "0.0.0",
       scan:
         continuation === "resume"
           ? { resumeScanId: "saved" }
@@ -64,6 +66,8 @@ for (const continuation of ["resume", "registered"] as const) {
       };
       await expect(
         registerScan({
+          surface: "sdk",
+          packageVersion: "0.0.0",
           scan:
             continuation === "resume"
               ? { resumeScanId: "saved" }

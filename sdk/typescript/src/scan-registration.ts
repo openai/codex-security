@@ -1,5 +1,5 @@
 import type { NormalizedTarget } from "./targets.js";
-import type { ScanOptions } from "./api.js";
+import type { CodexSecuritySurface, ScanOptions } from "./api.js";
 import type { ScanExpectation } from "./contract.js";
 import type { DeepScanOptions } from "./scan-settings.js";
 import type { ScanPermissions } from "./execution-preparation.js";
@@ -47,6 +47,8 @@ export async function registerScan(options: {
     | "scanPrompt"
     | "workflowId"
   >;
+  surface: CodexSecuritySurface;
+  packageVersion: string;
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
   modelInstructionsFile?: string;
@@ -113,6 +115,8 @@ export async function registerScan(options: {
           ],
           JSON.stringify({
             recipe,
+            surface: options.surface,
+            packageVersion: options.packageVersion,
             ...(options.parentScanRole === undefined
               ? {}
               : { parentScanRole: options.parentScanRole }),

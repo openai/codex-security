@@ -22,7 +22,7 @@ import { fixtureSpawn } from "./codex-process.js";
 export async function checkReplayWorkerSettings(
   root: string,
   config: JsonObject,
-): Promise<void> {
+): Promise<number> {
   const home = join(root, "worker-home");
   await mkdir(home, { mode: 0o700 });
   await writeFile(join(home, "config.toml"), "", { mode: 0o600 });
@@ -149,6 +149,7 @@ export async function checkReplayWorkerSettings(
       }
     }
     assert.equal(launches.length, 4);
+    return launches.length;
   } finally {
     spawn.mockRestore();
   }

@@ -104,12 +104,14 @@ EXPECTED_MIGRATIONS = [
     (58, "record the final Deep Scan reviewed surface count"),
     (59, "retain the launching Deep Scan service tier"),
     (60, "record classification rubric provenance"),
-    (61, "persist composition child membership"),
-    (62, "reuse scan severity assessments"),
-    (63, "persist scan execution sessions"),
-    (64, "recover unindexed severity assessments"),
-    (65, "repair stored composition membership"),
-    (66, "repair archived composition paths"),
+    (61, "record scan launch attribution"),
+    (62, "project scan lifecycle snapshots"),
+    (63, "persist composition child membership"),
+    (64, "reuse scan severity assessments"),
+    (65, "persist scan execution sessions"),
+    (66, "recover unindexed severity assessments"),
+    (67, "repair stored composition membership"),
+    (68, "repair archived composition paths"),
 ]
 
 
@@ -1021,7 +1023,7 @@ def insert_classified_scan(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-@pytest.mark.parametrize("previous_version", [41, 52, 63, 64])
+@pytest.mark.parametrize("previous_version", [41, 52, 65, 66])
 def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
     previous_version: int,
@@ -1073,12 +1075,12 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             connection.execute("UPDATE finding_severity_assessments SET classification_runs = 3")
             connection.execute("UPDATE scan_severity_assessments SET classification_runs = 5")
             connection.execute("UPDATE scan_severity_classifications SET classification_runs = 3")
-        updated = previous_version == 64 or (previous_version == 63 and indexed)
+        updated = previous_version == 66 or (previous_version == 65 and indexed)
         if updated:
             connection.execute(
                 "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
             )
-        if previous_version >= 62:
+        if previous_version >= 64:
             assert (
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
@@ -1099,7 +1101,7 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
         ).fetchall()
         assert [tuple(row) for row in migrated] == [("second-scan", occurrence_id)]
         expected_runs = (
-            None if previous_version < 52 else 5 if indexed or previous_version >= 64 else 3
+            None if previous_version < 52 else 5 if indexed or previous_version >= 66 else 3
         )
         assert (
             connection.execute(
@@ -1194,23 +1196,93 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
-def test_scan_model_migration_preserves_existing_scans() -> None:
+@pytest.mark.parametrize("complete", [False, True])
+def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
     insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
-    insert_legacy_scan(connection, timestamp)
+    status = "complete" if complete else "running"
+    finished_at = "2026-07-01T01:00:00Z" if complete else None
+    insert_legacy_scan(connection, timestamp, status=status, completed_at=finished_at)
     connection.commit()
 
     apply_migrations(connection)
 
-    scan = connection.execute(
-        "SELECT status, model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
-        ("legacy-scan",),
-    ).fetchone()
-    assert scan["status"] == "running"
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", ("legacy-scan",)).fetchone()
+    assert scan["status"] == status
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+    assert scan["launch_surface"] is None
+    assert scan["launch_package_version"] is None
+    assert scan["launch_plugin_version"] is None
+    assert scan["launch_kind"] is None
+    (snapshot,) = connection.execute(
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?", ("legacy-scan",)
+    ).fetchone()
+    assert json.loads(snapshot) == {
+        "scanId": "legacy-scan",
+        "mode": "standard",
+        "startedAt": timestamp,
+        "status": "completed" if complete else "running",
+        "finishedAt": finished_at,
+        "hasReportableFindings": None,
+        "surface": None,
+        "packageVersion": None,
+        "pluginVersion": None,
+        "mock": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("recipe", "kind", "mode", "is_mock", "plugin_version", "registered_version"),
+    (
+        ('{"mock":true,"pluginVersion":"0.4.0"}', "mock", "standard", True, "0.4.0", None),
+        ('{"import":{},"pluginVersion":"0.5.0"}', "import", "import", False, "0.5.0", None),
+        ('{"mode":"standard","pluginVersion":"0.6.0"}', None, "standard", None, "0.6.0", None),
+        ('{"pluginVersion":"0.6.0"}', None, "standard", None, "0.7.0", "0.7.0"),
+        ('{"pluginVersion":"  "}', None, "standard", None, None, None),
+        ('{"pluginVersion":42}', None, "standard", None, None, None),
+        ('{"mode":"standard"}', None, "standard", None, None, None),
+        ('{"pluginVersion":', None, "standard", None, None, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "write_after_upgrade", [False, True], ids=["before-upgrade", "after-upgrade"]
+)
+def test_scan_lifecycle_migration_recognizes_saved_recipes(
+    recipe: str,
+    kind: str | None,
+    mode: str,
+    is_mock: bool | None,
+    plugin_version: str | None,
+    registered_version: str | None,
+    write_after_upgrade: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(62 if registered_version else 61)
+    if write_after_upgrade:
+        apply_migrations(connection)
+
+    timestamp = "2026-07-01T00:00:00Z"
+    with connection:
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        attribution = {"launch_plugin_version": registered_version} if registered_version else {}
+        insert_legacy_scan(connection, timestamp, **attribution)
+        connection.execute("UPDATE scans SET recipe_json = ? WHERE id = ?", (recipe, "legacy-scan"))
+
+    if not write_after_upgrade:
+        apply_migrations(connection)
+
+    stored_kind, snapshot = connection.execute(
+        "SELECT launch_kind, snapshot FROM scans JOIN scan_lifecycles ON scan_id = id"
+    ).fetchone()
+    assert stored_kind == kind
+    lifecycle = json.loads(snapshot)
+    assert lifecycle["mode"] == mode
+    assert lifecycle["mock"] is is_mock
+    assert lifecycle["surface"] is None
+    assert lifecycle["packageVersion"] is None
+    assert lifecycle["pluginVersion"] == plugin_version
 
 
 @pytest.mark.parametrize(
@@ -2125,9 +2197,13 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
+        # Recreate the historical schema before removing its recipe column.
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("DROP INDEX scans_by_composition_parent")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 61")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 63")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         rename_migration(connection, 22, "dynamic scan execution profiles")
@@ -2812,25 +2888,30 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         "current-composition",
         "previous-merge",
         "pre-external-merge",
+        "pre-lifecycle-composition",
     ],
 )
 def test_workbench_upgrades_colliding_released_migration_histories(history: str) -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     timestamp = "2026-09-01T00:00:00Z"
-    old_versions = {43: 42, 61: 43, 62: 44, 63: 45, 64: 46, 65: 48, 66: 49}
+    old_versions = {43: 42, 63: 43, 64: 44, 65: 45, 66: 46, 67: 48, 68: 49}
     if history in {"main-severity", "released-main", "external-main"}:
         old_versions = {}
     elif history == "current-composition":
-        old_versions = {43: 50, **{version: version - 10 for version in range(61, 67)}}
+        old_versions = {43: 50, **{version: version - 12 for version in range(63, 69)}}
     elif history == "previous-merge":
-        old_versions = {version: version - 9 for version in range(61, 67)}
+        old_versions = {version: version - 11 for version in range(63, 69)}
     elif history == "pre-external-merge":
-        old_versions = {version: version - 8 for version in range(61, 67)}
+        old_versions = {version: version - 10 for version in range(63, 69)}
+    elif history == "pre-lifecycle-composition":
+        old_versions = {version: version - 2 for version in range(63, 69)}
     historical = [
         (old_versions.get(version, version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
         if (
-            version <= 42
+            (version <= 60 or version >= 63)
+            if history == "pre-lifecycle-composition"
+            else version <= 42
             if history == "main"
             else version <= 43
             if history == "main-severity"
@@ -2838,13 +2919,13 @@ def test_workbench_upgrades_colliding_released_migration_histories(history: str)
             if history == "released-main"
             else version <= 53
             if history == "external-main"
-            else (version <= 41 or version == 43 or version >= 61)
+            else (version <= 41 or version == 43 or version >= 63)
             if history == "published-composition"
-            else (version <= 51 or version >= 61)
+            else (version <= 51 or version >= 63)
             if history == "previous-merge"
-            else (version <= 52 or version >= 61)
+            else (version <= 52 or version >= 63)
             if history == "pre-external-merge"
-            else (version <= 43 or version >= 61)
+            else (version <= 43 or version >= 63)
         )
     ]
     with sqlite3.connect(":memory:") as connection:

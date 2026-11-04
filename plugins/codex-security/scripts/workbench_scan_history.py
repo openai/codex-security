@@ -79,6 +79,7 @@ def cli_scan_resume(
     sealed_producer_version: Callable[[sqlite3.Row], str | None],
     claim_token: str | None = None,
 ) -> dict[str, Any]:
+    scan = scan_with_progress(connection, scan["id"])
     if scan["recipe_json"] is None:
         raise SystemExit("Resume requires a scan with a saved launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
@@ -127,15 +128,14 @@ def scan_registration(
     scan: sqlite3.Row,
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    progress = connection.execute(
-        "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
+    scan = scan_with_progress(connection, scan["id"])
     return {
         "contract": scan_contract(scan),
         "recipe": json.loads(scan["recipe_json"]),
+        "lifecycle": json.loads(scan["lifecycle_json"]),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
-        "scopeFileCount": progress["scope_file_count"],
+        "scopeFileCount": scan["scope_file_count"],
         "startedAt": scan["started_at"],
         "targetId": scan["target_id"],
         "targetRevision": scan["target_revision"],
@@ -348,6 +348,7 @@ def _repository_origin(remote: str | None) -> tuple[str, str] | None:
 
 SCAN_SUMMARY_COLUMNS = """
     scans.*,
+    lifecycle.snapshot AS lifecycle_json,
     progress.reportable_findings_count,
     progress.scope_file_count,
     progress.review_items_completed,
@@ -363,7 +364,26 @@ SCAN_SUMMARY_QUERY = f"""
 SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
+JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
 """
+
+
+def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
+    return connection.execute(
+        """
+        SELECT scans.*, lifecycle.snapshot AS lifecycle_json, progress.updated_at AS progress_updated_at,
+               progress.scope_file_count, progress.reportable_findings_count,
+               progress.review_items_total, progress.review_items_completed, progress.deep_review_pass,
+               progress.phase_items_total, progress.phase_items_completed, progress.phase_progress_unit,
+               progress.preflight_checks_total, progress.preflight_checks_completed,
+               progress.preflight_issues_json
+        FROM scans
+        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
+        WHERE scans.id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
 
 
 def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -372,6 +392,7 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
         "continuationThreadId": row["continuation_thread_id"],
         **stored_scan_cost_fields(row["cost_json"]),
         "findingCount": row["finding_count"],
+        "lifecycle": json.loads(row["lifecycle_json"]),
         "handoffStatus": row["handoff_status"],
         "mode": row["mode"],
         "model": row["model"],

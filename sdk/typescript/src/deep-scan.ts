@@ -723,7 +723,23 @@ export async function runDeepScans(
               throw error;
             }
           },
-          { contextPath, onInvalidResponse: retryMerge, validationError },
+          {
+            contextPath,
+            onInvalidResponse: retryMerge,
+            validationError,
+            onComparisonError(error) {
+              executionSignal.throwIfAborted();
+              if (
+                error instanceof DeepScanRecoveryError ||
+                error instanceof ScanTransportClosedError ||
+                error instanceof ScanPermissionError ||
+                error instanceof ScanCostLimitExceededError ||
+                error instanceof ScanCostTrackingError ||
+                isCodexNonRetryableFailure(error)
+              )
+                throw error;
+            },
+          },
         );
         break;
       } catch (error) {

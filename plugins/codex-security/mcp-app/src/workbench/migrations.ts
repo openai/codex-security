@@ -364,18 +364,18 @@ export function applyMigrations(
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
         if (
-          [2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60].includes(
-            item.version,
-          )
+          [
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61,
+          ].includes(item.version)
         )
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);
-        else if ([61, 65, 66].includes(item.version))
+        else if ([63, 67, 68].includes(item.version))
           backfillCompositionChildren(database);
-        else if (item.version === 64)
+        else if (item.version === 66)
           backfillUnindexedSeverityAssessments(database);
       }
       if (!applied.has(item.version)) {

@@ -9,6 +9,7 @@ import {
   matchScanFindingsInternal,
   unionFindingGroups,
 } from "./scan-comparison.js";
+import { checkSameFix, type CompareReports } from "./same-fix.js";
 import type { ComparisonFinding } from "./finding-catalogue.js";
 import { errorMessage } from "./errors.js";
 import {
@@ -439,6 +440,77 @@ function scanMergeContexts(
     });
 }
 
+/** Keep accepted groups intact and require every distinct report in a proposed group to agree. */
+async function confirmScanGroups(
+  groups: string[][],
+  inputs: readonly ScanMergeInput[],
+  previous: ScanAggregate | null,
+  compare: CompareReports,
+  onError: (error: unknown) => void,
+): Promise<string[][]> {
+  const entries = [
+    ...(previous?.findings ?? []).map((finding) => ({
+      finding,
+      ids: sourceIds(finding),
+      originals: sourceIds(finding).map((id) => previous!.sourceFindings[id]!),
+    })),
+    ...inputs.flatMap((input) =>
+      input.draft.findings.map((finding, index) => ({
+        finding,
+        ids: [`${input.scanId}:${index}`],
+        originals: [input.sourceFindings[index]!],
+      })),
+    ),
+  ];
+  const byId = new Map(
+    entries.flatMap((entry) => entry.ids.map((id) => [id, entry] as const)),
+  );
+  const confirmed: string[][] = [];
+  for (const ids of groups) {
+    const members = [...new Set(ids.map((id) => byId.get(id)!))];
+    if (members.length === 1) {
+      confirmed.push(ids);
+      continue;
+    }
+    // Compare immutable source reports. A saved presentation can omit a
+    // distinguishing claim from another original in its group.
+    const reports = members.map(({ originals }) =>
+      originals.map(({ provenance: _provenance, ...report }) => report),
+    );
+    const copies = reports.map((originals) => {
+      const first = originals[0]!;
+      return originals.every((other) => isDeepStrictEqual(first, other))
+        ? first
+        : undefined;
+    });
+    const equal = (left: number, right: number) =>
+      copies[left] !== undefined &&
+      isDeepStrictEqual(copies[left], copies[right]);
+    let matches = new Map<number, Set<number>>();
+    if (!members.every((_, index) => equal(0, index))) {
+      try {
+        matches = await checkSameFix(members, compare);
+      } catch (error) {
+        onError(error);
+      }
+    }
+    const kept: number[][] = [];
+    for (const [right] of members.entries()) {
+      const group = kept.find((indices) =>
+        indices.every(
+          (left) => equal(left, right) || matches.get(right)?.has(left),
+        ),
+      );
+      if (group) group.push(right);
+      else kept.push([right]);
+    }
+    confirmed.push(
+      ...kept.map((group) => group.flatMap((index) => members[index]!.ids)),
+    );
+  }
+  return confirmed;
+}
+
 /** Reuse ordinary scan matching while the owning scan retains execution and cost tracking. */
 export async function createScanMerger(pluginRoot: string) {
   const [common, draft] = await Promise.all([
@@ -472,6 +544,7 @@ export async function createScanMerger(pluginRoot: string) {
       contextPath: string;
       onInvalidResponse?(error: unknown): Promise<boolean>;
       validationError?: unknown;
+      onComparisonError?(error: unknown): void;
     },
   ): Promise<ScanMergeResult> => {
     const observation = (
@@ -550,6 +623,37 @@ export async function createScanMerger(pluginRoot: string) {
       throw new ScanMergeValidationError(
         `Invalid scan merge: ${JSON.stringify(validate.errors)}`,
       );
-    return reconcileScanMerge(scanId, groups, inputs, previous, context);
+    const limitations = new Set<string>();
+    const confirmed = await confirmScanGroups(
+      groups,
+      inputs,
+      previous,
+      (prompt, schema) => run(prompt, signal, schema),
+      (error) => {
+        signal.throwIfAborted();
+        options.onComparisonError?.(error);
+        limitations.add(
+          `Deep Scan could not check disputed duplicates: ${errorMessage(error)}`,
+        );
+      },
+    );
+    signal.throwIfAborted();
+    const result = reconcileScanMerge(
+      scanId,
+      confirmed,
+      inputs,
+      previous,
+      context,
+    );
+    if (limitations.size) {
+      const scope = result.aggregate.scope ?? {};
+      result.aggregate.scope = {
+        ...scope,
+        limitations: [
+          ...new Set([...(scope.limitations ?? []), ...limitations]),
+        ],
+      };
+    }
+    return result;
   };
 }

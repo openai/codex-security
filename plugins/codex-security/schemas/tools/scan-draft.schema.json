@@ -443,7 +443,7 @@
                 "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
               },
               "uniqueItems": true,
-              "description": "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once."
+              "description": "IDs of the Standard scan findings grouped into this Deep scan finding."
             },
             "sourceFindings": {
               "type": "array",
@@ -462,7 +462,7 @@
                 "required": ["id", "finding"],
                 "additionalProperties": false
               },
-              "description": "Original source payloads retained by the host for lossless semantic merges."
+              "description": "Original Standard scan findings retained by the host."
             },
             "source": {
               "description": "The actual finding producer. Use local_plugin only for a finding discovered by this plugin.",

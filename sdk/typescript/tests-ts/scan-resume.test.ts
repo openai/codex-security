@@ -981,6 +981,57 @@ test.each([false, true])(
   },
 );
 
+test("resuming reports a committed cancellation once without another launch", async () => {
+  const f = await interruptedScan();
+  const { stderr, runCli } = createCliTest(main);
+  const existingThread = (id: string | null) => ({
+    id,
+    async runStreamed() {
+      return fail("Completed discovery needs no model turn");
+    },
+  });
+  let committed = false;
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json", "--verbose"],
+    {
+      ...dependencies({ environment: f.environment, currentDirectory: f.root }),
+      runWorkbench: f.command,
+      createSecurity: resumeClient(
+        f,
+        () => ({
+          startThread: () => existingThread(null),
+          resumeThread: existingThread,
+        }),
+        async (options, args, input) => {
+          if (args[0] === "prepare-scan-completion") {
+            await f.command([
+              "cancel-scan",
+              "--scan-id",
+              f.scanId,
+              "--thread-id",
+              f.threadId,
+            ]);
+            committed = true;
+            throw new ScanTransportClosedError(
+              "Synthetic transport disconnected",
+            );
+          }
+          return runWorkbench(options, args, input);
+        },
+      ),
+    },
+  );
+  expect(committed, stderr.text()).toBe(true);
+  expect(code).not.toBe(0);
+  const lifecycle = stderr
+    .text()
+    .split("\n")
+    .filter((line) => line.includes("debug: scan.lifecycle "));
+  expect(lifecycle, stderr.text()).toHaveLength(1);
+  expect(lifecycle[0]).toContain(`scan_id=${JSON.stringify(f.scanId)}`);
+  expect(lifecycle[0]).toContain('status="canceled"');
+});
+
 test("bulk recovery completes a sealed historical attempt without another scan", async () => {
   const f = await interruptedScan("deep", true, {}, false, true, null);
   await writeDraft(f.command, f.registration, "deep", {
