@@ -387,6 +387,7 @@ test.each(
                   : [{ path: "caller-skill", enabled: false }],
             };
     const environment = {
+      SYNTHETIC_GATEWAY_KEY: "synthetic-fixture-value",
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     };
