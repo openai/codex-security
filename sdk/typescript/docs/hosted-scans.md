@@ -288,8 +288,13 @@ a canceled receipt with the requested checkout, scope, and rubric before startin
 the executor. Invalid request fields still return a JSON-RPC error.
 After dispatch the CLI aborts its executor signal, emits
 `execution.cancel` with `{requestId}`, and waits for the host's outcome/usage
-before returning a canceled result. The host must continue reading notifications
-while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
+before returning a canceled result. For a registered scan, the durable lifecycle
+and final scan receipt record cancellation even if the executor reports failure.
+The `execution` field retains that failure, its diagnostics, and any usage.
+If the executor reports `acceptance_unknown`, the local scan records `failed`
+and the host receives `acceptance_unknown` for reconciliation.
+
+The host must continue reading notifications while executing. SIGINT/SIGTERM, output errors/closure, and cancellation with
 blocked output terminate the transport even while a write callback is stuck.
 Input EOF before the terminal response fails the run; EOF while that response is
 flushing waits for the write callback. A selected successful result is not a

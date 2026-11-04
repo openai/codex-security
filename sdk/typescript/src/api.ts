@@ -3,6 +3,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
   type ScanExecutor,
@@ -3799,7 +3800,10 @@ export class CodexSecurity {
             workbench,
             activeScan,
             options,
-            callerCancellation,
+            this.#dependencies.hostedScan
+              ? hostedScanFailureStatus(failure, callerCancellation) ===
+                  "canceled"
+              : explicitlyCanceled(callerCancellation),
             failure,
             snapshot?.cost,
           );
@@ -4898,7 +4902,7 @@ export class CodexSecurity {
             workbench,
             activeScan,
             options,
-            signal,
+            explicitlyCanceled(signal),
             error,
           );
           activeScan = undefined;
@@ -6115,25 +6119,27 @@ function notifyScanLifecycle(
     notifyObserver(options, "onLifecycle")(snapshot.data);
 }
 
+function explicitlyCanceled(signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true &&
+    !(signal.reason instanceof ScanCostLimitExceededError) &&
+    !(
+      signal.reason instanceof DOMException &&
+      signal.reason.name === "TimeoutError"
+    )
+  );
+}
+
 async function stopRegisteredScan(
   workbench: typeof runWorkbench,
   activeScan: { id: string; options: WorkbenchCommandOptions },
   options: ScanOptions,
-  callerSignal: AbortSignal | undefined,
+  canceled: boolean,
   error: unknown,
   cost?: Readonly<ScanCost> | null,
 ): Promise<void> {
   const cleanupOptions = { ...activeScan.options, signal: undefined };
   const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
-  const canceled =
-    error instanceof ScanExecutionError
-      ? error.result.status === "canceled"
-      : callerSignal?.aborted &&
-        !(callerSignal.reason instanceof ScanCostLimitExceededError) &&
-        !(
-          callerSignal.reason instanceof DOMException &&
-          callerSignal.reason.name === "TimeoutError"
-        );
   if (canceled) {
     try {
       const stopped = await workbench(cleanupOptions, [

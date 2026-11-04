@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
 
@@ -108,4 +108,21 @@ export class ScanExecutionError extends CodexSecurityError {
         `Hosted execution ${result.status}.`,
     );
   }
+}
+
+/** Classify the scan separately from the executor's retained outcome. */
+export function hostedScanFailureStatus(
+  error: unknown,
+  signal?: AbortSignal,
+  execution?: ScanExecutionResult,
+): "failed" | "canceled" | "acceptance_unknown" {
+  const status = (
+    error instanceof ScanExecutionError ? error.result : execution
+  )?.status;
+  if (status === "acceptance_unknown") return status;
+  return signal?.aborted ||
+    status === "canceled" ||
+    error instanceof ScanInterruptedError
+    ? "canceled"
+    : "failed";
 }

@@ -1318,35 +1318,83 @@ test("cancellation after registration retains scan identity before executor disp
   ]);
 });
 
-test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
+test.each(["canceled", "failed", "acceptance_unknown"] as const)(
+  "SDK cancellation retains the executor's %s outcome and usage",
+  async (executionStatus) => {
+    const input = await fixture();
+    const controller = new AbortController();
+    input.severityRubric = { ...severityRubric };
+    const pending = runHostedScan(input, {
+      signal: controller.signal,
+      executor: {
+        async run(request, options) {
+          expect(request.severityRubric).toEqual(severityRubric);
+          Reflect.set(
+            request.severityRubric!,
+            "markdown",
+            "Edited by executor.",
+          );
+          controller.abort();
+          expect(options.signal.aborted).toBe(true);
+          await Promise.resolve();
+          return receipt(request, {
+            status: executionStatus,
+            error: { code: -32010, message: "Synthetic remote diagnostic" },
+            sessionId: "canceled-session",
+            usage: { input_tokens: 42 },
+          });
+        },
+      },
+    });
+    input.severityRubric.markdown = "Edited by caller.";
+    const result = await pending;
+    expect(result.status).toBe(
+      executionStatus === "acceptance_unknown"
+        ? "acceptance_unknown"
+        : "canceled",
+    );
+    expect(
+      readSavedScanLifecycle(
+        { CODEX_SECURITY_STATE_DIR: input.stateDirectory },
+        result.scanId!,
+      ),
+    ).toMatchObject({
+      scanId: result.scanId,
+      status: executionStatus === "acceptance_unknown" ? "failed" : "canceled",
+    });
+    expect(result.severityRubric).toEqual(severityRubric);
+    expect(result.execution).toMatchObject({
+      status: executionStatus,
+      error: { code: -32010, message: "Synthetic remote diagnostic" },
+      sessionId: "canceled-session",
+      usage: { input_tokens: 42 },
+    });
+  },
+);
+
+test("a late cancel preserves a previously committed hosted failure", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  input.severityRubric = { ...severityRubric };
-  const pending = runHostedScan(input, {
+  const run = CodexSecurity.prototype.run;
+  using _cancel = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+    async function (this: CodexSecurity, ...args) {
+      try {
+        return await run.apply(this, args);
+      } finally {
+        controller.abort();
+      }
+    },
+  );
+  const result = await runHostedScan(input, {
     signal: controller.signal,
     executor: {
-      async run(request, options) {
-        expect(request.severityRubric).toEqual(severityRubric);
-        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
-        controller.abort();
-        expect(options.signal.aborted).toBe(true);
-        await Promise.resolve();
-        return receipt(request, {
-          status: "canceled",
-          sessionId: "canceled-session",
-          usage: { input_tokens: 42 },
-        });
-      },
+      run: async (request) =>
+        receipt(request, { status: "failed", message: "Recorded failure" }),
     },
   });
-  input.severityRubric.markdown = "Edited by caller.";
-  const result = await pending;
-  expect(result.status).toBe("canceled");
-  expect(result.severityRubric).toEqual(severityRubric);
-  expect(result.execution).toMatchObject({
-    status: "canceled",
-    sessionId: "canceled-session",
-    usage: { input_tokens: 42 },
+  expect(result).toMatchObject({
+    status: "failed",
+    execution: { status: "failed", message: "Recorded failure" },
   });
 });
 
