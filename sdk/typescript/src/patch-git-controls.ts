@@ -864,8 +864,7 @@ export async function capturePatchGitControls(
       const origin = origins[index]!;
       if (origin.startsWith("file:")) {
         const path = relativeFile(checkout, configPath(origin.slice(5)));
-        await rememberConfiguration(path);
-        activeConfigurations.add(controlPaths.get(path)!.canonical);
+        activeConfigurations.add(path);
       }
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
         includes = true;
@@ -936,16 +935,16 @@ export async function capturePatchGitControls(
       }
       const includePath = relativeFile(relativeTo, path);
       try {
-        if (optional && !userSelected) {
-          const canonical = await canonicalPath(includePath);
-          if (
-            !insideSelectedRoots(canonical) &&
-            !activeConfigurations.has(canonical)
-          )
-            throw new Error(
-              `Checkout requested a conditional include outside the selected Git roots: ${includePath}`,
-            );
-        }
+        if (
+          !insideSelectedRoots(await canonicalPath(includePath)) &&
+          (!userSelected ||
+            (await directoryLinks(includePath)).some((link) =>
+              insideSelectedRoots(dirname(link)),
+            ))
+        )
+          throw new Error(
+            `Checkout requested ${optional ? "a conditional" : "an active"} include outside the selected Git roots: ${includePath}`,
+          );
         await rememberConfiguration(includePath, !optional, optional);
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
@@ -1021,6 +1020,7 @@ export async function capturePatchGitControls(
         );
       }
     }
+    for (const path of activeConfigurations) await rememberConfiguration(path);
     for (const path of globalConfigurationPaths)
       await rememberSelectedConfiguration(relativeFile(checkout, path), true);
     const localConfig = (

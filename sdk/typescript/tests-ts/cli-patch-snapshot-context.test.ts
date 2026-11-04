@@ -1092,7 +1092,7 @@ test.each([
     const selectedConfig = join(storage, "snapshot.gitconfig");
     const configContents = "# Synthetic selected configuration.\n";
     if (mode === "include-symlink") {
-      const original = join(root, "selected-config");
+      const original = join(checkout, ".git", "selected-config");
       await writeFile(original, configContents);
       await symlink(original, selectedConfig);
     }
