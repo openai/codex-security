@@ -222,6 +222,8 @@ export function normalizeSemgrepSarif(
   const document = record(input, "Semgrep SARIF");
   if (document["version"] !== "2.1.0")
     throw new Error("Expected Semgrep SARIF 2.1.0.");
+  const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
+  const verifiedUrls = new Set([repositoryUrl]);
   const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
     const run = record(value, "SARIF run");
     for (const entry of array(
@@ -231,13 +233,12 @@ export function normalizeSemgrepSarif(
       const declared = text(
         record(entry, "Repository provenance")["repositoryUri"],
       );
-      if (
-        declared &&
-        cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
-      )
+      if (!declared || verifiedUrls.has(declared)) continue;
+      if (cloudRepositoryUrlKey(declared) !== repositoryKey)
         throw new Error(
           "SARIF source repository does not match the declared source repository URL.",
         );
+      verifiedUrls.add(declared);
     }
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
