@@ -33,6 +33,7 @@
 - skip LibreOffice lock files in knowledge-base folders ([#2291](https://github.com/openai/codex-security/pull/2291))
 - call out changes to scan instructions ([#2287](https://github.com/openai/codex-security/pull/2287))
 - clarify pre-commit hook scope and upgrades ([#1536](https://github.com/openai/codex-security/pull/1536))
+- pass severity record efforts through to the host ([#1842](https://github.com/openai/codex-security/pull/1842))
 
 <!-- release-section: highlights:end -->
 
