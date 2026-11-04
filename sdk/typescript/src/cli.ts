@@ -9511,7 +9511,7 @@ async function patchTransportEnvironment(
     return environment;
   // Git accumulates credential helpers until an empty helper resets them.
   const entries = await patchTransportConfig(
-    "^(credential(\\..*)?\\.helper|core\\.askpass)$",
+    "^(http\\..*|credential(\\..*)?\\.helper|core\\.askpass)$",
     repository,
     dependencies,
   );
@@ -9532,11 +9532,17 @@ async function patchTransportEnvironment(
     const newline = entry.indexOf("\n");
     const key = newline < 0 ? entry : entry.slice(0, newline);
     const value = newline < 0 ? "" : entry.slice(newline + 1);
-    if (
-      !value ||
-      (await operatorPatchConfig(entries[i]!, entries[i + 1]!, repository))
-    )
-      set(key, value);
+    const trusted = await operatorPatchConfig(
+      entries[i]!,
+      entries[i + 1]!,
+      repository,
+    );
+    if (key.startsWith("http.")) {
+      if (!trusted)
+        throw new CodexSecurityError(
+          "Patch publication cannot use checkout-selected HTTP transport settings. Move the settings to your user Git configuration.",
+        );
+    } else if (!value || trusted) set(key, value);
   }
   pinned["GIT_CONFIG_COUNT"] = String(count);
   return pinned;
