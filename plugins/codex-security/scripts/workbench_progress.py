@@ -124,6 +124,7 @@ def reported_scope_file_count(wb: Any, scan: sqlite3.Row) -> int | None:
         ):
             return count
     except (OSError, ValueError, RecursionError, SystemExit):
+        # An unreadable optional report leaves the stored estimate in place so the scan can continue.
         pass
     return None
 
