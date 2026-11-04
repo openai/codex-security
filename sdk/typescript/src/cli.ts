@@ -9058,6 +9058,43 @@ interface PatchPublication {
   root: string;
 }
 
+async function patchPreflightRemoteSettings(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  const entries = await patchTransportConfig(
+    "^remote\\.origin\\.(vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
+    repository,
+    dependencies,
+  );
+  const settings: string[] = [];
+  for (let index = 0; index + 2 < entries.length; index += 3) {
+    const entry = entries[index + 2]!;
+    const separator = entry.indexOf("\n");
+    const key = entry.slice("remote.origin.".length, separator);
+    if (key === "vcs")
+      throw new CodexSecurityError(
+        "Patch publication cannot use a Git remote helper selected through remote.origin.vcs.",
+      );
+    if (
+      (key === "uploadpack" || key === "receivepack") &&
+      entry.slice(separator + 1) !==
+        (key === "uploadpack" ? "git-upload-pack" : "git-receive-pack") &&
+      !(await operatorPatchConfig(
+        entries[index]!,
+        entries[index + 1]!,
+        repository,
+      ))
+    )
+      throw new CodexSecurityError(
+        `Patch publication cannot use a checkout-selected remote.origin.${key} command.`,
+      );
+    // ls-remote uses the upload service. Push uses the real origin's receive service.
+    if (key !== "receivepack") settings.push(entry);
+  }
+  return settings;
+}
+
 async function patchPublicationDestination(
   repository: string,
   branch: string,
@@ -9072,6 +9109,7 @@ async function patchPublicationDestination(
         trim: false,
       })
     ).replace(/\n$/u, "");
+  const settings = await patchPreflightRemoteSettings(repository, dependencies);
   const pushRemotes = (
     await remoteUrl(["remote", "get-url", "--push", "--all", "origin"])
   ).split("\n");
@@ -9174,6 +9212,7 @@ async function patchPublicationDestination(
       gitlab,
       command,
       pushRemotes,
+      settings,
       getSshCommand,
       existing: candidates[0],
     };
@@ -9214,6 +9253,7 @@ async function patchPublicationDestination(
     gitlab,
     command,
     pushRemotes,
+    settings,
     existing,
     getSshCommand,
   };
@@ -9611,23 +9651,12 @@ async function preparePatchPublication(
     existing = Boolean(destination.existing);
     if (!existing) {
       const name = `codex-security-preflight-${randomUUID()}`;
-      const settings = (
-        await dependencies.runRepositoryCommand(
-          "git",
-          ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
-          repository,
-          { trim: false, environment: { GIT_CONFIG: undefined } },
-        )
-      )
-        .split("\0")
-        .filter(Boolean)
-        .flatMap((entry) => {
-          const separator = entry.indexOf("\n");
-          const key = entry.slice("remote.origin.".length, separator);
-          return key === "url" || key === "pushurl"
-            ? []
-            : ["-c", `remote.${name}.${key}=${entry.slice(separator + 1)}`];
-        });
+      const settings = destination.settings.flatMap((entry) => [
+        "-c",
+        entry
+          .replace(/^remote\.origin\./u, `remote.${name}.`)
+          .replace("\n", "="),
+      ]);
       const configurationCount = Number(
         environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
       );
