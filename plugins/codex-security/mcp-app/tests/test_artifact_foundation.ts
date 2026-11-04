@@ -1,3 +1,4 @@
+import { after, test } from "node:test";
 import * as z from "zod/v4";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { readJson } from "./support/json.ts";
@@ -55,18 +56,13 @@ const rowSchema = {
   },
 };
 
-try {
-  await testSchemaSourceOfTruth();
-  await testScanContext();
-  await testSafeJsonAndJsonl();
-  await testAtomicReplacement();
-  await testBoundedPagination();
-  await testUnsafeArtifacts();
-} finally {
-  await rm(fixture, { force: true, recursive: true });
-}
-
-console.log("Codex Security compact artifact foundation tests passed");
+after(() => rm(fixture, { force: true, recursive: true }));
+test(testSchemaSourceOfTruth);
+test(testScanContext);
+test(testSafeJsonAndJsonl);
+test(testAtomicReplacement);
+test(testBoundedPagination);
+test(testUnsafeArtifacts);
 
 async function testSchemaSourceOfTruth() {
   const common =

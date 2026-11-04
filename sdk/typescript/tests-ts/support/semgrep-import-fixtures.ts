@@ -73,3 +73,31 @@ export function semgrepSarif() {
     ],
   };
 }
+
+export function semgrepPercentPathReports() {
+  const paths = [
+    "src/my file.ts",
+    "src/my%20file.ts",
+    "src/100%.ts",
+    "src/100%25.ts",
+  ];
+  const json = semgrepJson();
+  const jsonResult = json.results[0]!;
+  const { fingerprint: _fingerprint, ...extra } = jsonResult.extra;
+  const sarif = semgrepSarif();
+  const run = sarif.runs[0]!;
+  const { fingerprints: _fingerprints, ...sarifResult } = run.results[0]!;
+  const results = paths.map((path) => {
+    const result = structuredClone(sarifResult);
+    result.locations[0]!.physicalLocation.artifactLocation.uri = path;
+    return result;
+  });
+  return {
+    paths,
+    json: {
+      ...json,
+      results: paths.map((path) => ({ ...jsonResult, path, extra })),
+    },
+    sarif: { ...sarif, runs: [{ ...run, results }] },
+  };
+}

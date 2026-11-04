@@ -1,3 +1,4 @@
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
@@ -8,9 +9,7 @@ const { codexWorkerTurnError, DeepScanNonRetryableError } = await importModule({
   ],
 });
 
-testUsageLimitClassification();
-
-function testUsageLimitClassification() {
+test(function testUsageLimitClassification() {
   for (const message of [
     "Quota exceeded. Check your plan and billing details.",
     "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
@@ -35,4 +34,4 @@ function testUsageLimitClassification() {
     assert.equal(error.name, "Error");
     assert.equal(error.message, message);
   }
-}
+});

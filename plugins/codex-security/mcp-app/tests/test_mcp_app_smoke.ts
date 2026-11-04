@@ -465,12 +465,10 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
     assertNoError(saved);
     assert.equal(saved.result.structuredContent.workspace.scope, scope);
     assert.equal(saved.result.structuredContent.workspace.targetSummary, null);
-    assertNoError(
-      await nonUiServer.callTool(4, {
-        name: "list_codex_security_scans",
-        arguments: { query: "-sub" },
-      }),
-    );
+    await nonUiServer.callSuccessfulTool(4, {
+      name: "list_codex_security_scans",
+      arguments: { query: "-sub" },
+    });
     const setup = await nonUiServer.callTool(12, {
       name: "inspect_codex_security_setup",
       arguments: {
@@ -794,7 +792,7 @@ async function assertDeepScanRetainsStartupFailureAndTerminalState() {
       }),
     );
 
-    const started = await deepServer.request(2, "tools/call", {
+    const started = await deepServer.callTool(2, {
       name: "start_codex_security_deep_scan",
       arguments: { targetPath: fixtureTarget },
       _meta: {
@@ -808,7 +806,7 @@ async function assertDeepScanRetainsStartupFailureAndTerminalState() {
       /missing-deep-scan-codex/,
     );
 
-    const listed = await deepServer.request(3, "tools/call", {
+    const listed = await deepServer.callTool(3, {
       name: "list_codex_security_scans",
       arguments: {},
     });
@@ -839,18 +837,16 @@ async function assertDeepScanRetainsStartupFailureAndTerminalState() {
       { encoding: "utf8" },
     ).trim();
     const failureMessage = "Fixture retained ordinary scan failure";
-    assertNoError(
-      await deepServer.request(4, "tools/call", {
-        name: "fail_codex_security_scan",
-        arguments: {
-          scanId: scan.scanId,
-          handoffClaimToken,
-          message: failureMessage,
-        },
-        _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
-      }),
-    );
-    const rejoined = await deepServer.request(5, "tools/call", {
+    await deepServer.callSuccessfulTool(4, {
+      name: "fail_codex_security_scan",
+      arguments: {
+        scanId: scan.scanId,
+        handoffClaimToken,
+        message: failureMessage,
+      },
+      _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
+    });
+    const rejoined = await deepServer.callTool(5, {
       name: "start_codex_security_deep_scan",
       arguments: { scanId: scan.scanId, handoffClaimToken },
       _meta: {
@@ -975,12 +971,10 @@ exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"
 `,
       { mode: 0o755 },
     );
-    assertNoError(
-      await bundledPythonServer.callTool(2, {
-        name: "inspect_codex_security_target",
-        arguments: { targetPath: target },
-      }),
-    );
+    await bundledPythonServer.callSuccessfulTool(2, {
+      name: "inspect_codex_security_target",
+      arguments: { targetPath: target },
+    });
     assert.equal(await readFile(launchMarkerPath, "utf8"), "bundled");
   } finally {
     await bundledPythonServer.stop();

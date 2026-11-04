@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+pytest.register_assert_rewrite("publication_fixtures")
+from publication_fixtures import (  # noqa: F401 -- pytest discovers these shared fixtures here.
+    publication_scan,
+)
+
 
 @pytest.fixture(scope="session")
 def workbench_api():
