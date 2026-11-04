@@ -298,6 +298,11 @@ jobs:
         name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
 
+      - name: Audit bundled MCP production dependencies
+        uses: ./.github/actions/audit-pnpm-lockfiles
+        with:
+          targets: mcp
+
       - name: Audit production dependencies
         run: sfw pnpm --dir sdk/typescript run audit:prod
 
