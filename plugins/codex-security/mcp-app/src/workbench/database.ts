@@ -55,24 +55,30 @@ export async function openWorkbenchDatabase(
   databasePath: string,
   { deferred = false }: { deferred?: boolean } = {},
 ): Promise<DatabaseSync> {
-  createStateDirectory(dirname(databasePath));
-  for (let attempt = 0; ; attempt++) {
-    const database = new DatabaseSync(databasePath);
-    try {
-      database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-      applyMigrations(database, undefined, !deferred || attempt > 0);
-      database.exec("PRAGMA journal_mode = WAL");
-      chmodSync(databasePath, 0o600);
-      return database;
-    } catch (error) {
-      database.close();
-      const busy =
-        error instanceof Error &&
-        "errcode" in error &&
-        [5, 6].includes(Number(error.errcode) & 0xff);
-      if (attempt === 4 || !busy) throw error;
-      await setTimeout(50 * 2 ** attempt);
+  try {
+    createStateDirectory(dirname(databasePath));
+    for (let attempt = 0; ; attempt++) {
+      const database = new DatabaseSync(databasePath);
+      try {
+        database.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+        applyMigrations(database, undefined, !deferred || attempt > 0);
+        database.exec("PRAGMA journal_mode = WAL");
+        chmodSync(databasePath, 0o600);
+        return database;
+      } catch (error) {
+        database.close();
+        const busy =
+          error instanceof Error &&
+          "errcode" in error &&
+          [5, 6].includes(Number(error.errcode) & 0xff);
+        if (attempt === 4 || !busy) throw error;
+        await setTimeout(50 * 2 ** attempt);
+      }
     }
+  } catch (error) {
+    if (error instanceof Error && "errcode" in error)
+      error.message += `\nWorkbench database: ${databasePath}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`;
+    throw error;
   }
 }
 

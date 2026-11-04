@@ -13,3 +13,6 @@
 
 # Bundled dependencies contain intentional whitespace in strings and comments.
 github-action/dist/*.cjs linguist-generated=true -whitespace
+
+# This checksum-pinned upstream license contains its original whitespace.
+docker/wolfi/payload/notices/BUBBLEWRAP-COPYING -text -whitespace

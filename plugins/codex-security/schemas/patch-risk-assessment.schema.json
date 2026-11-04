@@ -1,9 +1,173 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openai.com/codex-security/schemas/patch-risk-assessment.schema.json",
   "title": "Patch risk assessment",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "patch": {
+      "type": "object",
+      "properties": {
+        "repository": { "$ref": "#/$defs/nonEmptyString" },
+        "sourceType": {
+          "enum": ["pull_request_diff", "patch_file", "commit_range"]
+        },
+        "base": { "$ref": "#/$defs/nonEmptyString" },
+        "head": { "$ref": "#/$defs/nonEmptyString" },
+        "changedFiles": { "$ref": "#/$defs/stringList" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": [
+        "repository",
+        "sourceType",
+        "base",
+        "head",
+        "changedFiles",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "recommendation": { "$ref": "#/$defs/recommendation" },
+    "workflowLabel": {
+      "enum": [
+        "auto_merge_candidate",
+        "human_review_required",
+        "revise",
+        "no_op",
+        "block",
+        "hold_for_evidence"
+      ]
+    },
+    "impact": { "$ref": "#/$defs/riskRating" },
+    "regressionLikelihood": { "$ref": "#/$defs/riskRating" },
+    "regressionProtection": {
+      "type": "object",
+      "properties": {
+        "rating": { "enum": ["strong", "partial", "none", "unknown"] },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" },
+        "exactHeadChecksPassed": { "type": "boolean" }
+      },
+      "required": ["rating", "rationale", "exactHeadChecksPassed"],
+      "additionalProperties": false
+    },
+    "recoverability": { "$ref": "#/$defs/recoveryRating" },
+    "confidence": { "$ref": "#/$defs/confidenceRating" },
+    "applicability": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "confirmed",
+            "no_live_effect",
+            "wrong_owner",
+            "duplicate",
+            "superseded",
+            "unknown"
+          ]
+        },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "required": ["status", "rationale"],
+      "additionalProperties": false
+    },
+    "statusQuoRisk": {
+      "type": "object",
+      "properties": {
+        "rating": {
+          "enum": ["low", "moderate", "high", "critical", "unknown"]
+        },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "required": ["rating", "rationale"],
+      "additionalProperties": false
+    },
+    "autoMergeExclusions": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "privileged_boundary",
+          "migration",
+          "persistent_state",
+          "public_contract",
+          "architecture_specific_rollout",
+          "broad_shared_default",
+          "other"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "affectedRuntimeRoots": { "$ref": "#/$defs/stringList" },
+    "importantCallers": { "$ref": "#/$defs/stringList" },
+    "riskDrivers": { "$ref": "#/$defs/stringList" },
+    "protectiveFactors": { "$ref": "#/$defs/stringList" },
+    "materialBoundaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "invariant": { "$ref": "#/$defs/nonEmptyString" },
+          "runtimeRoot": { "$ref": "#/$defs/nonEmptyString" },
+          "counterexample": { "$ref": "#/$defs/nonEmptyString" },
+          "legitimateControl": { "$ref": "#/$defs/nonEmptyString" },
+          "result": { "enum": ["supported", "contradicted", "unresolved"] }
+        },
+        "required": [
+          "id",
+          "invariant",
+          "runtimeRoot",
+          "counterexample",
+          "legitimateControl",
+          "result"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "validation": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "$ref": "#/$defs/nonEmptyString" },
+          "status": { "enum": ["passed", "failed", "skipped", "unavailable"] },
+          "protects": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "required": ["name", "status", "protects"],
+        "additionalProperties": false
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "summary": { "$ref": "#/$defs/nonEmptyString" },
+          "decisionCritical": { "type": "boolean" }
+        },
+        "required": ["summary", "decisionCritical"],
+        "additionalProperties": false
+      }
+    },
+    "evidencePlan": {
+      "maxItems": 3,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": { "$ref": "#/$defs/nonEmptyString" },
+          "action": { "$ref": "#/$defs/nonEmptyString" },
+          "outcomes": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/recommendation" },
+            "minProperties": 2
+          }
+        },
+        "required": ["question", "action", "outcomes"],
+        "additionalProperties": false
+      }
+    }
+  },
   "required": [
     "schemaVersion",
     "patch",
@@ -23,190 +187,12 @@
     "unknowns",
     "evidencePlan"
   ],
-  "properties": {
-    "schemaVersion": {
-      "const": 1
-    },
-    "patch": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "repository",
-        "sourceType",
-        "base",
-        "head",
-        "changedFiles",
-        "sha256"
-      ],
-      "properties": {
-        "repository": {"$ref": "#/$defs/nonEmptyString"},
-        "sourceType": {
-          "enum": ["pull_request_diff", "patch_file", "commit_range"]
-        },
-        "base": {"$ref": "#/$defs/nonEmptyString"},
-        "head": {"$ref": "#/$defs/nonEmptyString"},
-        "changedFiles": {"$ref": "#/$defs/stringList"},
-        "sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      }
-    },
-    "recommendation": {"$ref": "#/$defs/recommendation"},
-    "workflowLabel": {
-      "enum": [
-        "auto_merge_candidate",
-        "human_review_required",
-        "revise",
-        "no_op",
-        "block",
-        "hold_for_evidence"
-      ]
-    },
-    "impact": {"$ref": "#/$defs/riskRating"},
-    "regressionLikelihood": {"$ref": "#/$defs/riskRating"},
-    "regressionProtection": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["rating", "rationale", "exactHeadChecksPassed"],
-      "properties": {
-        "rating": {"enum": ["strong", "partial", "none", "unknown"]},
-        "rationale": {"$ref": "#/$defs/nonEmptyString"},
-        "exactHeadChecksPassed": {"type": "boolean"}
-      }
-    },
-    "recoverability": {
-      "$ref": "#/$defs/recoveryRating"
-    },
-    "confidence": {
-      "$ref": "#/$defs/confidenceRating"
-    },
-    "applicability": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "rationale"],
-      "properties": {
-        "status": {
-          "enum": [
-            "confirmed",
-            "no_live_effect",
-            "wrong_owner",
-            "duplicate",
-            "superseded",
-            "unknown"
-          ]
-        },
-        "rationale": {"$ref": "#/$defs/nonEmptyString"}
-      }
-    },
-    "statusQuoRisk": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["rating", "rationale"],
-      "properties": {
-        "rating": {"enum": ["low", "moderate", "high", "critical", "unknown"]},
-        "rationale": {"$ref": "#/$defs/nonEmptyString"}
-      }
-    },
-    "autoMergeExclusions": {
-      "type": "array",
-      "items": {
-        "enum": [
-          "privileged_boundary",
-          "migration",
-          "persistent_state",
-          "public_contract",
-          "architecture_specific_rollout",
-          "broad_shared_default",
-          "other"
-        ]
-      },
-      "uniqueItems": true
-    },
-    "affectedRuntimeRoots": {"$ref": "#/$defs/stringList"},
-    "importantCallers": {"$ref": "#/$defs/stringList"},
-    "riskDrivers": {"$ref": "#/$defs/stringList"},
-    "protectiveFactors": {"$ref": "#/$defs/stringList"},
-    "materialBoundaries": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "id",
-          "invariant",
-          "runtimeRoot",
-          "counterexample",
-          "legitimateControl",
-          "result"
-        ],
-        "properties": {
-          "id": {"$ref": "#/$defs/identifier"},
-          "invariant": {"$ref": "#/$defs/nonEmptyString"},
-          "runtimeRoot": {"$ref": "#/$defs/nonEmptyString"},
-          "counterexample": {"$ref": "#/$defs/nonEmptyString"},
-          "legitimateControl": {"$ref": "#/$defs/nonEmptyString"},
-          "result": {"enum": ["supported", "contradicted", "unresolved"]}
-        }
-      }
-    },
-    "validation": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "status", "protects"],
-        "properties": {
-          "name": {"$ref": "#/$defs/nonEmptyString"},
-          "status": {"enum": ["passed", "failed", "skipped", "unavailable"]},
-          "protects": {"$ref": "#/$defs/nonEmptyString"}
-        }
-      }
-    },
-    "unknowns": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["summary", "decisionCritical"],
-        "properties": {
-          "summary": {"$ref": "#/$defs/nonEmptyString"},
-          "decisionCritical": {"type": "boolean"}
-        }
-      }
-    },
-    "evidencePlan": {
-      "type": "array",
-      "maxItems": 3,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["question", "action", "outcomes"],
-        "properties": {
-          "question": {"$ref": "#/$defs/nonEmptyString"},
-          "action": {"$ref": "#/$defs/nonEmptyString"},
-          "outcomes": {
-            "type": "object",
-            "additionalProperties": {"$ref": "#/$defs/recommendation"},
-            "minProperties": 2
-          }
-        }
-      }
-    }
-  },
+  "additionalProperties": false,
   "$defs": {
-    "nonEmptyString": {
-      "type": "string",
-      "minLength": 1
-    },
-    "identifier": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9_-]*$"
-    },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
     "stringList": {
       "type": "array",
-      "items": {"$ref": "#/$defs/nonEmptyString"},
+      "items": { "$ref": "#/$defs/nonEmptyString" },
       "uniqueItems": true
     },
     "recommendation": {
@@ -214,30 +200,31 @@
     },
     "riskRating": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["rating", "rationale"],
       "properties": {
-        "rating": {"enum": ["low", "moderate", "high", "critical"]},
-        "rationale": {"$ref": "#/$defs/nonEmptyString"}
-      }
+        "rating": { "enum": ["low", "moderate", "high", "critical"] },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "required": ["rating", "rationale"],
+      "additionalProperties": false
     },
     "recoveryRating": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["rating", "rationale"],
       "properties": {
-        "rating": {"enum": ["easy", "managed", "hard"]},
-        "rationale": {"$ref": "#/$defs/nonEmptyString"}
-      }
+        "rating": { "enum": ["easy", "managed", "hard"] },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "required": ["rating", "rationale"],
+      "additionalProperties": false
     },
     "confidenceRating": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["rating", "rationale"],
       "properties": {
-        "rating": {"enum": ["high", "moderate", "low"]},
-        "rationale": {"$ref": "#/$defs/nonEmptyString"}
-      }
-    }
+        "rating": { "enum": ["high", "moderate", "low"] },
+        "rationale": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "required": ["rating", "rationale"],
+      "additionalProperties": false
+    },
+    "identifier": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$" }
   }
 }

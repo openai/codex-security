@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { Writable } from "node:stream";
+import { setImmediate } from "node:timers/promises";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -32,6 +34,119 @@ function importDependencies() {
 }
 
 describe("scan import", () => {
+  test.each(["completed", "failed", "interrupted", "preview"] as const)(
+    "preserves %s import outcomes when cleanup warnings fail asynchronously",
+    async (outcome) => {
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals });
+      deps.importScan = async (options, settings) => {
+        settings?.onWarning?.("Synthetic scratch cleanup failure");
+        if (outcome === "failed") throw new Error("Synthetic import failure");
+        if (outcome === "interrupted") {
+          signals.emit("SIGINT");
+          options.signal?.throwIfAborted();
+        }
+        return options.dryRun
+          ? {
+              dryRun: true,
+              inputPath: options.sourcePath,
+              format: options.format,
+              findingCount: 2,
+            }
+          : fakeResult(["high", "high"]);
+      };
+      const stdout = capture();
+      const stderr = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() =>
+            callback(new Error("Synthetic asynchronous stderr failure")),
+          );
+        },
+      });
+      expect(
+        await main(
+          [
+            "scan",
+            "import",
+            "--json",
+            "findings.json",
+            "--format",
+            "json",
+            ...(outcome === "preview" ? ["--dry-run"] : []),
+          ],
+          stdout.stream,
+          stderr,
+          deps,
+        ),
+      ).toBe(outcome === "failed" ? 2 : outcome === "interrupted" ? 130 : 0);
+      await setImmediate();
+      expect(stderr.listenerCount("error")).toBe(0);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      if (outcome === "completed") {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { id: "scan" } },
+        });
+      } else if (outcome === "preview") {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          dryRun: true,
+          findingCount: 2,
+        });
+      }
+    },
+  );
+
+  test("keeps required import output failures fatal", async () => {
+    const { deps } = importDependencies();
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() =>
+          callback(new Error("Synthetic import output failure")),
+        );
+      },
+    });
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "import", "--json", "findings.json", "--format", "json"],
+        stdout,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Synthetic import output failure");
+  });
+
+  test.each(["completed", "failed"] as const)(
+    "reports cleanup warnings without changing a %s import outcome",
+    async (outcome) => {
+      const { deps } = importDependencies();
+      deps.importScan = async (_options, settings) => {
+        settings?.onWarning?.("Synthetic scratch cleanup failure");
+        if (outcome === "failed") throw new Error("Synthetic import failure");
+        return fakeResult(["high", "high"]);
+      };
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scan", "import", "--json", "findings.json", "--format", "json"],
+          deps,
+        ),
+      ).toBe(outcome === "failed" ? 2 : 0);
+      expect(stderr.text()).toContain(
+        "codex-security: warning: Synthetic scratch cleanup failure",
+      );
+      if (outcome === "failed") {
+        expect(stderr.text()).toContain("Synthetic import failure");
+      } else {
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          manifest: { scan: { id: "scan" } },
+        });
+        expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
+      }
+    },
+  );
+
   test.each(["csv", "json"] as const)(
     "imports --%s while --format json controls output",
     async (format) => {

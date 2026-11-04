@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.js';
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational';
-export type ScanStatus = 'completed' | 'incomplete' | 'failed' | 'skipped';
+export type ScanStatus = 'completed' | 'failed' | 'skipped';
 export type PolicyStatus = 'passed' | 'failed' | 'not-evaluated';
 export type ReportStatus = 'ready' | 'partial' | 'failed';
 export interface Finding {
@@ -36,7 +36,9 @@ export interface ScanResults {
   reportStatus: ReportStatus;
   findings: Finding[];
   counts?: Record<Severity, number>;
+  usage?: { input_tokens: number; cached_input_tokens: number; output_tokens: number };
   estimatedCost?: number;
+  estimatedCostRange?: { min: number; max: number | null };
   paths: ResultPaths;
   errors: string[];
   sarifUploadReady: boolean;
@@ -112,7 +114,7 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push('CLI did not return a usable JSON scan result. See the CLI diagnostics.');
@@ -143,26 +145,21 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
   }
   result.counts = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
   for (const finding of result.findings) result.counts[finding.severity] += 1;
+  const usage = value.turn?.usage;
+  result.usage = usage == null ? undefined : {...usage, cached_input_tokens: usage.cached_input_tokens ?? 0};
   result.estimatedCost = value.cost?.estimatedUsd;
+  result.estimatedCostRange = value.cost?.estimatedUsdRange;
   result.paths = {resultsDirectory: options.resultsDirectory, manifestPath: join(options.resultsDirectory, 'scan-manifest.json'),
-    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: join(options.resultsDirectory, 'coverage.json'), sarifPath: ''};
+    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: value.coverage ? join(options.resultsDirectory, 'coverage.json') : '', sarifPath: ''};
   const warnings: string[] = value.warnings ?? [];
-  // The CLI includes target-change warnings in result data even when it exits 2.
-  // Those and failed execution must not become warning-only partial scans.
-  if (options.executionFailed || value.manifest.scan.status !== 'completed' || warnings.length > 0) {
+  // Execution and severity-policy outcomes come from the CLI, not coverage notes.
+  // Target-change warnings still prevent publication of a changed checkout.
+  if (options.executionFailed || value.manifest.scan.status !== 'completed' || warnings.length > 0 ||
+      (options.exitCode !== 0 && options.exitCode !== 1)) {
     result.errors.push('CLI did not complete successfully. See the CLI diagnostics.');
-  } else if (value.coverage.completeness === 'partial' && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = 'incomplete';
-  } else if (value.coverage.completeness === 'complete' && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = 'completed';
     result.policyStatus = options.exitCode === 1 ? 'failed' : 'passed';
-  } else result.errors.push(value.coverage.completeness === 'unknown'
-    ? 'CLI could not determine scan coverage. See the CLI diagnostics.'
-    : 'CLI did not complete successfully. See the CLI diagnostics.');
-  if (value.coverage.completeness !== 'complete') {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === 'string') result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === 'needs_follow_up' && typeof item.label === 'string')
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = join(options.resultsDirectory, 'exports/results.sarif');

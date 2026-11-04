@@ -1,30 +1,31 @@
 import { existsSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
+  copyFile,
   mkdir,
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
-import {
-  structuredCodexConfig,
-  MINIMAX_CODEX_PROVIDER,
-  MINIMAX_CN_CODEX_PROVIDER,
-} from "../src/config.js";
+import { mergeCodexOverrides, structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
 } from "../src/runtime.js";
@@ -59,6 +60,81 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test.each([false, true])(
+  "saved managed provider profiles remain isolated across concurrent scans (replay: %p)",
+  async (replay) => {
+    const root = await temporaryDirectory();
+    const environment = {
+      CODEX_HOME: join(root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const home = codexSecurityCredentialHome(environment);
+    const providers = ["first", "second"].map((name) => ({
+      openrouter: {
+        base_url: `https://${name}.example.invalid/`,
+        http_headers: { "X-Synthetic-Token": `synthetic-${name}-value` },
+        ...(replay ? { auth: null } : {}),
+      },
+    }));
+    const profiles = await Promise.all(
+      providers.map((model_providers) =>
+        createProviderProfile(home, { model_providers }, { replay }),
+      ),
+    );
+    expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+    const restore = (index: number) =>
+      restoreProviderProfile(
+        { model_provider: "openrouter" },
+        { name: profiles[index]!.name, home: "managed" },
+        environment,
+      );
+    const restored = await Promise.all([restore(0), restore(1)]);
+    for (const [index, profile] of profiles.entries()) {
+      expect(restored[index]).toEqual({
+        model_provider: "openrouter",
+        model_providers: providers[index]!,
+      });
+      if (process.platform !== "win32")
+        expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+    }
+    await profiles[0]!.cleanup();
+    expect(await restore(1)).toEqual(restored[1]);
+    await expect(
+      restoreProviderProfile(
+        {},
+        { name: "../outside", home: "managed" },
+        environment,
+      ),
+    ).rejects.toThrow("invalid provider profile");
+  },
+);
+
+test("saved provider reads preserve JSON parse and permission failures", async () => {
+  const root = await temporaryDirectory();
+  const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+  const home = codexSecurityCredentialHome(environment);
+  const profile = await createProviderProfile(home, config);
+  const reference = { name: profile.name, home: "managed" };
+  const jsonPath = join(home, `${profile.name}.config.json`);
+  expect(await restoreProviderProfile({}, reference, environment)).toEqual({
+    model_providers: config.model_providers,
+  });
+  await writeFile(jsonPath, "{", { mode: 0o600 });
+  await expect(
+    restoreProviderProfile({}, reference, environment),
+  ).rejects.toBeInstanceOf(SyntaxError);
+  if (process.platform !== "win32" && process.geteuid?.() !== 0) {
+    await chmod(jsonPath, 0o000);
+    try {
+      await expect(
+        restoreProviderProfile({}, reference, environment),
+      ).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      await chmod(jsonPath, 0o600);
+    }
+  }
+});
 
 test.each([
   [
@@ -227,13 +303,47 @@ test.each([
 
 test("native profile turns omit optional null fields and retain array errors", async () => {
   const home = await temporaryDirectory();
+  const saved = await createProviderProfile(
+    home,
+    {
+      model_providers: {
+        "synthetic.gateway": { http_headers: null, auth: null },
+      },
+    },
+    { replay: true },
+  );
+  const replay = await restoreProviderProfile(
+    {},
+    { name: saved.name, home: "ambient" },
+    { CODEX_HOME: home },
+  );
+  const native = await createProviderProfile(
+    home,
+    mergeCodexOverrides(
+      {
+        model_providers: {
+          "synthetic.gateway": {
+            name: "Synthetic",
+            wire_api: "responses",
+            http_headers: { "X-Synthetic": "synthetic-inherited-header" },
+            auth: { command: "synthetic-inherited-auth" },
+          },
+        },
+      },
+      replay,
+    ),
+  );
   const script = join(home, "profile child.mjs");
   await writeFile(
     script,
-    `for await (const chunk of process.stdin) {}
+    `import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
+    for await (const chunk of process.stdin) {}
+    const args = process.argv.slice(1);
+    const profile = await readFile(join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8");
     console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
     console.log(JSON.stringify({ type: "item.completed", item: {
-      type: "agent_message", id: "answer", text: JSON.stringify(process.argv.slice(1)),
+      type: "agent_message", id: "answer", text: JSON.stringify({ args, profile }),
     } }));
     console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
     process.exit(0);`,
@@ -260,14 +370,21 @@ test("native profile turns omit optional null fields and retain array errors", a
         nested: [{ enabled: true, optional: null }],
       }) as CodexOptions["config"],
     },
-    "synthetic-profile",
+    native.name,
   );
   for (const resumed of [false, true]) {
     const thread = resumed
       ? codex.resumeThread("synthetic-thread")
       : codex.startThread();
     const result = await thread.run("synthetic prompt");
-    const args: string[] = JSON.parse(result.finalResponse);
+    const observed = JSON.parse(result.finalResponse);
+    const args: string[] = observed.args;
+    expect(parse(observed.profile)).toEqual({
+      model_providers: {
+        "synthetic.gateway": { name: "Synthetic", wire_api: "responses" },
+      },
+    });
+    expect(args.join(" ")).not.toContain("synthetic-inherited");
     const overrides = args.flatMap((arg, index) =>
       arg === "--config" ? [args[index + 1]!] : [],
     );
@@ -289,6 +406,101 @@ test("native profile turns omit optional null fields and retain array errors", a
   await expect(invalid.startThread().run("synthetic prompt")).rejects.toThrow(
     "Codex config overrides must contain finite TOML values",
   );
+});
+
+test("API fixture cleanup retries a transient busy directory", async () => {
+  const root = await temporaryDirectory();
+  await writeFile(join(root, "child.txt"), "synthetic fixture");
+  const remove = fsPromises.rm;
+  let busy = true;
+  const removal = spyOn(fsPromises, "rm").mockImplementation(
+    async (path, options) => {
+      if (path === root && busy) {
+        busy = false;
+        throw Object.assign(new Error("Synthetic busy directory"), {
+          code: "EBUSY",
+        });
+      }
+      await remove(path, options);
+    },
+  );
+  try {
+    await cleanup();
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    removal.mockRestore();
+    await remove(root, { recursive: true, force: true });
+  }
+});
+
+test("native profile launches retain bundled tools through executable path aliases", async () => {
+  const root = await temporaryDirectory();
+  const bin = join(root, "vendor", "bin");
+  const tools = join(root, "vendor", "codex-path");
+  const executable = process.platform === "win32" ? "codex.exe" : "codex";
+  const tool = process.platform === "win32" ? "rg.exe" : "rg";
+  await mkdir(bin, { recursive: true });
+  await mkdir(tools);
+  const node = Bun.which("node")!;
+  await copyFile(node, join(bin, executable));
+  await copyFile(node, join(tools, tool));
+  const script = join(root, "profile tools.mjs");
+  await writeFile(
+    script,
+    `import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
+if (basename(process.execPath).startsWith("rg")) {
+  console.log("synthetic bundled search");
+  process.exit(0);
+}
+for await (const chunk of process.stdin) {}
+const result = spawnSync("rg", [], { encoding: "utf8" });
+if (result.error || result.status !== 0) throw result.error ?? new Error(result.stderr);
+console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));
+console.log(JSON.stringify({ type: "item.completed", item: {
+  type: "agent_message", id: "answer", text: JSON.stringify({
+    path: process.env.PATH, configured: process.env.CODEX_CLI_PATH,
+    search: result.stdout.trim(), resumed: process.argv.includes("resume"),
+  }),
+} }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+process.exit(0);`,
+  );
+  const aliases = [`${bin}${sep}.${sep}${executable}`];
+  if (process.platform !== "win32") {
+    const alias = join(root, "codex-alias");
+    await symlink(join(bin, executable), alias);
+    aliases.push(alias);
+  }
+  for (const configured of aliases) {
+    const environment = {
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+      PATH: "",
+      CODEX_HOME: root,
+      CODEX_CLI_PATH: configured,
+      NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+    };
+    const original = { ...environment };
+    const client = await createProfileCodex(
+      { env: environment },
+      "synthetic-profile",
+    );
+    for (const resumed of [false, true]) {
+      const thread = resumed
+        ? client.resumeThread("synthetic-thread")
+        : client.startThread();
+      const result = await thread.run("synthetic prompt");
+      expect(JSON.parse(result.finalResponse)).toEqual({
+        path: tools,
+        configured,
+        search: "synthetic bundled search",
+        resumed,
+      });
+    }
+    expect(environment).toEqual(original);
+  }
 });
 
 test("private profiles retain providers for native required and inherited selection", async () => {
@@ -497,39 +709,5 @@ test.each([
     } finally {
       await profile?.cleanup();
     }
-  },
-);
-
-test.each([
-  ["minimax", MINIMAX_CODEX_PROVIDER],
-  ["minimax-cn", MINIMAX_CN_CODEX_PROVIDER],
-] as const)(
-  "native startup accepts %s Responses metadata without exposing provider details",
-  async (selection, provider) => {
-    const home = await temporaryDirectory();
-    const command = await providerPreflightCommand(
-      {
-        ...resolveCodexCommand({}),
-        args: [
-          "-c",
-          "features.api_key_model_discovery=false",
-          "-c",
-          "features.plugins=false",
-        ],
-      },
-      { model_provider: selection, model_providers: { [selection]: provider } },
-    );
-    const argumentsText = JSON.stringify(command.args);
-    expect(argumentsText).toContain(selection);
-    expect(argumentsText).not.toContain(provider.base_url);
-    expect(argumentsText).not.toContain(provider.env_key);
-    const result = await runCodexCommand(command, ["mcp", "list", "--json"], {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      CODEX_HOME: home,
-      MINIMAX_API_KEY: "synthetic-regional-key",
-    });
-    expect(result.success, result.stderr).toBe(true);
-    expect(JSON.parse(result.stdout)).toEqual([]);
   },
 );

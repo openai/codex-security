@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
@@ -36,24 +36,17 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
-export const MINIMAX_CODEX_PROVIDER = {
-  name: "MiniMax",
-  base_url: "https://api.minimax.io/v1",
-  env_key: "MINIMAX_API_KEY",
+export const CHEAPERINFERENCE_CODEX_PROVIDER = {
+  name: "Cheaper Inference",
+  base_url: "https://api.cheaperinference.com/v1",
+  env_key: "CHEAPER_INFERENCE_API_KEY",
   wire_api: "responses",
-} as const satisfies JsonObject;
-
-export const MINIMAX_CN_CODEX_PROVIDER = {
-  ...MINIMAX_CODEX_PROVIDER,
-  name: "MiniMax China",
-  base_url: "https://api.minimaxi.com/v1",
 } as const satisfies JsonObject;
 
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
-  minimax: MINIMAX_CODEX_PROVIDER,
-  "minimax-cn": MINIMAX_CN_CODEX_PROVIDER,
+  cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -66,6 +59,12 @@ export function isExternalModelProvider(
     Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
   );
 }
+
+export const MODEL_FILE_SETTINGS = [
+  "model_instructions_file",
+  "model_catalog_json",
+  "experimental_compact_prompt_file",
+] as const;
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   approval_policy: "on-request",
@@ -123,30 +122,17 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
-/** @internal Preserve native configuration when adding provider presets. */
-export function scanAuthenticationProvider(
+/** @internal Use the selected native provider's configured credential key. */
+export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
-): unknown {
+): string | undefined {
   const selected = scanModelProvider(config);
-  if (
-    !isExternalModelProvider(selected) ||
-    selected === "openrouter" ||
-    selected === "fireworks"
-  ) {
-    return selected;
-  }
+  if (!isExternalModelProvider(selected)) return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
-  const preset = EXTERNAL_CODEX_PROVIDERS[selected];
-  return isObject(provider) &&
-    provider["base_url"] === preset.base_url &&
-    provider["env_key"] === preset.env_key &&
-    provider["wire_api"] === preset.wire_api &&
-    provider["requires_openai_auth"] !== true &&
-    provider["experimental_bearer_token"] == null &&
-    provider["auth"] == null
-    ? selected
-    : undefined;
+  return isObject(provider) && typeof provider["env_key"] === "string"
+    ? provider["env_key"]
+    : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
@@ -200,17 +186,24 @@ export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
   return structured;
 }
 
+/** @internal Quote a TOML string without changing its contents. */
+export function quoteTomlString(value: string): string {
+  return JSON.stringify(value).replaceAll("\u007f", "\\u007f");
+}
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
   if (value === null)
     throw new ConfigurationError(
       "Codex TOML overrides cannot contain null values.",
     );
+  // Match the Codex SDK's numeric spelling, including integers above 2**53 - 1.
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
   if (isObject(value)) {
     return `{${Object.entries(value)
       .filter(([, item]) => item !== null)
-      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .map(([key, item]) => `${quoteTomlString(key)}=${inlineToml(item)}`)
       .join(",")}}`;
   }
   return stringify({ value }).slice("value = ".length).trim();
@@ -219,10 +212,10 @@ export function inlineToml(value: JsonValue): string {
 export function scanApprovalPolicy(
   config: Readonly<JsonObject>,
 ): "never" | "on-request" {
-  return config["approval_policy"] === "never" ||
-    selectedScanProfile(config)?.["approval_policy"] === "never"
-    ? "never"
-    : "on-request";
+  const configured =
+    selectedScanProfile(config)?.["approval_policy"] ??
+    config["approval_policy"];
+  return configured === "never" ? "never" : "on-request";
 }
 
 function selectedScanProfile(
@@ -267,8 +260,107 @@ export function scanCyberAccessConfig(
   };
 }
 
+/** @internal Read file-profile settings before wrapper defaults or CLI model validation. */
+export async function readCodexFileProfile(
+  overrides: JsonObject,
+  profileHome?: string,
+): Promise<JsonObject> {
+  let nativeProfile: JsonObject = {};
+  const profileName = overrides["profile"];
+  if (profileName != null && typeof profileName !== "string") {
+    throw new ConfigurationError("Codex profile must be a name.");
+  }
+  if (
+    profileHome !== undefined &&
+    typeof profileName === "string" &&
+    selectedScanProfile(overrides) === undefined
+  ) {
+    if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
+      throw new ConfigurationError("Codex profile must be a plain name.");
+    }
+    try {
+      nativeProfile = parse(
+        await readFile(join(profileHome, `${profileName}.config.toml`), "utf8"),
+      ) as JsonObject;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new ConfigurationError(
+          `Could not read Codex profile ${profileName}.`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    if ("profile" in nativeProfile || "profiles" in nativeProfile) {
+      throw new ConfigurationError(
+        `Codex profile ${profileName} contains legacy profile settings.`,
+      );
+    }
+    validateOverrideKeys(nativeProfile);
+    validateOverrides(nativeProfile);
+    // CLI overrides otherwise resolve this file against the scan directory.
+    for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home", "log_dir"]) {
+      resolveConfigPath(nativeProfile, key, profileHome);
+    }
+    resolveNestedConfigPaths(nativeProfile, profileHome);
+    normalizeLegacyWindowsSandboxOverride(nativeProfile);
+  }
+  return nativeProfile;
+}
+
+function resolveConfigPath(
+  config: JsonObject,
+  key: string,
+  directory: string,
+): void {
+  const path = config[key];
+  if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+    config[key] = resolve(directory, path);
+  }
+}
+
+/** @internal Keep agent, skill, and TLS file paths anchored to their config directory. */
+export function resolveNestedConfigPaths(
+  config: JsonObject,
+  directory: string,
+): void {
+  const agents = config["agents"];
+  if (isObject(agents)) {
+    for (const agent of Object.values(agents)) {
+      if (isObject(agent)) resolveConfigPath(agent, "config_file", directory);
+    }
+  }
+  const skills = config["skills"];
+  if (isObject(skills) && Array.isArray(skills["config"])) {
+    for (const skill of skills["config"]) {
+      if (!isObject(skill)) continue;
+      resolveConfigPath(skill, "path", directory);
+    }
+  }
+
+  const otel = config["otel"];
+  if (!isObject(otel)) return;
+  for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
+    const exporter = otel[key];
+    if (!isObject(exporter)) continue;
+    for (const configuration of Object.values(exporter)) {
+      if (!isObject(configuration) || !isObject(configuration["tls"])) continue;
+      const tls = configuration["tls"];
+      for (const field of [
+        "ca-certificate",
+        "client-certificate",
+        "client-private-key",
+      ]) {
+        resolveConfigPath(tls, field, directory);
+      }
+    }
+  }
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
+  profileHome?: string,
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -276,8 +368,8 @@ export async function mergedCodexConfig(
   validateOverrideKeys(config.codexOverrides ?? {});
   const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
-  validateNativeMultiAgentV2Overrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
+  const nativeProfile = await readCodexFileProfile(overrides, profileHome);
   const profiles = overrides["profiles"];
   if (isObject(profiles)) {
     for (const profile of Object.values(profiles)) {
@@ -287,18 +379,13 @@ export async function mergedCodexConfig(
     }
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
-  const modelProvider = scanModelProvider(overrides);
-  if (modelProvider === "amazon-bedrock") {
+  const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  validateNativeMultiAgentV2Overrides(effectiveOverrides);
+  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }
-  if (
-    (modelProvider === "minimax" || modelProvider === "minimax-cn") &&
-    scanModel(overrides) === "MiniMax-M3.1-Flash"
-  ) {
-    defaults["model_reasoning_effort"] = "max";
-  }
-  return deepMerge(defaults, overrides);
+  return deepMerge(defaults, effectiveOverrides);
 }
 
 /** @internal Preserve existing native Windows backend selections. */
@@ -330,8 +417,6 @@ export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
   let contents: string;
   try {
     contents = stringify(config);
@@ -340,6 +425,16 @@ export async function writeCodexConfig(
       cause: error,
     });
   }
+  await writePrivateConfig(path, contents);
+}
+
+/** @internal Write private configuration without changing its serialized contents. */
+export async function writePrivateConfig(
+  path: string,
+  contents: string,
+): Promise<void> {
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
   let created = false;
   try {
