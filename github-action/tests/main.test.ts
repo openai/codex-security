@@ -16,7 +16,7 @@ import { runtimeEnvironment, type Runtime } from '../src/runtime.js';
 import type { ProcessResult } from '../src/process.js';
 import { copyCompletedScan } from './fixtures.js';
 
-type Scenario = 'schedule' | 'pr' | 'policy-pr';
+type Scenario = 'schedule' | 'pr' | 'policy-pr' | 'empty-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
 
 function assertAttribution(args: readonly string[], provider: string): void {
@@ -56,7 +56,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
   git('add', '.'); git('commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
   let sha = base;
-  if (scenario !== 'schedule') {
+  if (scenario !== 'schedule' && scenario !== 'empty-pr') {
     await writeFile(join(repository, scenario === 'policy-pr' ? 'SECURITY.md' : 'app.txt'), 'synthetic change\n');
     git('add', '.'); git('commit', '-qm', 'PR change');
     sha = git('rev-parse', 'HEAD');
@@ -81,7 +81,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
     GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: scenario === 'schedule' ? 'schedule' : 'pull_request',
     GITHUB_REPOSITORY: 'example/repo', GITHUB_WORKSPACE: repository, GITHUB_SHA: sha,
     GITHUB_REF: scenario === 'schedule' ? 'refs/heads/main' : 'refs/pull/4/merge',
-    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl,
+    GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl, GITHUB_RUN_ID: '123456',
     GITHUB_OUTPUT: outputPath, GITHUB_STATE: statePath, RUNNER_TEMP: root,
     OPENAI_API_KEY: 'synthetic-offline-test-key', INPUT_SUMMARY: 'true', INPUT_ANNOTATIONS: 'false',
     INPUT_SCOPE: scenario === 'schedule' ? 'repository' : 'diff',
@@ -152,7 +152,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
       try {
         process.exitCode = 0;
         await runAction(root, {
-          setupRuntime: async () => { setups++; await configuration.prepare?.(); await reports(); return runtime; },
+          setupRuntime: async (options) => { setups++; options.log?.('Synthetic provisioning output.'); await configuration.prepare?.(); await reports(); return runtime; },
           cleanupRuntime: async () => { cleanups++; if (configuration.cleanupFails) throw new Error('Synthetic cleanup failure'); },
           runProcess: async (_executable, args, options): Promise<ProcessResult> => {
             processes++; capturedArgs = args; capturedEnvironment = options.env;
@@ -422,6 +422,8 @@ for (const threshold of ['none', 'high']) {
   test(`summary write failure preserves the scan result with severity threshold ${threshold}`, async (t) => {
     const app = await harness(t);
     app.setInput('summary', 'true'); app.setInput('fail-on-severity', threshold);
+    app.setInput('upload-artifacts', 'true');
+    const upload = t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => ({id: 2468, size: 1}));
     t.mock.method(core.summary, 'write', async () => { throw new Error('Synthetic summary write failure'); });
     const result = await app.run();
     assert.equal(result.exitCode, threshold === 'none' ? 0 : 1);
@@ -431,6 +433,7 @@ for (const threshold of ['none', 'high']) {
     assert.equal(result.outputs['sarif-upload-ready'], 'true');
     assert.ok(result.outputs['sarif-path']);
     assert.equal(result.cleanups, 1);
+    assert.equal(upload.mock.callCount(), 1);
     assert.match(result.logs, /::warning::Could not write the job summary\./);
   });
 }
@@ -458,7 +461,7 @@ test('scope exclusions and deferred notes do not fail completed scans or make fi
   assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
   assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
   assert.ok(!result.args.includes('--verbose'));
-  assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
+  assert.doesNotMatch(result.logs, /Synthetic live CLI progress|Synthetic provisioning output/);
   assert.match(result.logs, /Starting security scan/);
   assert.match(result.logs, /Scan: completed/);
   assert.match(result.logs, /Findings:.*high: 1/);
@@ -573,6 +576,64 @@ test('dry-run is explicitly skipped with no findings policy pass', async (t) => 
   assert.equal(result.outputs['high-count'], ''); assert.ok(result.args.includes('--dry-run')); assert.equal(result.environment.OPENAI_API_KEY, undefined);
 });
 
+for (const threshold of ['low', 'medium', 'high', 'critical']) {
+  test(`dry-run rejects ${threshold} enforcement before runtime setup`, async (t) => {
+    const app = await harness(t);
+    app.setInput('dry-run', 'true'); app.setInput('fail-on-severity', threshold);
+    app.setInput('summary', 'false');
+    const result = await app.run();
+    assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
+    assert.equal(result.outputs['policy-status'], 'not-evaluated');
+    assert.equal(result.outputs['scan-status'], 'failed');
+    assert.match(result.logs, /dry-run requires fail-on-severity: none/);
+    assert.equal(result.summary, '');
+  });
+}
+
+for (const threshold of ['none', 'high']) {
+  test(`verified empty PR diff succeeds without a scan for ${threshold} enforcement`, async (t) => {
+    const app = await harness(t, 'empty-pr');
+    app.setInput('fail-on-severity', threshold);
+    delete process.env.OPENAI_API_KEY;
+    const result = await app.run();
+    assert.equal(result.exitCode, 0); assert.equal(result.setups, 0); assert.equal(result.processes, 0);
+    assert.equal(result.outputs['scan-status'], 'skipped'); assert.equal(result.outputs['skip-reason'], 'empty-diff');
+    assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['high-count'], '');
+    assert.equal(result.outputs['sarif-upload-ready'], 'false');
+    assert.match(result.summary, /No committed changes to scan/);
+  });
+}
+
+test('successful artifact uploads link named reports and retention in the job summary', async (t) => {
+  const app = await harness(t);
+  app.setInput('upload-artifacts', 'true'); app.setInput('artifact-name', 'review-reports'); app.setInput('retention-days', '14');
+  const upload = t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (...[name, files, _root, options]: Parameters<DefaultArtifactClient['uploadArtifact']>) => {
+    assert.equal(name, 'review-reports'); assert.equal(options?.retentionDays, 14);
+    assert.ok(files.some(file => basename(file) === 'findings.json'));
+    return {id: 2468, size: 1};
+  });
+  const result = await app.run();
+  assert.equal(result.exitCode, 0); assert.equal(upload.mock.callCount(), 1);
+  assert.match(result.summary, /<a href="https:\/\/github.com\/example\/repo\/actions\/runs\/123456\/artifacts\/2468">review-reports<\/a> · Retention: up to 14 days/);
+});
+
+test('disabled artifact upload neither uploads reports nor adds a download link', async (t) => {
+  const app = await harness(t);
+  const upload = t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => ({id: 2468, size: 1}));
+  const result = await app.run();
+  assert.equal(result.exitCode, 0); assert.equal(upload.mock.callCount(), 0);
+  assert.doesNotMatch(result.summary, /\/artifacts\//);
+});
+
+test('disabled summary leaves requested artifact upload and scan outcome intact', async (t) => {
+  const app = await harness(t);
+  app.setInput('summary', 'false'); app.setInput('upload-artifacts', 'true');
+  const upload = t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => ({id: 2468, size: 1}));
+  const result = await app.run();
+  assert.equal(result.exitCode, 0); assert.equal(upload.mock.callCount(), 1); assert.equal(result.summary, '');
+  assert.equal(result.outputs['report-status'], 'ready');
+});
+
 test('scope conflict fails without runtime setup', async (t) => {
   const app = await harness(t, 'pr'); app.setInput('paths', 'app.txt'); const result = await app.run();
   assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.match(result.logs, /paths cannot be combined/u);
@@ -626,6 +687,7 @@ test('requested artifact upload failure remains fatal without SARIF', async (t) 
   assert.ok(result.outputs['results-directory']); assert.equal(result.outputs['sarif-path'], '');
   assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
   assert.match(result.summary, /Synthetic artifact upload failure/);
+  assert.doesNotMatch(result.summary, /\/artifacts\//);
 });
 
 test('archive read failure preserves scan reports, summary and cleanup', {
@@ -677,7 +739,8 @@ test('archive read failure preserves scan reports, summary and cleanup', {
     assert.ok((await readFile(result.outputs[name])).length);
   }
   assert.match(result.summary, /EACCES/);
-  assert.ok(result.summary.includes(unreadable));
+  const displayedSummary = result.summary.replace(/&#(\d+);/g, (_entity, value: string) => String.fromCodePoint(Number(value)));
+  assert.ok(displayedSummary.includes(unreadable));
   assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
   assert.deepEqual(requests, ['/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact']);
   assert.equal(signal?.aborted, true);

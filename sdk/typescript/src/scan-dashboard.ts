@@ -52,8 +52,14 @@ const CURSOR_HOME = "\u001B[H";
 const ERASE_LINE = "\u001B[2K";
 const MAX_HISTORY_ENTRIES = 2_000;
 const FIXED_SCREEN_ROWS = 4; // Title, two dividers and elapsed time.
+const COMPONENT_STATUS = {
+  pending: "Queued",
+  completed: "Complete",
+  failed: "Failed",
+} as const;
 
 interface DashboardStream {
+  readonly writableNeedDrain?: boolean;
   write(chunk: string, callback?: (error?: Error | null) => void): unknown;
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
@@ -476,7 +482,7 @@ export class ScanDashboard {
         mode: "standard",
         componentName: receipt.name,
       });
-      dashboard.setStage("Queued");
+      dashboard.setStage(COMPONENT_STATUS.pending);
       dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
       return { receipt: { ...receipt }, dashboard };
     });
@@ -494,11 +500,12 @@ export class ScanDashboard {
         dashboard.#startedAt = this.#options.clock.now();
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
+        const status = COMPONENT_STATUS[receipt.status];
         dashboard.#finishedAt = this.#options.clock.now();
-        dashboard.setStage(componentStatus(receipt));
+        dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${componentStatus(receipt)} · ${receipt.findingCount ?? 0} findings before deduplication`,
+            `${status} · ${receipt.findingCount ?? 0} findings before deduplication`,
         );
       }
     }
@@ -541,8 +548,7 @@ export class ScanDashboard {
         dashboard.setUsageObservation(event.value);
         break;
       case "workers":
-        if (event.value.kind === "dispatch")
-          dashboard.setStage(scanPhaseLabel(event.value.phase));
+        dashboard.setStage(scanPhaseLabel(event.value.phase));
         break;
       case "warning":
         dashboard.note(event.value);
@@ -661,14 +667,16 @@ export class ScanDashboard {
     } else {
       this.#activities[existing] = entry;
     }
-    if (this.#activities.length > MAX_HISTORY_ENTRIES) {
-      this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
-    }
+    // Count the added rows before dropping old entries above the view, so a
+    // scrolled view stays in place once history reaches its cap.
     if (this.#scrollOffset !== 0) {
       this.#scrollOffset += Math.max(
         0,
         this.#activityLines(this.#width()).length - previousRows,
       );
+    }
+    if (this.#activities.length > MAX_HISTORY_ENTRIES) {
+      this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
     }
     this.#scheduleRefresh();
   }
@@ -721,7 +729,7 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer === null) return;
+    if (this.#timer === null || this.#stream.writableNeedDrain) return;
     try {
       this.#stream.write(this.#frame());
     } catch {}
@@ -937,7 +945,7 @@ export class ScanDashboard {
         const status =
           receipt.status === "started"
             ? dashboard.#stage
-            : componentStatus(receipt);
+            : COMPONENT_STATUS[receipt.status];
         return { receipt, dashboard, status, progress };
       });
     const progressWidth = Math.max(
@@ -970,7 +978,7 @@ export class ScanDashboard {
       findings: string,
       cost: string,
     ): string =>
-      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost.padStart(8)}` : ""}`;
+      `  ${marker} ${fitCell(terminalText(name), nameWidth)} ${fitCell(terminalText(status), statusWidth)} ${progress.padStart(progressWidth)} ${findings.padStart(8)}${this.#showCost ? ` ${cost}` : ""}`;
     const table = visible.map(
       ({ receipt, dashboard, status, progress }, index) =>
         row(
@@ -1474,15 +1482,6 @@ function isFileInventory(activity: ScanActivity): boolean {
 
 function formatElapsed(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function componentStatus(receipt: ComponentReceipt): string {
-  return {
-    pending: "Queued",
-    started: "Running",
-    completed: "Complete",
-    failed: "Failed",
-  }[receipt.status];
 }
 
 function formatLocalTime(timestamp: number): string {
