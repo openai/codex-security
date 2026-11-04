@@ -90,7 +90,6 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
-  modelProvider?: unknown;
   maxCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
@@ -1026,9 +1025,7 @@ export class ScanDashboard {
 
   get #showCost(): boolean {
     return (
-      this.#options.modelProvider !== "huggingface" &&
-      (this.#options.showCost === true ||
-        this.#options.maxCostUsd !== undefined)
+      this.#options.showCost === true || this.#options.maxCostUsd !== undefined
     );
   }
 

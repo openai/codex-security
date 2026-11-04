@@ -258,33 +258,6 @@ async function scanSandboxFixture() {
 }
 
 describe("Codex configuration", () => {
-  test("resolves the Hugging Face preset and preserves a native authentication override", async () => {
-    const selection = { model_provider: "huggingface", model: "org/model" };
-    const connection = {
-      name: "Hugging Face",
-      base_url: "https://router.huggingface.co/v1",
-      wire_api: "responses",
-    };
-    const config = await mergedCodexConfig({ codexOverrides: selection });
-    expect(config["model_providers"]).toEqual({
-      huggingface: { ...connection, env_key: "HF_TOKEN" },
-    });
-
-    const auth = { command: "synthetic-auth" };
-    const native = await mergedCodexConfig({
-      codexOverrides: {
-        ...selection,
-        model_providers: { huggingface: { auth } },
-      },
-    });
-    expect(native["model_providers"]).toEqual({
-      huggingface: { ...connection, auth },
-    });
-    await expect(
-      mergedCodexConfig({ codexOverrides: { model_provider: "huggingface" } }),
-    ).rejects.toThrow("requires an explicit model");
-  });
-
   test("automatically reviews scan execution approvals by default", async () => {
     expect(await mergedCodexConfig({})).toMatchObject({
       approval_policy: "on-request",

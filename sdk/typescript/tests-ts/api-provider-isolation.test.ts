@@ -1,14 +1,12 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
-import { Codex, type CodexOptions } from "@openai/codex-sdk";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { EXTERNAL_CODEX_PROVIDERS, type JsonObject } from "../src/config.js";
+import type { JsonObject } from "../src/config.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { copyCredentialTestPlugin, PLUGIN_ROOT } from "./plugin-root.js";
@@ -16,7 +14,6 @@ import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { nodeCommand } from "./support/shell.js";
 
 const workerExecutorUrl = new URL(
   "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
@@ -674,41 +671,7 @@ const fileProviderKeyCases = [
   ["fireworks", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "custom Codex key", "CODEX_API_KEY"],
   ["openrouter", "other external key", "FIREWORKS_API_KEY"],
-  ["huggingface", "default", "HF_TOKEN"],
-  ["openrouter", "other external key", "HF_TOKEN"],
-  ["openrouter", "inactive Hugging Face", "OPENROUTER_API_KEY"],
 ] as const;
-
-async function modelChildKeys(
-  root: string,
-  options: CodexOptions,
-  names: string[],
-) {
-  const preload = join(root, "model-environment.mjs");
-  const output = join(root, "model-environment.json");
-  await writeFile(
-    preload,
-    `import { writeFileSync } from "node:fs";
-for await (const _ of process.stdin) {}
-const keys = ${JSON.stringify(names)};
-writeFileSync(${JSON.stringify(output)}, JSON.stringify(Object.fromEntries(keys.map(k => [k, process.env[k]]))));
-process.exit(0);`,
-  );
-  const model = new Codex({
-    ...options,
-    codexPathOverride: nodeCommand().command,
-    env: {
-      ...options.env,
-      NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-    },
-  });
-  const { events } = await model
-    .startThread()
-    .runStreamed("Synthetic environment check");
-  for await (const _ of events) {
-  }
-  return JSON.parse(await readFile(output, "utf8")) as Record<string, string>;
-}
 
 test.each(["openrouter", "fireworks"] as const)(
   "native file profile accepts the %s custom environment key",
@@ -755,28 +718,22 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(scan, { mode: 0o700 });
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
-      const canonicalKey = EXTERNAL_CODEX_PROVIDERS[providerId].env_key;
-      const inactiveHf = _selection === "inactive Hugging Face";
-      const keyNames = [
-        "OPENAI_API_KEY",
-        "CODEX_API_KEY",
-        "OPENROUTER_API_KEY",
-        "FIREWORKS_API_KEY",
-        "HF_TOKEN",
-      ];
+      const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
       const headerEnvironment =
         _selection === "canonical header" ||
         _selection === "missing custom primary"
           ? { [canonicalKey]: " synthetic-header-key " }
           : {};
-      const inheritedEnvironment: Record<string, string> = {
-        HF_TOKEN: "synthetic-unrelated-key",
+      const inheritedEnvironment = {
         ...(_selection === "custom Codex key" ||
-        _selection === "other external key" ||
-        providerId === "huggingface" ||
-        inactiveHf
+        _selection === "other external key"
           ? Object.fromEntries(
-              keyNames
+              [
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "FIREWORKS_API_KEY",
+              ]
                 .filter((name) => name !== providerKey)
                 .map((name) => [name, "synthetic-unrelated-key"]),
             )
@@ -787,7 +744,6 @@ for (const mode of ["standard", "deep"] as const) {
           : { [providerKey]: "synthetic-file-key" }),
       };
       const workerEnvironment = {
-        ...(inactiveHf ? { HF_TOKEN: inheritedEnvironment["HF_TOKEN"] } : {}),
         ...headerEnvironment,
         [providerKey]: "synthetic-file-key",
       };
@@ -803,12 +759,7 @@ for (const mode of ["standard", "deep"] as const) {
       const original = stringifyToml({
         model: "synthetic-model",
         model_provider: providerId,
-        model_providers: {
-          [providerId]: provider,
-          ...(inactiveHf
-            ? { huggingface: EXTERNAL_CODEX_PROVIDERS.huggingface }
-            : {}),
-        },
+        model_providers: { [providerId]: provider },
         features: { shell_tool: false, unified_exec: false },
       });
       await writeFile(join(sourceHome, "review.config.toml"), original);
@@ -833,12 +784,13 @@ for (const mode of ["standard", "deep"] as const) {
                   expect(options.apiKey).toBeUndefined();
                   const environment = options.env!;
                   expect(environment[providerKey]).toBe("synthetic-file-key");
-                  const modelEnvironment =
-                    providerKey === "HF_TOKEN" || inactiveHf
-                      ? await modelChildKeys(root, options, keyNames)
-                      : environment;
-                  for (const name of keyNames) {
-                    expect(modelEnvironment[name]).toBe(
+                  for (const name of [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "FIREWORKS_API_KEY",
+                  ]) {
+                    expect(environment[name]).toBe(
                       name === providerKey || name === canonicalKey
                         ? inheritedEnvironment[name]
                         : undefined,

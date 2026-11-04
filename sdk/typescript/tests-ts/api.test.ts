@@ -65,7 +65,6 @@ import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
-  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
@@ -197,13 +196,6 @@ const EXTERNAL_PROVIDER_CASES = [
     "CHEAPER_INFERENCE_API_KEY",
     "gpt-5.4",
     CHEAPERINFERENCE_CODEX_PROVIDER,
-  ],
-  [
-    "Hugging Face",
-    "huggingface",
-    "HF_TOKEN",
-    "openai/gpt-oss-120b",
-    HUGGINGFACE_CODEX_PROVIDER,
   ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
@@ -15112,42 +15104,6 @@ if __name__ == "__main__":
     }
   });
 
-  test("keeps Hugging Face usage without pricing a colliding OpenAI model", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const commands: Array<readonly string[]> = [];
-    const environment = { HF_TOKEN: "synthetic-router-token" };
-    await using client = new TestClient(
-      { codexOverrides: { model_provider: "huggingface", model: "gpt-5.5" } },
-      {
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        environment,
-        prepareRuntime: async () => ({
-          ...preparedRuntime(codexHome),
-          environment,
-        }),
-        runWorkbench: recordingWorkbench(commands),
-        createCodex: completedCodex(root),
-      },
-    );
-    await expect(
-      client.preflight(repository, { maxCostUsd: 1 }),
-    ).rejects.toThrow(/cost limit.+gpt-5\.5/u);
-    const costs: ScanCost[] = [];
-    const result = await client.run(repository, {
-      onCost: (cost) => costs.push(cost),
-    });
-    expect(result.turnResult).toMatchObject({
-      model: "gpt-5.5",
-      modelProvider: "huggingface",
-      usage: { input_tokens: 10, output_tokens: 3 },
-    });
-    expect(result.cost).toBeNull();
-    expect(costs).toEqual([]);
-    const completion = commands.find((args) => args[0] === "complete-scan");
-    expect(completion).toBeDefined();
-    expect(completion).not.toContain("--cost-json");
-  });
-
   test("reports unpriced model usage without letting its observer stop the scan", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
@@ -16653,7 +16609,6 @@ if __name__ == "__main__":
         {
           environment: {
             CODEX_SECURITY_STATE_DIR: configuredStateDirectory,
-            HF_TOKEN: "synthetic-unrelated-hub-token",
             [apiKey]: "synthetic-transient-key",
           },
           resolvePluginPython: async () => "/managed/python",
@@ -16688,9 +16643,6 @@ if __name__ == "__main__":
               id: null,
               async runStreamed() {
                 expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
-                expect(options.env?.["HF_TOKEN"]).toBe(
-                  apiKey === "HF_TOKEN" ? "synthetic-transient-key" : undefined,
-                );
                 expect(options.apiKey).toBe(
                   provider === undefined
                     ? "synthetic-transient-key"

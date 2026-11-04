@@ -53,7 +53,6 @@ import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
-  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
   mergedCodexConfig,
@@ -865,7 +864,6 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
-              "huggingface",
               "amazon-bedrock",
             ],
           },
@@ -1563,12 +1561,6 @@ describe("CLI", () => {
       "fireworks",
       "accounts/fireworks/models/qwen3-235b-a22b",
       FIREWORKS_CODEX_PROVIDER,
-    ],
-    [
-      "Hugging Face",
-      "huggingface",
-      "openai/gpt-oss-120b",
-      HUGGINGFACE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes bulk scans through %s",
@@ -3189,13 +3181,6 @@ describe("CLI", () => {
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
-    [
-      "Hugging Face",
-      "huggingface",
-      "openai/gpt-oss-120b",
-      "openai/gpt-oss-120b:groq",
-      HUGGINGFACE_CODEX_PROVIDER,
-    ],
   ] as const)(
     "routes scans through %s",
     async (_name, provider, selectedModel, codexModel, providerConfig) => {
@@ -3591,20 +3576,6 @@ describe("CLI", () => {
       [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
-      [
-        [
-          "scan",
-          ".",
-          "--provider",
-          "huggingface",
-          "--model",
-          "gpt-5.5",
-          "--max-cost",
-          "1",
-          "--dry-run",
-        ],
-        "cost limit is not available",
-      ],
       [["scan", ".", "--max-time", "--dry-run"], "Missing value for flag"],
       [
         ["scan", ".", "--max-time-hours", "--dry-run"],

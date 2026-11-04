@@ -42,8 +42,6 @@ export async function prepareCliDeepScanSession(options) {
   if (initializing) throw new Error('Concurrent native SQLite initialization');
   initializing = true;
   try {
-    const name = options.env.SYNTHETIC_HF_ENV_KEY;
-    if (name && options.env[name] !== 'synthetic-' + options.env.SYNTHETIC_THREAD_ID) throw new Error('Native provider credential changed');
     await writeFile(join(options.env.CODEX_HOME, 'initialized'), 'ready');
     return { threadId: options.env.SYNTHETIC_THREAD_ID,
     model: 'synthetic-model', reasoningEffort: 'high',
@@ -62,7 +60,6 @@ const lines = createInterface({input: process.stdin});
 const request = JSON.parse((await lines[Symbol.asyncIterator]().next()).value);
 writeFileSync(process.env.SYNTHETIC_RECEIPT, JSON.stringify({
   request, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
-  hasHfToken: Object.keys(process.env).some(name => name.toUpperCase() === 'HF_TOKEN'),
   execPath: process.execPath, bun: process.versions.bun,
   awsProfile: process.env.AWS_PROFILE, snapshot: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
   externalImports: process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
@@ -88,10 +85,7 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       const scanDir = join(root, name);
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
-      const hfKey = name === "mixed-case" ? "Hf_Token" : "HF_TOKEN";
       const environment = {
-        SYNTHETIC_HF_ENV_KEY: hfKey,
-        [hfKey]: `synthetic-thread-${name}`,
         PATH: process.versions["bun"] ? process.env["PATH"]! : "",
         CODEX_HOME: join(root, "codex-home"),
         SYNTHETIC_RECEIPT: receipt,
@@ -148,7 +142,6 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
               : undefined,
       );
       assert.partialDeepStrictEqual(saved, {
-        hasHfToken: false,
         key: `synthetic-key-${name}`,
         awsProfile: `profile-${name}`,
         snapshot: environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,

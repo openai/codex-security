@@ -15,7 +15,6 @@ export interface TurnResultMetadata {
   id?: string;
   status?: string;
   model?: string;
-  modelProvider?: string;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -89,11 +88,7 @@ export class ScanResult {
     this.threatModelPath = options.threatModelPath ?? null;
     this.cost =
       options.recordedCost ??
-      estimateScanCost(
-        options.turnResult.model,
-        options.turnResult.usage,
-        options.turnResult.modelProvider,
-      );
+      estimateScanCost(options.turnResult.model, options.turnResult.usage);
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {

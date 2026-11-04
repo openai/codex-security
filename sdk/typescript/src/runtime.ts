@@ -74,7 +74,7 @@ import {
   errorMessage,
   abortReason,
 } from "./errors.js";
-import { EXTERNAL_CODEX_PROVIDER_ENV_KEYS, type JsonObject } from "./config.js";
+import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import {
   isWithin,
@@ -129,7 +129,10 @@ const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
-  ...EXTERNAL_CODEX_PROVIDER_ENV_KEYS,
+  "OPENROUTER_API_KEY",
+  "FIREWORKS_API_KEY",
+  "CHEAPER_INFERENCE_API_KEY",
+  "HF_TOKEN",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
 from pathlib import Path

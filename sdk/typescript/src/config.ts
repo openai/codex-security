@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -44,71 +43,13 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
-export const HUGGINGFACE_CODEX_PROVIDER = {
-  name: "Hugging Face",
-  base_url: "https://router.huggingface.co/v1",
-  env_key: "HF_TOKEN",
-  wire_api: "responses",
-} as const satisfies JsonObject;
-
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
-  huggingface: HUGGINGFACE_CODEX_PROVIDER,
 } as const;
 
-export const EXTERNAL_CODEX_PROVIDER_ENV_KEYS: ReadonlySet<string> = new Set(
-  Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
-);
-
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
-
-/** Native workers can select any declared provider in the saved configuration. */
-export function providerEnvironmentNames(provider: unknown): string[] {
-  if (!isObject(provider)) return [];
-  return [
-    provider["env_key"],
-    ...(isObject(provider["env_http_headers"])
-      ? Object.values(provider["env_http_headers"])
-      : []),
-  ].filter((name): name is string => typeof name === "string");
-}
-
-/** Forward the user's Hub token only when the selected native model uses it. */
-export function huggingFaceEnvironment<Value>(
-  environment: Record<string, Value>,
-  config: JsonObject = {},
-  selected: unknown = scanModelProvider(config),
-  defaultKey?: string,
-): Record<string, Value> {
-  const key = HUGGINGFACE_CODEX_PROVIDER.env_key;
-  if (!Object.keys(environment).some((name) => name.toUpperCase() === key))
-    return environment;
-  const native =
-    selected === "openai" || selected === "ollama" || selected === "lmstudio"
-      ? undefined
-      : configuredProvider(config, selected);
-  const names = providerEnvironmentNames(native);
-  if (native?.["env_key"] == null && native?.["auth"] == null) {
-    const primary =
-      defaultKey ?? (selected === "huggingface" ? key : undefined);
-    if (primary !== undefined) names.push(primary);
-  }
-  const filtered = Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) =>
-        name.toUpperCase() !== key ||
-        names.some((declared) =>
-          process.platform === "win32"
-            ? declared.toUpperCase() === key
-            : declared === name,
-        ),
-    ),
-  );
-  forwardExternalImportSetting(environment, filtered);
-  return filtered;
-}
 
 export function isExternalModelProvider(
   provider: unknown,
@@ -181,33 +122,28 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
   return selectedProfile?.["model_provider"] ?? config["model_provider"];
 }
 
-function configuredProvider(
-  config: Readonly<JsonObject>,
-  selected: unknown = scanModelProvider(config),
-): JsonObject | undefined {
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const table =
-    typeof selected === "string" && isObject(providers)
-      ? providers[selected]
-      : undefined;
-  return isObject(table) ? table : undefined;
-}
-
 /** @internal Use the selected native provider's configured credential key. */
 export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
 ): string | undefined {
   const selected = scanModelProvider(config);
   if (!isExternalModelProvider(selected)) return undefined;
-  const key = configuredProvider(config, selected)?.["env_key"];
-  return typeof key === "string"
-    ? key
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isObject(providers) ? providers[selected] : undefined;
+  return isObject(provider) && typeof provider["env_key"] === "string"
+    ? provider["env_key"]
     : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
-  return configuredProvider(config)?.["auth"] != null;
+  const selected = scanModelProvider(config);
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider =
+    typeof selected === "string" && isObject(providers)
+      ? providers[selected]
+      : undefined;
+  return isObject(provider) && provider["auth"] != null;
 }
 
 /** @internal Keep host-side helpers independent of the source checkout. */
@@ -445,14 +381,6 @@ export async function mergedCodexConfig(
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
-  if (scanModelProvider(effectiveOverrides) === "huggingface") {
-    const model = scanModel(effectiveOverrides);
-    if (typeof model !== "string" || model.trim() === "")
-      throw new ConfigurationError("Hugging Face requires an explicit model.");
-    const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
-    if (hasCommandAuth(effectiveOverrides)) delete preset["env_key"];
-    defaults["model_providers"] = { huggingface: preset };
-  }
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";

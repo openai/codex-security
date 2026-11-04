@@ -233,19 +233,16 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
-
-export HF_TOKEN="<your-hugging-face-inference-token>"
-codex-security scan . --provider huggingface --model openai/gpt-oss-120b
 ```
 
-For Hugging Face, use a token with the **Make calls to Inference Providers**
-permission and a model that supports streaming and tool calls on its beta
-Responses endpoint. SDK callers set `codexOverrides.model_provider` to
-`"huggingface"` and `codexOverrides.model` to the router model ID. A dry run
-checks local configuration. Token usage is available, but route-specific pricing
-is unavailable for dollar estimates and `--max-cost`. See the
-[Hugging Face Codex integration](https://huggingface.co/docs/inference-providers/en/integrations/codex)
-and [Responses API guide](https://huggingface.co/docs/inference-providers/en/guides/responses-api).
+### Hugging Face compatibility
+
+The bundled Codex 0.166.0 scanner sends its scan-completion tool inside a
+`namespace` and can request `web_search`. Hugging Face's published Responses
+implementation accepts `function` and remote `mcp` tool declarations. A named
+Hugging Face scan provider is deferred until the scanner and router can exchange
+the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
+and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469a9f59ad16e2eb3a0d6f1c4de637a7b/src/schemas.ts#L219-L232).
 
 ### Amazon Bedrock
 

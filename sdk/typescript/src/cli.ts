@@ -91,7 +91,7 @@ import {
   SCAN_AUTH_MODES,
   scanAuthentication,
   runtimeScanAuthentication,
-  validateScanCostLimit,
+  selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
@@ -105,7 +105,6 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
-  withoutOpenAiApiKeys,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanProgress } from "./scan-progress.js";
@@ -488,7 +487,6 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
-    "huggingface",
     "amazon-bedrock",
   ])
   .default("openai")
@@ -1683,7 +1681,7 @@ export async function runCodexSkillCommand(
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...withoutOpenAiApiKeys(selected),
+          ...selectedScanEnvironment(selected, "chatgpt"),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {
@@ -5660,15 +5658,15 @@ export async function main(
             dependencies.environment["CI"] === undefined &&
             dependencies.environment["TERM"] !== "dumb"
           ) {
-            const effectiveConfig = await mergedCodexConfig(
-              config,
-              scanCodexHome(dependencies.environment),
-            );
             const candidate = new ScanDashboard(errorOutput, {
               repository,
               presentation: "components",
-              model: scanModelConfiguration(effectiveConfig),
-              modelProvider: scanModelProvider(effectiveConfig),
+              model: scanModelConfiguration(
+                await mergedCodexConfig(
+                  config,
+                  scanCodexHome(dependencies.environment),
+                ),
+              ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
               showCost: options.showCost,
@@ -10027,8 +10025,6 @@ async function executeScan(
       ]),
     );
     const provider = scanModelProvider(effectiveConfiguration);
-    if (provider === "huggingface")
-      validateScanCostLimit(arguments_.maxCostUsd, effectiveModel, provider);
     const analytics = resolvedConfiguration["analytics"];
     if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
@@ -10116,7 +10112,6 @@ async function executeScan(
         mode: arguments_.mode,
         showCost,
         model: scanModelConfiguration(effectiveConfiguration),
-        modelProvider: provider,
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),

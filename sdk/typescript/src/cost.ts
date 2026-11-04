@@ -241,7 +241,6 @@ type SessionUsage = ReturnType<typeof createSessionUsage> & {
 interface ScanCostTrackerOptions {
   codexHome: string;
   model: string;
-  modelProvider?: unknown;
   repository?: string;
   scanDirectory?: string;
   maxCostUsd?: number;
@@ -2257,11 +2256,7 @@ export class ScanCostTracker {
     }
     if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
       return this.#snapshot;
-    const cost = estimateScanCost(
-      this.#options.model,
-      fallbackUsage,
-      this.#options.modelProvider,
-    );
+    const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportUsage(tokenUsage(fallbackUsage));
     this.#reportCost(cost);
@@ -2460,11 +2455,7 @@ export class ScanCostTracker {
     if (observeUsage) this.#reportUsageObservation(usages, complete);
     if (!complete) this.#snapshot = { usage: null, cost: null };
     if (usage === null) return;
-    const cost = estimateScanCost(
-      this.#options.model,
-      usage,
-      this.#options.modelProvider,
-    );
+    const cost = estimateScanCost(this.#options.model, usage);
     if (complete) {
       this.#snapshot = { usage, cost };
       this.#reportUsage(usage);

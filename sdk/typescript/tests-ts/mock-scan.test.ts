@@ -26,10 +26,7 @@ import { rejecting, throwing } from "./support/errors.js";
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-async function fixture(
-  workbench: typeof runWorkbench = runWorkbench,
-  codexOverrides?: JsonObject,
-) {
+async function fixture(workbench: typeof runWorkbench = runWorkbench) {
   const root = await mkdtemp(join(await realpath(tmpdir()), "mock-scan-test-"));
   roots.track(root);
   const repository = join(root, "repository");
@@ -47,7 +44,7 @@ async function fixture(
   const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
   const client = new TestClient(
-    { pythonPath: python!, codexOverrides },
+    { pythonPath: python! },
     {
       environment,
       runWorkbench: workbench,
@@ -58,28 +55,6 @@ async function fixture(
   );
   return { root, repository, client, environment, python: python! };
 }
-
-test("persists a Hugging Face mock scan without pricing a Bedrock model ID", async () => {
-  const { client, repository, python, environment } = await fixture(
-    runWorkbench,
-    { model_provider: "huggingface", model: "openai.gpt-5.6-cyber" },
-  );
-  await using owned = client;
-  await expect(
-    owned.run(repository, { mock: true, maxCostUsd: 1 }),
-  ).rejects.toThrow(/cost limit/u);
-  const result = await owned.run(repository, { mock: true });
-  expect(result.cost).toBeNull();
-  expect(result.turnResult).toMatchObject({
-    modelProvider: "huggingface",
-    usage: { input_tokens: 0, output_tokens: 0 },
-  });
-  const stored = await runWorkbench(
-    { python, pluginRoot: PLUGIN_ROOT, environment },
-    ["get-scan", "--scan-id", result.manifest.scan.id],
-  );
-  expect((stored["scan"] as JsonObject)["cost"] ?? null).toBeNull();
-});
 
 test("mock scans seal real artifacts and index shared and unique findings without Codex", async () => {
   const { repository, client, environment, python } = await fixture();

@@ -11,7 +11,6 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import {
   deepMerge,
-  huggingFaceEnvironment,
   inlineToml,
   type JsonObject,
   type JsonValue,
@@ -407,7 +406,7 @@ export async function* runDeepScan(
   const output = await runEngine(
     node?.executable ?? process.execPath,
     [join(options.pluginRoot, "mcp", "server.mjs"), "--deep-scan-engine"],
-    huggingFaceEnvironment(node?.environment ?? environment),
+    node?.environment ?? environment,
     JSON.stringify({ scanId: options.scanId, ...session }),
     options.signal,
   );

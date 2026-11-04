@@ -14,10 +14,7 @@ import {
 import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
-  scanAuthentication,
   scanCodexHome,
-  selectedScanEnvironment,
-  definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
 } from "./api.js";
@@ -32,7 +29,6 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
-  huggingFaceEnvironment,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -41,7 +37,6 @@ import {
   scanCyberAccessConfig,
   scanModelConfiguration,
   scanModelProvider,
-  scanProviderEnvKey,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -623,11 +618,9 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      scanModelProvider(providerConfig) === "huggingface"
-        ? undefined
-        : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-          environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-          undefined,
+      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+      undefined,
     config: {
       ...sdkConfig,
       windows,
@@ -1184,9 +1177,10 @@ export async function comparisonEnvironment(
   config?: JsonObject,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const configuration = config ?? (await readCodexHomeConfig(source, signal));
-  const environment = definedEnvironment(
-    huggingFaceEnvironment(source, configuration),
+  const environment = Object.fromEntries(
+    Object.entries(source).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
   );
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
@@ -1195,22 +1189,10 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (hasCommandAuth(configuration)) {
+  if (
+    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
+  ) {
     return withoutOpenAiApiKeys(environment);
-  }
-  const provider = scanModelProvider(configuration);
-  if (provider === "huggingface") {
-    const key = scanProviderEnvKey(configuration);
-    scanAuthentication(environment, "api-key", provider, false, false, key);
-    return definedEnvironment(
-      selectedScanEnvironment(
-        environment,
-        "api-key",
-        provider,
-        key,
-        configuration,
-      ),
-    );
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;

@@ -171,10 +171,8 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
 export function estimateScanCost(
   model: string | undefined,
   usage: unknown,
-  provider?: unknown,
 ): ScanCost | null {
-  // Router model names do not identify a billable Hugging Face route or rate.
-  if (model === undefined || provider === "huggingface") return null;
+  if (model === undefined) return null;
   const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
     ? BEDROCK_MODEL_PRICING[model]
     : undefined;

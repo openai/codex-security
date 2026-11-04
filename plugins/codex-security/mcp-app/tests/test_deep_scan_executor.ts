@@ -2757,7 +2757,6 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
-    ["huggingface", "HF_TOKEN"],
   ]) {
     await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
       const configPath = path.join(fixture.root, "provider.toml");
@@ -2794,7 +2793,6 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
-        HF_TOKEN: undefined,
       };
       const saved = Object.keys(environment).map(
         (name) => [name, process.env[name]] as const,
@@ -2822,7 +2820,7 @@ async function testExternalProviderCredentialsReachWorker() {
         });
         for (const resumeThreadId of [undefined, "fixture-provider-resume"]) {
           launches.length = 0;
-          if (resumeThreadId) process.env[key] = "changed-ambient-key";
+          process.env[key] = "changed-ambient-key";
           await executor.run(
             workerRequest(promptPath, workingDirectory, {
               resumeThreadId,
@@ -2833,10 +2831,6 @@ async function testExternalProviderCredentialsReachWorker() {
           assert.equal(launch.environment[key], selectedKey);
           assert.equal(launch.environment.OPENAI_API_KEY, undefined);
           assert.equal(launch.environment.CODEX_API_KEY, undefined);
-          assert.equal(
-            launch.environment.HF_TOKEN,
-            key === "HF_TOKEN" ? selectedKey : undefined,
-          );
           assertFlagPair(launch.args, "--profile", profile);
           assertConfigOverrides(launch.args, {
             model_provider: provider,
