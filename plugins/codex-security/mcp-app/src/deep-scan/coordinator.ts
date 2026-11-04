@@ -357,6 +357,8 @@ export class DeepScanCoordinator {
     let finalizationFailure: { error: unknown } | undefined;
     let selectingFinalization = false;
     try {
+      // A replacement coordinator must honor a worker failure committed before handoff.
+      if (this.state.error) throw new Error(this.state.error);
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
@@ -367,6 +369,7 @@ export class DeepScanCoordinator {
       this.setupComplete = true;
       const loopResult = await this.runIterations();
       if (this.canceled || this.externallyFailed) return;
+      this.abortController.signal.throwIfAborted();
       if (this.state.workflowVersion === "deep-security-scan/v2") {
         if (!this.options.store.selectFinalization)
           throw new Error(
@@ -470,7 +473,7 @@ export class DeepScanCoordinator {
       }
       const message = errorMessage(error);
       const persistedMessage = deepScanErrorMessage(error);
-      if (!this.setupComplete) {
+      if (!this.setupComplete && !this.state.error) {
         this.log({
           event: "setup_failed",
           scanId: this.state.scanId,

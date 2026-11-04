@@ -70,6 +70,7 @@ export type DeepScanWorkerMutation = Omit<
 > & {
   scanId: string;
   validatedResultSha256?: string;
+  terminalFailure?: boolean;
   replaceableFailureKind?: DeepScanReplaceableFailureKind;
 };
 

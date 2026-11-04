@@ -174,6 +174,7 @@ def collect_scan_usage(
                 warnings,
                 descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
                 worker_directories=worker_directories,
+                scan_directory=Path(scan["scan_dir"]) if worker_directories else None,
                 started_at=started_at,
                 completed_at=stopped_at,
             )
@@ -554,10 +555,10 @@ def scan_execution_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> 
 def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
     if scan["mode"] != "deep":
         return set()
-    return {
-        row["artifact_dir"]
-        if row["kind"] == "discovery"
-        else str(Path(scan["scan_dir"]) / "artifacts")
+    artifacts = Path(scan["scan_dir"]) / "artifacts"
+    # Finding comparisons start independent sessions before the batch checkpoint is saved.
+    return {str(artifacts / "deep_discovery")} | {
+        row["artifact_dir"] if row["kind"] == "discovery" else str(artifacts)
         for row in connection.execute(
             "SELECT kind, artifact_dir FROM deep_scan_workers "
             "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",
@@ -612,6 +613,7 @@ def _discover_rollout_sessions(
     *,
     descendant_roots: set[str] | None = None,
     worker_directories: set[str] | None = None,
+    scan_directory: Path | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
 ) -> tuple[list[RolloutSession], set[str]]:
@@ -630,6 +632,9 @@ def _discover_rollout_sessions(
             columns = {str(row["name"]) for row in database.execute(f"PRAGMA table_info({table})")}
             if not required.issubset(columns):
                 raise ValueError("Codex state graph does not expose the required thread columns.")
+            if table == "threads" and worker_directories and not {"cwd", "created_at"} <= columns:
+                worker_directories = set()
+                warnings.add("worker_directories_unavailable")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
         root_ids = dict.fromkeys(roots)
@@ -649,6 +654,36 @@ def _discover_rollout_sessions(
             )
             directory_expression = "codex_security_path_key(cwd)"
             worker_directories = {_normalized_windows_path(value) for value in worker_directories}
+            if scan_directory is not None:
+                scan_directory = Path(_normalized_windows_path(scan_directory))
+        if worker_directories and scan_directory and ".previous-" in scan_directory.name:
+            # Archived files move, but session working directories describe where execution ran.
+            # Confirm the original output with an already-bound session before including peers.
+            bound_directories = {
+                Path(row[0])
+                for row in database.execute(
+                    f"SELECT DISTINCT {directory_expression} FROM threads WHERE cwd IS NOT NULL "
+                    "AND id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(roots),),
+                )
+            }
+            relatives = {
+                Path(path).relative_to(scan_directory)
+                for path in worker_directories
+                if Path(path).is_relative_to(scan_directory)
+            }
+            for marker in re.finditer(r"\.previous-", scan_directory.name):
+                if marker.start() == 0:
+                    continue
+                original = scan_directory.with_name(scan_directory.name[: marker.start()])
+                candidates = {original / relative for relative in relatives}
+                # Older archives kept absolute discovery paths in their original directory.
+                if (
+                    original in bound_directories
+                    or candidates & bound_directories
+                    or any(Path(path).is_relative_to(original) for path in worker_directories)
+                ):
+                    worker_directories = worker_directories | {str(path) for path in candidates}
         for directory in sorted(worker_directories):
             for row in database.execute(
                 "SELECT id FROM threads WHERE cwd IS NOT NULL "
@@ -685,7 +720,11 @@ def _discover_rollout_sessions(
                     and isinstance(payload := metadata.get("payload"), dict)
                     and (payload.get("id") or payload.get("session_id")) == root
                     and (created_at := _timestamp(payload.get("timestamp"))) is not None
-                    and created_at < started_millisecond
+                    and (
+                        created_at < started_millisecond
+                        or completed_at is not None
+                        and created_at > completed_at
+                    )
                 ):
                     continue
             sessions[root] = RolloutSession(root, None, path)

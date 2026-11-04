@@ -28,6 +28,7 @@ export const {
   DeepScanRemoteCoordinator,
   AsyncLock,
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   recordCodexSecurityWorkerScanDraft,
 } = await importModule({
@@ -35,7 +36,7 @@ export const {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
-      export { classifyCodexWorkerError } from "./errors.ts";
+      export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
@@ -200,6 +201,11 @@ export class FakeStore {
     }
     persisted.consecutiveErrors = this.run.consecutiveErrors;
     this.workers.set(update.id, persisted);
+    if (update.terminalFailure) {
+      assert.equal(update.status, "failed");
+      assert.ok(update.error);
+      this.run.error ??= update.error;
+    }
     return structuredClone(persisted);
   }
 

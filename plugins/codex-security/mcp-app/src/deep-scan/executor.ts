@@ -98,6 +98,7 @@ export interface CodexSdkWorkerRuntimeSettings {
     api_key_cyber_access_programs?: boolean;
     api_key_model_discovery?: boolean;
   };
+  profileMcpServerNames?: string[];
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -180,6 +181,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           environment: current.environment,
           nativeProfile: current.nativeProfile,
+          profileMcpServerNames: current.profileMcpServerNames,
           preflightProviderOverrides: current.preflightProviderOverrides,
           ...this.modelSettings.runtimeSettings,
           config: await restoredWorkerRuntimeConfig(this.modelSettings),
@@ -289,15 +291,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               : {}),
             codex_security_worker_role: request.kind,
           },
-          mcp_servers: {
-            ...(isRecord(workerConfig.mcp_servers)
-              ? workerConfig.mcp_servers
-              : {}),
-            // A disabled server still needs a valid transport during native resolution.
-            "codex-security": { command: "node", enabled: false },
-            ...(discovery &&
-              this.compactArtifactServer(discovery, includePathsFile)),
-          },
           ...(discovery
             ? workerSubagentConfig(
                 discovery.subagents,
@@ -312,6 +305,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                   apps: false,
                   plugins: false,
                   shell_tool: false,
+                  view_image: false,
+                  image_generation: false,
+                  computer_use: false,
                   unified_exec: false,
                   code_mode: false,
                   code_mode_only: false,
@@ -388,14 +384,23 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
-      if (!discovery) {
-        for (const name of mcpServerNames) {
-          if (name !== "codex-security")
-            configOverrides.push(
-              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
-            );
-        }
-      }
+      const inheritedServers = new Set([
+        ...mcpServerNames,
+        ...(runtimeSettings.profileMcpServerNames ?? []),
+      ]);
+      // Merge flags into the existing transports. Native -c splits dotted keys
+      // even when the server name is quoted; a single TOML table preserves it.
+      const servers = discovery
+        ? {
+            "codex-security": inheritedServers.has("codex-security")
+              ? { enabled: false }
+              : { command: "node", enabled: false },
+            ...this.compactArtifactServer(discovery, includePathsFile),
+          }
+        : Object.fromEntries(
+            [...inheritedServers].map((name) => [name, { enabled: false }]),
+          );
+      configOverrides.push(...profileConfigOverrides({ mcp_servers: servers }));
       const prompt =
         request.kind === "compare"
           ? request.prompt
@@ -907,6 +912,11 @@ export async function workerRuntimeSettings(
         "utf8",
       ),
     );
+    if (isRecord(nativeProfileConfig.mcp_servers)) {
+      settings.profileMcpServerNames = Object.keys(
+        nativeProfileConfig.mcp_servers,
+      );
+    }
     if (isRecord(nativeProfileConfig.model_providers)) {
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
