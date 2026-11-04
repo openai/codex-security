@@ -3174,7 +3174,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         except sqlite3.OperationalError as exc:
             if not getattr(exc, "_codex_security_state_unavailable", False):
                 raise
-            print(f"Local finding history is unavailable: {exc}", file=sys.stderr)
+            print(f"sqlite3.OperationalError: {exc}", file=sys.stderr)
             raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
