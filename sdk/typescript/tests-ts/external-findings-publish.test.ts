@@ -17,6 +17,7 @@ import {
 } from "../src/snyk-findings.js";
 import {
   semgrepJson,
+  semgrepPercentPathReports,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
@@ -9293,23 +9294,7 @@ test("OpenGrep CLI Cloud preview forwards source provenance without uploading", 
 });
 
 test("Semgrep native percent paths retain CE records through JSON-to-SARIF publication", async () => {
-  const paths = [
-    "src/my file.ts",
-    "src/my%20file.ts",
-    "src/100%.ts",
-    "src/100%25.ts",
-  ];
-  const json: any = semgrepJson();
-  const sarif: any = semgrepSarif();
-  delete json.results[0].extra.fingerprint;
-  delete sarif.runs[0].results[0].fingerprints;
-  json.results = paths.map((path) => ({ ...json.results[0], path }));
-  const run = sarif.runs[0];
-  run.results = paths.map((path) => {
-    const result = structuredClone(run.results[0]);
-    result.locations[0].physicalLocation.artifactLocation.uri = path;
-    return result;
-  });
+  const { paths, json, sarif } = semgrepPercentPathReports();
   const f = await fixture(json);
   const settings = {
     ...options,
