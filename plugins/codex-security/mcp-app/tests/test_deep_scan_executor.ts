@@ -1,4 +1,19 @@
 import {
+  CodexSdkWorkerExecutor,
+  resolveCodexPath,
+  snapshotWorkerEnvironment,
+  appendItemDiagnostic,
+  isCodexCybersecurityPolicyRefusal,
+  parseDeepScan,
+  temporaryDirectories,
+  fakeCodexFixture,
+  bundledCodexSdkEnvironment,
+  workerRequest,
+  assertReadOnlyWorkerPolicy,
+  workerPermissionProfileOverride,
+  assertWorkerSubagentPolicy,
+} from "./deep_scan_executor_fixture.ts";
+import {
   mockWorkerSpawn,
   testWorkerCancellation,
 } from "./deep_scan_cancellation_cases.ts";
@@ -12,7 +27,6 @@ import {
 } from "./support/fake-codex-source.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
-  createFakeCodexFixture,
   deniedWorkerPermissionProfile,
   emptyWorkerPermissionProfile,
   trustedParentSandbox,
@@ -25,7 +39,6 @@ import {
   assertFlagPair,
   nativeConfigOverrides,
 } from "./assertions.ts";
-import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock, test, type TestContext } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
@@ -35,7 +48,6 @@ import childProcess, {
   type ChildProcess,
 } from "node:child_process";
 import {
-  chmod,
   copyFile,
   mkdir,
   readFile,
@@ -49,8 +61,6 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
-import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.ts";
 
 import type {
   CodexWorkerDiagnostic,
@@ -62,54 +72,11 @@ import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
-const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
-const { bundledCodexSdkEnvironment } =
-  process.platform === "win32"
-    ? {}
-    : await importModule({
-        entryPoints: [
-          fileURLToPath(
-            new URL(
-              "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-              import.meta.url,
-            ),
-          ),
-        ],
-      });
-
-const {
-  CodexSdkWorkerExecutor,
-  resolveCodexPath,
-  snapshotWorkerEnvironment,
-  appendItemDiagnostic,
-  isCodexCybersecurityPolicyRefusal,
-  parseDeepScan,
-} = await importModule({
-  define: {
-    "import.meta.url": JSON.stringify(executorSource.href),
-  },
-  stdin: {
-    // Expose the environment snapshot only for tests.
-    contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export { isCodexCybersecurityPolicyRefusal } from "./errors.js";
-export { parseDeepScan } from "./response.js";`,
-    loader: "ts",
-    resolveDir: path.dirname(fileURLToPath(executorSource)),
-    sourcefile: fileURLToPath(executorSource),
-  },
-});
-
 const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
 const nativeLauncher = path.join(
   path.dirname(sdkRequire.resolve("@openai/codex/package.json")),
   "bin",
   "codex.js",
-);
-const temporaryDirectories = createTemporaryDirectories(true);
-const fakeCodexFixture = createFakeCodexFixture.bind(
-  null,
-  temporaryDirectories,
 );
 const previousMarker = process.env.FAKE_CODEX_MARKER;
 const ipcFrameError =
@@ -156,32 +123,13 @@ try {
       "selected profile files",
     );
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
-    await check(
-      t,
-      () =>
-        testWorkerCyberAccessSettings({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          parentSandbox: trustedParentSandbox,
-          workerRequest,
-          assertConfigOverrides,
-          assertReadOnlyWorkerPolicy,
-          assertWorkerSubagentPolicy,
-          restoreEnv,
-        }),
-      "cyber access settings",
-    );
+    await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
     await check(t, testRuntimeSnapshotReadRetry);
     if (process.platform !== "win32") {
       await check(
         t,
-        () =>
-          testDeepScanContextSnapshots({
-            CodexSdkWorkerExecutor,
-            fakeCodexFixture,
-            parentSandbox: trustedParentSandbox,
-          }),
+        testDeepScanContextSnapshots,
         "isolated context snapshots",
       );
       await check(t, testMissingParentSandboxFailsBeforeWorkerLaunch);
@@ -212,14 +160,7 @@ try {
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
       await check(
         t,
-        () =>
-          testConcurrentWorkerExecutableAliases({
-            CodexSdkWorkerExecutor,
-            fakeCodexFixture,
-            parentSandbox: trustedParentSandbox,
-            bundledCodexSdkEnvironment,
-            assertReadOnlyWorkerPolicy,
-          }),
+        testConcurrentWorkerExecutableAliases,
         "concurrent executable aliases",
       );
     }
@@ -3649,83 +3590,11 @@ function runWorker(
   }).run(workerRequest(promptPath, workingDirectory, options));
 }
 
-function workerRequest(
-  promptPath: string,
-  workingDirectory: string,
-  options: Partial<CodexWorkerRequest> = {},
-): CodexWorkerRequest {
-  return {
-    kind: "discovery",
-    promptPath,
-    workingDirectory,
-    subagents: 0,
-    signal: new AbortController().signal,
-    ...options,
-  };
-}
-
 async function runFixtureWorker(prompt: string, subagents = 0) {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, `${prompt}\n`);
     return await runWorker(promptPath, workingDirectory, { subagents });
   });
-}
-
-function assertReadOnlyWorkerPolicy(args: readonly string[]) {
-  assert.equal(args.includes("--sandbox"), false);
-  assert.equal(args.includes("--add-dir"), false);
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("approval_policy=")),
-    ['approval_policy="never"'],
-  );
-  assert.equal(
-    args.some((arg: string) => arg.includes("network_access")),
-    false,
-  );
-  const override = workerPermissionProfileOverride(args);
-  assertConfigOverrides(args, {
-    "permissions.codex_security_deep_scan_worker.extends": ":read-only",
-    "permissions.codex_security_deep_scan_worker.filesystem.:root": "read",
-    "permissions.codex_security_deep_scan_worker.network.enabled": false,
-  });
-  assert.equal(override.includes('"write"'), false);
-}
-
-function workerPermissionProfileOverride(args: readonly string[]) {
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("default_permissions=")),
-    ['default_permissions="codex_security_deep_scan_worker"'],
-  );
-  const overrides = args.filter((arg: string) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.equal(overrides.length, 1);
-  return overrides[0];
-}
-
-function assertWorkerSubagentPolicy(
-  args: readonly string[],
-  subagents: number,
-  codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
-) {
-  assertConfigOverrides(args, {
-    "features.multi_agent_v2.enabled": false,
-    "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
-    "features.multi_agent": undefined,
-    "features.code_mode.excluded_tool_namespaces":
-      codeMode?.excluded_tool_namespaces,
-    ...(subagents === 0
-      ? {
-          "agents.max_threads": undefined,
-          "features.enable_fanout": false,
-          "features.code_mode.enabled": codeMode?.enabled,
-        }
-      : {
-          "agents.max_threads": subagents,
-          "features.enable_fanout": undefined,
-        }),
-  });
-  assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
 }
 
 async function withWorkerFixture<Result>(
@@ -3749,30 +3618,16 @@ async function withWorkerFixture<Result>(
 }
 
 async function testWorkerTerminalEvents() {
-  const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
-  try {
-    const promptPath = path.join(fixture.root, "prompt.md");
+  await withWorkerFixture(async (_fixture, promptPath, workingDirectory) => {
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const wrappedQuota = `Error running remote compact task: ${quotaMessage}`;
+    const disconnect =
+      "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: wrappedQuota } },
+      { type: "turn.failed", error: { message: disconnect } },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
       {
@@ -3788,19 +3643,14 @@ async function testWorkerTerminalEvents() {
       );
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         const onNonRetryableError = mock.fn();
-        const execution = new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind: "discovery",
-          promptPath,
-          workingDirectory: fixture.root,
-          subagents: 0,
+        const execution = runWorker(promptPath, workingDirectory, {
           resumeThreadId,
-          signal: new AbortController().signal,
           onNonRetryableError,
         });
         if (event?.type === "turn.failed") {
-          const isQuota = event.error.message === quotaMessage;
+          const isQuota = [quotaMessage, wrappedQuota].includes(
+            event.error.message,
+          );
           await assert.rejects(execution, {
             name: isQuota ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
@@ -3809,7 +3659,7 @@ async function testWorkerTerminalEvents() {
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,
             ),
-            isQuota ? [quotaMessage] : [],
+            isQuota ? [event.error.message] : [],
           );
           continue;
         }
@@ -3818,9 +3668,5 @@ async function testWorkerTerminalEvents() {
         assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
       }
     }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
-  }
+  });
 }
