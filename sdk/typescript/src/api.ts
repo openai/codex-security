@@ -4170,7 +4170,7 @@ export class CodexSecurity {
       const resumableInputFailure = failure instanceof DeepScanRecoveryError;
       const canceled = this.#dependencies.hostedScan
         ? hostedScanFailureStatus(failure, callerCancellation) === "canceled"
-        : explicitlyCanceled(callerCancellation);
+        : isExplicitScanCancellation(failure, callerCancellation);
 
       const preservedCost =
         options.mode === "deep"
@@ -5390,7 +5390,7 @@ export class CodexSecurity {
             workbench,
             activeScan,
             options,
-            explicitlyCanceled(signal),
+            isExplicitScanCancellation(error, signal),
             error,
           );
           activeScan = undefined;
@@ -6525,6 +6525,32 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
   }
   return result;
+}
+
+function isExplicitScanCancellation(
+  failure: unknown,
+  signal?: AbortSignal,
+): boolean {
+  if (!signal || !explicitlyCanceled(signal)) return false;
+  let current = failure;
+  const seen = new Set<ScanInterruptedError>();
+  while (current instanceof ScanInterruptedError) {
+    if (current instanceof ScanCostLimitExceededError) return false;
+    if (current.cause === undefined) return true;
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = current.cause;
+  }
+  if (
+    current instanceof CodexSecurityError &&
+    current.message === "CodexSecurity is closed."
+  ) {
+    return true;
+  }
+  return (
+    current === signal.reason ||
+    (isRecord(current) && current["name"] === "AbortError")
+  );
 }
 
 function throwIfPatchAborted(signal?: AbortSignal, repository = ""): void {

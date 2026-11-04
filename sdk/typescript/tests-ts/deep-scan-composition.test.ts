@@ -816,19 +816,27 @@ describe("ordinary scan composition", () => {
           discoveryLimit ? 0 : fatalMergeFailure ? 1 : 3 - priorFailures,
         );
         expect(h.calls).toEqual([]);
-        expect(h.published).toEqual([]);
-        expect(await h.checkpoint()).toMatchObject({
+        const state = await h.checkpoint();
+        expect(state).toMatchObject({
           consecutiveErrors,
-          ...(kind === "failed discovery"
-            ? {}
-            : {
-                mergeFailures:
-                  discoveryLimit || fatalMergeFailure ? priorFailures : 3,
-              }),
           noNewStreak: 0,
-          mergedScanIds: [],
           terminalReason: "failed",
         });
+        if (kind === "refusal" || kind === "discovery") {
+          expect(state.mergeFailures).toBe(0);
+          expect(state.mergedScanIds).toEqual([scanId]);
+          expect(state.aggregate?.findings).toHaveLength(
+            exampleFindings.findings.length,
+          );
+          expect(h.published).toEqual([state.aggregate!]);
+        } else {
+          if (kind !== "failed discovery")
+            expect(state.mergeFailures).toBe(
+              permissionFailure ? priorFailures : 3,
+            );
+          expect(state.mergedScanIds).toEqual([]);
+          expect(h.published).toEqual([]);
+        }
         expect(await readFile(join(scanDir, "findings.json"))).toEqual(bytes);
         return;
       }
@@ -937,12 +945,25 @@ describe("ordinary scan composition", () => {
 
       expect(attempts).toBe(2);
       expect(h.calls).toHaveLength(1);
-      expect(await h.checkpoint()).toMatchObject({
+      expect(h.checkpoints).toContainEqual(
+        expect.objectContaining({ mergeFailures: 1, mergedScanIds: [] }),
+      );
+      const state = await h.checkpoint();
+      const childId = state.passes[0]!.scanId;
+      expect(state).toMatchObject({
         terminalReason: "failed",
-        mergeFailures: 1,
-        mergedScanIds: [],
+        mergeFailures: 0,
+        mergedScanIds: [childId],
+        aggregate: {
+          findings: [
+            {
+              identity: { anchor: "supported-issue" },
+              provenance: { sourceFindingIds: [`${childId}:0`] },
+            },
+          ],
+        },
       });
-      expect(h.published).toEqual([]);
+      expect(h.published).toEqual([state.aggregate!]);
     },
   );
 
