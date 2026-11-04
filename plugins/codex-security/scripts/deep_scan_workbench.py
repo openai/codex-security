@@ -17,6 +17,7 @@ import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory, worker_usage_directory
+from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -339,6 +340,11 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "coordinatorGeneration": run["coordinator_generation"],
         "status": run["status"],
         "phase": run["phase"],
+        # Older coordinators could persist discovery on the parent before dispatching.
+        "discoveryStarted": (
+            PHASES.index(scan["phase"]) >= PHASES.index("discovery")
+            or run["phase"] in {"discovery", "reducing"}
+        ),
         "config": {
             "workers": run["workers"],
             "subagents": run["subagents"],

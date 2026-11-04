@@ -15,6 +15,9 @@ import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
   scanCodexHome,
+  scanAuthentication,
+  selectedScanEnvironment,
+  definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
 } from "./api.js";
@@ -29,6 +32,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
+  isExternalModelProvider,
+  scanProviderEnvKey,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -269,7 +274,11 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput & SavedComparisonContext,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -543,7 +552,9 @@ export async function matchScanFindingsInternal(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<{
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
@@ -635,12 +646,19 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
+  const modelProvider = scanModelProvider(providerConfig);
+  const nativeKey =
+    !commandAuth && !isExternalModelProvider(modelProvider)
+      ? scanProviderEnvKey(providerConfig)
+      : undefined;
   const environment = await comparisonEnvironment(
     source,
     accountStatus,
     options.signal,
     undefined,
     providerConfig,
+    nativeKey,
+    options.auth,
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
@@ -649,9 +667,11 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-      undefined,
+      nativeKey !== undefined
+        ? undefined
+        : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+          environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+          undefined,
     config: {
       ...sdkConfig,
       windows,
@@ -716,6 +736,15 @@ async function startReadOnlyCodexThread(
       );
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
+    }
+    if (
+      nativeKey !== undefined &&
+      runtimeOptions.nativeProviderEnvironment !== undefined
+    ) {
+      codexOptions.env = {
+        ...runtimeOptions.nativeProviderEnvironment,
+        ...environment,
+      };
     }
     const codex =
       profile === undefined
@@ -1221,6 +1250,8 @@ export async function comparisonEnvironment(
   signal?: AbortSignal,
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
+  nativeKey?: string,
+  auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1234,6 +1265,13 @@ export async function comparisonEnvironment(
     if (name === "CODEX_HOME" && environment[key]) {
       environment[key] = home;
     }
+  }
+  if (nativeKey !== undefined && config !== undefined) {
+    const provider = scanModelProvider(config);
+    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+    return definedEnvironment(
+      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+    );
   }
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
