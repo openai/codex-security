@@ -186,7 +186,8 @@ def recorded_git_checkout_roots(connection: sqlite3.Connection) -> set[Path] | N
         )
         for (root,) in connection.execute(
             f"SELECT DISTINCT value FROM workspaces LEFT JOIN json_each({saved}) "
-            "WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL"
+            f"WHERE {saved} IS NOT NULL OR "
+            "(target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL)"
         ):
             if root is None:
                 return None

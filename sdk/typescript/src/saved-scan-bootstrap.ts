@@ -462,7 +462,8 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
     ? readRows<{ root: string | null }>(
         database,
         `SELECT DISTINCT value AS root FROM workspaces LEFT JOIN json_each(${saved})
-         WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL`,
+         WHERE ${saved} IS NOT NULL OR
+             (target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL)`,
       ).map((row) => row.root)
     : [];
   const roots = [...rows.map((row) => row.checkout_root), ...rejected];

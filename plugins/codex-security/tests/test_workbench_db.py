@@ -1907,8 +1907,9 @@ def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
 @pytest.mark.parametrize("relative", [False, True])
 @pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("corrected", [False, True])
 def test_rejected_workspace_cannot_supply_git_to_later_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool, legacy: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool, legacy: bool, corrected: bool
 ) -> None:
     state = tmp_path / "state"
     requested, rejected = tmp_path / "requested", tmp_path / "rejected"
@@ -1917,7 +1918,8 @@ def test_rejected_workspace_cannot_supply_git_to_later_history(
     create_workspace(state, str(uuid.uuid4()), "--target-path", str(requested))
     monkeypatch.chdir(rejected)
     value = "." if relative else str(rejected / "missing")
-    workspace = create_workspace(state, str(uuid.uuid4()), "--target-path", value)
+    workspace_id = str(uuid.uuid4())
+    workspace = create_workspace(state, workspace_id, "--target-path", value)
     assert workspace["targetPath"] == value
     assert workspace["setupValidation"]["valid"] is False
 
@@ -1926,6 +1928,9 @@ def test_rejected_workspace_cannot_supply_git_to_later_history(
             connection.execute("UPDATE workspaces SET rejected_checkout_roots_json = NULL")
     (rejected / ".git").rename(tmp_path / "removed-git")
     monkeypatch.chdir(requested)
+    if corrected:
+        saved = save_workspace(state, workspace_id, str(requested), ".", "standard")
+        assert saved["setupValidation"]["valid"] is True
     monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     trusted = tmp_path / "trusted"
     trusted.mkdir()

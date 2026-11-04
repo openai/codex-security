@@ -620,7 +620,9 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
                 deep_scan_config_json = ?, submitted = 1, updated_at = ?, target_path_unvalidated = 0,
-                rejected_checkout_roots_json = NULL
+                -- JSON null keeps PATH discovery disabled after a legacy rejection.
+                rejected_checkout_roots_json = COALESCE(rejected_checkout_roots_json,
+                    CASE WHEN target_path_unvalidated = 1 AND target_id IS NULL THEN 'null' END)
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (

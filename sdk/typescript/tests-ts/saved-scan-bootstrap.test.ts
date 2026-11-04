@@ -50,9 +50,14 @@ function writePythonProbe(path: string) {
   );
 }
 
-test.each(["recorded", "legacy"])(
-  "a %s rejected workspace excludes its former checkout from Python discovery",
-  async (history) => {
+test.each([
+  { recorded: true, corrected: false },
+  { recorded: false, corrected: false },
+  { recorded: true, corrected: true },
+  { recorded: false, corrected: true },
+])(
+  "a rejected workspace excludes its former checkout from Python discovery: %j",
+  async ({ recorded, corrected }) => {
     const root = await temporaryDirectory();
     const checkout = join(root, "untrusted");
     const candidate = join(checkout, "requested");
@@ -67,13 +72,27 @@ test.each(["recorded", "legacy"])(
       database
         .query("INSERT INTO workspaces VALUES (?, 1, NULL)")
         .run(candidate);
-      if (history === "recorded") {
+      if (recorded || corrected) {
         database.exec(
           "ALTER TABLE workspaces ADD COLUMN rejected_checkout_roots_json TEXT",
         );
         database
           .query("UPDATE workspaces SET rejected_checkout_roots_json = ?")
-          .run(JSON.stringify([checkout, candidate]));
+          .run(JSON.stringify(recorded ? [checkout, candidate] : null));
+      }
+      if (corrected) {
+        const target = join(root, "corrected");
+        database.exec(
+          "CREATE TABLE security_targets (current_path, git_checkout_root)",
+        );
+        database
+          .query("INSERT INTO security_targets VALUES (?, ?)")
+          .run(target, target);
+        database
+          .query(
+            "UPDATE workspaces SET target_path = ?, target_path_unvalidated = 0, target_id = 1",
+          )
+          .run(target);
       }
     } finally {
       database.close();
@@ -81,9 +100,9 @@ test.each(["recorded", "legacy"])(
     const boundaries = await savedCheckoutBoundaries({
       CODEX_SECURITY_STATE_DIR: root,
     });
-    expect(boundaries?.complete).toBe(history === "recorded");
+    expect(boundaries?.complete).toBe(recorded);
     const roots = await savedDiscoveryRoots(boundaries, []);
-    if (history === "recorded") expect(roots).toContain(checkout);
+    if (recorded) expect(roots).toContain(checkout);
 
     if (process.platform !== "win32") {
       const marker = join(root, "probed");
