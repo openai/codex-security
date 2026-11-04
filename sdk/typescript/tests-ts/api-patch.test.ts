@@ -276,6 +276,12 @@ describe("CodexSecurity headless patching", () => {
         JSON.stringify(join(PLUGIN_ROOT, "skills", "fix-finding", "SKILL.md")),
       );
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
+      expect(captured.prompt).toContain(
+        "true for a committed credential or a confirmed runtime disclosure",
+      );
+      expect(captured.prompt).toContain(
+        "no confirmed disclosure, set the field to false",
+      );
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.prompt).toContain("Do not commit, push, publish");
       expect(captured.turn?.outputSchema).toMatchObject({

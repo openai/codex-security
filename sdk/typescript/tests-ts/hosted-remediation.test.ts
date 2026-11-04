@@ -79,8 +79,16 @@ test.each([
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
-      if (operation === "verify")
+      if (operation === "verify") {
         expect(request.prompt).not.toContain('"checks"');
+      } else {
+        expect(request.prompt).toContain(
+          "true for a committed credential or a confirmed runtime disclosure",
+        );
+        expect(request.prompt).toContain(
+          "no confirmed disclosure, set the field to false",
+        );
+      }
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
       expect(request.prompt).toContain("Verification mode: static");

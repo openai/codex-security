@@ -88,13 +88,17 @@ For a fresh `verified` or `no_change` result, the executor must return a
 boolean `credentialRevocationPending`. The SDK omits the field from the public
 result when false. A missing executor decision is an invalid result.
 
-For a credential exposed in source, `patch.status` describes code cleanup.
+For a checked-in credential or a confirmed runtime disclosure, `patch.status`
+describes the code repair.
 When `patch.credentialRevocationPending` is `true`, show the owner action in
 `patch.verification` and keep the credential finding open. The owner can revoke
 the old credential or deploy a replacement and disable the old value. A
-separate `verify` request needs source cleanup and issuer or owner confirmation
-that the old credential is unusable to return `fixed`. Source cleanup alone
-yields `inconclusive`. Both operations assess supplied evidence offline.
+separate `verify` request needs code cleanup and dated issuer or owner
+confirmation that identifies the affected credentials and establishes their
+retirement to return `fixed`. Code cleanup alone yields `inconclusive` for a
+confirmed exposure. If only a vulnerable endpoint is known, verifying its
+repair can yield `fixed` while the owner checks whether a credential reached
+any caller. Both operations assess supplied evidence offline.
 
 Hosted and local verification use the same verdict parser and do not require
 `checks`. At the hosted boundary, a `fixed` verdict is rejected if a nonempty

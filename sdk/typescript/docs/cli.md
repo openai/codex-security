@@ -2543,9 +2543,10 @@ validation, and `patch` still fixes and verifies findings. Both commands accept 
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
 
-For a checked-in credential, patch results distinguish the code change from
-retirement of the old value. A saved finding can return `verified` after a code
-change or `no_change` if the source was already clean. If
+For a checked-in credential or a confirmed runtime disclosure, patch results
+distinguish the code change from retirement of the old value. A saved finding
+can return `verified` after a code change or `no_change` if the source was
+already clean. If
 `credentialRevocationPending` is `true`, follow the [credential owner steps](#checked-in-credentials).
 You can review the diff or use `--create-pr` with a verified source change while
 the owner retires the old credential.
@@ -2784,10 +2785,13 @@ size. To verify another open occurrence from that scan, run
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
-For a checked-in credential, verified source cleanup with unknown retirement
-returns `inconclusive`. To verify again, put the original finding, source location,
-and issuer or owner confirmation that the specific old credential was disabled
-in one file, omitting the credential value.
+For a checked-in credential or a confirmed runtime disclosure, verified code
+cleanup with unknown retirement returns `inconclusive`. If only a vulnerable
+endpoint is known, verifying that it no longer discloses a credential can yield
+`fixed`. Check the deployment history to determine whether any credential was
+exposed. To verify retirement, put the original finding, source location, and
+dated issuer or owner confirmation identifying the old credential and when it
+was disabled in one file. Omit the credential value.
 Run `codex-security verify-fix finding.md` from the affected checkout.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.

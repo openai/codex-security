@@ -35,7 +35,7 @@ Establish purpose from format and usage. Distinguish credential material from pu
 
 If the caller supplies dated evidence from the issuer or owner that establishes the specific credential’s status, include that status, source, and date in the finding’s `summary`. Otherwise state “Validity unchecked” in the summary.
 
-In `codeEvidence`, copy the complete, verbatim source lines at each cited location. Prefer a consumer line when it proves the finding. If the assignment is needed, include the entire line without truncating the literal or inserting ellipses. Follow `finding-detail-fields.md` for the separate source cleanup and owner retirement steps. If misuse is suspected, recommend immediate revocation. Review available access logs from the earliest plausible exposure through retirement.
+In `codeEvidence`, copy the complete, verbatim source lines at each cited location. Prefer a consumer line when it proves the finding. If the assignment is needed, include the entire line without truncating the literal or inserting ellipses. Follow `finding-detail-fields.md` for the separate source cleanup and owner retirement steps. If misuse is suspected, recommend immediate revocation. Ask the owner to review available access logs from the earliest plausible exposure through retirement.
 
 ## Finding Severity
 
