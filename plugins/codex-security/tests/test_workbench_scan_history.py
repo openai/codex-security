@@ -185,6 +185,7 @@ def create_cli_scan(
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
     identity_instance: str | None = None,
+    locations: list[dict[str, Any]] | None = None,
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
@@ -243,9 +244,11 @@ def create_cli_scan(
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
-    if not finding or extra_anchors or identity_instance is not None:
+    if not finding or extra_anchors or identity_instance is not None or locations is not None:
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
+        if locations is not None:
+            findings["findings"][0]["locations"] = locations
         if identity_instance is not None:
             findings["findings"][0]["identity"]["instance"] = identity_instance
         if not finding:
@@ -1095,34 +1098,65 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == occurrences
 
 
-@pytest.mark.parametrize(
-    ("before_instance", "after_instance"),
-    [(None, None), ("entry", "entry"), ("first", "second"), (None, "entry"), ("entry", None)],
-)
-def test_scan_matching_selects_cross_mode_evidence_for_compatible_instances(
-    tmp_path: Path, before_instance: str | None, after_instance: str | None
-) -> None:
+def test_scan_matching_selects_cross_mode_evidence_for_compatible_instances(tmp_path: Path) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     root = tmp_path / "results"
-    before = create_cli_scan(state_dir, root, repository, identity_instance=before_instance)
+    before = {
+        instance: create_cli_scan(state_dir, root, repository, identity_instance=instance)
+        for instance in (None, "entry")
+    }
+    after = {
+        instance: create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            mode="deep",
+            identity_anchor="unchecked-extraction",
+            identity_instance=instance,
+        )
+        for instance in (None, "entry", "other")
+    }
+    for old_instance, old in before.items():
+        for new_instance, new in after.items():
+            inputs = compare_scan_pair(state_dir, old, new, "--include-matching-inputs")[
+                "matchingInputs"
+            ]
+            if old_instance == new_instance:
+                assert inputs["crossModeOccurrenceIds"] == [
+                    inputs[side][0]["occurrenceId"] for side in ("before", "after")
+                ]
+            else:
+                assert "crossModeOccurrenceIds" not in inputs
 
-    after = create_cli_scan(
-        state_dir,
-        root,
-        repository,
-        mode="deep",
-        identity_anchor="unchecked-extraction",
-        identity_instance=after_instance,
-    )
-    inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
-        "matchingInputs"
-    ]
-    if before_instance != after_instance:
-        assert "crossModeOccurrenceIds" not in inputs
-    else:
-        assert inputs["crossModeOccurrenceIds"] == [
-            inputs[side][0]["occurrenceId"] for side in ("before", "after")
+
+def test_cross_mode_matching_uses_the_first_displayed_control(tmp_path: Path) -> None:
+    state_dir, repository = empty_history_paths(tmp_path)
+    root = tmp_path / "results"
+    witness = {"role": "source", "path": "request.py", "startLine": 2}
+    primary = {"role": "expected_control", "path": "extract.py", "startLine": 41}
+    secondary = {"role": "concrete_implementation", "path": "preview.py", "startLine": 66}
+    before = create_cli_scan(state_dir, root, repository, locations=[witness, primary, secondary])
+    for locations, same_control in [
+        ([{**witness, "path": "upload.py"}, {**primary, "role": "concrete_implementation"}], True),
+        ([witness, secondary, primary], False),
+    ]:
+        after = create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            mode="deep",
+            identity_anchor="unchecked-write",
+            locations=locations,
+        )
+        inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
+            "matchingInputs"
         ]
+        if same_control:
+            assert inputs["crossModeOccurrenceIds"] == [
+                inputs[side][0]["occurrenceId"] for side in ("before", "after")
+            ]
+        else:
+            assert "crossModeOccurrenceIds" not in inputs
 
 
 def test_matching_plan_keeps_cross_mode_context_with_each_scan_pair(tmp_path: Path) -> None:

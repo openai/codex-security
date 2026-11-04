@@ -1035,7 +1035,7 @@ function comparisonPrompt(
     "Keep distinct independently vulnerable controls or instances separate.",
     ...(crossModeSites
       ? [
-          "Cards marked crossModeSite include an occurrence with a candidate from the other scan mode at the same rule and primary site but with a different anchor. If the controls or fixes are unclear, request the full evidence before deciding whether the findings match.",
+          "Cards marked crossModeSite include an occurrence with a cross-mode candidate sharing its rule and site despite different anchors. Request full evidence if the control or fix is unclear.",
         ]
       : []),
     "The earlier findings form a catalogue of known issues. Each top-level before occurrenceId represents that issue. Its earlierDescriptions contain fields that differ from the current card. Return the top-level IDs; the host expands the saved historical occurrences.",

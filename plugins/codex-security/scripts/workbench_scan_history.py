@@ -21,7 +21,6 @@ from finalize_scan_contract import (
     _prepare_scan_finalization,
     _read_scan_local_json_bytes,
     _read_sealed_scan,
-    _sarif_primary_location,
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
@@ -452,6 +451,8 @@ def list_scans(
 
 
 _FindingSites = dict[tuple[str, str | None, PurePosixPath, int, int], dict[str, Any] | None]
+# Match the first location shown by compactFinding in finding-catalogue.ts.
+_COMPARISON_LOCATION_RANK = {"root_control": 0, "expected_control": 1, "concrete_implementation": 1}
 
 
 def _unique_finding_sites(findings: list[dict[str, Any]]) -> _FindingSites:
@@ -459,7 +460,10 @@ def _unique_finding_sites(findings: list[dict[str, Any]]) -> _FindingSites:
     for finding in findings:
         if not finding.get("locations"):
             return {}
-        location = _sarif_primary_location(finding)
+        location = min(
+            finding["locations"],
+            key=lambda site: _COMPARISON_LOCATION_RANK.get(site.get("role"), 2),
+        )
         key = (
             finding["ruleId"],
             finding["identity"].get("instance"),

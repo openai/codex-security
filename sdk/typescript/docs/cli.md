@@ -2139,9 +2139,10 @@ codex-security scans match --all --force --model gpt-6.1-sol --effort high
 
 When a saved Standard scan and a Deep scan have the same recorded target,
 revision, and snapshot digest, matching flags findings that have different
-anchors but share a unique rule, primary source range, and optional instance.
-Codex can request their saved evidence to distinguish separate causes at that
-site. Automatic matching under a cost limit keeps its single comparison call.
+anchors but share a unique rule, first displayed source range, and optional
+instance. Matching preserves the case of saved paths. Codex can request the
+saved evidence to distinguish separate causes at that site. Automatic matching
+under a cost limit keeps its single comparison call.
 
 Only high-confidence root-cause matches are grouped. Uncertain and related
 findings remain separate. Rebuilding retains stable identities, triage, and
@@ -2366,8 +2367,9 @@ this repository and contains only the generated commands. Rerun `install-hook`
 with `--fail-on-severity` set to its original threshold. It recognizes the legacy
 `npx` hook and supported earlier templates with matching absolute Node and CLI
 paths. If it refuses to overwrite the verified hook, back it up, remove it and
-reinstall with the same threshold. Restore the backup if installation fails. The installer
-respects `core.hooksPath`.
+reinstall with the same threshold. Restore the backup if installation fails.
+The installer uses host Git for the selected repository and respects
+`core.hooksPath`.
 
 ## Import SonarQube Cloud issues
 
