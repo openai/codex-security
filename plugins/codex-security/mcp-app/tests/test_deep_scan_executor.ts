@@ -1082,7 +1082,8 @@ async function testReportOnlyComparison() {
     // override paths that the pinned native executable splits literally.
     await writeFile(
       path.join(fixture.root, "config.toml"),
-      '[mcp_servers."fixture.catalog"]\ncommand = "fixture-command"\n',
+      '[mcp_servers."fixture.catalog"]\ncommand = "fixture-command"\n' +
+        '[mcp_servers.codex-security]\nurl = "https://example.invalid/mcp"\n',
     );
     const effective = spawnSync(
       process.execPath,
