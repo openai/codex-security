@@ -1,6 +1,9 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
+  completePatches,
   publicationRepository,
   resultWithFindings,
   runGitRepositoryCommand,
@@ -116,3 +119,80 @@ test.each([
   expect(new Set(commands)).toEqual(new Set(["git"]));
   expect(model).not.toHaveBeenCalled();
 });
+
+test.each([
+  ["preflight", "vcs"],
+  ["patch branch", "vcs"],
+  ["resume", "vcs"],
+  ["preflight", "uploadpack"],
+  ["preflight", "receivepack"],
+])(
+  "rejects checkout-selected publication transport (%s, remote.origin.%s)",
+  async (stage, field) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const key = `remote.origin.${field}`;
+    const hosted = "https://gitlab.com/example/repository.git";
+    const branch = "codex-security/patch-scan-1";
+    git("remote", "set-url", "origin", hosted);
+    if (field !== "vcs") {
+      git("config", "--add", "remote.origin.pushurl", hosted);
+      git("config", "--add", "remote.origin.pushurl", remote);
+    }
+    if (stage === "patch branch") {
+      const include = join(directory, ".git", "patch-branch.config");
+      git("config", "--file", include, key, "synthetic-helper");
+      git("config", `includeIf.onbranch:${branch}.path`, include);
+    } else {
+      git("config", key, "synthetic-helper");
+    }
+    if (stage === "resume") {
+      git("branch", branch);
+      git(
+        "config",
+        `branch.${branch}.codexSecurityPatchCommit`,
+        git("rev-parse", "HEAD"),
+      );
+    }
+
+    const transports: string[] = [];
+    let modelCalls = 0;
+    const outcome = await runWorkflow(
+      stage === "resume"
+        ? ["patch", "--resume-pr", branch, "--json"]
+        : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: async (args, output) => {
+          modelCalls++;
+          await writeFile(join(directory, "src", "finding-1.ts"), "fixed\n");
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") return "";
+          if (args.includes("ls-remote")) {
+            transports.push("ls-remote");
+            if (stage === "patch branch") return "";
+            throw new Error("Unexpected preflight transport");
+          }
+          if (args.includes("push")) {
+            transports.push("push");
+            throw new Error("Unexpected publication transport");
+          }
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+      },
+      { localHosting: false },
+    );
+    expect(transports, outcome.stderr).toEqual(
+      stage === "patch branch" ? ["ls-remote"] : [],
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(outcome.stderr).toMatch(
+      /remote helper|remote\.origin\.|pack program|service program/i,
+    );
+    expect(modelCalls).toBe(stage === "patch branch" ? 1 : 0);
+  },
+);
