@@ -1465,6 +1465,7 @@ describe("ordinary scan composition", () => {
 
   test.each([
     "Transient scan interruption",
+    "Error running remote compact task: stream disconnected before completion: synthetic reset",
     "429: request flagged for possible cybersecurity risk.",
     "Rate-limited: request refused under safety policy.",
     "Source fixture: Request blocked by cyberPolicy.",
@@ -2137,6 +2138,7 @@ describe("ordinary scan composition", () => {
   test.each([
     "metering",
     "Quota exceeded. Check your plan and billing details.",
+    "Error running remote compact task: Quota exceeded. Check your plan and billing details.",
     "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
     "Your workspace is out of credits. Add credits to continue.",
     "You’ve hit your usage limit. Try again later.",

@@ -5,6 +5,25 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const USAGE_LIMIT_MESSAGES = new Set([
+  "Quota exceeded. Check your plan and billing details.",
+  "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
+  "Your workspace is out of credits. Add credits to continue.",
+  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+  "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+]);
+
+/** Codex reports native quota failures as text, sometimes during compaction. */
+export function isCodexUsageLimit(message: string): boolean {
+  const reason = message.replace(/^Error running remote compact task: /, "");
+  return (
+    USAGE_LIMIT_MESSAGES.has(reason) ||
+    reason.startsWith("You’ve hit your usage limit.") ||
+    reason.startsWith("You’ve hit your usage limit for ")
+  );
+}
+
 export function abortReason(signal: AbortSignal): unknown {
   return (
     signal.reason ??

@@ -29,6 +29,17 @@ const { recordCodexSecurityScanDraftViaWorkbench } = draftApi;
 const execFileAsync = promisify(execFile);
 const generic = { reason: "Review remains.", paths: ["src/example.py"] };
 const close = (id: string, reason = "Review completed.") => ({ id, reason });
+
+async function snapshotFiles(directory: string): Promise<[string, Buffer][]> {
+  const files: [string, Buffer][] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...(await snapshotFiles(filename)));
+    else files.push([filename, await readFile(filename)]);
+  }
+  return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
 const findingFor = (candidateId: string) => ({
   ruleId: "fixture.review",
   title: "Synthetic review finding",
@@ -92,6 +103,33 @@ test("current draft recovery rejects legacy optional details without modifying s
   assert.throws(() => parseCanonicalCheckpoint(input));
   assert.deepEqual(input, original);
 });
+
+for (const layout of ["standard", "diff", "worker"] as const) {
+  test(`${layout}: duplicate task IDs cannot close independent deferred work`, async (t) => {
+    const f = await fixture(t, layout);
+    const first = { id: "review", ...generic };
+    const second = { ...first, paths: ["src/other.py"] };
+    await assert.rejects(
+      f.writeReviewState({ deferred: [first, second] }),
+      /reviewState.deferred repeats review/,
+    );
+    assert.deepEqual(await readdir(f.root), []);
+    second.id = "other-review";
+    await f.writeReviewState({ deferred: [first, second] });
+    const before = await snapshotFiles(f.root);
+    const repeated = [
+      close(first.id),
+      close(first.id, "Checked both callers."),
+    ];
+    await assert.rejects(
+      f.writeReviewState({ resolvedDeferred: repeated }, true),
+      /reviewState.resolvedDeferred repeats review/,
+    );
+    assert.deepEqual(await snapshotFiles(f.root), before);
+    await f.writeReviewState({ resolvedDeferred: [close(first.id)] }, true);
+    assert.deepEqual((await f.read()).deferred, [second]);
+  });
+}
 
 for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: parent writes return receipt repairs and workbench warnings`, async (t) => {
@@ -321,21 +359,6 @@ for (const layout of ["standard", "diff"] as const) {
     });
   }
 
-  test(`${layout}: duplicate task IDs cannot close independent deferred work`, async (t) => {
-    const f = await fixture(t, layout);
-    const first = { id: "review", ...generic };
-    const second = { ...first, paths: ["src/other.py"] };
-    await assert.rejects(
-      f.write(f.draft({ deferred: [first, second] })),
-      /reviewState.deferred repeats review/,
-    );
-    assert.deepEqual(await readdir(f.root), []);
-    second.id = "other-review";
-    await f.write(f.draft({ deferred: [first, second] }));
-    await f.write(f.draft({ resolvedDeferred: [close(first.id)] }, true));
-    assert.deepEqual((await f.read()).deferred, [second]);
-  });
-
   for (const savedIn of ["canonical result", "checkpoint"]) {
     test(`${layout}: a closure cannot erase distinct legacy tasks from a ${savedIn}`, async (t) => {
       const f = await fixture(t, layout);
@@ -361,17 +384,7 @@ for (const layout of ["standard", "diff"] as const) {
         (layout === "worker" ? saved.reviewState : saved).deferred = tasks;
         await writeJson(filename, saved);
       }
-      const snapshot = async (
-        directory = f.root,
-      ): Promise<[string, string][]> => {
-        const files: [string, string][] = [];
-        for (const entry of await readdir(directory, { withFileTypes: true })) {
-          const filename = path.join(directory, entry.name);
-          if (entry.isDirectory()) files.push(...(await snapshot(filename)));
-          else files.push([filename, await readFile(filename, "utf8")]);
-        }
-        return files.sort(([left], [right]) => left.localeCompare(right));
-      };
+      const snapshot = () => snapshotFiles(f.root);
       const original = await snapshot();
       for (let attempt = 0; attempt < 2; attempt += 1) {
         await assert.rejects(
