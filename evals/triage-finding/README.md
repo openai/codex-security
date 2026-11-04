@@ -2,7 +2,7 @@
 
 This Promptfoo suite verifies that `$codex-security:triage-finding` accepts the current supported input source types and returns the expected `triage-finding/v0`
 JSON result shape. It also covers bare skill invocation with no supplied finding,
-which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, REST endpoints, and explicit Connector requests without querying live GitHub during the eval.
+which should prompt the user for a finding in a supported format instead of returning triage JSON. GitHub intake cases cover repository-source selection, app, CLI and REST routing, and source-specific endpoints without querying live GitHub during the eval.
 
 The suite uses the Promptfoo Codex SDK provider because it only needs final assistant output and deterministic assertions. The common runner stages the checkout's triage skill and policy helper in a throwaway directory, with ambient plugins and memory disabled. The default suite can also read the synthetic fixtures; calibration cases can read their own hydrated checkout. Dataset labels, assertions, and calibration Git history stay outside those readable roots. The eval directory owns a small pinned pnpm environment so new cases can be added and run without a separate scratch setup.
 
@@ -59,14 +59,13 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `tests/invocation-behavior.yaml` opts out of those default JSON assertions for the no-finding case with `options.disableDefaultAsserts: true`.
 - `assertions/missing-input.mts` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
-- `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector requests and approved REST fallback, and explicit-only GitHub Issue handling.
+- `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases. Start a fresh GitHub intake evaluation when updating the routing fixtures. Saved runs retain their old prompts and expected transports.
+- `assertions/github-rest-intake.mts` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, transport and authentication selection, explicit Connector requests and approved fallback, and explicit-only GitHub Issue handling.
 
-The explicit Connector case returns a three-field JSON decision for transport,
-fallback, and account/repository scope. The code-scanning case returns request
-paths and query parameters as JSON. A separate default-transport case checks
-that intake selects REST without an explicit Connector request. Other intake
-cases use freeform answers.
+The code-scanning case checks endpoint paths and query parameters. Routing cases
+check the selected transport and credential for a capable app, a saved GitHub CLI
+login, a direct credential, an unavailable credential, and user-selected app or CLI transports
+that cannot enforce the requested scope. Other intake cases use freeform answers.
 
 ## Calibration Dataset
 

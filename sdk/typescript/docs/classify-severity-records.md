@@ -25,7 +25,7 @@ Send one newline-delimited JSON-RPC request with `method: "run"` and these param
 ```
 
 The `rubric` field is optional. Omit it to classify with the
-[built-in severity rubric](https://github.com/openai/codex-security/blob/main/sdk/typescript/src/default-severity-rubric.ts), using the same configured
+[built-in severity rubric](https://github.com/openai/codex-security/blob/main/plugins/codex-security/references/default-severity-rubric.md), using the same configured
 independent host reviews and usage accounting. The result echoes its built-in
 revision (currently `1`) and exact Markdown SHA-256. Supplying a custom rubric
 replaces the default completely and preserves the supplied revision/hash binding.
