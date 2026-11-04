@@ -1,4 +1,5 @@
 import { isNonEmptyString } from "./value.js";
+import { isUtf8 } from "node:buffer";
 import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync, type Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
@@ -128,10 +129,13 @@ export async function normalizeRepository(
 ): Promise<string> {
   const candidate = resolveRepositoryPath(repository);
   requirePortableWindowsRepositoryPath(candidate);
-  let canonical: string;
+  let resolved: Buffer;
   try {
-    canonical = await abortable(() => realpath(candidate), signal);
-    if (!(await abortable(() => stat(canonical), signal)).isDirectory()) {
+    resolved = await abortable(
+      () => realpath(candidate, { encoding: "buffer" }),
+      signal,
+    );
+    if (!(await abortable(() => lstat(resolved), signal)).isDirectory()) {
       throw new Error("not a directory");
     }
   } catch (error) {
@@ -143,12 +147,27 @@ export async function normalizeRepository(
       },
     );
   }
+  requireUtf8Path("Repository path", candidate, resolved);
+  const canonical = resolved.toString();
   requirePortableWindowsRepositoryPath(canonical);
   return canonical;
 }
 
 export function resolveRepositoryPath(repository: string): string {
+  requireUtf8Path("Repository path", repository);
   return resolve(expandHome(repository));
+}
+
+function requireUtf8Path(
+  label: "Repository path" | "Path target",
+  value: string,
+  resolved?: Buffer,
+): void {
+  if (resolved === undefined ? !value.isWellFormed() : !isUtf8(resolved)) {
+    throw new InvalidTargetError(
+      `${label} cannot be represented as UTF-8: ${value}`,
+    );
+  }
 }
 
 function requirePortableWindowsRepositoryPath(path: string): void {
@@ -572,25 +591,36 @@ export async function normalizeTarget(
         "Path scan targets must not contain an empty path.",
       );
     }
+    requireUtf8Path("Path target", value);
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
-    let metadata: Stats;
     let canonical: string;
     try {
-      metadata = await abortable(() => stat(candidate), signal);
-      canonical = await abortable(() => realpath(candidate), signal);
+      // Some runtimes cannot canonicalize special files to filesystem paths.
+      requireScanPathType(
+        value,
+        await abortable(() => stat(candidate), signal),
+      );
+      const resolved = await abortable(
+        () => realpath(candidate, { encoding: "buffer" }),
+        signal,
+      );
+      canonical = resolved.toString();
+      if (!isAbsolute(canonical)) {
+        throw new InvalidTargetError(`Could not resolve path target: ${value}`);
+      }
+      requireScanPathType(
+        value,
+        await abortable(() => lstat(resolved), signal),
+      );
+      requireUtf8Path("Path target", value, resolved);
     } catch (error) {
       throwIfAborted(signal);
+      if (error instanceof InvalidTargetError) throw error;
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
-    }
-    // Match the bundled scan scope resolver's supported filesystem types.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target is not a regular file or directory: ${value}`,
-      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
@@ -610,6 +640,14 @@ export async function normalizeTarget(
     paths.add(normalized);
   }
   return { kind: "paths", paths: [...paths] };
+}
+
+function requireScanPathType(value: string, metadata: Stats): void {
+  if (!metadata.isFile() && !metadata.isDirectory()) {
+    throw new InvalidTargetError(
+      `Path target is not a regular file or directory: ${value}`,
+    );
+  }
 }
 
 export async function validateCommittedDiffCheckout(
