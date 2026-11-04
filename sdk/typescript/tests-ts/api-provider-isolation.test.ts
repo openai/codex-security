@@ -665,6 +665,8 @@ test.each([
 const fileProviderKeyCases = [
   ["gateway", "custom only", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "declared external header", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "declared Codex account header", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -677,6 +679,12 @@ const fileProviderKeyCases = [
   ["openrouter", "custom Codex key", "CODEX_API_KEY"],
   ["openrouter", "other external key", "FIREWORKS_API_KEY"],
 ] as const;
+
+const gatewayHeaders = new Map<string, string>([
+  ["declared external header", "FIREWORKS_API_KEY"],
+  ["declared Codex account header", "CODEX_API_KEY"],
+  ["declared OpenAI account header", "OPENAI_API_KEY"],
+]);
 
 test.each(["openrouter", "fireworks"] as const)(
   "native file profile accepts the %s custom environment key",
@@ -724,28 +732,24 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
       const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const gatewayHeader = gatewayHeaders.get(_selection);
       const headerKey =
-        _selection === "declared external header"
-          ? "FIREWORKS_API_KEY"
-          : _selection === "canonical header"
-            ? canonicalKey
-            : undefined;
+        gatewayHeader ??
+        (_selection === "canonical header" ? canonicalKey : undefined);
       const headerEnvironment =
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
           : {};
-      const inactiveKey =
-        _selection === "declared external header"
-          ? "CHEAPER_INFERENCE_API_KEY"
-          : "INACTIVE_GATEWAY_TOKEN";
-      const inactiveEnvironment =
-        _selection === "declared external header"
-          ? { [inactiveKey]: "synthetic-inactive-key" }
-          : {};
+      const inactiveKey = gatewayHeader
+        ? "CHEAPER_INFERENCE_API_KEY"
+        : "INACTIVE_GATEWAY_TOKEN";
+      const inactiveEnvironment = gatewayHeader
+        ? { [inactiveKey]: "synthetic-inactive-key" }
+        : {};
       const inheritedEnvironment: Record<string, string> = {
         ...(_selection === "custom Codex key" ||
         _selection === "other external key" ||
-        _selection === "declared external header"
+        gatewayHeader
           ? Object.fromEntries(
               [
                 "OPENAI_API_KEY",
@@ -776,6 +780,9 @@ for (const mode of ["standard", "deep"] as const) {
         wire_api: "responses",
         base_url: "https://provider.example.test/v1",
         env_key: providerKey,
+        ...(gatewayHeader === "OPENAI_API_KEY"
+          ? { requires_openai_auth: true }
+          : {}),
         ...(headerKey
           ? { env_http_headers: { "X-Synthetic-Token": headerKey } }
           : {}),
@@ -805,8 +812,8 @@ for (const mode of ["standard", "deep"] as const) {
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
-              if (_selection === "declared external header") {
-                expect(options.environment).not.toHaveProperty(headerKey!);
+              if (gatewayHeader) {
+                expect(options.environment).not.toHaveProperty(gatewayHeader);
                 expect(options.environment).not.toHaveProperty(inactiveKey);
               }
             }

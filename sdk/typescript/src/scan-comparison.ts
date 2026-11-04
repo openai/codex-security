@@ -15,6 +15,9 @@ import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
   scanCodexHome,
+  scanAuthentication,
+  selectedScanEnvironment,
+  definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
 } from "./api.js";
@@ -29,6 +32,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
+  isExternalModelProvider,
+  scanProviderEnvKey,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -604,12 +609,20 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
+  const modelProvider = scanModelProvider(providerConfig);
+  const nativeKey =
+    !commandAuth &&
+    options.auth !== "chatgpt" &&
+    !isExternalModelProvider(modelProvider)
+      ? scanProviderEnvKey(providerConfig)
+      : undefined;
   const environment = await comparisonEnvironment(
     source,
     accountStatus,
     options.signal,
     undefined,
     providerConfig,
+    nativeKey,
   );
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
@@ -618,9 +631,11 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-      environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-      undefined,
+      nativeKey !== undefined
+        ? undefined
+        : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+          environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+          undefined,
     config: {
       ...sdkConfig,
       windows,
@@ -1175,6 +1190,7 @@ export async function comparisonEnvironment(
   signal?: AbortSignal,
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
+  nativeKey?: string,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1188,6 +1204,26 @@ export async function comparisonEnvironment(
     if (name === "CODEX_HOME" && environment[key]) {
       environment[key] = home;
     }
+  }
+  if (nativeKey !== undefined && config !== undefined) {
+    const provider = scanModelProvider(config);
+    scanAuthentication(
+      environment,
+      "api-key",
+      provider,
+      false,
+      false,
+      nativeKey,
+    );
+    return definedEnvironment(
+      selectedScanEnvironment(
+        environment,
+        "api-key",
+        provider,
+        nativeKey,
+        config,
+      ),
+    );
   }
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
