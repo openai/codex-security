@@ -529,6 +529,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           CODEX_SECURITY_ARTIFACT_LAYOUT: assigned.layout,
           CODEX_SECURITY_SCAN_ID: scan.scanId,
           CODEX_SECURITY_PLUGIN_ROOT: scan.pluginRoot,
+          ...(assigned.discoveryBoard && {
+            CODEX_SECURITY_DISCOVERY_BOARD_ROOT: assigned.discoveryBoard.root,
+            CODEX_SECURITY_DISCOVERY_WORKER: assigned.discoveryBoard.author,
+          }),
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
