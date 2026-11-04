@@ -74,7 +74,9 @@ def bundled_instruction_digest(
         installation = root.stat()
         compiled: dict[str, bytes] = {}
         if deep_role_digests is not None:
-            for role in ("discovery", "dedup"):
+            # Earlier coordinators also supplied a compiled reducer template.
+            roles = ("discovery", "dedup") if "dedup" in deep_role_digests else ("discovery",)
+            for role in roles:
                 value = deep_role_digests.get(role)
                 if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
                     return None

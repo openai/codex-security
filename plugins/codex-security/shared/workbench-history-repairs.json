@@ -2,8 +2,26 @@
   [
     "WITH input AS (SELECT :history AS history)",
     "SELECT 'sql' AS operation,",
-    "    'UPDATE schema_migrations SET version = 61 WHERE version = 59' AS value",
-    "FROM schema_migrations WHERE version = 59 AND name = 'record scan and worker instruction digests';"
+    "    'UPDATE schema_migrations SET version = 63 WHERE version = ' || version AS value",
+    "FROM schema_migrations WHERE version IN (59, 61) AND name = 'record scan and worker instruction digests';"
+  ],
+  [
+    "-- A released reader can add its columns while an instruction digest preview still owns the version.",
+    "WITH released(version, table_name, column_name) AS (",
+    "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
+    "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
+    "        (58, 'deep_scan_runs', 'terminal_reviewed_surface_count'),",
+    "        (59, 'deep_scan_runs', 'service_tier'),",
+    "        (61, 'scans', 'launch_surface')",
+    ")",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (' ||",
+    "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
+    "FROM released JOIN json_each(:history) AS history",
+    "    ON json_extract(history.value, '$.version') = released.version",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'record scan and worker instruction digests')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
   ],
   [
     "WITH input AS (SELECT :history AS history)",

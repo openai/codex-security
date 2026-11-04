@@ -15,8 +15,6 @@ import pytest
 from workbench_test_support import (
     BUDGET_COST,
     cancel_scan,
-    claim_deep_scan_dedup,
-    commit_deep_dedup,
     empty_target_paths,
     empty_target_scan,
     fail_deep_scan,
@@ -33,6 +31,8 @@ from workbench_test_support import (
     saved_discovery_worker,
     saved_draft,
     scan_command,
+    seal_legacy_reducer,
+    seed_legacy_reducer,
     select_checkpoint,
     upsert_deep_worker,
     worker_paths,
@@ -1298,7 +1298,7 @@ def running_standard_reducer(
         for worker_id in (discovery_worker_id, *additional_worker_ids)
         for argument in ("--input-worker-id", worker_id)
     ]
-    claim_deep_scan_dedup(
+    seed_legacy_reducer(
         state_dir,
         scan_id,
         reducer_id,
@@ -1342,7 +1342,7 @@ def committed_standard_reducer(
     )
     environment = {"CODEX_HOME": str(codex_home)}
     result_path.write_text(discovery_result.read_text())
-    committed = commit_deep_dedup(
+    committed = seal_legacy_reducer(
         state_dir, scan_id, reducer_id, str(result_path), "0", environment=environment
     )["deepScan"]
     return reducer_id, result_path, committed
@@ -1820,7 +1820,7 @@ def test_failed_reducer_preserves_later_successful_worker_findings(tmp_path: Pat
 
     reducer_id = str(uuid.uuid4())
     prompt_path, artifact_dir, _ = worker_paths(scan_dir, "failed-reducer")
-    claim_deep_scan_dedup(
+    seed_legacy_reducer(
         state_dir,
         scan_id,
         reducer_id,

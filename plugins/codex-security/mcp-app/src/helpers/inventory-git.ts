@@ -1,5 +1,6 @@
 import {
   environmentValue,
+  isMissingPathError,
   resolvedPathText as canonical,
 } from "./helper-files";
 import {
@@ -47,13 +48,16 @@ interface ToolResult {
 }
 
 const repositoryEnvironment = [
+  "GIT_ALLOW_PROTOCOL",
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
   "GIT_CEILING_DIRECTORIES",
   "GIT_COMMON_DIR",
   "GIT_DIR",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
   "GIT_INDEX_FILE",
+  "GIT_LITERAL_PATHSPECS",
   "GIT_NAMESPACE",
+  "GIT_NO_LAZY_FETCH",
   "GIT_OBJECT_DIRECTORY",
   "GIT_WORK_TREE",
 ];
@@ -325,10 +329,11 @@ function gitProcess(repo: string, args: string[]) {
   const inherited = inheritedToolPaths();
   for (const name of Object.keys(env)) {
     const key = windows ? name.toUpperCase() : name;
-    if (repositoryEnvironment.includes(key) || key === "GIT_LITERAL_PATHSPECS")
-      delete env[name];
+    if (repositoryEnvironment.includes(key)) delete env[name];
   }
   env.GIT_LITERAL_PATHSPECS = "1";
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_ALLOW_PROTOCOL = "";
   return spawnTool(
     command,
     [
@@ -608,11 +613,20 @@ export async function changedPaths(
     ),
   ))
     if (!path.endsWith("/")) result.set(path, { path, status: "A" });
-  return [...result.values()].filter(
-    ({ path, status }) =>
-      !path.split("/").some((part) => sourceMetadata.has(part)) &&
-      (status === "D" || regular(append(repo, path))),
-  );
+  const selected: Change[] = [];
+  for (const change of result.values()) {
+    const { path, status } = change;
+    if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
+    const absolute = append(repo, path);
+    try {
+      if (status === "M" && linkedParent(repo, absolute))
+        selected.push({ path, status: "D" });
+      else if (status === "D" || regular(absolute)) selected.push(change);
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return selected;
 }
 
 /** Consume each complete blob while retaining at most the preview prefix. */
