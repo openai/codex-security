@@ -1,4 +1,0 @@
-interface:
-  display_name: "Fix Finding"
-  short_description: "Fix and verify a given security finding"
-  default_prompt: "Use $fix-finding to fix a given security finding and verify the issue no longer reproduces."

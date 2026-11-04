@@ -1,8 +1,15 @@
-import { createHash, X509Certificate } from "node:crypto";
+import { X509Certificate, hash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMain } from "./is-main.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
+
+/**
+ * @typedef {Record<string, unknown>} ReleaseMetadata
+ * @typedef {{ version: string, gitHead: string }} PublishedRelease
+ * @typedef {PublishedRelease & { repository: string }} RepositoryRelease
+ * @typedef {RepositoryRelease & { runId: string }} WorkflowRelease
+ * @typedef {WorkflowRelease & { runAttempt: string, sha512: string }} ReleaseProvenance
+ */
 
 const packageName = "@openai/codex-security";
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
@@ -10,7 +17,10 @@ const provenancePredicate = "https://slsa.dev/provenance/v1";
 const publicNpmRegistry = "https://registry.npmjs.org/";
 const githubActionsOidcIssuer = "https://token.actions.githubusercontent.com";
 const fulcioExtensionPrefix = Buffer.from("2b0601040183bf3001", "hex");
+const releaseSummaryStart = "<!-- codex-security-release-summary:start -->";
+const releaseSummaryEnd = "<!-- codex-security-release-summary:end -->";
 
+/** @param {unknown} tag */
 function stableReleaseTagVersion(tag) {
   if (typeof tag !== "string" || !tag.startsWith("npm-v")) {
     throw new Error("Release tags must identify a stable npm-vX.Y.Z version.");
@@ -23,19 +33,126 @@ function stableReleaseTagVersion(tag) {
   return version;
 }
 
+/** @param {unknown} version */
+export function assertStableVersion(version) {
+  if (typeof version !== "string" || !stableVersion.test(version)) {
+    throw new Error("Release package must have a stable X.Y.Z version.");
+  }
+  return version;
+}
+
+/** @param {ReleaseMetadata} packageJson */
 export function releaseVersion(packageJson) {
   if (packageJson?.name !== packageName) {
     throw new Error("Release package must be @openai/codex-security.");
   }
-  if (
-    typeof packageJson.version !== "string" ||
-    !stableVersion.test(packageJson.version)
-  ) {
-    throw new Error("Release package must have a stable X.Y.Z version.");
-  }
-  return packageJson.version;
+  return assertStableVersion(packageJson.version);
 }
 
+function hasReviewedText(value) {
+  return !value.includes("\0") && /\S/u.test(value);
+}
+
+/**
+ * @param {string} version
+ * @param {string} notes
+ */
+export function parseReviewedReleaseNotes(version, notes) {
+  const expectedHeader = `<!-- release-version: ${version} -->`;
+  const normalized =
+    typeof notes === "string" ? notes.replace(/\n+$/u, "") : "";
+  const firstNewline = normalized.indexOf("\n");
+  const summary = normalized.slice(firstNewline + 1);
+  if (
+    firstNewline === -1 ||
+    normalized.slice(0, firstNewline) !== expectedHeader ||
+    !hasReviewedText(summary)
+  ) {
+    throw new Error(
+      `Release notes must start with ${expectedHeader} and include a reviewed summary.`,
+    );
+  }
+  return summary;
+}
+
+/** @param {string} notes */
+export function extractHistoricalReleaseSummary(notes) {
+  if (typeof notes !== "string") {
+    throw new Error("Existing release notes must be a string.");
+  }
+
+  const markers = [...notes.matchAll(/^[^\r\n]+$/gmu)].filter(
+    ([line]) => line === releaseSummaryStart || line === releaseSummaryEnd,
+  );
+  if (markers.length === 0 || markers[0]?.index !== 0) return null;
+
+  const [startMarker, endMarker] = markers;
+  if (
+    markers.length !== 2 ||
+    startMarker?.[0] !== releaseSummaryStart ||
+    endMarker?.[0] !== releaseSummaryEnd
+  ) {
+    throw new Error("Existing release summary markers are malformed.");
+  }
+
+  const remainder = notes.slice(endMarker.index + endMarker[0].length);
+  if (remainder !== "" && !/^(?:\r?\n){2}/u.test(remainder)) {
+    throw new Error("Existing release summary markers are malformed.");
+  }
+
+  const summary = notes
+    .slice(startMarker.index + startMarker[0].length, endMarker.index)
+    .replace(/^\r?\n/u, "")
+    .replace(/\r?\n$/u, "");
+  if (!hasReviewedText(summary)) {
+    throw new Error("Existing release summary is empty.");
+  }
+  return summary;
+}
+
+/**
+ * @param {string} version
+ * @param {string | undefined} taggedNotes
+ * @param {string | undefined} existingNotes
+ */
+export function resolveReleaseSummary(version, taggedNotes, existingNotes) {
+  if (taggedNotes !== undefined) {
+    return parseReviewedReleaseNotes(version, taggedNotes);
+  }
+  if (existingNotes === undefined || existingNotes.length === 0) {
+    return null;
+  }
+  return extractHistoricalReleaseSummary(existingNotes);
+}
+
+/**
+ * @param {string} generatedNotes
+ * @param {string | null} releaseSummary
+ */
+export function composeReleaseNotes(generatedNotes, releaseSummary) {
+  if (releaseSummary === null || releaseSummary === "") {
+    return generatedNotes;
+  }
+  return [
+    releaseSummaryStart,
+    releaseSummary,
+    releaseSummaryEnd,
+    "",
+    "<details>",
+    "<summary>All changes</summary>",
+    "",
+    generatedNotes,
+    "",
+    "</details>",
+  ].join("\n");
+}
+
+/**
+ * @param {string} refType
+ * @param {string} ref
+ * @param {string} refName
+ * @param {ReleaseMetadata} packageJson
+ */
 export function releaseTagVersion(refType, ref, refName, packageJson) {
   if (refType !== "tag" || ref !== `refs/tags/${refName}`) {
     throw new Error("npm releases must be dispatched from a real Git tag.");
@@ -50,6 +167,10 @@ export function releaseTagVersion(refType, ref, refName, packageJson) {
   return packageVersion;
 }
 
+/**
+ * @param {string} left
+ * @param {string} right
+ */
 export function compareReleaseVersions(left, right) {
   if (!stableVersion.test(left) || !stableVersion.test(right)) {
     throw new Error("Release versions must use stable X.Y.Z versions.");
@@ -64,6 +185,10 @@ export function compareReleaseVersions(left, right) {
   return 0;
 }
 
+/**
+ * @param {string} version
+ * @param {string} previousVersion
+ */
 export function requireReleaseIncrease(version, previousVersion) {
   if (compareReleaseVersions(version, previousVersion) <= 0) {
     throw new Error(
@@ -73,6 +198,11 @@ export function requireReleaseIncrease(version, previousVersion) {
   return version;
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} registryError
+ * @returns {string[]}
+ */
 export function initialPublishedVersions(version, registryError) {
   releaseVersion({ name: packageName, version });
   if (version !== "0.1.0" || registryError?.error?.code !== "E404") {
@@ -81,6 +211,11 @@ export function initialPublishedVersions(version, registryError) {
   return [];
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} publishedVersions
+ * @returns {"publish" | "recover"}
+ */
 export function publishedReleaseMode(version, publishedVersions) {
   releaseVersion({ name: packageName, version });
   if (!Array.isArray(publishedVersions)) {
@@ -106,6 +241,10 @@ export function publishedReleaseMode(version, publishedVersions) {
   return mode;
 }
 
+/**
+ * @param {string} version
+ * @param {unknown} publishedVersions
+ */
 export function requirePublishedReleaseIncrease(version, publishedVersions) {
   if (publishedReleaseMode(version, publishedVersions) !== "publish") {
     throw new Error(
@@ -164,14 +303,8 @@ function derChildren(bytes, element) {
   let cursor = element.start;
   while (cursor < element.end) {
     const child = derElement(bytes, cursor, element.end);
-    if (child.end <= cursor) {
-      throw invalidSigningCertificate();
-    }
     children.push(child);
     cursor = child.end;
-  }
-  if (cursor !== element.end) {
-    throw invalidSigningCertificate();
   }
   return children;
 }
@@ -314,13 +447,7 @@ function verifySigningCertificate(bundle, expected) {
     );
   }
 
-  const runPrefix = `${expected.repository}/actions/runs/${expected.runId}/attempts/`;
-  const certificateRun = extensions.get(21);
-  if (
-    typeof certificateRun !== "string" ||
-    !certificateRun.startsWith(runPrefix) ||
-    !/^[1-9][0-9]*$/u.test(certificateRun.slice(runPrefix.length))
-  ) {
+  if (extensions.get(21) !== expected.invocation) {
     throw new Error(
       "The Fulcio certificate must identify the exact release run.",
     );
@@ -337,6 +464,10 @@ function verifySigningCertificate(bundle, expected) {
   }
 }
 
+/**
+ * @param {string} tag
+ * @param {{ registryVersions: string[], githubReleaseTags: string[], reachableTags: string[] }} history
+ */
 export function releaseHistory(tag, history) {
   const version = stableReleaseTagVersion(tag);
   if (
@@ -350,62 +481,45 @@ export function releaseHistory(tag, history) {
   }
 
   const publishedVersions = new Set(
-    history.registryVersions.filter(
+    [
+      ...history.registryVersions,
+      ...history.githubReleaseTags
+        .filter((tag) => typeof tag === "string" && tag.startsWith("npm-v"))
+        .map((tag) => tag.slice("npm-v".length)),
+    ].filter(
       (candidate) =>
         typeof candidate === "string" && stableVersion.test(candidate),
     ),
   );
-  const publishedGitHubTags = new Set(
-    history.githubReleaseTags.filter(
-      (candidate) =>
-        typeof candidate === "string" &&
-        candidate.startsWith("npm-v") &&
-        stableVersion.test(candidate.slice("npm-v".length)),
-    ),
-  );
 
-  let previousTag = null;
-  for (const candidate of history.reachableTags) {
+  let previousVersion = null;
+  for (const tag of history.reachableTags) {
+    if (typeof tag !== "string" || !tag.startsWith("npm-v")) continue;
+    const candidate = tag.slice("npm-v".length);
     if (
-      typeof candidate !== "string" ||
-      !candidate.startsWith("npm-v") ||
-      !stableVersion.test(candidate.slice("npm-v".length))
+      stableVersion.test(candidate) &&
+      publishedVersions.has(candidate) &&
+      compareReleaseVersions(candidate, version) < 0 &&
+      (previousVersion === null ||
+        compareReleaseVersions(candidate, previousVersion) > 0)
     ) {
-      continue;
-    }
-
-    const candidateVersion = candidate.slice("npm-v".length);
-    if (
-      compareReleaseVersions(candidateVersion, version) >= 0 ||
-      (!publishedVersions.has(candidateVersion) &&
-        !publishedGitHubTags.has(candidate))
-    ) {
-      continue;
-    }
-
-    if (
-      previousTag === null ||
-      compareReleaseVersions(
-        candidateVersion,
-        previousTag.slice("npm-v".length),
-      ) > 0
-    ) {
-      previousTag = candidate;
+      previousVersion = candidate;
     }
   }
 
-  const makeLatest =
-    Array.from(publishedVersions).every(
+  return {
+    previousTag: previousVersion === null ? null : "npm-v" + previousVersion,
+    makeLatest: Array.from(publishedVersions).every(
       (candidate) => compareReleaseVersions(version, candidate) >= 0,
-    ) &&
-    Array.from(publishedGitHubTags).every(
-      (candidate) =>
-        compareReleaseVersions(version, candidate.slice("npm-v".length)) >= 0,
-    );
-
-  return { previousTag, makeLatest };
+    ),
+  };
 }
 
+/**
+ * @param {ReleaseMetadata} metadata
+ * @param {Uint8Array} archive
+ * @param {PublishedRelease} expected
+ */
 export function verifyPublishedRelease(metadata, archive, expected) {
   const version = releaseVersion(metadata);
   if (version !== expected.version) {
@@ -415,8 +529,7 @@ export function verifyPublishedRelease(metadata, archive, expected) {
   assertExpectedGitHead(metadata, expected.gitHead);
 
   const integrity = metadata["dist.integrity"] ?? metadata.dist?.integrity;
-  const expectedIntegrity =
-    "sha512-" + createHash("sha512").update(archive).digest("base64");
+  const expectedIntegrity = "sha512-" + hash("sha512", archive, "base64");
   if (integrity !== expectedIntegrity) {
     throw new Error(
       "Published npm integrity must match the verified release artifact.",
@@ -433,10 +546,16 @@ export function verifyPublishedRelease(metadata, archive, expected) {
     version,
     gitHead: expected.gitHead,
     integrity: expectedIntegrity,
-    sha256: createHash("sha256").update(archive).digest("hex"),
+    sha256: hash("sha256", archive),
   };
 }
 
+/**
+ * @param {ReleaseMetadata} metadata
+ * @param {Uint8Array} archive
+ * @param {WorkflowRelease} expected
+ * @param {ReleaseProvenance} provenance
+ */
 export function verifyGitHubPublishedRelease(
   metadata,
   archive,
@@ -444,7 +563,7 @@ export function verifyGitHubPublishedRelease(
   provenance,
 ) {
   const version = releaseVersion(metadata);
-  const sha512 = createHash("sha512").update(archive).digest("hex");
+  const sha512 = hash("sha512", archive);
   if (
     provenance?.version !== version ||
     provenance.gitHead !== expected.gitHead ||
@@ -467,6 +586,33 @@ export function verifyGitHubPublishedRelease(
   return verifyPublishedRelease(metadata, archive, expected);
 }
 
+function readProvenance(verified) {
+  const provenance = Array.isArray(verified.attestationBundles)
+    ? verified.attestationBundles.find(
+        (candidate) => candidate?.predicateType === provenancePredicate,
+      )
+    : undefined;
+  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
+  if (typeof encodedStatement !== "string") {
+    throw new Error("The verified SLSA provenance bundle is missing.");
+  }
+
+  let statement;
+  try {
+    statement = JSON.parse(
+      Buffer.from(encodedStatement, "base64").toString("utf8"),
+    );
+  } catch {
+    throw new Error("The verified SLSA provenance statement is invalid.");
+  }
+  return { provenance, statement };
+}
+
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {WorkflowRelease} expected
+ */
 export function verifySignatureAudit(report, archive, expected) {
   if (
     !Array.isArray(report?.invalid) ||
@@ -512,24 +658,7 @@ export function verifySignatureAudit(report, archive, expected) {
     throw new Error("The verified npm package must have SLSA v1 provenance.");
   }
 
-  const provenance = Array.isArray(verified.attestationBundles)
-    ? verified.attestationBundles.find(
-        (candidate) => candidate?.predicateType === provenancePredicate,
-      )
-    : undefined;
-  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
-  if (typeof encodedStatement !== "string") {
-    throw new Error("The verified SLSA provenance bundle is missing.");
-  }
-
-  let statement;
-  try {
-    statement = JSON.parse(
-      Buffer.from(encodedStatement, "base64").toString("utf8"),
-    );
-  } catch {
-    throw new Error("The verified SLSA provenance statement is invalid.");
-  }
+  const { provenance, statement } = readProvenance(verified);
   if (
     statement?._type !== "https://in-toto.io/Statement/v1" ||
     statement.predicateType !== provenancePredicate
@@ -537,7 +666,7 @@ export function verifySignatureAudit(report, archive, expected) {
     throw new Error("The verified SLSA provenance statement is invalid.");
   }
 
-  const sha512 = createHash("sha512").update(archive).digest("hex");
+  const sha512 = hash("sha512", archive);
   const expectedSubject = `pkg:npm/%40openai/codex-security@${version}`;
   if (
     !Array.isArray(statement.subject) ||
@@ -616,7 +745,7 @@ export function verifySignatureAudit(report, archive, expected) {
     repository,
     releaseRef,
     gitHead: expected.gitHead,
-    runId,
+    invocation,
   });
 
   return {
@@ -624,10 +753,16 @@ export function verifySignatureAudit(report, archive, expected) {
     gitHead: expected.gitHead,
     repository: expected.repository,
     runId,
+    runAttempt: invocation.slice(invocationPrefix.length),
     sha512,
   };
 }
 
+/**
+ * @param {ReleaseMetadata} report
+ * @param {Uint8Array} archive
+ * @param {RepositoryRelease} expected
+ */
 export function verifyRecoveredSignatureAudit(report, archive, expected) {
   const version = releaseVersion({
     name: packageName,
@@ -652,24 +787,7 @@ export function verifyRecoveredSignatureAudit(report, archive, expected) {
     );
   }
 
-  const provenance = Array.isArray(verified.attestationBundles)
-    ? verified.attestationBundles.find(
-        (candidate) => candidate?.predicateType === provenancePredicate,
-      )
-    : undefined;
-  const encodedStatement = provenance?.bundle?.dsseEnvelope?.payload;
-  if (typeof encodedStatement !== "string") {
-    throw new Error("The verified SLSA provenance bundle is missing.");
-  }
-
-  let statement;
-  try {
-    statement = JSON.parse(
-      Buffer.from(encodedStatement, "base64").toString("utf8"),
-    );
-  } catch {
-    throw new Error("The verified SLSA provenance statement is invalid.");
-  }
+  const { statement } = readProvenance(verified);
 
   const prefix = `https://github.com/${expected.repository}/actions/runs/`;
   const invocation = statement?.predicate?.runDetails?.metadata?.invocationId;
@@ -694,6 +812,13 @@ export function verifyRecoveredSignatureAudit(report, archive, expected) {
   });
 }
 
+/**
+ * @param {ReleaseMetadata} release
+ * @param {Uint8Array} archive
+ * @param {string} expectedTag
+ * @param {string} assetName
+ * @param {Uint8Array} [downloadedArchive]
+ */
 export function verifyGitHubRelease(
   release,
   archive,
@@ -708,8 +833,7 @@ export function verifyGitHubRelease(
     throw new Error("Existing GitHub Release must be published and stable.");
   }
 
-  const expectedDigest =
-    "sha256:" + createHash("sha256").update(archive).digest("hex");
+  const expectedDigest = "sha256:" + hash("sha256", archive);
   const asset = Array.isArray(release.assets)
     ? release.assets.find((candidate) => candidate?.name === assetName)
     : undefined;
@@ -717,8 +841,7 @@ export function verifyGitHubRelease(
   const downloadedDigest =
     downloadedArchive === undefined
       ? undefined
-      : "sha256:" +
-        createHash("sha256").update(downloadedArchive).digest("hex");
+      : "sha256:" + hash("sha256", downloadedArchive);
   if (
     asset === undefined ||
     (publishedDigest != null && publishedDigest !== expectedDigest) ||
@@ -786,6 +909,12 @@ function main() {
     return;
   }
 
+  if (command === "validate-release-notes" && process.argv.length === 5) {
+    const notes = readFileSync(process.argv[4], "utf8");
+    process.stdout.write(parseReviewedReleaseNotes(process.argv[3], notes));
+    return;
+  }
+
   if (command === "release-history" && process.argv.length === 4) {
     const registryVersions = JSON.parse(
       process.env.CODEX_SECURITY_PUBLISHED_NPM_VERSIONS ?? "[]",
@@ -812,24 +941,25 @@ function main() {
     return;
   }
 
-  if (command === "verify-publication" && process.argv.length === 6) {
+  if (
+    (command === "verify-publication" && process.argv.length === 6) ||
+    (command === "verify-github-publication" && process.argv.length === 8) ||
+    (command === "verify-provenance" && process.argv.length === 8) ||
+    (command === "verify-recovered-provenance" && process.argv.length === 7)
+  ) {
     const metadata = JSON.parse(readFileSync(0, "utf8"));
     const archive = readFileSync(process.argv[3]);
-    const verified = verifyPublishedRelease(metadata, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-    });
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (command === "verify-github-publication" && process.argv.length === 8) {
-    const metadata = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const provenance = JSON.parse(
-      process.env.CODEX_SECURITY_VERIFIED_PROVENANCE ?? "null",
-    );
-    const verified = verifyGitHubPublishedRelease(
+    const provenance =
+      command === "verify-github-publication"
+        ? JSON.parse(process.env.CODEX_SECURITY_VERIFIED_PROVENANCE ?? "null")
+        : undefined;
+    const verify = {
+      "verify-publication": verifyPublishedRelease,
+      "verify-github-publication": verifyGitHubPublishedRelease,
+      "verify-provenance": verifySignatureAudit,
+      "verify-recovered-provenance": verifyRecoveredSignatureAudit,
+    }[command];
+    const verified = verify(
       metadata,
       archive,
       {
@@ -844,49 +974,6 @@ function main() {
     return;
   }
 
-  if (command === "verify-provenance" && process.argv.length === 8) {
-    const report = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const verified = verifySignatureAudit(report, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-      repository: process.argv[6],
-      runId: process.argv[7],
-    });
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (command === "verify-recovered-provenance" && process.argv.length === 7) {
-    const report = JSON.parse(readFileSync(0, "utf8"));
-    const archive = readFileSync(process.argv[3]);
-    const verified = verifyRecoveredSignatureAudit(report, archive, {
-      version: process.argv[4],
-      gitHead: process.argv[5],
-      repository: process.argv[6],
-    });
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
-  if (
-    command === "verify-github-release" &&
-    (process.argv.length === 5 || process.argv.length === 6)
-  ) {
-    const release = JSON.parse(readFileSync(0, "utf8"));
-    const archivePath = process.argv[3];
-    const archive = readFileSync(archivePath);
-    const verified = verifyGitHubRelease(
-      release,
-      archive,
-      process.argv[4],
-      basename(archivePath),
-      process.argv[5] === undefined ? undefined : readFileSync(process.argv[5]),
-    );
-    console.log(JSON.stringify(verified));
-    return;
-  }
-
   throw new Error(
     "Usage: release-automation.mjs version <package.json>, " +
       "release-tag <ref-type> <ref> <ref-name> <package.json>, " +
@@ -896,6 +983,7 @@ function main() {
       "require-published-increase <version> " +
       "(published npm versions JSON from stdin), " +
       "release-mode <version> (published npm versions JSON from stdin), " +
+      "validate-release-notes <version> <release-notes-file>, " +
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
@@ -903,17 +991,12 @@ function main() {
       "<repository> <run-id> (package metadata JSON from stdin and " +
       "verified provenance from CODEX_SECURITY_VERIFIED_PROVENANCE), " +
       "verify-provenance <archive> <version> <git-head> <repository> <run-id> " +
-      "(signature audit JSON from stdin), " +
+      "(signature audit JSON from stdin), or " +
       "verify-recovered-provenance <archive> <version> <git-head> " +
-      "<repository> (signature audit JSON from stdin), or " +
-      "verify-github-release <archive> <tag> [downloaded-asset] " +
-      "(GitHub release JSON from stdin).",
+      "<repository> (signature audit JSON from stdin).",
   );
 }
 
-if (
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isMain(import.meta.url)) {
   main();
 }

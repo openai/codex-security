@@ -10,7 +10,8 @@ export interface ScanManifest {
       version: string;
       [k: string]: unknown;
     };
-    status: "completed";
+    status: "completed" | "failed" | "canceled" | "interrupted";
+    warnings?: string[];
     startedAt: string;
     completedAt: string;
     sealedAt: string;
@@ -36,20 +37,54 @@ export interface ScanManifest {
       limitations?: string[];
       [k: string]: unknown;
     };
-    threatModel?: {
-      summary: string;
-      assets?: string[];
-      trustBoundaries?: string[];
-      attackerCapabilities?: string[];
-      securityObjectives?: string[];
-      assumptions?: string[];
-      [k: string]: unknown;
-    };
+    /**
+     * Retained threat-model content. Existing structured models remain supported; Markdown documents preserve their complete original body.
+     */
+    threatModel?:
+      | {
+          summary: string;
+          assets?: string[];
+          trustBoundaries?: string[];
+          attackerCapabilities?: string[];
+          securityObjectives?: string[];
+          assumptions?: string[];
+          [k: string]: unknown;
+        }
+      | {
+          format: "markdown";
+          content: string;
+          /**
+           * The modeled source scope, which may differ from the scan scope. Omit when unknown.
+           */
+          scope?: {
+            includePaths: string[];
+            excludePaths?: string[];
+            summary?: string;
+            [k: string]: unknown;
+          };
+          origin?: "generated" | "provided" | "reconciled" | "recovered";
+          [k: string]: unknown;
+        };
     hardening?: {
       portfolioPath: "hardening/hardening.md";
       [k: string]: unknown;
     };
-    coverageRef: "coverage.json";
+    coverageRef?: "coverage.json";
+    mode?:
+      | "repository"
+      | "scoped_path"
+      | "diff"
+      | "commit"
+      | "branch_diff"
+      | "working_tree"
+      | "deep_repository";
+    review?: {
+      excludedPaths: string[];
+      [k: string]: unknown;
+    };
+    reviewState?: {
+      [k: string]: unknown;
+    };
     findingsRef: "findings.json";
     /**
      * @minItems 1
@@ -130,6 +165,13 @@ export interface FindingsDocument {
       explanation: string;
       [k: string]: unknown;
     }[];
+    code_evidence?:
+      | {
+          id: string;
+          code: string;
+          [k: string]: unknown;
+        }[]
+      | null;
     rootCause?:
       | {
           summary: string;
@@ -139,11 +181,110 @@ export interface FindingsDocument {
           [k: string]: unknown;
         }
       | string;
+    root_cause?:
+      | {
+          summary?: string;
+          evidenceRefs?: string[];
+          evidence_refs?: string[];
+          code?: string;
+          language?: string;
+          [k: string]: unknown;
+        }
+      | string
+      | null;
     remediation: string;
     validation?: {
+      assertions?: string[];
+      counterEvidence?: string[];
+      evidence?: string | string[];
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      limitations?: string[];
+      method?: string;
+      status?: string | null;
+      summary?: string;
+      disposition?: string | null;
+      result?: string | null;
       [k: string]: unknown;
     } | null;
     attackPath?: {
+      assumptions?: string[];
+      blindspots?: string[];
+      controls?: string[];
+      dataFlow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      data_flow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      dataflow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      impact?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      likelihood?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      limitations?: string[];
+      preconditions?: string[];
+      reachability?:
+        | string
+        | {
+            summary?: string;
+            attacker?: string;
+            entrypoint?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            preconditions?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      steps?: string[];
+      summary?: string;
       [k: string]: unknown;
     } | null;
     remediationTests?: string[];
@@ -175,13 +316,8 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
-    | "repository"
-    | "scoped_path"
-    | "diff"
-    | "directory"
-    | "custom";
+    "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
   surfaces: {
@@ -209,6 +345,13 @@ export interface CoverageDocument {
     paths?: string[];
     surfaceIds?: string[];
     [k: string]: unknown;
+  }[];
+  /**
+   * Completed generic review tasks, with their saved IDs and completion reasons.
+   */
+  resolvedDeferred?: {
+    id: string;
+    reason: string;
   }[];
   openQuestions?: {
     question: string;
@@ -264,15 +407,19 @@ export type FindingValidation = NonNullable<Finding["validation"]>;
 
 export type FindingAttackPath = NonNullable<Finding["attackPath"]>;
 
-export type AttackPathDataflow = ContractObject;
+export type AttackPathDataflow = Extract<
+  NonNullable<FindingAttackPath["dataFlow"]>,
+  object
+>;
 
-export type AttackPathReachability = ContractObject;
+export type AttackPathReachability = Extract<
+  NonNullable<FindingAttackPath["reachability"]>,
+  object
+>;
 
 export type FindingProvenance = Finding["provenance"];
 
 export type CoverageMode = CoverageDocument["mode"];
-
-export type CoverageCompleteness = CoverageDocument["completeness"];
 
 export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 

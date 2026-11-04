@@ -1,5 +1,4 @@
-import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { realpath } from "node:fs/promises";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -15,11 +14,18 @@ import type {
   ScanProgress,
   ScanWorkerStatus,
   SeverityLevel,
+  ValidationOptions,
+  ValidationResult,
 } from "../src/index.js";
 import { CodexSecurityError, ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
+import { throwing } from "./support/errors.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
+
+export type OnCodex = (
+  ...arguments_: Parameters<MainDependencies["runCodex"]>
+) => number | Promise<number>;
 
 export const SYNTHETIC_CREDENTIALS = [
   "sk-proj-SYNTHETIC_KEY_123",
@@ -73,59 +79,7 @@ export const SYNTHETIC_CREDENTIALS = [
   "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3DSYNTHETIC_NESTED_REFRESH_123%26password%3DSYNTHETIC_NESTED_PASSWORD_123%26safe%3D1",
 ].join(" ");
 
-export const REDACTED_CREDENTIALS = [
-  "[redacted]",
-  "Bearer [redacted]",
-  "Authorization: Basic [redacted]",
-  "Authorization: Token [redacted]",
-  "Authorization: Bearer%20[redacted]",
-  "Authorization%3A%20Bearer%20[redacted]",
-  "https://[redacted]@example.test/private",
-  "ssh://[redacted]@example.test/private",
-  "git+ssh://[redacted]@example.test/private",
-  "[redacted]",
-  "[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "CODEX_API_KEY=[redacted]",
-  "CODEX_ACCESS_TOKEN=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "GH_TOKEN=[redacted]",
-  '{"OPENAI_API_KEY":"[redacted]","CODEX_API_KEY":"[redacted]"}',
-  '{\\"OPENAI_API_KEY\\":\\"[redacted]\\",\\"CODEX_API_KEY\\":\\"[redacted]\\"}',
-  '{"refresh_token":"[redacted]","id_token":"[redacted]","clientSecret":"[redacted]","dbPassword":"[redacted]","passwd":"[redacted]"}',
-  '{\\"refreshToken\\":\\"[redacted]\\",\\"idToken\\":\\"[redacted]\\",\\"clientSecret\\":\\"[redacted]\\",\\"password\\":\\"[redacted]\\"}',
-  "AWS_SECRET_ACCESS_KEY=[redacted]",
-  "AWS_ACCESS_KEY_ID=[redacted]",
-  "AWS_SESSION_TOKEN=[redacted]",
-  "NODE_AUTH_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "ACTIONS_ID_TOKEN_REQUEST_TOKEN=[redacted]",
-  "ACTIONS_RUNTIME_TOKEN=[redacted]",
-  "GITLAB_TOKEN=[redacted]",
-  "HF_TOKEN=[redacted]",
-  "SLACK_BOT_TOKEN=[redacted]",
-  "//registry.npmjs.org/:_authToken=[redacted]",
-  "x-api-key: [redacted]",
-  "access_token=[redacted]",
-  "[redacted]",
-  "https://example.test/?token=[redacted]&safe=1",
-  "https://example.test/?credential=[redacted]&safe=1",
-  "https://example.test/?AWS_ACCESS_KEY_ID=[redacted]&safe=1",
-  "https://example.test/?AWS%5FACCESS%5FKEY%5FID=[redacted]&AWS%2DACCESS%2DKEY%2DID=[redacted]&safe=1",
-  "https://example.test/?service-api-key=[redacted]&service-access-token=[redacted]&service-token=[redacted]&service-secret=[redacted]&signature=[redacted]&safe=1",
-  "https://example.test/?X-Amz-Signature=[redacted]&X-Amz-Credential=[redacted]&X-Amz-Security-Token=[redacted]&safe=1",
-  "https://example.test/?X-Goog-Signature=[redacted]&X-Goog-Credential=[redacted]&safe=1",
-  "https://example.test/?sv=2026-01-01&sig=[redacted]&safe=1",
-  "https://example.test/?password=[redacted]&passwd=[redacted]&safe=1",
-  "https://example.test/?oauth.refreshToken=[redacted]&auth[token]=[redacted]&auth%5BclientSecret%5D=[redacted]&safe=1",
-  "https://example.test/?access_token%3D[redacted]&client_secret%3D[redacted]&safe=1",
-  "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3D[redacted]%26password%3D[redacted]%26safe%3D1",
-].join(" ");
-
-export function capture(isTTY = false): {
+export function capture(isTTY: boolean | null = false): {
   stream: Pick<NodeJS.WriteStream, "write"> &
     Partial<Pick<NodeJS.WriteStream, "isTTY">>;
   text(): string;
@@ -133,7 +87,7 @@ export function capture(isTTY = false): {
   let value = "";
   return {
     stream: {
-      isTTY,
+      ...(isTTY === null ? {} : { isTTY }),
       write(chunk: string | Uint8Array): boolean {
         value += chunk.toString();
         return true;
@@ -157,9 +111,22 @@ export function fakePreflight(
   };
 }
 
+export const savedRecipe = (
+  config: JsonObject = {},
+  target: JsonObject = { kind: "repository", paths: [] },
+) => ({
+  scanId: "scan-original",
+  recipe: {
+    repository: "/original/repository",
+    target,
+    mode: "standard",
+    config,
+  },
+});
+
 export function fakeResult(
   severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = "complete",
+  completeness?: "complete" | "partial" | "unknown",
   usage: unknown = null,
 ): ScanResult {
   const manifest = {
@@ -196,7 +163,7 @@ export function fakeResult(
     schemaVersion: "1.0",
     scanId: "scan",
     mode: "repository",
-    completeness,
+    ...(completeness === undefined ? {} : { completeness }),
     inventoryStrategy: "repository",
     includePaths: ["."],
     excludePaths: [],
@@ -240,15 +207,26 @@ export class FakeSignals {
 export function dependencies(
   options: {
     onConfig?: (config: CodexSecurityConfig) => void;
-    onTurn?: (repository: string, options: unknown) => void;
+    onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (args: readonly string[]) => number;
-    bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onValidate?: (options: ValidationOptions) => Promise<ValidationResult>;
+    onCodex?: OnCodex;
+    linearClient?: MainDependencies["linearClient"];
+    importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
+    onRepositoryCommand?: (
+      ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
+    ) => string | Promise<string>;
+    onWorkbench?: (
+      args: readonly string[],
+      input?: string,
+      signal?: AbortSignal,
+    ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
-    onUpdateCheck?: () => Promise<UpdateNotice | undefined>;
+    onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
     environment?: NodeJS.ProcessEnv;
@@ -262,8 +240,10 @@ export function dependencies(
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
+  let scannedRepository: string | undefined;
   const security = {
     run: async (repository: string, runOptions: ScanOptions) => {
+      scannedRepository = repository;
       options.onTurn?.(repository, runOptions);
       const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
@@ -289,49 +269,98 @@ export function dependencies(
     },
     preflight: async (repository: string) =>
       options.preflight ?? fakePreflight(repository),
+    validate: async (validationOptions: ValidationOptions) =>
+      options.onValidate?.(validationOptions) ?? {
+        disposition: "deferred",
+        report: "Additional evidence is needed.",
+        outputDir: "/tmp/validation",
+        threadId: "validation-thread",
+      },
     close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
+  } as Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   return {
     createSecurity: (config) => {
       options.onConfig?.(config);
       return security;
     },
     environment: options.environment ?? {},
-    checkForUpdate: async () => await options.onUpdateCheck?.(),
+    checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
-    setInterval: () => ({}) as NodeJS.Timeout,
+    setInterval: fakeInterval,
     clearInterval: () => {},
     addSignalListener: (signal, listener) => signals.add(signal, listener),
     removeSignalListener: (signal, listener) =>
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (args) => options.onCodex?.(args) ?? 0,
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
-    exportFindings: async (arguments_) => {
-      const contents = new TextEncoder().encode(
+    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runRepositoryCommand: async (command, args, repository, commandOptions) =>
+      (await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
+    ...(options.linearClient === undefined
+      ? {}
+      : { linearClient: options.linearClient }),
+    ...(options.importGitHubAdvisories === undefined
+      ? {}
+      : { importGitHubAdvisories: options.importGitHubAdvisories }),
+    ...(options.importGitHubAlerts === undefined
+      ? {}
+      : { importGitHubAlerts: options.importGitHubAlerts }),
+    runWorkbench: async (args, input, signal) =>
+      (await options.onWorkbench?.(args, input, signal)) ??
+      (args[0] === "get-scan" &&
+      args.includes("--check-target") &&
+      scannedRepository !== undefined
+        ? { scan: { targetPath: await realpath(scannedRepository) } }
+        : { scans: [] }),
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
+    exportFindings: async (arguments_) =>
+      new TextEncoder().encode(
         arguments_.format === "csv"
           ? "occurrence_id,finding_id\n"
           : arguments_.format === "json"
             ? '{"documentType":"codex-security.findings"}\n'
             : '{"version":"2.1.0"}\n',
-      );
-      if (arguments_.output !== "-") {
-        const metadata = await lstat(arguments_.output).catch(() => undefined);
-        if (metadata?.isSymbolicLink()) {
-          throw new CodexSecurityError(
-            "results.sarif: expected a regular non-symlink file",
-          );
-        }
-        await mkdir(join(arguments_.output, ".."), { recursive: true });
-        await writeFile(arguments_.output, contents, { mode: 0o600 });
-      }
-      return contents;
-    },
+      ),
   };
 }
+
+export const mustNotInitializeCodex = throwing("must not initialize Codex");
+
+export function fakeSecurity(run: CodexSecurity["run"]) {
+  return {
+    ...dependencies().createSecurity({}),
+    run,
+    preflight: async () => fakePreflight(),
+  };
+}
+
+export function failingSecurity(message: string) {
+  return fakeSecurity(async () => {
+    throw new CodexSecurityError(message);
+  });
+}
+
+export function fakeInterval(_callback: () => void): NodeJS.Timeout {
+  return {} as NodeJS.Timeout;
+}
+
+export const warningResult =
+  (message: string, targetChanged = false) =>
+  async (_repository: string, options?: ScanOptions) => {
+    if (targetChanged)
+      options?.onWarning?.(message, { kind: "target_changed" });
+    else options?.onWarning?.(message);
+    return fakeResult();
+  };

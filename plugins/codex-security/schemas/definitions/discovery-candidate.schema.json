@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/definitions/discovery-candidate.schema.json",
+  "$defs": {
+    "nonEmptyText": { "type": "string", "pattern": "\\S" },
+    "cweId": {
+      "type": "string",
+      "pattern": "^\\s*[Cc][Ww][Ee]-0*[1-9][0-9]*\\s*$"
+    },
+    "locationRole": {
+      "enum": [
+        "entrypoint",
+        "entrypoint/wrapper",
+        "source",
+        "root_control",
+        "sink",
+        "concrete_implementation",
+        "evidence"
+      ]
+    },
+    "rawDiscoveryLocation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "role": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/locationRole"
+        }
+      },
+      "required": ["path", "start_line", "role"],
+      "additionalProperties": false
+    },
+    "normalizedDiscoveryLocation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "role": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/locationRole"
+        }
+      },
+      "required": ["path", "start_line", "end_line", "role"],
+      "additionalProperties": false
+    },
+    "rawDiscoveryCandidate": {
+      "type": "object",
+      "properties": {
+        "cwe_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/cweId"
+          }
+        },
+        "locations": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryLocation"
+          }
+        },
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "evidence": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "context": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "instance": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": ["cwe_ids", "locations", "summary", "evidence"],
+      "additionalProperties": false
+    },
+    "discoveryCandidate": {
+      "type": "object",
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}$)[^/\\\\]+$"
+        },
+        "cwe_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^CWE-[1-9][0-9]*$" }
+        },
+        "locations": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/normalizedDiscoveryLocation"
+          }
+        },
+        "summary": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "evidence": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "context": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        },
+        "instance": {
+          "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/nonEmptyText"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "cwe_ids",
+        "locations",
+        "summary",
+        "evidence"
+      ],
+      "additionalProperties": true
+    }
+  }
+}
