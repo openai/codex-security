@@ -10472,7 +10472,7 @@ async function createPatchPullRequest(
           ...stageFiles,
         ]);
         await removeSources(stage);
-        await stage(["commit", "-m", PATCH_PR_TITLE]);
+        await stage(["commit", "--no-gpg-sign", "-m", PATCH_PR_TITLE]);
         committed = true;
         if (!(await matchesCapturedTree()))
           throw new CodexSecurityError(
