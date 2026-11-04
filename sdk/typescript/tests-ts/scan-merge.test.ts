@@ -29,6 +29,7 @@ import {
   semanticFinding,
   semanticCoverage,
 } from "./helpers/semantic-scan.js";
+import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 const parent = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const targetContract = {
@@ -306,7 +307,7 @@ describe("local scan merging", () => {
       await rm(join(directory, original.path));
       await expect(hydrateScanAggregate(directory, stored)).rejects.toThrow();
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      await removeTemporaryDirectory(directory);
     }
   });
 
