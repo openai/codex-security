@@ -65,6 +65,8 @@ test.each([
   ["MEDIUM", "medium"],
   ["LOW", "low"],
   ["EXPERIMENT", "unknown"],
+  ["constructor", "unknown"],
+  ["__proto__", "unknown"],
 ] as const)("maps severity %s to %s", (inputLevel, expected) => {
   const input = semgrepJson();
   input.results[0]!.extra.severity = inputLevel!;

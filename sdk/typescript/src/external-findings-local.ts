@@ -800,17 +800,6 @@ export async function prepareLocalImport(
     dependencies,
   );
   const sources = new Map<string, ExternalSourceRepository>();
-  if (
-    options.provider === "semgrep" &&
-    current.report?.["format"] === guardianSelectionFormat
-  ) {
-    const url = declaredScannerRepositoryUrl(
-      current.report["repositoryUrl"],
-      "Guardian",
-      "local",
-    );
-    sources.set(url, { url });
-  }
   const references = [...readerSources, ...parsedSources];
   const inspector = inspectorReportRepository(
     options.provider,
@@ -907,6 +896,22 @@ export async function prepareLocalImport(
       );
     hostedSources.set(source.url, source);
   }
+  function addGuardianSource(value: unknown) {
+    if (options.provider !== "semgrep")
+      throw new CodexSecurityError(
+        "Use the semgrep provider for Guardian findings.",
+      );
+    const url = declaredScannerRepositoryUrl(value, "Guardian", "local");
+    const source =
+      hostedSources.get(url) ??
+      semgrepPlatformRepositoryReference(url, readerSources);
+    hostedSources.set(url, source);
+    return source;
+  }
+  const guardianReport =
+    current.report?.["format"] === guardianSelectionFormat
+      ? addGuardianSource(current.report["repositoryUrl"])
+      : undefined;
   if (semgrepPlatformRepositoryUrl)
     addSemgrepSource(semgrepPlatformRepositoryUrl);
   const known = new Set<string>(parsedSources.map(({ url }) => url));
@@ -939,23 +944,38 @@ export async function prepareLocalImport(
       addSemgrepSource(semgrep.url);
       if (semgrep.sourceData) finding.evidence.source_data = semgrep.sourceData;
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
-    } else hasOrdinaryRows = true;
-    const { evidence } = finding;
-    if (
-      options.provider === "semgrep" &&
-      evidence.source_data?.["format"] === guardianSelectionFormat
-    ) {
-      const url = declaredScannerRepositoryUrl(
-        evidence.source_data["sourceRepositoryUrl"],
-        "Guardian",
-        "local",
-      );
-      sources.set(url, { url });
     }
+    const { evidence } = finding;
+    const guardian =
+      evidence.source_data?.["format"] === guardianSelectionFormat;
     const url = evidence.details?.repository?.url;
-    // A selected row's projected URL was already verified against its hosted source.
-    if (!semgrep && url) sources.set(url, { url });
-    if (hasPlatformEvidence && !semgrep && !retained && !native.length) {
+    if (guardian) {
+      const source = addGuardianSource(
+        evidence.source_data!["sourceRepositoryUrl"],
+      );
+      if (
+        (guardianReport &&
+          !semgrepReferenceMatches(guardianReport, source.url)) ||
+        (url &&
+          !semgrepReferenceMatches(
+            source,
+            declaredScannerRepositoryUrl(url, "Guardian", "local"),
+          ))
+      )
+        throw new CodexSecurityError(
+          "The Guardian finding repository does not match its recorded selection.",
+        );
+    } else if (!semgrep) {
+      hasOrdinaryRows = true;
+      if (url) sources.set(url, { url });
+    }
+    if (
+      hasPlatformEvidence &&
+      !semgrep &&
+      !guardian &&
+      !retained &&
+      !native.length
+    ) {
       for (const source of sarif) sources.set(source.url, source);
       if (!url && !sarif.length) ordinaryRowNeedsReferences = true;
       if (!url && references.length) {
