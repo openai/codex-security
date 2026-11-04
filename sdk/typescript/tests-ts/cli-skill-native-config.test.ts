@@ -543,6 +543,9 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           const workerConfig = {
             model_catalog_json: modelCatalog,
             openai_base_url: baseUrl,
+            mcp_servers: {
+              "codex-security": { url: `${baseUrl}/mcp`, enabled: false },
+            },
             cli_auth_credentials_store: "file",
             features: { plugins: false },
             analytics: { enabled: false },
