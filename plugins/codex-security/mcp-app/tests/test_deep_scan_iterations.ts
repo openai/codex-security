@@ -1373,3 +1373,111 @@ test("legacy provenance cannot drop or overwrite visible findings on resume", as
     );
   }
 });
+
+test("resuming partial source ancestry isolates only the ambiguous finding", async () => {
+  const { mergeBatch } = await importSource(
+    join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
+  );
+  const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
+    await importSource(
+      join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+    );
+  for (const ancestry of [
+    {
+      sourceFindings: [{ id: "w:0", finding: { title: "old" } }],
+      sourceFindingIds: ["w:0"],
+    },
+    {
+      sourceFindings: [
+        { id: "w:0", finding: { title: "old", locations: lookup.locations } },
+      ],
+    },
+    { sourceFindingIds: ["w:0"] },
+    {},
+  ]) {
+    const scanId = randomUUID();
+    const old = {
+      ...lookup,
+      title: "Previously visible report",
+      provenance: { ...lookup.provenance, ...ancestry },
+    };
+    let saved = parseScanUnion({ scanId, findings: [old] });
+    const titles = ["Current bug", "Alias of current bug"];
+    const worker = (id: string, entries: string[]) => ({
+      id,
+      resultPath: join("/tmp", id, "result.json"),
+      result: {
+        ...standardScanDraft(scanId, undefined, id),
+        findings: entries.map((title) => ({ ...lookup, title })),
+      },
+    });
+    const fail = (error: unknown) => {
+      throw error;
+    };
+    let reviews = 0;
+    await mergeBatch(
+      saved,
+      [worker("second", titles)],
+      "/tmp",
+      async (
+        prompt: string,
+        schema: { properties: Record<string, unknown> },
+      ) => {
+        const input = JSON.parse(prompt.split("\n").at(-1)!);
+        if ("reviews" in schema.properties) {
+          reviews++;
+          assert.deepEqual(
+            input.pairs.map((p: { left: number; right: number }) => [
+              p.left,
+              p.right,
+            ]),
+            [[1, 2]],
+          );
+          return JSON.stringify(approvePairs(input));
+        }
+        if ("sources" in schema.properties)
+          return JSON.stringify({
+            sources: input.map(({ id }: { id: number }) => ({
+              id,
+              same: true,
+              survivingPaths: [],
+            })),
+          });
+        // The old report and the new primary share a proposed direct assignment;
+        // the alias also lists a second assignment and needs same-fix confirmation.
+        return JSON.stringify({
+          uncertain: [],
+          defects: [[0, 1, 2], [2]].map((ids) => ({
+            operation: "lookup",
+            failure: "check",
+            path: "fixture.py",
+            reports: ids.map((id) => ({ id, evidence: 0 })),
+          })),
+        });
+      },
+      fail,
+    );
+    assert.equal(reviews, 1);
+    saved = parseScanUnion(
+      JSON.parse(JSON.stringify(persistedScanUnion(saved))),
+    );
+    await mergeBatch(
+      saved,
+      [worker("third", [titles[1]!])],
+      "/tmp",
+      fail,
+      fail,
+    );
+    const result = scanUnionToDraft(saved);
+    assert.deepEqual(
+      result.findings.map((f: typeof lookup) => f.title),
+      [old.title, titles[0]],
+    );
+    assert.deepEqual(result.findings[0].provenance, old.provenance);
+    assert.deepEqual(result.findings[1].provenance.sourceFindingIds, [
+      "second:0",
+      "second:1",
+      "third:0",
+    ]);
+  }
+});

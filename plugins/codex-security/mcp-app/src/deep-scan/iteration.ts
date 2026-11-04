@@ -354,11 +354,37 @@ function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
 // are published as one. A later batch must see the same reports after a resume.
 const repairGroupSchema = z.strictObject({
   order: z.number().int().nonnegative(),
-  sources: z.array(z.string()).min(1),
+  sources: z.array(z.string()),
   representative: scanDraftInputSchema.shape.findings.element.optional(),
 });
 const repairGroupsSchema = z.array(repairGroupSchema).min(1);
 type RepairGroup = z.infer<typeof repairGroupSchema>;
+
+function sourceIds(finding: Finding) {
+  return (
+    finding.provenance.sourceFindingIds ??
+    finding.provenance.sourceFindings?.map(({ id }) => id) ??
+    []
+  );
+}
+
+// The persisted schema accepts partial original records from older reducers.
+// Only groups with all their original reports can enter semantic comparisons.
+function hasCompleteSources(finding: Finding) {
+  const ids = sourceIds(finding);
+  const sources = finding.provenance.sourceFindings ?? [];
+  const known = new Set(sources.map(({ id }) => id));
+  return (
+    ids.length > 0 &&
+    ids.length === sources.length &&
+    known.size === ids.length &&
+    ids.every((id) => known.has(id)) &&
+    sources.every(
+      ({ finding }) =>
+        scanDraftInputSchema.shape.findings.element.safeParse(finding).success,
+    )
+  );
+}
 
 function withoutSourceHistory(finding: Finding): Finding {
   const {
@@ -416,11 +442,27 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
     if (!parts || parts[0]!.order <= previousTarget) return visibleGroups();
     const target = parts[0]!.order;
     previousTarget = target;
+    if (parts.length === 1) {
+      // Singletons already carry the visible report, even if a legacy source
+      // has only a title or a reference with no archived finding.
+      const ids = sourceIds(visible);
+      const sources = parts[0]!.sources;
+      if (
+        groups.has(target) ||
+        ids.length !== sources.length ||
+        !ids.every((id, i) => id === sources[i])
+      )
+        return visibleGroups();
+      delete visible.provenance.deepScanRepairGroups;
+      groups.set(target, { finding: visible, target });
+      continue;
+    }
     const originals = new Map(
       visible.provenance.sourceFindings?.map((source) => [source.id, source]),
     );
     for (const { order, sources, representative } of parts) {
-      if (order < target || groups.has(order)) return visibleGroups();
+      if (!sources.length || order < target || groups.has(order))
+        return visibleGroups();
       const members = [];
       for (const id of sources) {
         const source = originals.get(id);
@@ -479,7 +521,14 @@ export async function mergeBatch(
     JSON.stringify({ ...finding, provenance: undefined });
   const exact = originals.map(content);
   const copies = new Map<string, (typeof retained)[number]>();
+  const incomplete = new Set<number>();
   for (const group of retained) {
+    if (!hasCompleteSources(group.finding)) {
+      incomplete.add(group.target);
+      continue;
+    }
+    // A legacy checkpoint can include all originals without the separate ID array.
+    group.finding.provenance.sourceFindingIds ??= sourceIds(group.finding);
     copies.set(exact[group.id]!, group);
     for (const source of group.finding.provenance.sourceFindings ?? [])
       copies.set(content(source.finding), group);
@@ -529,8 +578,9 @@ export async function mergeBatch(
         retained.find((prior) => {
           const other = repairs?.get(prior.id);
           if (
-            !equalRepairs(key, other) &&
-            !fallbackMatches.get(id)?.has(prior.id)
+            incomplete.has(prior.target) ||
+            (!equalRepairs(key, other) &&
+              !fallbackMatches.get(id)?.has(prior.id))
           )
             return false;
           if (
@@ -602,17 +652,10 @@ export async function mergeBatch(
     group.target = group.id;
     group.worker = worker;
   }
-  if (
-    repairs &&
-    retained.some((group) => group.worker >= 0) &&
-    retained.every(
-      ({ finding }) =>
-        finding.provenance.sourceFindings?.length &&
-        finding.provenance.sourceFindingIds?.length,
-    )
-  ) {
+  if (repairs && retained.some((group) => group.worker >= 0)) {
     const sources = new Map<number, Record<string, unknown>[]>();
     for (const group of retained) {
+      if (incomplete.has(group.target)) continue;
       const members = sources.get(group.target) ?? [];
       members.push(
         ...group.finding.provenance.sourceFindings!.map((s) => s.finding),
@@ -621,7 +664,9 @@ export async function mergeBatch(
     }
     const reviewFailures = new Set<string>();
     const matches = await checkSameFix(
-      retained.filter((group) => group.target === group.id),
+      retained.filter(
+        (group) => group.target === group.id && !incomplete.has(group.target),
+      ),
       priorTargets,
       records,
       repairs,
@@ -689,7 +734,7 @@ export async function mergeBatch(
         : group.representative;
       (target.provenance.deepScanRepairGroups as RepairGroup[]).push({
         order,
-        sources: group.finding.provenance.sourceFindingIds!,
+        sources: sourceIds(group.finding),
         ...(representative && { representative }),
       });
     }
