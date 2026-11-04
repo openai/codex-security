@@ -905,12 +905,13 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     join(home, "config.toml"),
     windows +
-      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nSNAPSHOT_USER_SET="preserved"\n',
+      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nAWS_SESSION_TOKEN="synthetic-policy-session"\nAWS_CONTAINER_AUTHORIZATION_TOKEN="synthetic-container-token"\nSNAPSHOT_USER_SET="preserved"\n',
   );
   const script = join(root, "inspect.cjs");
   await writeFile(
     script,
     `const fs=require("node:fs");
+if(process.argv.includes("bedrock")){fs.writeSync(1, JSON.stringify(Object.keys(process.env).filter(key=>/^AWS_/i.test(key))));process.exit(0);}
 fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,modelKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
@@ -989,6 +990,23 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
     modelKeys: [],
   });
   expect(bytes.subarray(end + 1)).toEqual(input);
+  const bedrock = await runRepositoryCommand(
+    "git",
+    [...args, "bedrock"],
+    repository,
+    {
+      sandbox: {
+        ...sandbox,
+        environment: {
+          ...sandbox.environment,
+          AWS_SECRET_ACCESS_KEY: "synthetic-host-secret",
+          AWS_WEB_IDENTITY_TOKEN_FILE: "synthetic-token-path",
+        },
+        stripAwsCredentials: true,
+      },
+    },
+  );
+  expect(JSON.parse(bedrock)).toEqual([]);
   await expect(
     runRepositoryCommand("git", [...args, "fail"], repository, { sandbox }),
   ).rejects.toMatchObject({

@@ -1215,6 +1215,7 @@ interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
   readonly environment: NodeJS.ProcessEnv;
   readonly providerKeyVariable?: string;
+  readonly stripAwsCredentials?: boolean;
   readonly directory: string;
   readonly configuration?: JsonObject;
   readonly gitEnvironment?: NodeJS.ProcessEnv;
@@ -1442,11 +1443,17 @@ if (process.platform === "win32") {
       nativeGitOptions.push("-c", "safe.directory=" + value);
   }
 }
-for (const [name, value] of JSON.parse(header.toString())) {
+const { bindings, stripAwsCredentials } = JSON.parse(header.toString());
+for (const [name, value] of bindings) {
   if (value === null) delete process.env[name];
   else process.env[name] = value;
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
+if (stripAwsCredentials) {
+  for (const name of Object.keys(process.env)) {
+    if (/^AWS_/i.test(name)) delete process.env[name];
+  }
+}
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
@@ -1552,6 +1559,7 @@ export async function runRepositoryCommand(
       for (const name of Object.keys(environment)) {
         if (
           name.toUpperCase() === "CODEX_HOME" ||
+          (sandbox.stripAwsCredentials && /^AWS_/i.test(name)) ||
           credentialVariables.some(
             (key) => key.toUpperCase() === name.toUpperCase(),
           )
@@ -1564,16 +1572,16 @@ export async function runRepositoryCommand(
       sandbox === undefined
         ? undefined
         : Buffer.from(
-            JSON.stringify(
-              // Native shell policy can set variables again. Remove model keys
-              // from Git and its filters after applying that policy as well.
-              Object.entries({
+            JSON.stringify({
+              // Reapply credential exclusions after the native shell policy.
+              stripAwsCredentials: sandbox.stripAwsCredentials,
+              bindings: Object.entries({
                 ...sandbox.gitEnvironment,
                 ...Object.fromEntries(
                   credentialVariables.map((key) => [key, null]),
                 ),
               }).map(([key, value]) => [key, value ?? null]),
-            ),
+            }),
           );
     const execution = spawn(
       codex === undefined
@@ -2168,6 +2176,8 @@ export async function runCodexSkillCommand(
                           profile,
                           directory: output.appServer!.directory,
                           environment,
+                          stripAwsCredentials:
+                            authentication?.method === "aws_credentials",
                           ...(authentication?.method === "api_key"
                             ? { providerKeyVariable: authentication.source }
                             : {}),
