@@ -684,14 +684,16 @@ export class ScanDashboard {
     } else {
       this.#activities[existing] = entry;
     }
-    if (this.#activities.length > MAX_HISTORY_ENTRIES) {
-      this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
-    }
+    // Count the added rows before dropping old entries above the view, so a
+    // scrolled view stays in place once history reaches its cap.
     if (this.#scrollOffset !== 0) {
       this.#scrollOffset += Math.max(
         0,
         this.#activityLines(this.#width()).length - previousRows,
       );
+    }
+    if (this.#activities.length > MAX_HISTORY_ENTRIES) {
+      this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
     }
     this.#scheduleRefresh();
   }

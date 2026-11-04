@@ -1,4 +1,3 @@
-import type { DeepReducerContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
 import type { WorkerTokenUsage } from "./usage-receipt.js";
@@ -51,15 +50,6 @@ export type DeepScanWorkerMutation = Omit<
 export type DeepScanReplaceableFailureKind =
   "policy_refusal" | "transient_error" | "invalid_discovery_artifacts";
 
-/** Inputs committed atomically when a reducer finishes. */
-export interface DedupCommit {
-  id: string;
-  scanId: string;
-  newFindings: number;
-  resultManifestPath: string;
-  candidateLedgerPath?: string;
-}
-
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
@@ -69,16 +59,12 @@ export type DeepScanStore = Omit<
 /** Host-bound worker artifact state; never populate this from model input. */
 export interface CodexWorkerArtifactContext {
   root: string;
-  layout: "worker" | "reducer";
-  deepReducer?: DeepReducerContext;
+  layout: "worker";
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
-export interface CodexWorkerRequest {
-  attemptId?: string;
-  /** Host-bound receipt storage, excluded from model filesystem access. */
-  workerUsageDirectory?: string;
-  kind: DeepScanWorkerKind;
+export interface CodexWorkerRequest extends WorkerTelemetryOptions {
+  kind: "discovery";
   promptPath: string;
   workingDirectory: string;
   subagents: number;
@@ -86,8 +72,14 @@ export interface CodexWorkerRequest {
   resumeThreadId?: string;
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
-  onThreadStarted?: (threadId: string) => Promise<void> | void;
   onNonRetryableError?: (error: Error) => void;
+}
+
+export interface WorkerTelemetryOptions {
+  attemptId?: string;
+  /** Host-bound receipt storage, excluded from model filesystem access. */
+  workerUsageDirectory?: string;
+  onThreadStarted?: (threadId: string) => Promise<void> | void;
   onAttribution?: (attribution: WorkerAttribution) => void;
   onUsage?: (
     usage: WorkerTokenUsage | null,
@@ -120,6 +112,13 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  compareFindings?(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
+  ): Promise<string>;
 }
 
 export interface DeepScanClock {

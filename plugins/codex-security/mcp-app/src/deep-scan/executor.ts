@@ -52,6 +52,7 @@ import type {
   CodexWorkerExecutor,
   CodexWorkerRequest,
   CodexWorkerResult,
+  WorkerTelemetryOptions,
   DeepScanConfig,
 } from "./types.js";
 
@@ -94,19 +95,54 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
+    const { threadId, turnId, usage, diagnostics } =
+      await this.runTurn(request);
+    return { threadId, turnId, usage, ...(diagnostics && { diagnostics }) };
+  }
+
+  async compareFindings(
+    prompt: string,
+    workingDirectory: string,
+    signal: AbortSignal,
+    schema: Record<string, unknown>,
+    telemetry?: WorkerTelemetryOptions,
+  ): Promise<string> {
+    const turn = await this.runTurn({
+      ...telemetry,
+      kind: "compare",
+      prompt,
+      workingDirectory,
+      signal,
+      schema,
+    });
+    return turn.finalResponse;
+  }
+
+  private async runTurn(
+    request:
+      | CodexWorkerRequest
+      | (WorkerTelemetryOptions & {
+          kind: "compare";
+          prompt: string;
+          workingDirectory: string;
+          signal: AbortSignal;
+          schema: Record<string, unknown>;
+        }),
+  ) {
+    const discovery = request.kind === "discovery" ? request : undefined;
     const includePaths = this.modelSettings.artifactContext?.includePaths;
     const scopeInput = JSON.stringify({
       paths: includePaths,
       filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
     });
     const includePathsFile =
-      includePaths === undefined
+      !discovery || includePaths === undefined
         ? undefined
-        : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
+        : resolve(dirname(discovery.promptPath), `scope-${randomUUID()}.json`);
     const deepConfigFile =
-      this.modelSettings.deepScanConfig === undefined
+      !discovery || this.modelSettings.deepScanConfig === undefined
         ? undefined
-        : resolve(dirname(request.promptPath), `limits-${randomUUID()}.toml`);
+        : resolve(dirname(discovery.promptPath), `limits-${randomUUID()}.toml`);
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -242,12 +278,32 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         mcp_servers: {
           // A disabled server still needs a valid transport during native resolution.
           "codex-security": { command: "node", enabled: false },
-          ...this.compactArtifactServer(request, includePathsFile),
+          ...(discovery &&
+            this.compactArtifactServer(discovery, includePathsFile)),
         },
-        ...workerSubagentConfig(
-          request.subagents,
-          runtimeSettings.config.features,
-        ),
+        ...(discovery
+          ? workerSubagentConfig(
+              discovery.subagents,
+              runtimeSettings.config.features,
+            )
+          : {
+              web_search: "disabled",
+              project_doc_max_bytes: 0,
+              features: {
+                ...(isRecord(runtimeSettings.config.features) &&
+                  runtimeSettings.config.features),
+                apps: false,
+                plugins: false,
+                shell_tool: false,
+                unified_exec: false,
+                code_mode: false,
+                code_mode_only: false,
+                js_repl: false,
+                multi_agent: false,
+                multi_agent_v2: false,
+                enable_fanout: false,
+              },
+            }),
         approval_policy: "never",
         default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
         [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:
@@ -297,13 +353,24 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         // Explicit per-scan feature settings remain authoritative.
         configOverrides.push("features.api_key_cyber_access_programs=true");
       }
-      const { useOpenAiApiKey } =
+      const { useOpenAiApiKey, mcpServerNames } =
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
-      const prompt = await fs.readFile(request.promptPath, "utf8");
+      if (!discovery) {
+        for (const name of mcpServerNames) {
+          if (name !== "codex-security")
+            configOverrides.push(
+              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
+            );
+        }
+      }
+      const prompt =
+        request.kind === "compare"
+          ? request.prompt
+          : await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
         codexPathOverride: executablePathForSpawn(codexPath),
         env: childEnv,
@@ -332,16 +399,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         skipGitRepoCheck: true,
         workingDirectory: request.workingDirectory,
       } as const;
-      const thread = request.resumeThreadId
-        ? codex.resumeThread(request.resumeThreadId, threadOptions)
+      const thread = discovery?.resumeThreadId
+        ? codex.resumeThread(discovery.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const workerPrompt = request.resumeThreadId
-        ? (request.continuationPrompt ?? prompt)
+      const workerPrompt = discovery?.resumeThreadId
+        ? (discovery.continuationPrompt ?? prompt)
         : prompt;
       const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
-      const input = pluginRoot
-        ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
-        : workerPrompt;
+      const input =
+        discovery && pluginRoot
+          ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
+          : workerPrompt;
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -353,6 +421,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       try {
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
+          ...(request.kind === "compare" && { outputSchema: request.schema }),
           cyberAccessProgram:
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });
@@ -396,7 +465,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             } else if (event.type === "turn.failed") {
               const error = codexWorkerTurnError(event.error.message);
               if (error instanceof DeepScanNonRetryableError)
-                request.onNonRetryableError?.(error);
+                discovery?.onNonRetryableError?.(error);
               throw error;
             } else if (event.type === "error") {
               // Codex exec emits retry-in-progress notifications as error events.
@@ -413,6 +482,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           );
         }
         return {
+          finalResponse: turn.finalResponse,
           threadId: turn.threadId ?? thread.id ?? undefined,
           ...(turnId === undefined ? {} : { turnId }),
           usage: readUsage(turn.usage),
@@ -444,21 +514,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "Deep Scan worker has no coordinator-bound artifact context.",
       );
     }
-    const expectedLayout = request.kind === "dedup" ? "reducer" : "worker";
-    if (assigned.layout !== expectedLayout) {
-      throw new Error(
-        "Deep Scan worker artifact context does not match its assigned phase.",
-      );
-    }
-    if (
-      (expectedLayout === "reducer") !==
-      (assigned.deepReducer !== undefined)
-    ) {
-      throw new Error(
-        "Deep Scan reducer requires its coordinator-bound source assignments.",
-      );
-    }
-
     return {
       // Keep every qualified worker tool within Codex's existing name limit.
       cs_artifacts: {
@@ -482,13 +537,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             : { CODEX_SECURITY_INCLUDE_PATHS_FILE: includePathsFile }),
           ...(scan.pythonCommand !== undefined
             ? { CODEX_SECURITY_PYTHON_COMMAND: scan.pythonCommand }
-            : {}),
-          ...(assigned.deepReducer
-            ? {
-                CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify(
-                  assigned.deepReducer,
-                ),
-              }
             : {}),
         },
         required: true,

@@ -1,7 +1,8 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import type { ScanOptions } from "../src/index.js";
 import {
   OperationTelemetry,
   readOperationTelemetry,
@@ -401,9 +402,83 @@ test.each([
       },
     });
     try {
-      const result = await client.run(repository, { workflowId: workflow.id });
+      const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+      const options = { workflowId: workflow.id, onLifecycle };
+      const result = await client.run(repository, options);
       expect(result.cost).toEqual(expected);
       expect(result.toJSON()["cost"]).toEqual(expected);
+      if (scenario === "lost receipt") {
+        expect(onLifecycle).toHaveBeenCalledWith(
+          expect.objectContaining({ scanId, status: "completed" }),
+        );
+        await client.run(repository, options);
+      }
+      expect(onLifecycle).toHaveBeenCalledTimes(
+        scenario === "lost receipt" ? 1 : 0,
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(["failed", "canceled", "running"] as const)(
+  "workflow recovery observes the previous %s scan before retry",
+  async (status) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const workbench = workbenchCommand(
+      await runtime.resolvePluginPython({ environment }),
+      () => environment,
+    );
+    const registration = await workbench(
+      scanRegistrationArguments(repository, scanDir),
+    );
+    const scanId = registration["scanId"] as string;
+    const workflow = new FindingWorkflow("retry-scan", environment);
+    await workflow.bind({ repositoryPath: repository, scanId, scanDir });
+    await workflow.begin("scan");
+    if (status === "failed")
+      await workbench([
+        "fail-scan",
+        "--scan-id",
+        scanId,
+        "--message",
+        "Synthetic failure",
+      ]);
+    if (status === "canceled")
+      await workbench(["cancel-scan", "--scan-id", scanId]);
+    const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+    const client = TestClient.withDependencies({
+      environment,
+      runWorkbench: async (options, args, input) => {
+        if (
+          args[0] === "finding-workflow" &&
+          JSON.parse(input!).action === "begin"
+        ) {
+          expect(
+            onLifecycle.mock.calls.map(([snapshot]) => [
+              snapshot.scanId,
+              snapshot.status,
+            ]),
+          ).toEqual(status === "running" ? [] : [[scanId, status]]);
+          throw new Error("Synthetic stop before retry");
+        }
+        return runWorkbench(options, args, input);
+      },
+    });
+    try {
+      await expect(
+        client.run(repository, { workflowId: workflow.id, onLifecycle }),
+      ).rejects.toThrow("Synthetic stop before retry");
     } finally {
       await client.close();
     }

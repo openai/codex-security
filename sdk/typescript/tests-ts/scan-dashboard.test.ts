@@ -2124,6 +2124,33 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test("keeps scrolled history in place once the oldest activity is dropped", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 80, rows: 14 },
+      { input },
+    );
+    const visible = () => lastFrame(stderr).match(/finding-\d+/gu);
+
+    recordActions(dashboard, 2_000);
+    dashboard.start();
+    input.emit("data", "\u001B[A".repeat(6));
+    const before = visible();
+    expect(before).toContain("finding-1994");
+
+    dashboard.record({
+      id: "action-2001",
+      kind: "command",
+      status: "completed",
+      description: "rg -n finding-2001 routes.ts",
+      paths: [],
+    });
+    expect(visible()).toEqual(before);
+    expect(lastFrame(stderr)).toContain("7 lines above live");
+    dashboard.stop();
+  });
+
   test("scrolls half a page with Mac-friendly Ctrl+U and Ctrl+D", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();

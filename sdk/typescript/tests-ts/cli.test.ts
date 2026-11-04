@@ -3758,6 +3758,18 @@ describe("CLI", () => {
           verified: false,
         });
         options?.onOutputDirReady?.("/tmp/scan");
+        options?.onLifecycle?.({
+          scanId: result.manifest.scan.id,
+          mode: "standard",
+          status: "running",
+          startedAt: result.manifest.scan.startedAt,
+          finishedAt: null,
+          hasReportableFindings: null,
+          surface: "cli",
+          packageVersion: VERSION,
+          pluginVersion: BUNDLED_PLUGIN_VERSION,
+          mock: false,
+        });
         options?.onScanStarted?.();
         options?.onWorkerStatus?.({
           kind: "dispatch",
@@ -3788,6 +3800,20 @@ describe("CLI", () => {
       'codex-security: debug: scan.output_ready scan_dir="/tmp/scan"',
     );
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    const lifecycleLine = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.lifecycle "),
+      );
+    expect(lifecycleLine).toContain(
+      `scan_id=${JSON.stringify(result.manifest.scan.id)}`,
+    );
+    expect(lifecycleLine).toContain('status="running"');
+    expect(lifecycleLine).toContain('surface="cli"');
+    expect(lifecycleLine).toContain(
+      `package_version=${JSON.stringify(VERSION)}`,
+    );
     expect(stderr.text()).toContain(
       'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
     );
