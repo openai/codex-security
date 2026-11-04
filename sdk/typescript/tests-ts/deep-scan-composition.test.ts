@@ -531,6 +531,31 @@ describe("ordinary scan composition", () => {
     ).toBe(true);
   });
 
+  test("a terminal comparison checkpoints accepted child findings without another model call", async () => {
+    const h = await harness({ workers: 2, maxDiscoveryRuns: 4 });
+    const message = "Quota exceeded. Check your plan and billing details.";
+    let comparisons = 0;
+    h.input.merge = async () => {
+      comparisons++;
+      throw new Error(message);
+    };
+    h.setRun(async (options) =>
+      result(
+        options.resumeScanId!,
+        options.outputDir!,
+        options.outputDir!.split("pass-").at(-1)!,
+      ),
+    );
+    await expect(runDeepScans(h.input)).rejects.toThrow(message);
+    expect(comparisons).toBe(1);
+    expect(h.calls).toHaveLength(2);
+    const saved = await h.checkpoint();
+    expect(saved.terminalReason).toBe("failed");
+    expect(saved.mergedScanIds).toHaveLength(2);
+    expect(saved.aggregate!.findings).toHaveLength(2);
+    expect(h.published.at(-1)).toEqual(saved.aggregate!);
+  });
+
   test("keeps the parent in discovery while merging intermediate batches", async () => {
     const h = await harness({ workers: 1, maxDiscoveryRuns: 2 });
     const events: string[] = [];
@@ -1788,12 +1813,23 @@ describe("ordinary scan composition", () => {
         ScanTransportClosedError,
       );
       h.input.workbench = workbench;
-      await expect(runDeepScans(h.input)).resolves.toMatchObject({
-        terminalReason: "capped",
-        consecutiveErrors: successLast ? 0 : 1,
-      });
+      if (successLast && limit <= 2) {
+        await expect(runDeepScans(h.input)).rejects.toThrow(
+          "consecutive error limit",
+        );
+        expect(await h.checkpoint()).toMatchObject({
+          terminalReason: "failed",
+          consecutiveErrors: limit,
+        });
+        expect(h.mergeInputs).toEqual([]);
+      } else {
+        await expect(runDeepScans(h.input)).resolves.toMatchObject({
+          terminalReason: "capped",
+          consecutiveErrors: successLast ? 0 : 1,
+        });
+        expect(h.mergeInputs).toEqual([1]);
+      }
       expect(h.calls).toEqual([]);
-      expect(h.mergeInputs).toEqual([1]);
       expect(h.published[0]!.findings).toHaveLength(
         exampleFindings.findings.length,
       );

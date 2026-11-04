@@ -113,3 +113,44 @@ test("a separately cited control and an incomplete original survive model approv
   expect(calls).toBeGreaterThan(0);
   expect(matches.size).toBe(0);
 });
+
+test("the primary evidence includes its immutable identity and excludes repeated attachments", async () => {
+  const left = group("Primary");
+  const primary = {
+    ...left.finding,
+    ruleId: "primary-rule",
+    attackPath: { summary: "primary attack path" },
+    validation: { summary: "primary validation" },
+  };
+  const secondary = {
+    ...primary,
+    ruleId: "attached-rule",
+    attackPath: { summary: "secondary path" },
+  };
+  let reviewed = 0;
+  await checkSameFix(
+    [
+      { finding: primary, originals: [primary, { ...primary }, secondary] },
+      group("Peer"),
+    ],
+    async (prompt) => {
+      const { reports } = JSON.parse(prompt.split("\n").at(-1)!);
+      reviewed++;
+      expect(reports[0].primary).toMatchObject({
+        ruleId: "primary-rule",
+        attackPath: { summary: "primary attack path" },
+        validation: { summary: "primary validation" },
+      });
+      expect(reports[0].attached).toHaveLength(1);
+      expect(reports[0].attached[0]).toMatchObject({
+        ruleId: "attached-rule",
+        attackPath: { summary: "secondary path" },
+      });
+      return { reviews: [] };
+    },
+    (error) => {
+      throw error;
+    },
+  );
+  expect(reviewed).toBe(1);
+});

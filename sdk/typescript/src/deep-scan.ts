@@ -16,6 +16,7 @@ import type { DeepScanOptions } from "./scan-settings.js";
 import {
   combineScanCoverage,
   confirmScanMerge,
+  mergeExactScanFindings,
   validateScanMerge,
   unchangedScanGroups,
   scanMergePrompt,
@@ -312,10 +313,15 @@ export async function runDeepScans(
       if (cost === null) reportPassCost(directory, cost);
     let recoveredSuccess = false;
     let recoveredFailure = false;
+    let reachedErrorLimit = false;
     for (const { record, pass } of passes) {
       if (recoverOutcomes && record.progress.status === "failed") {
         recoveredFailure ||= !pass.failed;
-        observePassFailure(state, pass, recoveredSuccess);
+        if (!reachedErrorLimit) {
+          observePassFailure(state, pass, recoveredSuccess);
+          reachedErrorLimit =
+            state.consecutiveErrors >= settings.stopAfterConsecutiveErrors;
+        } else pass.failed = true;
       }
       if (
         record.progress.status === "complete" &&
@@ -329,7 +335,7 @@ export async function runDeepScans(
         coverage.set(record.scanId, projected.draft.reviewState);
         if (!state.mergedScanIds.includes(record.scanId))
           completed.set(record.scanId, projected);
-        if (recoverOutcomes)
+        if (recoverOutcomes && !reachedErrorLimit)
           recoveredSuccess = observePassCompletion(
             state,
             pass,
@@ -382,6 +388,27 @@ export async function runDeepScans(
       });
   }, 1_000);
   cancellationTimer.unref();
+  let stoppedDuringComparison = false;
+  const commitMerge = async (
+    merged: ReturnType<typeof validateScanMerge>,
+    pending: ScanMergeInput[],
+  ) => {
+    const sourceScanIds = pending.map((result) => result.scanId);
+    acceptMerge(
+      state,
+      merged,
+      sourceScanIds,
+      combineScanCoverage([...coverage.values()]),
+    );
+    await save();
+    input.onMergeCommitted?.({
+      scanId,
+      sourceScanIds,
+      newFindings: merged.newFindingCount,
+      retainedFindings: merged.aggregate.findings.length,
+    });
+    for (const result of pending) completed.delete(result.scanId);
+  };
   const mergePending = async (allowEmpty = false): Promise<void> => {
     if ((state.mergeFailures ?? 0) >= settings.stopAfterConsecutiveErrors)
       throw new Error("Deep Scan reached its consecutive merge error limit.");
@@ -512,11 +539,11 @@ export async function runDeepScans(
         }
         if (error instanceof DeepScanRecoveryError) throw error;
         if (error instanceof SyntaxError) validationError = error;
-        if (
-          executionSignal.aborted ||
-          error instanceof ScanPermissionError ||
-          (error !== validationError && isCodexNonRetryableFailure(error))
-        )
+        if (error !== validationError && isCodexNonRetryableFailure(error)) {
+          stoppedDuringComparison = true;
+          throw error;
+        }
+        if (executionSignal.aborted || error instanceof ScanPermissionError)
           throw error;
         const failures = (state.mergeFailures = (state.mergeFailures ?? 0) + 1);
         await save();
@@ -524,21 +551,7 @@ export async function runDeepScans(
       }
     }
     executionSignal.throwIfAborted();
-    const sourceScanIds = pending.map((result) => result.scanId);
-    acceptMerge(
-      state,
-      merged,
-      sourceScanIds,
-      combineScanCoverage([...coverage.values()]),
-    );
-    await save();
-    input.onMergeCommitted?.({
-      scanId,
-      sourceScanIds,
-      newFindings: merged.newFindingCount,
-      retainedFindings: merged.aggregate.findings.length,
-    });
-    for (const result of pending) completed.delete(result.scanId);
+    await commitMerge(merged, pending);
   };
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
@@ -794,6 +807,30 @@ export async function runDeepScans(
             ? "canceled"
             : "failed",
     );
+    if (
+      !signal.aborted &&
+      (stoppedDuringComparison || error === consecutiveErrorLimit)
+    ) {
+      const pending = state.passes.flatMap((pass) => {
+        const child =
+          pass.completed && pass.scanId
+            ? completed.get(pass.scanId)
+            : undefined;
+        return child && !state.mergedScanIds.includes(child.scanId)
+          ? [child]
+          : [];
+      });
+      if (pending.length) {
+        try {
+          await commitMerge(
+            await mergeExactScanFindings(scanId, pending, state.aggregate),
+            pending,
+          );
+        } catch (cause) {
+          input.onCleanupError?.(cause);
+        }
+      }
+    }
     updateAggregateCoverage();
     await save().catch(() => undefined);
     if (state.aggregate !== null)

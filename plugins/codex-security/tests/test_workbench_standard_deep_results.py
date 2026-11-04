@@ -1263,6 +1263,36 @@ def accepted_standard_worker(
     return worker_id, result_path
 
 
+def test_stopped_scan_recovers_latest_numbered_iteration_after_upgrade(tmp_path: Path) -> None:
+    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    worker_id, _ = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
+    legacy_id, legacy = accepted_standard_worker(
+        state_dir, codex_home, scan_dir, scan_id, name="dedup-0001"
+    )
+    write_checkpoint(legacy.parent / "checkpoints", json.loads(legacy.read_text()))
+    latest_id, result = accepted_standard_worker(
+        state_dir, codex_home, scan_dir, scan_id, name="dedup-0002"
+    )
+    finding = standard_finding(tmp_path, scan_id, target)
+    finding["provenance"]["deepScanRepairGroups"] = [{"order": 0, "sources": [f"{worker_id}:1"]}]
+    model = {"summary": "The most recent scan found another trust boundary."}
+    result.write_text(json.dumps({"scanId": scan_id, "findings": [finding], "threatModel": model}))
+    # Seed the retired worker format directly. The live native engine no longer writes these rows.
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', completed_at = ? WHERE id IN (?, ?)",
+            ("2026-10-27T00:00:00Z", legacy_id, latest_id),
+        )
+    stop_scan(state_dir, scan_id, "Interrupted after saving the iteration.")
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert manifest["threatModel"] == model
+    retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 1
+    assert retained[0]["summary"] == finding["summary"]
+    assert "deepScanRepairGroups" not in retained[0]["provenance"]
+    assert json.loads(result.read_text())["findings"] == [finding]
+
+
 def test_stopped_scan_rebinds_prepared_completion_seal(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
     contract_dir = tmp_path / "contract"

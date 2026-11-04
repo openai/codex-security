@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -240,8 +241,7 @@ async function discover(
     } else if (entry.isFile()) {
       // Office keeps a "~$" owner file next to each open document.
       if (entry.name.startsWith("~$")) continue;
-      // macOS writes "._" metadata files when copying to other filesystems.
-      if (entry.name.startsWith("._")) continue;
+      if (entry.name.startsWith("._") && (await isAppleDouble(path))) continue;
       // LibreOffice keeps a ".~lock.<name>#" file next to each open document.
       if (/^\.~lock\..+#$/s.test(entry.name)) continue;
       if (!DOCUMENT_EXTENSIONS.has(extname(path).toLowerCase())) {
@@ -259,6 +259,21 @@ async function discover(
     }
   }
   return documents;
+}
+
+// AppleDouble sidecars and ordinary documents can share the same "._" prefix.
+async function isAppleDouble(path: string): Promise<boolean> {
+  const file = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const header = Buffer.alloc(4);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    return bytesRead === header.length && header.readUInt32BE() === 0x00051607;
+  } finally {
+    await file.close();
+  }
 }
 
 function decodeText(path: string, bytes: Uint8Array): string {

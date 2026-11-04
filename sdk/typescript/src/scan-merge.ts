@@ -235,8 +235,8 @@ export async function confirmScanMerge(
   proposed: ScanMergeResult,
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
-  compare: CompareReports,
-  onComparisonError: (error: unknown) => void,
+  compare?: CompareReports,
+  onComparisonError?: (error: unknown) => void,
 ): Promise<ScanMergeResult> {
   const sources = scanMergeSources(inputs, previous);
   const revised: ScanMergeGroups["groups"] = [];
@@ -286,12 +286,13 @@ export async function confirmScanMerge(
     };
     let matches = new Map<number, Set<number>>();
     if (
+      compare &&
       entries.some((_, right) =>
         entries.some((_, left) => left < right && !exactMatch(left, right)),
       )
     ) {
       matches = await checkSameFix(entries, compare, (error) => {
-        onComparisonError(error);
+        onComparisonError?.(error);
         limitations.add(
           `Deep Scan could not check disputed duplicates: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -338,6 +339,33 @@ export async function confirmScanMerge(
     };
   }
   return result;
+}
+
+/** Retain accepted sources after comparisons stop. Only exact copies are combined. */
+export function mergeExactScanFindings(
+  scanId: string,
+  inputs: readonly ScanMergeInput[],
+  previous: ScanAggregate | null,
+) {
+  const prior = unchangedScanGroups(scanId, previous).groups;
+  const ids = [
+    ...prior.flatMap((group) => group.sourceFindingIds),
+    ...inputs.flatMap((input) => input.draft.findings.flatMap(refs)),
+  ];
+  const groups = ids.length
+    ? [
+        {
+          sourceFindingIds: ids,
+          canonicalSourceFindingId:
+            prior[0]?.canonicalSourceFindingId ?? ids[0]!,
+        },
+      ]
+    : [];
+  return confirmScanMerge(
+    validateScanMerge({ scanId, groups }, inputs, previous),
+    inputs,
+    previous,
+  );
 }
 
 /** Clean batches have no grouping decision; their coverage/context remain host-owned. */

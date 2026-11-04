@@ -1872,6 +1872,8 @@ async function testParentToolList(bundle: string) {
     for (const name of [
       "get_codex_security_deep_reducer_inputs",
       "record_codex_security_deep_reduction",
+      "post_deep_scan_peer_note",
+      "read_deep_scan_peer_notes",
     ]) {
       assert.equal(
         names.has(name),

@@ -958,6 +958,7 @@ export async function inspectWindowsCredentialAclSnapshot(
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
   const ancestorAclScript = windowsCredentialAncestorAclScript(path);
+  const treePath = win32.toNamespacedPath(path);
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -975,6 +976,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     env: {
       ...inheritedEnvironment,
       CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
+      CODEX_SECURITY_CREDENTIAL_TREE_PATH: treePath,
       PSModulePath: join(
         systemDirectory,
         "WindowsPowerShell",
@@ -1011,24 +1013,26 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     // A child can disappear while an existing directory is being enumerated.
     // Retry that incomplete listing before accepting a vanished descendant.
     `    if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
-    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
+    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
     "    throw",
     "  }",
     "  foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
     "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
-    "    try { Write-CredentialAcl $entry.FullName } catch {",
+    // Keep the extended-length path when Windows PowerShell returns child names.
+    '    $child = "$path\\$($entry.Name)"',
+    "    try { Write-CredentialAcl $child } catch {",
     // A descendant can disappear inside Get-Acl after it was enumerated.
     `      if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand' -or $_.FullyQualifiedErrorId -eq 'GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
     "      if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }",
     "      throw",
     "    }",
-    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
+    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $child }",
     "  }",
     "}",
     ancestorAclScript,
     "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_TREE_PATH",
     `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
   ].join("\n");
   const resolvePrincipalScript = [
@@ -1191,7 +1195,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (!descendantsArePrivate) {
     await execFile(
       icacls,
-      [join(path, "*"), "/reset", "/t", "/q"],
+      [join(treePath, "*"), "/reset", "/t", "/q"],
       processOptions,
     );
     await readAcl();

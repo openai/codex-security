@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { finding } from "./scan-draft-fixture.ts";
+import { validateRetainedCoverage } from "../src/coverage-publication.ts";
 import { fixture } from "./scan-draft-recovery-fixture.ts";
 import { readJson } from "./support/json.ts";
 const findings = [
@@ -152,3 +153,18 @@ for (const layout of ["deep"] as const) {
     });
   }
 }
+
+test("retained coverage accepts Unicode paths and validates resolved task text", () => {
+  validateRetainedCoverage({
+    deferred: [{ paths: ["é:helper.ts"] }],
+    resolvedDeferred: [],
+  });
+  assert.throws(
+    () =>
+      validateRetainedCoverage({
+        deferred: [],
+        resolvedDeferred: [{ id: "done", reason: "\ud800" }],
+      }),
+    /well-formed Unicode/,
+  );
+});

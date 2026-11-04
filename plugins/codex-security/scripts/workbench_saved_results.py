@@ -1356,6 +1356,7 @@ def cancel_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
+    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
@@ -1372,13 +1373,16 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             }
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
+        if cost_json is not None:
+            cost_json = merge_scan_cost(scan["cost_json"], cost_json)
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?,
+                cost_json = COALESCE(?, cost_json)
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, scan["id"]),
+            (timestamp, timestamp, timestamp, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")

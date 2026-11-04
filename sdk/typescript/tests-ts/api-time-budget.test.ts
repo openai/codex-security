@@ -184,6 +184,7 @@ test("explicit cancellation remains authoritative with an advisory allowance", a
     }),
   ).rejects.toBeInstanceOf(ScanInterruptedError);
   expect(state.commands).toContain("cancel-scan");
+  expect(state.commands).not.toContain("fail-scan");
   expect(state.commands).not.toContain("complete-scan");
 });
 
