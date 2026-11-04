@@ -113,13 +113,12 @@ def test_endor_csv_preserves_rows_and_vendor_evidence() -> None:
     )
 
 
-def test_csv_source_count_allows_large_exports_and_bounds_excluded_rows() -> None:
+def test_csv_imports_large_exports_and_counts_excluded_rows() -> None:
     row = _rows()[0]
     parsed = parse_report(_csv([row] * 2501), "endor")
     assert len(parsed["findings"]) == 2501
     row["Finding Categories"] = "FINDING_CATEGORY_LICENSE_RISK"
-    with pytest.raises(ValueError, match="at most 10000 source findings"):
-        parse_report(_csv([row] * 10001), "endor")
+    assert parse_report(_csv([row] * 10001), "endor")["excludedCount"] == 10001
 
 
 @pytest.mark.parametrize(

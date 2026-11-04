@@ -1700,9 +1700,8 @@ codex-security dependency-findings assess REPORT_ID --finding FINDING_ID --forma
 codex-security dependency-findings show REPORT_ID --verdict inconclusive --format json
 ```
 
-Imports accept up to 8 MiB and 10,000 source records, including excluded alerts,
-with a 16 MiB limit on normalized data. These limits bound import and storage
-work. Use `--finding` to select a finding, or repeat it to select up to 100 per
+Imports accept reports up to 8 MiB and normalized findings up to 16 MiB.
+Use `--finding` to select a finding, or repeat it to select up to 100 per
 assessment.
 Importing and browsing reports do not start Codex. Assessment checks advisory
 and package identity first, then the application conditions relevant to the

@@ -9,12 +9,13 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Callable
 from copy import deepcopy
 
-MAX_SOURCE_FINDINGS = 10000
 MAX_REPORT_BYTES = 8 * 1024 * 1024
-MAX_CONTEXT_BYTES = 16 * 1024
 MAX_NORMALIZED_BYTES = 16 * 1024 * 1024
+
+_AddFinding = Callable[[dict[str, object]], None]
 
 _ECOSYSTEMS = {
     "pip": "pypi",
@@ -65,23 +66,6 @@ def _selected(record: dict[str, object], *keys: str) -> dict[str, object]:
     return {key: deepcopy(record[key]) for key in keys if key in record}
 
 
-def _check_record_count(lists: list[object]) -> None:
-    count = 0
-    for records in lists:
-        if not isinstance(records, list):
-            raise ValueError("Source findings must be JSON arrays")
-        count += len(records)
-    if count > MAX_SOURCE_FINDINGS:
-        raise ValueError(f"Import at most {MAX_SOURCE_FINDINGS} source findings per report")
-
-
-def _context(record: dict[str, object], *keys: str) -> dict[str, object]:
-    context = {key: record[key] for key in keys if key in record}
-    if len(json.dumps(context).encode("utf-8")) > MAX_CONTEXT_BYTES:
-        raise ValueError("Shared package or project context exceeds the 16 KiB limit")
-    return deepcopy(context)
-
-
 def _package(ecosystem: object, name: object, version: object) -> dict[str, str]:
     result = {}
     eco = _text(ecosystem)
@@ -128,10 +112,8 @@ def _finding(
     }
 
 
-def _snyk(payload: object) -> tuple[list[dict[str, object]], int, int]:
+def _snyk(payload: object, add: _AddFinding) -> tuple[int, int]:
     reports = _objects(payload if isinstance(payload, list) else [payload], "Snyk report")
-    _check_record_count([report.get("vulnerabilities") for report in reports])
-    findings = []
     licenses = 0
     others = 0
     for report in reports:
@@ -139,7 +121,7 @@ def _snyk(payload: object) -> tuple[list[dict[str, object]], int, int]:
             raise ValueError(
                 "Expected Snyk Open Source CLI JSON with packageManager and vulnerabilities"
             )
-        context = _context(
+        context = _selected(
             report, "projectName", "path", "targetFile", "displayTargetFile", "packageManager"
         )
         for record in _objects(report["vulnerabilities"], "Snyk vulnerabilities"):
@@ -168,7 +150,7 @@ def _snyk(payload: object) -> tuple[list[dict[str, object]], int, int]:
             )
             evidence = _selected(record, "reachability", "functions", "functions_new", "references")
             evidence["project"] = deepcopy(context)
-            findings.append(
+            add(
                 _finding(
                     record,
                     source_id=record.get("id"),
@@ -195,12 +177,12 @@ def _snyk(payload: object) -> tuple[list[dict[str, object]], int, int]:
                     evidence=evidence,
                 )
             )
-    return findings, licenses, others
+    return licenses, others
 
 
-def _endor(payload: object) -> tuple[list[dict[str, object]], int, int]:
+def _endor(payload: object, add: _AddFinding) -> tuple[int, int]:
     if isinstance(payload, str):
-        return _endor_csv(payload)
+        return _endor_csv(payload, add)
     report = _object(payload, "Endor report")
     if "list" in report:
         records = _objects(_object(report["list"], "Endor list").get("objects"), "Endor findings")
@@ -208,8 +190,6 @@ def _endor(payload: object) -> tuple[list[dict[str, object]], int, int]:
         records = [report]
     else:
         raise ValueError("Expected Endor Finding or ListFindingsResponse JSON")
-    _check_record_count([records])
-    findings = []
     licenses = 0
     others = 0
     for record in records:
@@ -248,7 +228,7 @@ def _endor(payload: object) -> tuple[list[dict[str, object]], int, int]:
             "finding_metadata",
             "location_urls",
         )
-        findings.append(
+        add(
             _finding(
                 record,
                 source_id=record.get("uuid"),
@@ -274,7 +254,7 @@ def _endor(payload: object) -> tuple[list[dict[str, object]], int, int]:
                 evidence=evidence,
             )
         )
-    return findings, licenses, others
+    return licenses, others
 
 
 def _csv_values(value: str) -> list[str]:
@@ -291,9 +271,8 @@ def _endor_csv_package(value: str) -> dict[str, str]:
     return _package(ecosystem, name, version)
 
 
-def _endor_csv(payload: str) -> tuple[list[dict[str, object]], int, int]:
+def _endor_csv(payload: str, add: _AddFinding) -> tuple[int, int]:
     reader = csv.reader(io.StringIO(payload.removeprefix("\ufeff"), newline=""), strict=True)
-    findings: list[dict[str, object]] = []
     licenses = 0
     others = 0
     previous_field_limit = csv.field_size_limit(MAX_REPORT_BYTES)
@@ -306,8 +285,6 @@ def _endor_csv(payload: str) -> tuple[list[dict[str, object]], int, int]:
         ):
             raise ValueError("Expected Endor CSV export headers without blank or duplicate columns")
         for position, values in enumerate(reader, start=1):
-            if position > MAX_SOURCE_FINDINGS:
-                raise ValueError(f"Import at most {MAX_SOURCE_FINDINGS} source findings per report")
             if len(values) != len(headers):
                 raise ValueError(f"Endor CSV row {position} does not match the header columns")
             row = dict(zip(headers, values, strict=True))
@@ -366,25 +343,21 @@ def _endor_csv(payload: str) -> tuple[list[dict[str, object]], int, int]:
             )
             if row.get("Commit SHA"):
                 finding["sourceRevision"] = row["Commit SHA"]
-            findings.append(finding)
+            add(finding)
     except csv.Error as error:
         raise ValueError(f"Malformed Endor CSV: {error}") from error
     finally:
         csv.field_size_limit(previous_field_limit)
-    return findings, licenses, others
+    return licenses, others
 
 
-def _socket(payload: object) -> tuple[list[dict[str, object]], int, int]:
+def _socket(payload: object, add: _AddFinding) -> tuple[int, int]:
     if isinstance(payload, dict):
         report = _object(payload, "Socket report")
         if report.get("ok") is not True:
             raise ValueError("Expected Socket JSON with ok=true and a data array")
         payload = report.get("data")
     artifacts = _objects(payload, "Socket artifacts")
-    _check_record_count(
-        [artifact.get("alerts") for artifact in artifacts if artifact.get("_type") != "scores"]
-    )
-    findings = []
     licenses = 0
     others = 0
     for artifact in artifacts:
@@ -392,7 +365,7 @@ def _socket(payload: object) -> tuple[list[dict[str, object]], int, int]:
             continue
         if not _text(artifact.get("type")):
             raise ValueError("Expected Socket package artifacts with type and alerts")
-        context = _context(
+        context = _selected(
             artifact,
             "id",
             "type",
@@ -412,6 +385,7 @@ def _socket(payload: object) -> tuple[list[dict[str, object]], int, int]:
                 f"{namespace}:{name}" if artifact.get("type") == "maven" else f"{namespace}/{name}"
             )
         package = _package(artifact.get("type"), name, artifact.get("version"))
+        reachability = None
         for record in _objects(artifact.get("alerts"), "Socket alerts"):
             alert_type = _text(record.get("type"))
             if not alert_type:
@@ -433,13 +407,14 @@ def _socket(payload: object) -> tuple[list[dict[str, object]], int, int]:
                 )
             evidence = _selected(record, "props", "reachability", "file", "start", "end")
             evidence["package"] = deepcopy(context)
-            reachability = _optional_object(artifact.get("alertKeysToReachabilitySummaries"))
+            if reachability is None:
+                reachability = _optional_object(artifact.get("alertKeysToReachabilitySummaries"))
             key = _text(record.get("key"))
             if key and key in reachability:
-                evidence["reachabilitySummary"] = _context(reachability, key)[key]
+                evidence["reachabilitySummary"] = deepcopy(reachability[key])
             fix = _selected(props, "firstPatchedVersionIdentifier", "vulnerableVersionRange")
             fix.update(_selected(record, "fix", "patch"))
-            findings.append(
+            add(
                 _finding(
                     record,
                     source_id=record.get("key"),
@@ -454,7 +429,7 @@ def _socket(payload: object) -> tuple[list[dict[str, object]], int, int]:
                     evidence=evidence,
                 )
             )
-    return findings, licenses, others
+    return licenses, others
 
 
 def parse_report(payload: object, vendor: str) -> dict[str, object]:
@@ -467,9 +442,18 @@ def parse_report(payload: object, vendor: str) -> dict[str, object]:
     parsers = {"endor": _endor, "snyk": _snyk, "socket": _socket}
     if vendor not in parsers:
         raise ValueError("Supported vendors are endor, snyk, and socket")
-    findings, licenses, others = parsers[vendor](payload)
-    if len(json.dumps(findings).encode("utf-8")) > MAX_NORMALIZED_BYTES:
-        raise ValueError("Normalized findings exceed the 16 MiB size limit")
+    findings: list[dict[str, object]] = []
+    normalized_bytes = 2  # JSON array brackets
+
+    def add(finding: dict[str, object]) -> None:
+        nonlocal normalized_bytes
+        # json.dumps defaults to ASCII and uses ", " between records.
+        normalized_bytes += len(json.dumps(finding)) + (2 if findings else 0)
+        if normalized_bytes > MAX_NORMALIZED_BYTES:
+            raise ValueError("Normalized findings exceed the 16 MiB size limit")
+        findings.append(finding)
+
+    licenses, others = parsers[vendor](payload, add)
     warnings = []
     if licenses:
         warnings.append(f"Excluded {licenses} license-only finding(s).")
@@ -480,19 +464,15 @@ def parse_report(payload: object, vendor: str) -> dict[str, object]:
         warnings.append(
             f"{incomplete} finding(s) lack a complete package ecosystem, name, or version."
         )
-    ambiguous_locations = sum(
-        "," in (_text(_optional_object(item.get("original")).get("Location")) or "")
-        for item in findings
-    )
-    if vendor == "endor" and isinstance(payload, str) and ambiguous_locations:
-        warnings.append(
-            f"{ambiguous_locations} finding(s) have comma-containing locations retained "
-            "as vendor evidence; individual repository paths are unresolved."
-        )
     if vendor == "endor" and isinstance(payload, str):
-        missing_locations = sum(
-            not _text(_optional_object(item.get("original")).get("Location")) for item in findings
-        )
+        locations = [_text(item["original"].get("Location")) or "" for item in findings]
+        ambiguous_locations = sum("," in location for location in locations)
+        if ambiguous_locations:
+            warnings.append(
+                f"{ambiguous_locations} finding(s) have comma-containing locations retained "
+                "as vendor evidence; individual repository paths are unresolved."
+            )
+        missing_locations = locations.count("")
         if missing_locations:
             warnings.append(
                 f"{missing_locations} finding(s) lack a repository location; "

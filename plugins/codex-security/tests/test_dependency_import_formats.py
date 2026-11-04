@@ -157,32 +157,11 @@ def test_unsupported_shapes_fail_explicitly(vendor: str, payload: object) -> Non
         parse_report(payload, vendor)
 
 
-@pytest.mark.parametrize("vendor", ["endor", "snyk", "socket"])
-def test_source_count_is_bounded_before_filtering(vendor: str) -> None:
-    """Excluded source records also consume the pre-normalization import limit."""
-    if vendor == "endor":
-        payload = {
-            "list": {
-                "objects": [
-                    {"meta": {}, "spec": {"finding_categories": ["FINDING_CATEGORY_LICENSE_RISK"]}}
-                ]
-                * 10001
-            }
-        }
-    elif vendor == "snyk":
-        payload = {"packageManager": "npm", "vulnerabilities": [{"type": "license"}] * 10001}
-    else:
-        payload = {
-            "ok": True,
-            "data": [
-                {
-                    "type": "npm",
-                    "alerts": [{"type": "unidentifiedLicense", "category": "license"}] * 10001,
-                }
-            ],
-        }
-    with pytest.raises(ValueError, match="at most 10000 source findings"):
-        parse_report(payload, vendor)
+def test_large_snyk_license_export_retains_exclusion_count() -> None:
+    records = [{"type": "license"}] * 10001
+    result = parse_report({"packageManager": "npm", "vulnerabilities": records}, "snyk")
+    assert result["excludedCount"] == len(records)
+    assert result["findings"] == []
 
 
 def test_socket_does_not_amplify_shared_metadata() -> None:
@@ -203,15 +182,18 @@ def test_socket_does_not_amplify_shared_metadata() -> None:
     assert result["findings"][0]["evidence"]["reachabilitySummary"] == [{"type": "reachable"}]
 
 
-@pytest.mark.parametrize("vendor", ["snyk", "socket"])
-def test_oversized_shared_context_is_rejected(vendor: str) -> None:
-    """Oversized repeated project or package context cannot multiply report size."""
-    if vendor == "snyk":
-        payload = {"packageManager": "npm", "projectName": "x" * 20000, "vulnerabilities": []}
-    else:
-        payload = {"ok": True, "data": [{"type": "npm", "name": "x" * 20000, "alerts": []}]}
-    with pytest.raises(ValueError, match="Shared package or project context"):
-        parse_report(payload, vendor)
+def test_socket_preserves_workspace_manifest_paths() -> None:
+    paths = [f"workspaces/workspace-{i}/package-lock.json" for i in range(500)]
+    artifact = {
+        "type": "npm",
+        "name": "example",
+        "version": "1",
+        "manifestFiles": [{"file": path} for path in paths],
+        "alerts": [{"type": "cve", "key": "example-alert"}],
+    }
+    [finding] = parse_report([artifact], "socket")["findings"]
+    assert finding["locations"] == [{"path": path} for path in paths]
+    assert finding["evidence"]["package"]["manifestFiles"] == artifact["manifestFiles"]
 
 
 def test_normalized_storage_is_bounded() -> None:
