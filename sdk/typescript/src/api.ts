@@ -3,6 +3,8 @@ import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  explicitlyCanceled,
+  hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
   type ScanExecutor,
@@ -2016,11 +2018,11 @@ export class CodexSecurity {
     this.#requireOpen();
     if (options.mock) return await this.#runMock(repository, options);
     const costAbortController = new AbortController();
-    const signal = AbortSignal.any([
+    const callerSignal = AbortSignal.any([
       this.#abortController.signal,
-      costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const signal = AbortSignal.any([callerSignal, costAbortController.signal]);
     const budgetAbortController = new AbortController();
     const budgetSignal = AbortSignal.any([
       signal,
@@ -3744,13 +3746,18 @@ export class CodexSecurity {
         result.rolloutSessionIndexPath = rolloutSessionIndexPath;
       return result;
     } catch (error) {
+      // Capture who stopped the scan before cleanup can fire another signal.
+      const callerCancellation =
+        callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
+          ? callerSignal
+          : undefined;
+      let failure =
+        signal.aborted && callerCancellation === undefined
+          ? signal.reason
+          : error;
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
-      let failure =
-        signal.reason instanceof ScanCostLimitExceededError
-          ? signal.reason
-          : error;
       if (
         failure instanceof ScanCostLimitExceededError &&
         snapshot?.cost &&
@@ -3767,8 +3774,7 @@ export class CodexSecurity {
         budgetRecovery !== null &&
         budgetRecovery.threadId !== null &&
         activeScan !== null &&
-        !this.#abortController.signal.aborted &&
-        options.signal?.aborted !== true
+        !callerSignal.aborted
       ) {
         try {
           const completion = await workbench(
@@ -3803,10 +3809,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            callerSignal,
             true,
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
@@ -3889,21 +3892,19 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(failure)}`,
-              ...(snapshot?.cost
-                ? ["--cost-json", JSON.stringify(snapshot.cost)]
-                : []),
-            ],
+          const stopped = await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            this.#dependencies.hostedScan
+              ? hostedScanFailureStatus(failure, callerCancellation) ===
+                  "canceled"
+              : explicitlyCanceled(callerCancellation),
+            failure,
+            snapshot?.cost,
           );
           activeScan = null;
-          await saveRollouts?.(failed["scan"]);
-          notifyScanLifecycle(options, failed["scan"], true);
+          await saveRollouts?.(stopped);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -4994,17 +4995,14 @@ export class CodexSecurity {
     } catch (error) {
       if (activeScan !== undefined) {
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(error)}`,
-            ],
+          await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            explicitlyCanceled(signal),
+            error,
           );
           activeScan = undefined;
-          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (this.#closed) this.#requireOpen();
@@ -6227,6 +6225,52 @@ function notifyScanLifecycle(
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
     notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+async function stopRegisteredScan(
+  workbench: typeof runWorkbench,
+  activeScan: { id: string; options: WorkbenchCommandOptions },
+  options: ScanOptions,
+  canceled: boolean,
+  error: unknown,
+  cost?: Readonly<ScanCost> | null,
+): Promise<unknown> {
+  const cleanupOptions = { ...activeScan.options, signal: undefined };
+  const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  if (canceled) {
+    try {
+      const stopped = await workbench(cleanupOptions, [
+        "cancel-scan",
+        "--scan-id",
+        activeScan.id,
+        ...costArgs,
+      ]);
+      // A workspace can already display a replacement when cancellation returns.
+      const results = stopped["results"];
+      if (isRecord(results) && results["scanId"] === activeScan.id) {
+        notifyScanLifecycle(options, results, true);
+        return results;
+      }
+      observeSettledScan(options, activeScan);
+      return;
+    } catch (cause) {
+      // Older external workbenches can only persist cost on a failed scan.
+      if (
+        !cost ||
+        !errorMessage(cause).includes("unrecognized arguments: --cost-json")
+      )
+        throw cause;
+    }
+  }
+  const failed = await workbench(cleanupOptions, [
+    "fail-scan",
+    "--scan-id",
+    activeScan.id,
+    `--message=${errorMessage(error)}`,
+    ...costArgs,
+  ]);
+  notifyScanLifecycle(options, failed["scan"], true);
+  return failed["scan"];
 }
 
 function observeSettledScan(

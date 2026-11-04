@@ -4,6 +4,11 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
+}
+
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
  */
@@ -11,6 +16,7 @@ export interface ArtifactContext {
   root: string;
   repoRoot: string;
   layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
