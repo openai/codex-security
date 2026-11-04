@@ -1266,8 +1266,9 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
-If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
-a string task ID, the command reports its line number and leaves the ledger untouched.
+Each nonempty committed line in `results.jsonl` must be valid JSON with a string
+task ID and a positive integer attempt number. If a line fails these checks, the
+command reports its line number and preserves the ledger.
 Restore a complete ledger backup that includes every committed attempt, or start
 a separate campaign in a new `--output-dir`.
 

@@ -515,6 +515,10 @@ describe("multiscan", () => {
     ["non-object", "null", false],
     ["missing ID", "{}", false],
     ["non-string ID", '{"id":42}', false],
+    ["missing attempt", '{"id":"receipt"}', false],
+    ["string attempt", '{"id":"receipt","attempt":"1"}', false],
+    ["zero attempt", '{"id":"receipt","attempt":0}', false],
+    ["fractional attempt", '{"id":"receipt","attempt":1.5}', true],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {

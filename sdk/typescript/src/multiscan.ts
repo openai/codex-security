@@ -349,11 +349,7 @@ async function runCampaign(
       continue;
     }
     if (artifactsPresent) {
-      if (
-        receipt.status === "completed" &&
-        Number.isSafeInteger(receipt.attempt) &&
-        receipt.attempt > 0
-      ) {
+      if (receipt.status === "completed") {
         try {
           if (receipt.cleanupPending === "checkout") {
             await rm(join(output, "checkouts", task.id), {
@@ -1066,6 +1062,8 @@ async function readReceipts(
       saved = JSON.parse(line);
       if (typeof saved?.id !== "string")
         throw new Error("Expected a receipt with a string id");
+      if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
+        throw new Error("Expected a positive integer receipt attempt");
     } catch (cause) {
       throw new Error(
         `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
