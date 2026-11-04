@@ -11,6 +11,7 @@ source_hash="$(git diff-tree -r -z --no-abbrev "$empty_tree" HEAD -- \
   "${ci_only}"invoice-desk-{source,target}{,.test}.mjs \
   "${ci_only}"{check-ci-results,select-ci-checks,test-ci-selection,test-release-guide}.mjs \
   "${ci_only}"{verify-pr-source,test-verify-pr-source,release-progress,test_release_progress}.mjs \
+  "${ci_only}"test_check_plugin_source_compatibility.mts \
   "${ci_only}"{install-ripgrep.sh,require_native_python_report.py,test_require_native_python_report.py} \
   .github/workflows/native-artifacts.yml \
   .github/workflows/native-unix.yml \

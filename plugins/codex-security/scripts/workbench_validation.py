@@ -16,6 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
+from workbench_constants import optional_text as optional_text
 from workbench_scan_usage import TOKEN_FIELDS, valid_account_rate_limit
 from workbench_scan_usage import (
     _reject_nonstandard_json_number as reject_nonstandard_json_number,
@@ -23,6 +24,19 @@ from workbench_scan_usage import (
 from workbench_scan_usage import _timestamp as usage_timestamp
 
 reject_non_finite_json = finalizer._reject_non_finite_json
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_non_finite_json,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path.name}: expected a JSON object.")
+    return payload
 
 
 def javascript_utf8(value: str) -> bytes:
@@ -43,15 +57,6 @@ def require_uuid(value: str, label: str) -> str:
         return str(uuid.UUID(value))
     except ValueError as exc:
         raise SystemExit(f"{label} must be a UUID.") from exc
-
-
-def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    if maximum is not None and len(normalized) > maximum:
-        raise SystemExit(f"Text value must be no longer than {maximum} characters.")
-    return normalized or None
 
 
 def sqlite_busy(error: sqlite3.OperationalError) -> bool:

@@ -60,7 +60,7 @@ alias expansion.
 
 For Daybreak on Codex 0.163.0 or later, set `codex.daybreak` to `true`; the toggle
 defaults off. This native setting is retained in scan recipes and passed to
-Deep Scan discovery and reducer workers, including resumes. An explicit
+Deep Scan discovery workers, including resumes. An explicit
 `scan.cyber_access_program` takes precedence for each turn. See
 [Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
 
@@ -77,6 +77,15 @@ node sdk/typescript/bin/codex-security.mjs scan . -c docs/examples/codex-securit
 ```
 
 ## Desktop and conversational Deep Scans
+
+When the Codex host supplies the launching turn’s speed, Deep Scan uses it for
+discovery and reducer workers, including resumed workers. Selecting Default
+overrides a faster tier in the worker’s Codex config. On hosts that omit the
+turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
+at Default on those hosts, leave `service_tier = "default"` in the worker’s
+config for the duration of the scan, including any resumes. Other scans that
+load the same config also use that setting. The usual config file is
+`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `$CODEX_HOME` is unset.
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project
 file using the same format. For example:

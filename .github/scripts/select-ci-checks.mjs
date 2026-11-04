@@ -86,6 +86,9 @@ export function selectChecks(paths, options) {
   ];
   const selected = {
     "source-required": String(source),
+    "container-required": String(
+      sourceBeyondSdkTests && scope !== "python-tests",
+    ),
     "plugin-tests-required": String(sourceBeyondSdkTests),
     "package-required": String(source || scope === "action"),
     "action-ci": String(action),
