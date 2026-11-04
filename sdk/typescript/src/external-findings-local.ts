@@ -1188,8 +1188,10 @@ export async function prepareLocalImport(
       strictSources.set(checkmarx, platformFor(source));
   }
   if (
-    (options.provider === "checkmarx" || checkmarx) &&
-    !sameRepositories(sources.keys())
+    ((options.provider === "checkmarx" || checkmarx) &&
+      !sameRepositories(sources.keys())) ||
+    (checkmarx &&
+      hosted.some((source) => !semgrepReferenceMatches(source, checkmarx)))
   )
     throw new Error(
       "The retained Checkmarx report repository does not match the finding repository.",

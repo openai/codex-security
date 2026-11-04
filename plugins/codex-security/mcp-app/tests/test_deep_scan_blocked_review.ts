@@ -23,7 +23,6 @@ class CheckpointExecutor extends FakeExecutor {
 
   override async run(request: CodexWorkerRequest) {
     const result = await super.run(request);
-    if (request.kind !== "discovery") return result;
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = JSON.parse(await readFile(resultPath, "utf8"));
     const blocked = this.discoveryCalls <= this.blockedAttempts;
@@ -79,7 +78,7 @@ try {
       assert.equal(publications, complete ? 1 : 0);
       if (!complete) {
         assert.match(terminal.error!, /only a checkpoint/);
-        assert.equal(executor.dedupCalls, 0);
+        assert.deepEqual(store.iterations, []);
         const worker = [...store.workers.values()][0];
         assert.notEqual(worker.status, "succeeded");
         const head = JSON.parse(

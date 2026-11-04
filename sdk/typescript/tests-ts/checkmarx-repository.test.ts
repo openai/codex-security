@@ -3,6 +3,7 @@ import { normalizeCheckmarxOne } from "../src/checkmarx-one.js";
 import { normalizeCheckmarxXml } from "../src/checkmarx-xml.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import type { ExternalFindings } from "../src/external-findings.js";
+import { normalizeSemgrepPlatformFindings } from "../src/semgrep-platform-findings.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
 const source = "https://github.com/example/project";
@@ -261,6 +262,44 @@ test("a projected Checkmarx row under Wiz retains the report and original asset 
     (await bind([row("sdk-row"), retained("wiz-row", other)], source)).preview
       .findings,
   ).toHaveLength(2);
+});
+
+test("a projected Checkmarx report must match a hosted Semgrep project even with both Git remotes", async () => {
+  await using fixture = await localFindingsFixture({
+    remote: source,
+    isolatedGit: true,
+  });
+  const other = source + "-other";
+  fixture.git("remote", "add", "other", other);
+  const scan = normalizeSemgrepPlatformFindings({
+    format: "semgrep-platform-findings/v2",
+    deployment: "example",
+    project: { id: "1", name: "example/project", url: source },
+    ref: "refs/heads/main",
+    product: "sca",
+    repositoryAliases: [],
+    findingCount: 1,
+    findings: [JSON.stringify({ id: 9, rule_name: "example.rule" })],
+  });
+  const prepare = (reportUrl: string) =>
+    prepareNormalizedLocalImport(
+      {
+        read: 2,
+        excluded: [],
+        findings: [
+          ...scan.findings,
+          {
+            source_finding_id: "checkmarx-one:" + "a".repeat(64),
+            evidence: { title: "Projected result", severity: "low" },
+          },
+        ],
+        report: { sourceRepositoryUrl: reportUrl },
+      },
+      { provider: "semgrep", repository: fixture.repository, sourceKey: "sdk" },
+      { environment: fixture.environment },
+    );
+  await expect(prepare(other)).rejects.toThrow(/Checkmarx report repository/);
+  expect((await prepare(source)).preview.findings).toHaveLength(2);
 });
 
 test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {
