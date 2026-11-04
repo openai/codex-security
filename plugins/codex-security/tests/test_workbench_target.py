@@ -1464,6 +1464,12 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     ):
         assert trusted_git_executable(repository) is None
 
+    # A recorded outer boundary keeps the historical shim excluded after target deletion.
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved), recorded_git_roots=lambda: (historical,)
+    ):
+        assert trusted_git_executable(repository) == str(host / name)
+
     # The caller can still explicitly select a tool outside the current repository.
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(historical / name))
     with WORKBENCH_TARGET["scoped_git_discovery"](

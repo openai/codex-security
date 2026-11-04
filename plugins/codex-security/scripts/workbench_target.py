@@ -280,14 +280,15 @@ def _resolve_git_executable(
             # A legacy Git target has no trustworthy boundary to exclude from PATH.
             if recorded_git_roots is None:
                 return None
-            for root in recorded_git_roots:
+            saved_boundaries = tuple(recorded_git_roots)
+            for root in saved_boundaries:
                 repositories.extend(_historical_repository_roots(root))
             for root in discovery_roots:
                 for repository in _historical_repository_roots(root):
-                    if not repository.is_dir():
-                        # A missing target without enclosing Git metadata cannot bound its
-                        # former checkout. Treat ambient Git as unavailable rather than
-                        # selecting an executable from unknown historical repository content.
+                    if not repository.is_dir() and not any(
+                        repository.is_relative_to(boundary) for boundary in saved_boundaries
+                    ):
+                        # Its former checkout is neither discoverable nor already excluded.
                         return None
                     repositories.append(repository)
             for root in excluded_roots:
