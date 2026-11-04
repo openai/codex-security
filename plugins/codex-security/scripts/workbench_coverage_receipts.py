@@ -108,6 +108,7 @@ def retain_recorded_receipt_ownership(
 def resolve_coverage_receipts(
     scan_dir: Path, item: dict[str, Any], worker: Any, relative: str
 ) -> Any:
+    """Qualify worker receipt references relative to their source checkpoint for use in parent coverage."""
     refs = item.get("receiptRefs", [])
     if not isinstance(refs, list):
         return refs

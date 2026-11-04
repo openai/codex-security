@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse

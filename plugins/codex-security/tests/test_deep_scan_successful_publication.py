@@ -1,3 +1,5 @@
+"""Check how final deep scan reports preserve remediation, selected paths, and worker evidence."""
+
 from __future__ import annotations
 
 import copy

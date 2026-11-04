@@ -125,7 +125,13 @@ def merge_saved_results(
     current_contract: bool = False,
     recovery_snapshot_error: _CheckpointSnapshotError | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    """Read only bound parent/worker files; return an unsealed loss-preserving union."""
+    """Reconcile the bound parent and worker checkpoints into an unsealed scan draft.
+
+    Return the manifest, findings document, and coverage document, or None when there
+    is no saved input or the sealed parent already reflects the selected checkpoints.
+    Frozen digests and heads identify the inputs selected when the scan stopped.
+    Recovery appends diagnostics to the caller's warnings list.
+    """
     initial_warnings = set(warnings)
     if frozen_source_digests is None:
         checkpoint_heads = {}
@@ -703,8 +709,7 @@ def merge_saved_results(
     for relative, draft, worker_id in sources:
         if relative not in accepted_sources:
             continue
-        surfaces = draft["reviewState"].get("surfaces", [])
-        for index, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
+        for index, surface in enumerate(_coverage_rows(draft["reviewState"], "surfaces"), 1):
             if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                 accepted_surfaces.setdefault((worker_id, surface["id"]), []).append(
                     (index, surface)
@@ -825,11 +830,7 @@ def merge_saved_results(
     surface_ids_by_source: dict[tuple[str, str], list[str]] = {
         (relative, row["id"]): []
         for relative, draft, _ in all_sources
-        for row in (
-            draft["reviewState"].get("surfaces", [])
-            if isinstance(draft["reviewState"].get("surfaces"), list)
-            else []
-        )
+        for row in _coverage_rows(draft["reviewState"], "surfaces")
         if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     discarded_coverage_sources: set[str] = set()
@@ -1074,8 +1075,7 @@ def merge_saved_results(
     retained_surface_rows: set[int] = set()
     for relative, draft, _ in all_sources:
         for field in ("surfaces", "deferred"):
-            rows = draft["reviewState"].get(field)
-            for row in rows if isinstance(rows, list) else []:
+            for row in _coverage_rows(draft["reviewState"], field):
                 if isinstance(row, dict):
                     paths_for_row = coverage_sources.setdefault(id(row), (row, []))[1]
                     if relative not in paths_for_row:
@@ -1227,8 +1227,7 @@ def merge_saved_results(
             if isinstance(finding, dict) and valid_finding(finding)
         }
         for field in ("surfaces", "deferred", "explicitExclusions"):
-            rows = draft["reviewState"].get(field, [])
-            for index, row in enumerate(rows if isinstance(rows, list) else [], 1):
+            for index, row in enumerate(_coverage_rows(draft["reviewState"], field), 1):
                 if not isinstance(row, dict):
                     continue
                 if (
@@ -1350,8 +1349,7 @@ def merge_saved_results(
 
     pending_surface_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
     for relative, draft, owner in all_sources:
-        surfaces = draft["reviewState"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        for surface in _coverage_rows(draft["reviewState"], "surfaces"):
             if (
                 isinstance(surface, dict)
                 and surface.get("disposition") == "needs_follow_up"
@@ -3180,8 +3178,7 @@ def merge_saved_results(
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)
-    surfaces = coverage.get("surfaces", [])
-    for surface in surfaces if isinstance(surfaces, list) else []:
+    for surface in _coverage_rows(coverage, "surfaces"):
         if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
             surface["provenance"].pop("scanReceiptRefs", None)
     if (

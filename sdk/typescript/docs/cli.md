@@ -130,8 +130,19 @@ after logout completes.
 Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
 `HOME` or `USERPROFILE` environment setting.
 
-If credentials cannot refresh, run `login status`. Retry if the sign-in recently
-changed; otherwise run `logout`, then `login`.
+If you use file-based ChatGPT credentials with both Codex and Codex Security,
+run `codex-security login` before your first scan or status check to give Codex
+Security its own session. An imported sign-in shares a single-use refresh token.
+When either client renews it, the other client's next refresh can fail even
+while its login status reports that it is signed in.
+
+If Codex Security reports that the refresh token was already used, run
+`codex-security logout`, then `codex-security login`. If your Codex CLI or app
+reports that error, sign out and sign back in there.
+
+For other refresh errors, check `codex-security login status`. Retry if the
+sign-in recently changed. Otherwise run `codex-security logout`, then
+`codex-security login`.
 Some cybersecurity requests and protected findings require
 [Trusted Access for Cyber](https://chatgpt.com/cyber).
 
@@ -1493,10 +1504,22 @@ review the new submission before confirming.
 
 | Status        | Exit code | Meaning                                                                                |
 | ------------- | --------- | -------------------------------------------------------------------------------------- |
+| `empty`       | 0         | No records were available to upload.                                                   |
 | `complete`    | 0         | The inbox job processed every record successfully, or the publisher verified each one. |
 | `partial`     | 1         | The import had exclusions or record errors, or the inbox job failed or was cancelled.  |
 | `interrupted` | 2         | The CLI stopped while uploading, checking the result or saving a receipt.              |
 | `failed`      | 2         | Preparation failed before upload.                                                      |
+
+A clean empty report needs no confirmation. Self-contained file imports can
+finish before Cloud sign-in; Semgrep Platform and Snyk REST captures use the
+Cloud catalog to verify their repository. Local imports still validate the
+checkout and create no workbench database. Explicit scanner errors
+and selections containing only excluded records fail; JSON output retains their
+diagnostics and exclusion reasons. Existing findings stay open.
+
+For automation, check the scanner's exit status as well as the import's. SARIF
+can contain no runs or omit results in a rules-only export. `empty` describes
+the selected report, not whether a scan completed successfully.
 
 For a partial or interrupted import, check `excluded` and any `error` before
 retrying. Some records may already have reached Cloud.

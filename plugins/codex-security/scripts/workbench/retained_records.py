@@ -20,6 +20,7 @@ from finalize_scan_contract import (
     _validate_schema_node,
     finding_candidate_id,
 )
+from finalize_scan_contract import _schema_values_equal as same_raw_value
 from workbench.saved_coverage import _coverage_rows, _has_candidate_metadata, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
 from workbench_coverage_receipts import _deferred_candidate_id, resolve_coverage_receipts
@@ -160,6 +161,7 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
 def _recover_preserved_worker_source(
     scan_dir, relative, scan_id, binding, worker_id, worker, draft, warnings
 ):
+    """Normalize findings and receipt references in the draft and return diagnostics for discarded findings."""
     discarded_findings = []
     # Recover imported records without relaxing canonical parent validation.
     if "complete" in draft and not isinstance(draft["complete"], bool):
@@ -238,10 +240,10 @@ def _recover_preserved_worker_source(
 def _recover_preserved_worker_coverage(
     scan_dir, relative, worker_id, draft, discarded_findings, warnings
 ):
+    """Repair coverage in the draft, append source warnings, and return whether coverage was discarded."""
     discarded_coverage = False
     for field in ("surfaces", "explicitExclusions", "deferred"):
-        rows = draft["reviewState"].get(field)
-        for row in rows if isinstance(rows, list) else []:
+        for row in _coverage_rows(draft["reviewState"], field):
             if isinstance(row, dict):
                 row.setdefault("id", _saved_coverage_id(row))
                 if field == "surfaces":
@@ -270,6 +272,7 @@ def _recover_preserved_worker_coverage(
 
 
 def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
+    """Return the report ID and ledger row ID from extensions, using None for missing or blank IDs."""
     extensions = value.get("extensions")
     return tuple(
         identifier if _has_identity_text(identifier) else None
@@ -281,6 +284,7 @@ def _report_ids(value: dict[str, Any]) -> tuple[Any, Any]:
 
 
 def raw_owner(value: dict[str, Any], source_owner: str | None) -> str | None:
+    """Return the source owner, falling back to the worker ID recorded in finding provenance."""
     if source_owner is not None:
         return source_owner
     provenance = value.get("provenance", {})
@@ -289,6 +293,7 @@ def raw_owner(value: dict[str, Any], source_owner: str | None) -> str | None:
 
 
 def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
+    """Return the rule, path, and line range of the first location used to match anonymous reports."""
     # Match scanFindingIdentity's primary location for anonymous reports.
     location = value["locations"][0]
     return (
@@ -299,24 +304,9 @@ def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def same_raw_value(left: Any, right: Any) -> bool:
-    if isinstance(left, dict):
-        return (
-            isinstance(right, dict)
-            and left.keys() == right.keys()
-            and all(same_raw_value(value, right[key]) for key, value in left.items())
-        )
-    if isinstance(left, list):
-        return (
-            isinstance(right, list)
-            and len(left) == len(right)
-            and all(same_raw_value(a, b) for a, b in zip(left, right, strict=True))
-        )
-    # JSON numbers compare by value, but booleans are a distinct scalar type.
-    return isinstance(left, bool) == isinstance(right, bool) and left == right
-
-
 def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Compare substantive finding fields while ignoring identity, provenance, and report-tracking IDs."""
+
     def content(value: dict[str, Any]) -> dict[str, Any]:
         result = _finding_content(value)
         if isinstance(result.get("extensions"), dict):
@@ -333,6 +323,10 @@ def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def contains_raw_value(current: Any, previous: Any) -> bool:
+    """Check whether the current JSON value retains every part of the previous value.
+
+    Match dictionary values by key and list elements by content, regardless of order.
+    """
     if isinstance(previous, dict):
         return isinstance(current, dict) and all(
             key in current and contains_raw_value(current[key], value)
@@ -411,6 +405,7 @@ def _saved_candidate_outcomes(
     workers_by_id,
     coverage_schema,
 ):
+    """Return saved candidate outcomes with their evidence and the ordering of pending candidates by owner."""
     pending_candidate_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
     outcomes = []
     for relative, draft, owner in current_drafts:
@@ -421,8 +416,7 @@ def _saved_candidate_outcomes(
         }
         pending_candidates = set()
         for field in ("deferred", "surfaces"):
-            items = draft["reviewState"].get(field, [])
-            for item in items if isinstance(items, list) else []:
+            for item in _coverage_rows(draft["reviewState"], field):
                 if isinstance(item, dict) and (
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
                 ):
@@ -581,18 +575,16 @@ def _project_missing_record(
         if previous is not None and isinstance(previous.get("id"), str):
             result["id"] = previous["id"]
         else:
-            surfaces = coverage.get("surfaces", [])
             if any(
                 isinstance(row, dict) and row.get("id") == result["id"]
-                for row in (surfaces if isinstance(surfaces, list) else [])
+                for row in _coverage_rows(coverage, "surfaces")
             ):
                 result["id"] = f"{result['id']}-{_digest(result)[:16]}"
     elif field == "deferred":
         result["id"] = f"{prefix}-deferred-{index}"
         if isinstance(item.get("surfaceIds"), list):
             surface_ids: dict[str, str] = {}
-            surfaces = projected_coverage.get("surfaces", [])
-            for surface in surfaces if isinstance(surfaces, list) else []:
+            for surface in _coverage_rows(projected_coverage, "surfaces"):
                 if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
                     continue
                 provenance = surface.get("provenance", {})
@@ -603,9 +595,8 @@ def _project_missing_record(
                     and isinstance(provenance.get("sourceId"), str)
                 ):
                     surface_ids.setdefault(provenance["sourceId"], surface["id"])
-            surfaces = source.get("surfaces", [])
             source_surface_ids: dict[str, tuple[int, dict[str, Any]]] = {}
-            for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
+            for offset, surface in enumerate(_coverage_rows(source, "surfaces"), 1):
                 if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                     source_surface_ids.setdefault(surface["id"], (offset, surface))
             for (owner, source_id), accepted in accepted_surfaces.items():
