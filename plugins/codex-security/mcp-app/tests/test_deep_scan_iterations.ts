@@ -1001,3 +1001,45 @@ test("a merged report cannot lend its extra citation to a later comparison", asy
     [2, 1],
   );
 });
+
+test("a context-sized report does not prevent comparison of later observations", async () => {
+  const tooLarge = () => {
+    throw new Error(
+      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+    );
+  };
+  const separate = { ...base, title: "Oversized report" };
+  const alias = { ...base, title: "Second description" };
+  const { draft } = await scanLoop([[separate, base, alias]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [
+      tooLarge,
+      tooLarge,
+      tooLarge,
+      tooLarge,
+      (rows) => {
+        assert.deepEqual(
+          rows.map(({ title }) => title),
+          [alias.title, base.title],
+        );
+        return {
+          uncertain: [],
+          defects: [
+            {
+              operation: "check",
+              failure: "fixture",
+              path: "fixture.py",
+              reports: rows.map(({ id }) => ({ id, evidence: 0 })),
+            },
+          ],
+        };
+      },
+    ],
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.provenance.sourceFindings?.length),
+    [1, 2],
+  );
+  assert.match(draft.scope?.limitations?.join(" ") ?? "", /context window/);
+});

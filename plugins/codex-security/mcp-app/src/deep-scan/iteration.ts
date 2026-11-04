@@ -124,6 +124,86 @@ function repairKeys(response: string, records: ReturnType<typeof report>[]) {
   return keys;
 }
 
+function equalRepairs(a?: number[], b?: number[]) {
+  return (
+    !!a && !!b && a.length === b.length && a.every((key, i) => key === b[i])
+  );
+}
+
+function contextWindowExceeded(error: unknown) {
+  return errorMessage(error).startsWith(
+    "Codex ran out of room in the model's context window.",
+  );
+}
+
+async function compareRecords(
+  records: ComparisonReport[],
+  compare: CompareReports,
+) {
+  const rows = records.map((record, id) => ({ id, ...record }));
+  return repairKeys(
+    await compare(
+      instructions + "\n" + JSON.stringify(rows),
+      duplicateResponseSchema,
+    ),
+    records,
+  );
+}
+
+// A repair must cite a file in both reports. After the model rejects the full
+// batch, compare new reports only with earlier reports that can share a repair.
+async function compareWithinContext(
+  records: ComparisonReport[],
+  exact: string[],
+  previous: number,
+  compare: CompareReports,
+  matches: Map<number, Set<number>>,
+) {
+  const byFile = new Map<string, number[]>();
+  const seen = new Set<string>();
+  for (const [id, record] of records.entries()) {
+    if (seen.has(exact[id]!)) continue;
+    seen.add(exact[id]!);
+    const files = new Set(
+      [...record.locations, ...record.evidence].flatMap(([path]) =>
+        path ? [path] : [],
+      ),
+    );
+    if (id >= previous) {
+      const candidates = [
+        ...new Set([...files].flatMap((path) => byFile.get(path) ?? [])),
+      ];
+      async function check(ids: number[]): Promise<void> {
+        try {
+          const keys = await compareRecords(
+            [record, ...ids.map((i) => records[i]!)],
+            compare,
+          );
+          for (const [i, other] of ids.entries()) {
+            if (equalRepairs(keys.get(0), keys.get(i + 1))) {
+              const earlier = matches.get(id) ?? new Set<number>();
+              earlier.add(other);
+              matches.set(id, earlier);
+            }
+          }
+        } catch (error) {
+          if (!contextWindowExceeded(error)) throw error;
+          if (ids.length === 1) return; // Even this pair cannot fit. Retain both reports.
+          const mid = Math.ceil(ids.length / 2);
+          await check(ids.slice(0, mid));
+          await check(ids.slice(mid));
+        }
+      }
+      if (candidates.length) await check(candidates);
+    }
+    for (const path of files) {
+      const ids = byFile.get(path) ?? [];
+      ids.push(id);
+      byFile.set(path, ids);
+    }
+  }
+}
+
 function hasAdditionalSink(
   finding: ReturnType<typeof report>,
   other: ReturnType<typeof report>,
@@ -317,6 +397,7 @@ export async function mergeBatch(
       copies.set(content(source.finding), group);
   }
   let repairs: Map<number, number[] | undefined> | undefined;
+  const fallbackMatches = new Map<number, Set<number>>();
   let records: ComparisonReport[] = [];
   let limitation: string | undefined;
   const unseen = new Set(
@@ -325,20 +406,28 @@ export async function mergeBatch(
   if (unseen.size > (previous ? 0 : 1)) {
     try {
       records = originals.map((finding, id) => report(finding, id < previous));
-      const rows = records.map((record, id) => ({ id, ...record }));
-      repairs = repairKeys(
-        await compare(
-          instructions + "\n" + JSON.stringify(rows),
-          duplicateResponseSchema,
-        ),
-        records,
-      );
+      repairs = await compareRecords(records, compare);
       if (repairs.size < records.length)
         limitation = `Deep Scan comparison omitted ${records.length - repairs.size} of ${records.length} reports from its repair assignments.`;
     } catch (error) {
-      // Failed comparisons preserve all findings except exact repeats.
       onError(error);
       limitation = `Deep Scan could not compare this batch for duplicates: ${errorMessage(error)}`;
+      if (contextWindowExceeded(error) && records.length > 2) {
+        limitation +=
+          " Retried reports with shared files in smaller comparisons. Pairs that could not fit were kept separate.";
+        try {
+          await compareWithinContext(
+            records,
+            exact,
+            previous,
+            compare,
+            fallbackMatches,
+          );
+        } catch (retryError) {
+          onError(retryError);
+          limitation += ` Smaller comparisons stopped: ${errorMessage(retryError)}`;
+        }
+      }
     }
   }
   const changed = new Map<number, number>();
@@ -352,10 +441,8 @@ export async function mergeBatch(
         retained.find((prior) => {
           const other = repairs?.get(prior.id);
           if (
-            !key ||
-            !other ||
-            key.length !== other.length ||
-            !key.every((v, i) => v === other[i])
+            !equalRepairs(key, other) &&
+            !fallbackMatches.get(id)?.has(prior.id)
           )
             return false;
           if (
