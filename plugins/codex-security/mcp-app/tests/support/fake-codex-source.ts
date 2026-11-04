@@ -9,15 +9,15 @@ export function fakeCodexSource(
 ): string {
   return `#!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};
 const temporaryEnvironment = Object.fromEntries(['TEMP', 'TMP'].map(name => [name, process.env[name]]));
 if (process.argv.includes('app-server')) {
-  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR, temporaryEnvironment, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
+  const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR, temporaryEnvironment, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env["LD_LIBRARY_PATH"], cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeaders: Object.fromEntries(['SYNTHETIC_HEADER_VALUE', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY'].map(name => [name, process.env[name]])), providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
 ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       if (message.method === 'config/read' || message.method === 'permissionProfile/list') {
@@ -38,7 +38,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
         }
         result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile }, mcp_servers: { 'fixture.catalog': { command: 'node' } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
       } else if (message.method === 'account/read') {
@@ -65,6 +65,7 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
+const codexConfig = stdin.includes('CAPTURE_SYNTHETIC_CODEX_CONFIG') ? readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8') : undefined;
 const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'CODEX_MCP_NODE_PATH', 'CODEX_BROWSER_USE_NODE_PATH', 'CODEX_ELECTRON_RESOURCES_PATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const toolProbe = stdin.includes('CAPTURE_SYNTHETIC_RG') ? spawnSync('rg', ['--version'], { encoding: 'utf8' }) : undefined;
 if (toolProbe && toolProbe.status !== 0) throw toolProbe.error ?? new Error(toolProbe.stderr);
@@ -74,7 +75,7 @@ const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
 const deepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, 'utf8') : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, deepConfig, codexHome: process.env.CODEX_HOME, temporaryEnvironment, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, deepConfig, codexHome: process.env.CODEX_HOME, temporaryEnvironment, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_DEBUG', 'NODE_EXTRA_CA_CERTS', 'CODEX_MCP_NODE_PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, codexConfig, providerHeaders: Object.fromEntries(['SYNTHETIC_HEADER_VALUE', 'OPENROUTER_API_KEY', 'FIREWORKS_API_KEY'].map(name => [name, process.env[name]])), providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
@@ -114,11 +115,14 @@ if (stdin.includes('INCOMPLETE_STREAM')) { console.log(JSON.stringify({ type: 'e
 if (stdin.includes('BWRAP_NAMESPACE_FAILURE')) console.log(JSON.stringify({ type: 'item.completed', item: { id: 'command-1', type: 'command_execution', command: 'super-secret-command', aggregated_output: 'private source text\\nbwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_user_namespaces exceeded (ENOSPC)', exit_code: 1, status: 'failed' } }));
 if (stdin.includes('ARTIFACT_TOOL_')) {
   const server = stdin.includes('FOREIGN_ARTIFACT_TOOL_') ? 'untrusted_server' : stdin.includes('LEGACY_OWNED_ARTIFACT_TOOL_') ? 'codex_security_artifacts' : 'cs_artifacts';
-  const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_deep_reduction';
+  const tool = stdin.includes('ADDITIONAL_OWNED_ARTIFACT_TOOL_') ? 'additional_codex_security_worker_tool' : stdin.includes('DISCOVERY_OWNED_ARTIFACT_TOOL_') ? 'record_codex_security_discovery_candidates' : 'record_codex_security_scan_draft';
   const item = { id: 'mcp-1', type: 'mcp_tool_call', server, tool, arguments: { secret: 'Bearer synthetic-secret', source: 'private source text' }, result: stdin.includes('REJECTED') ? { content: [{ type: 'text', text: 'private output sk-proj-synthetic-secret' }] } : null, error: stdin.includes('TRANSPORT_FAILED') ? { message: '--provider-error transport closed sk-proj-synthetic-secret /private/customer/path' } : null, status: 'failed' };
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
-console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
+const schemaIndex = process.argv.indexOf('--output-schema');
+const schema = schemaIndex < 0 ? undefined : JSON.parse(readFileSync(process.argv[schemaIndex + 1], 'utf8'));
+const text = schema?.properties?.reviews ? '{"reviews":[]}' : schema?.properties?.defects ? JSON.stringify({defects: [{operation: 'Check ownership', failure: 'foreign object', path: 'fixture.py', reports: [{id: 0, evidence: 0}]}], uncertain: []}) : 'fixture final response';
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
@@ -156,9 +160,9 @@ export function workerRuntimeEnvironment(root: string, virtualenv?: string) {
         : "python3",
     PYTHONUTF8: "1",
     LD_LIBRARY_PATH:
-      (process.env.LD_LIBRARY_PATH === undefined
+      (process.env["LD_LIBRARY_PATH"] === undefined
         ? ""
-        : process.env.LD_LIBRARY_PATH + path.delimiter) +
+        : process.env["LD_LIBRARY_PATH"] + path.delimiter) +
       path.join(root, "libraries"),
     DYLD_LIBRARY_PATH: path.join(root, "dylibs"),
     DYLD_FALLBACK_LIBRARY_PATH: path.join(root, "fallback-libraries"),
@@ -181,7 +185,7 @@ export const externalImports: {
 ];
 
 export function workerScanEnvironment(root: string, index: number) {
-  const { override } = externalImports[index];
+  const { override } = externalImports[index]!;
   return {
     ...(override === undefined
       ? {}

@@ -7,7 +7,11 @@ import type {
 import type { Provider } from "./external-import-models.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
-import { readSemgrepFindings } from "./semgrep-findings.js";
+import {
+  isSemgrepSarifDriver,
+  readSemgrepFindings,
+} from "./semgrep-findings.js";
+import { semgrepPlatformReportRepository } from "./semgrep-platform-findings.js";
 import { readOpenGrepFindings } from "./opengrep-findings.js";
 import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -15,9 +19,11 @@ import { readGitHubFindings } from "./github-findings.js";
 import { readSonarFindings } from "./sonar-findings.js";
 import { readVeracodeFindings } from "./veracode-findings.js";
 import { readBlackDuckFindings } from "./blackduck-findings.js";
+import { readContinuumFindings } from "./continuum-findings.js";
 import { readInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import {
+  readLocalWizFindings,
   readVendorFindingsForPublication,
   wizFindingRepository,
 } from "./wiz-findings.js";
@@ -35,6 +41,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   blackduck: "blackduck",
   veracode: "veracode",
   sonar: "sonar",
+  continuum: "continuum",
 } as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -81,11 +88,52 @@ export function localFindingRepositories(
   return [];
 }
 
+/** Repository claims retained by the Semgrep SARIF reader. */
+export function semgrepSarifRepositories(
+  { evidence }: ExternalFinding,
+  allowPartialCloudUrl = false,
+): { url: string; branch?: string }[] {
+  const data = evidence.source_data;
+  const document = data?.["documentContext"];
+  const driver = data?.["driverContext"];
+  const partial = allowPartialCloudUrl && document === undefined;
+  if (
+    (!partial && (!isRecord(document) || document["version"] !== "2.1.0")) ||
+    !isRecord(driver) ||
+    typeof driver["name"] !== "string" ||
+    !isSemgrepSarifDriver(driver["name"]) ||
+    !isRecord(data?.["result"])
+  )
+    return [];
+  const context = data["runContext"];
+  const references = isRecord(context)
+    ? context["versionControlProvenance"]
+    : undefined;
+  return Array.isArray(references)
+    ? references.flatMap((reference) =>
+        isRecord(reference) &&
+        typeof reference["repositoryUri"] === "string" &&
+        reference["repositoryUri"].trim()
+          ? [
+              {
+                url: reference["repositoryUri"],
+                ...(!partial &&
+                  typeof reference["branch"] === "string" && {
+                    branch: reference["branch"],
+                  }),
+              },
+            ]
+          : [],
+      )
+    : [];
+}
+
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
   options: ExternalFindingsReaderOptions,
   target: ExternalImportTarget = "cloud",
+  references: readonly ExternalSourceRepository[] = [],
 ): Promise<ReadExternalFindings> {
   if (options.provider === "sonar") {
     const url = options.sourceRepositoryUrl;
@@ -111,7 +159,7 @@ export async function readExternalFindings(
     const provider = options.provider;
     const findings =
       provider === "snyk"
-        ? await readSnykFindings(path, target)
+        ? await readSnykFindings(path, target, references)
         : await readEndorFindings(path, target);
     return {
       findings,
@@ -124,37 +172,29 @@ export async function readExternalFindings(
     const findings = await readSemgrepFindings(
       path,
       {
-        sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+        sourceRepositoryUrl: options.sourceRepositoryUrl,
+        sourceRepositories: references,
       },
       target,
     );
-    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
-      const context = evidence.source_data?.["runContext"];
-      const references = isRecord(context)
-        ? context["versionControlProvenance"]
-        : undefined;
-      return Array.isArray(references)
-        ? references.flatMap((reference) =>
-            isRecord(reference) &&
-            typeof reference["repositoryUri"] === "string" &&
-            reference["repositoryUri"].trim()
-              ? [{ url: reference["repositoryUri"] }]
-              : [],
-          )
-        : [];
-    });
+    if (semgrepPlatformReportRepository(findings)) return { findings };
+    const sourceRepositories = findings.findings.flatMap((finding) =>
+      semgrepSarifRepositories(finding),
+    );
     return { findings, sourceRepositories };
   }
   if (options.provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (
     options.provider === "inspector" ||
+    options.provider === "continuum" ||
     options.provider === "blackduck" ||
     options.provider === "veracode"
   ) {
     const url = options.sourceRepositoryUrl ?? "";
     const read = {
       inspector: readInspectorFindings,
+      continuum: readContinuumFindings,
       blackduck: readBlackDuckFindings,
       veracode: readVeracodeFindings,
     }[options.provider];
@@ -165,16 +205,16 @@ export async function readExternalFindings(
   }
   // A new reader must choose its parser before reaching the Wiz replay path.
   options.provider satisfies "wiz";
-  const publication = await readVendorFindingsForPublication(path, target);
-  const sourceRepositories = publication.current.findings.flatMap((finding) =>
+  const wiz =
+    target === "local"
+      ? await readLocalWizFindings(path)
+      : await readVendorFindingsForPublication(path, target);
+  const sourceRepositories = wiz.current.findings.flatMap((finding) =>
     localFindingRepositories("wiz", finding),
   );
   return {
-    findings: publication.current,
-    publication,
-    sourceRepositories: [
-      ...publication.sourceRepositories,
-      ...sourceRepositories,
-    ],
+    findings: wiz.current,
+    ...("legacy" in wiz && { publication: wiz }),
+    sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
   };
 }

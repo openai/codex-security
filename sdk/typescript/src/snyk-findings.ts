@@ -1,12 +1,21 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
+import {
+  encodeSnykV1File,
+  isSnykRestFormat,
+  parseSnykReport,
+  SNYK_REST_ISSUES_V1,
+} from "./snyk-rest-v1.js";
+import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { isRecord } from "./record.js";
 import {
   array,
   hasSarifExternalPropertyReferences,
   indexSarifRules,
-  matchesSarifRuleReference,
   normalizeRecords,
   readScannerJson,
   record,
@@ -15,6 +24,7 @@ import {
   stableId,
   strings,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 function snykIdentity(value: unknown, project: string | null): string {
@@ -212,6 +222,24 @@ export function snykRepositoryUrls(
         : repository,
     ];
   }
+  const project = source["project"];
+  if (
+    isRecord(project) &&
+    typeof project["ok"] === "boolean" &&
+    text(project["packageManager"]) &&
+    isRecord(source["vulnerability"])
+  ) {
+    // A remote Snyk test puts its GitHub URL and optional ref in the same
+    // path field that local scans use for a directory or npm package name.
+    const repository = text(project["path"])?.split("#", 1)[0];
+    if (
+      repository &&
+      /^https?:\/\/github\.com(?::\d+)?\/[^/?#\\\s]+\/[^/?#\\\s]+\/?$/iu.test(
+        repository,
+      )
+    )
+      return [repository];
+  }
   // Generic normalized evidence may use these field names for opaque metadata.
   const document = source["document"];
   const driver = source["driver"];
@@ -302,16 +330,8 @@ export function normalizeSnykSarif(
       const match = rulesById.get(id);
       if (!match)
         throw new Error("Result must reference exactly one rule in its run.");
-      const { rule, index } = match;
-      if (result["ruleIndex"] !== undefined && result["ruleIndex"] !== index)
-        throw new Error("Result ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Rule reference");
-        if (!matchesSarifRuleReference(ref, id, match))
-          throw new Error(
-            "Result uses an inconsistent or external rule reference.",
-          );
-      }
+      const { rule } = match;
+      validateSarifRuleReference(result, id, match, "Snyk");
       const help = requiredText(
         record(rule["help"], "Rule help")["markdown"],
         "Rule help markdown",
@@ -501,13 +521,37 @@ export function normalizeSnykJson(
   );
 }
 
+/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
+export function readSnykReport(path: string): Promise<unknown> {
+  return readScannerJson(path, parseSnykReport);
+}
+
 export async function readSnykFindings(
   path: string,
   target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  const input = await readScannerJson(path);
+  references: readonly ExternalSourceRepository[] = [],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
+  return normalizeSnykFile(await readSnykReport(path), target, references);
+}
+
+/** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
+export async function normalizeSnykFile(
+  input: unknown,
+  target: ExternalImportTarget,
+  references: readonly ExternalSourceRepository[],
+): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
   if (Array.isArray(input)) return normalizeSnykJson(input, target);
   const document = record(input, "Snyk findings");
+  if (isSnykRestFormat(document["format"])) {
+    const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
+    return normalizeSnykIssues(
+      document["format"] === SNYK_REST_ISSUES_V1
+        ? encodeSnykV1File(document)
+        : document,
+      target,
+      references,
+    );
+  }
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);
   if (document["version"] === "2.1.0")
