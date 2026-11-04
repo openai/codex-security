@@ -5,37 +5,8 @@ import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
+import { workflow } from "./support/workflow.js";
 
-type Step = {
-  name: string;
-  uses?: string;
-  run?: string;
-  with?: Record<string, string | boolean>;
-};
-type Job = {
-  needs?: string | string[];
-  uses?: string;
-  if?: string;
-  environment?: string;
-  permissions?: Record<string, string>;
-  outputs?: Record<string, string>;
-  with?: Record<string, string>;
-  steps?: Step[];
-};
-function workflow(name: string) {
-  return Bun.YAML.parse(
-    readFileSync(
-      new URL(`../../../.github/workflows/${name}.yml`, import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    concurrency?: {
-      group: string;
-      queue?: string;
-    };
-    jobs: Record<string, Job>;
-  };
-}
 const release = workflow("container-publish");
 const parent = workflow("node-github-release");
 const directories = createTemporaryDirectoriesSync();
