@@ -12059,6 +12059,8 @@ async function assessPatchRisk(
         "--literal-pathspecs",
         "diff",
         "--no-relative",
+        "--no-textconv",
+        "--no-ext-diff",
       ];
       const sources =
         request.files === undefined
