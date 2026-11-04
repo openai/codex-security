@@ -471,6 +471,57 @@ test.each(["administration", "direct-administration"] as const)(
   30_000,
 );
 
+// The baseline snapshot precedes the model turn. Exercise a model that finds an
+// untouched cache in a separate checkout: Windows keeps deny-write ACLs on disk.
+test.each(["inside", "outside"] as const)(
+  "model cannot populate an absent optional cache: %s",
+  async (location) => {
+    await resolvePatchProfile(
+      location !== "inside",
+      location,
+      false,
+      async (context, inspectModel) => {
+        const temporaryDirectory = await fixtures.create(
+          "patch-cache-temporary-",
+        );
+        const paths = ["objects", "tmp"].map((part) =>
+          join(context.storage, part),
+        );
+        for (const path of paths)
+          await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+        const attempts = await inspectModel(
+          `const fs=require("node:fs");const paths=${JSON.stringify(paths)};
+const attempts=paths.map(path=>{
+  const attempt=(operation)=>{try{return operation()===undefined?"ok":"created";}catch(error){return error.code;}};
+  return [
+    attempt(()=>fs.mkdirSync(path,{recursive:true})),
+    attempt(()=>fs.mkdirSync(path+"/child")),
+    attempt(()=>fs.writeFileSync(path+"/synthetic","changed")),
+  ];
+});fs.writeSync(1,JSON.stringify(attempts));`,
+          temporaryDirectory,
+        );
+        const results = JSON.parse(attempts);
+        expect(results).toHaveLength(paths.length);
+        const denied = ["EACCES", "EPERM", "EROFS", "ENOENT"];
+        for (const [index, path] of paths.entries()) {
+          const [create, child, write] = results[index];
+          // A pre-existing native placeholder makes recursive mkdir a no-op.
+          expect([...denied, "ok"]).toContain(create);
+          expect(denied).toContain(child);
+          expect(denied).toContain(write);
+          if (process.platform === "win32")
+            expect(await readdir(path)).toEqual([]);
+          else
+            await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+        }
+        await context.controls!.validate();
+      },
+    );
+  },
+  30_000,
+);
+
 for (const location of ["inside", "outside", "selected"] as const) {
   for (const existing of location === "selected" ? [true] : [false, true]) {
     test(`optional cache keeps model protection and inherited snapshot access: ${location}, existing ${existing}`, async () => {
@@ -508,39 +559,6 @@ for (const location of ["inside", "outside", "selected"] as const) {
                 },
               },
             );
-          if (!existing) {
-            for (const path of paths)
-              await expect(lstat(path)).rejects.toMatchObject({
-                code: "ENOENT",
-              });
-            const beforeSnapshot = JSON.parse(
-              await inspectModel(
-                `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,childCreated=false,wrote=false,createError,childError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.mkdirSync(path+"/synthetic-child");childCreated=true;}catch(error){childError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,childCreated,wrote,createError,childError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
-                temporaryDirectory,
-              ),
-            );
-            expect(beforeSnapshot).toEqual(
-              paths.map(() =>
-                expect.objectContaining({
-                  created: false,
-                  childCreated: false,
-                  wrote: false,
-                  childError: expect.any(String),
-                  writeError: expect.any(String),
-                }),
-              ),
-            );
-            for (const path of paths) {
-              if (process.platform === "win32") {
-                // Native ACL setup creates empty protected directory placeholders.
-                expect((await lstat(path)).isDirectory()).toBe(true);
-                expect(await readdir(path)).toEqual([]);
-              } else
-                await expect(lstat(path)).rejects.toMatchObject({
-                  code: "ENOENT",
-                });
-            }
-          }
           const snapshot = await inspect(
             `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
             location === "selected"
