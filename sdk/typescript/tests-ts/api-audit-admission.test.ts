@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
-import { build } from "esbuild";
+import { importNativeModule } from "../../../plugins/codex-security/mcp-app/tests/import-module.ts";
 import { runScanEvents } from "../src/api.js";
 import { loadContract } from "../src/contract.js";
 import { sha256 } from "./support/finding-identity.js";
@@ -18,29 +18,6 @@ import { completedEvents } from "./support/api-events.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-const bundlePath = join(await temporaryDirectory(), "deep-admission.mjs");
-try {
-  await build({
-    stdin: {
-      resolveDir: fileURLToPath(
-        new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
-      ),
-      contents: `export * from "./src/artifact-scan-draft.ts";
-      export { recordCodexSecurityScanDraft } from "./tests/scan-draft-writer-fixture.ts";
-      export * from "./src/deep-scan/artifacts.ts";
-      export * from "./src/deep-scan/artifact-validation.ts";
-      export * from "./src/deep-scan/worker-runner.ts";`,
-    },
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    loader: { ".md": "text" },
-    outfile: bundlePath,
-  });
-} catch (error) {
-  await cleanup().catch(() => undefined);
-  throw error;
-}
 const {
   createDeepScanArtifacts,
   parseCanonicalScanDraft,
@@ -49,7 +26,19 @@ const {
   recordCodexSecurityScanDraftViaWorkbench,
   readDiscoveryAuditDraft,
   DeepScanWorkerRunner,
-} = await import(pathToFileURL(bundlePath).href);
+} = await importNativeModule({
+  stdin: {
+    resolveDir: fileURLToPath(
+      new URL("../../../plugins/codex-security/mcp-app/", import.meta.url),
+    ),
+    contents: `export * from "./src/artifact-scan-draft.ts";
+      export { recordCodexSecurityScanDraft } from "./tests/scan-draft-writer-fixture.ts";
+      export * from "./src/deep-scan/artifacts.ts";
+      export * from "./src/deep-scan/artifact-validation.ts";
+      export * from "./src/deep-scan/worker-runner.ts";`,
+  },
+  loader: { ".md": "text" },
+});
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
 type Mutation =
@@ -276,7 +265,7 @@ for (const scenario of cases) {
       expect(standard.finalizations).toBe(0);
     }
     if (scenario.accepted) {
-      expect(deepResult.status).toBe("succeeded");
+      expect(deepResult.status, deepResult.error?.message).toBe("succeeded");
       expect(acceptedPaths).toEqual([deepResult.worker.resultPath]);
       const deepDraft: ScanDraftInput = await readDiscoveryAuditDraft(
         artifacts,
