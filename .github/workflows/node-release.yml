@@ -159,10 +159,10 @@ jobs:
         name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
 
-      - name: Audit bundled MCP production dependencies
+      - name: Audit bundled MCP and tokenizer dependencies
         uses: ./.github/actions/audit-pnpm-lockfiles
         with:
-          targets: mcp
+          targets: mcp tokenizer
 
       - name: Audit production dependencies
         run: sfw pnpm --dir sdk/typescript run audit:prod

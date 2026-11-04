@@ -762,6 +762,9 @@ export class DeepScanCoordinator {
       this.artifacts.dedupRoot,
       "dedup",
     );
+    let pass = persisted.filter(
+      (w) => w.kind === "dedup" && w.status === "succeeded",
+    ).length;
     let dispatched = this.state.dispatchedCount;
     let streak = this.state.noNewStreak;
     let errors = this.state.consecutiveErrors;
@@ -789,7 +792,8 @@ export class DeepScanCoordinator {
       signal.throwIfAborted();
       if (batch.length) {
         // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
-        for (const count of await this.mergeAcceptedBatch(result, batch)) {
+        const newCounts = await this.mergeAcceptedBatch(result, batch);
+        for (const count of newCounts) {
           streak = count ? 0 : streak + 1;
         }
         resultPath = join(
@@ -801,8 +805,9 @@ export class DeepScanCoordinator {
           "result.json",
         );
         await writeJsonAtomic(resultPath, persistedScanUnion(result));
+        const iterationId = randomUUID();
         const saved = await this.options.store.recordIteration({
-          id: randomUUID(),
+          id: iterationId,
           scanId,
           workerIds: batch.map((w) => w.id),
           resultPath,
@@ -811,6 +816,15 @@ export class DeepScanCoordinator {
         });
         signal.throwIfAborted();
         this.state = saved;
+        this.log({
+          event: "dedup_committed",
+          scanId,
+          workerId: iterationId,
+          pass: ++pass,
+          count: batch.length,
+          newFindings: newCounts.reduce((sum, count) => sum + count, 0),
+          retainedFindings: result.findings.length,
+        });
         this.logProgress(acceptedCount);
       }
       if (errors >= config.stopAfterConsecutiveErrors && failure) {
