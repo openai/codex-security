@@ -105,7 +105,7 @@ def cli_scan_resume(
             or Path(requested_repository).expanduser().resolve() != Path(scan["target_path"])
         ):
             raise SystemExit("Scan launch recipe repository must match the scanned repository.")
-    result = scan_registration(connection, scan, scan_contract)
+    result = scan_registration(scan_with_progress(connection, scan["id"]), scan_contract)
     result["recipe"] = recipe
     if producer_version is None:
         require_current_deep_scan(connection, scan)
@@ -126,11 +126,9 @@ def require_current_deep_scan(connection: sqlite3.Connection, scan: sqlite3.Row)
 
 
 def scan_registration(
-    connection: sqlite3.Connection,
     scan: sqlite3.Row,
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    scan = scan_with_progress(connection, scan["id"])
     return {
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),

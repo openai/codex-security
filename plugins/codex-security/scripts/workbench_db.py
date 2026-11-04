@@ -83,8 +83,8 @@ from workbench_scan_start import (
     archive_scan,
     extend_scan_target_protection,
     insert_running_scan,
-    require_deep_pass_target,
     loaded_plugin_version,
+    require_deep_pass_target,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -1777,17 +1777,13 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
-            scan = connection.execute(
-                "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
-                "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",
-                (scan_id,),
-            ).fetchone()
+            scan = scan_history.scan_with_progress(connection, scan_id)
             connection.commit()
     except BaseException:
         connection.rollback()
         raise
     return {
-        **scan_history.scan_registration(connection, scan, scan_contract),
+        **scan_history.scan_registration(scan, scan_contract),
         **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
     }
 

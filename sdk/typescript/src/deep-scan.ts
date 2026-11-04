@@ -14,6 +14,7 @@ import {
 import type { DeepScanOptions } from "./scan-settings.js";
 import {
   combineScanCoverage,
+  confirmScanMerge,
   validateScanMerge,
   unchangedScanGroups,
   scanMergePrompt,
@@ -82,7 +83,11 @@ export interface DeepScanComposition {
   signal: AbortSignal;
   createClient(): Pick<CodexSecurity, "run" | "close">;
   workbench(args: readonly string[], input?: string): Promise<JsonObject>;
-  merge(prompt: string, signal: AbortSignal): Promise<unknown>;
+  merge(
+    prompt: string,
+    signal: AbortSignal,
+    outputSchema?: Record<string, unknown>,
+  ): Promise<unknown>;
   onRetry?(message: string): void;
   onCleanupError?(error: unknown): void;
   writer: ScanArtifactRestorer & {
@@ -446,6 +451,38 @@ export async function runDeepScans(
           validationError = error;
           throw error;
         }
+        merged = await confirmScanMerge(
+          merged,
+          pending,
+          state.aggregate,
+          async (prompt, schema) =>
+            JSON.stringify(await input.merge(prompt, executionSignal, schema)),
+          (error) => {
+            executionSignal.throwIfAborted();
+            if (
+              error instanceof DeepScanInputRecoveryError &&
+              error.neverStarted
+            ) {
+              // The grouping turn already ran. A rejected confirmation turn cannot roll it back.
+              throw new DeepScanInputRecoveryError(
+                error.message,
+                scanDir,
+                false,
+                { cause: error },
+              );
+            }
+            if (
+              error instanceof DeepScanRecoveryError ||
+              error instanceof ScanTransportClosedError ||
+              error instanceof ScanPermissionError ||
+              isCodexNonRetryableFailure(error)
+            )
+              throw error;
+            input.onRetry?.(
+              `Deep Scan kept disputed findings separate: ${errorMessage(error)}`,
+            );
+          },
+        );
         break;
       } catch (error) {
         if (

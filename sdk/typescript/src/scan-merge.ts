@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { checkSameFix, type CompareReports } from "./same-fix.js";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ScanArtifactRestorer } from "./runtime.js";
@@ -220,6 +222,91 @@ export function validateScanMerge(
       .filter((_, index) => novelInputs.has(index))
       .map((input) => input.scanId),
   };
+}
+
+/** Recheck proposed consolidations against the original reports before accepting the batch.
+ * Previously checkpointed findings remain indivisible. An exact repeat needs no additional turn. */
+export async function confirmScanMerge(
+  proposed: ScanMergeResult,
+  inputs: readonly ScanMergeInput[],
+  previous: ScanAggregate | null,
+  compare: CompareReports,
+  onComparisonError: (error: unknown) => void,
+): Promise<ScanMergeResult> {
+  const sources = scanMergeSources(inputs, previous);
+  const revised: ScanMergeGroups["groups"] = [];
+  let limitation: string | undefined;
+  let split = false;
+  for (const finding of proposed.aggregate.findings) {
+    const ids = refs(finding);
+    const canonical = String(finding.provenance["canonicalSourceFindingId"]);
+    const members = [...new Set(ids.map((id) => sources.get(id)!.canonical))];
+    const entries = members.map((member) => {
+      const sourceIds = refs(member);
+      const originals = sourceIds.map((id) => sources.get(id)!.original);
+      return { finding: member, originals, sourceIds };
+    });
+    // The host may assign different per-run IDs and provenance to identical reports.
+    const content = (member: SemanticFinding) => ({
+      ...member,
+      provenance: undefined,
+    });
+    const copies = entries.map(({ finding: member }) =>
+      entries.findIndex((entry) =>
+        isDeepStrictEqual(content(entry.finding), content(member)),
+      ),
+    );
+    let matches = new Map<number, Set<number>>();
+    if (new Set(copies).size > 1) {
+      try {
+        matches = await checkSameFix(entries, compare);
+      } catch (error) {
+        onComparisonError(error);
+        limitation = `Deep Scan could not check disputed duplicates: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    const kept: number[][] = [];
+    for (let right = 0; right < entries.length; right++) {
+      const group = kept.find((indices) =>
+        indices.every(
+          (left) =>
+            copies[left] === copies[right] || matches.get(right)?.has(left),
+        ),
+      );
+      if (group) group.push(right);
+      else kept.push([right]);
+    }
+    split ||= kept.length > 1;
+    for (const group of kept) {
+      const sourceFindingIds = group.flatMap(
+        (index) => entries[index]!.sourceIds,
+      );
+      const first = entries[group[0]!]!.finding;
+      revised.push({
+        sourceFindingIds,
+        canonicalSourceFindingId: sourceFindingIds.includes(canonical)
+          ? canonical
+          : String(
+              first.provenance["canonicalSourceFindingId"] ??
+                sourceFindingIds[0],
+            ),
+      });
+    }
+  }
+  if (!split) return proposed;
+  const result = validateScanMerge(
+    { scanId: proposed.aggregate.scanId, groups: revised },
+    inputs,
+    previous,
+  );
+  if (limitation) {
+    const scope = result.aggregate.scope ?? {};
+    result.aggregate.scope = {
+      ...scope,
+      limitations: [...new Set([...(scope.limitations ?? []), limitation])],
+    };
+  }
+  return result;
 }
 
 /** Clean batches have no grouping decision; their coverage/context remain host-owned. */

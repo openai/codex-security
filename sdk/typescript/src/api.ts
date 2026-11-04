@@ -2543,6 +2543,7 @@ export class CodexSecurity {
               true,
             );
             reportPublicationWarnings(options, warnings);
+            notifyScanLifecycle(options, completedScan, true);
             await finalizeScanUsage(
               registered.scanId,
               readOptions,
@@ -2765,7 +2766,7 @@ export class CodexSecurity {
         environment: { ...session.source.environment },
       };
       const registered = await registerScan({
-            surface: this.#surface,
+        surface: this.#surface,
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
@@ -3137,7 +3138,8 @@ export class CodexSecurity {
         }
         activeScan = { id: scanId, options: workbenchOptions };
       }
-      if (!resumeScanId && !options.registeredScan) notifyScanLifecycle(options, registration);
+      if (!resumeScanId && !options.registeredScan)
+        notifyScanLifecycle(options, registration);
       await options.onRegisteredScan?.(registration);
       notifyObserver(
         "onScanRegistered",
@@ -3687,12 +3689,13 @@ export class CodexSecurity {
                   ),
                 onCleanupError: (error) =>
                   warnCleanupFailed(options, error, "Deep Scan pass"),
-                merge: async (mergePrompt, mergeSignal) => {
+                merge: async (mergePrompt, mergeSignal, outputSchema) => {
                   const turn = await readCodexTurn({
                     thread,
                     events: (
                       await thread.runStreamed(mergePrompt, {
                         ...turnOptions,
+                        ...(outputSchema ? { outputSchema } : {}),
                         signal: mergeSignal,
                       })
                     ).events,
@@ -4236,19 +4239,22 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          const stopped = await workbench({ ...activeScan.options, signal: undefined }, [
-            canceled ? "cancel-scan" : "fail-scan",
-            "--scan-id",
-            activeScan.id,
-            ...(canceled
-              ? []
-              : [
-                  `--message=${errorMessage(failure)}`,
-                  ...(preservedCost
-                    ? ["--cost-json", JSON.stringify(preservedCost)]
-                    : []),
-                ]),
-          ]);
+          const stopped = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              canceled ? "cancel-scan" : "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              ...(canceled
+                ? []
+                : [
+                    `--message=${errorMessage(failure)}`,
+                    ...(preservedCost
+                      ? ["--cost-json", JSON.stringify(preservedCost)]
+                      : []),
+                  ]),
+            ],
+          );
           if (!canceled) {
             activeScan = null;
             notifyScanLifecycle(options, stopped["scan"], true);
@@ -5372,12 +5378,15 @@ export class CodexSecurity {
             this.#abortController.signal.aborted) &&
           isCancellationDerivedFailure(error, signal);
         try {
-        const stopped = await workbench({ ...activeScan.options, signal: undefined }, [
-          canceled ? "cancel-scan" : "fail-scan",
-          "--scan-id",
-          activeScan.id,
-          ...(canceled ? [] : [`--message=${errorMessage(error)}`]),
-        ]);
+          const stopped = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              canceled ? "cancel-scan" : "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              ...(canceled ? [] : [`--message=${errorMessage(error)}`]),
+            ],
+          );
           if (!canceled) {
             activeScan = undefined;
             notifyScanLifecycle(options, stopped["scan"], true);
@@ -6071,7 +6080,12 @@ function notifyScanLifecycle(
   if (!options.onLifecycle || !isRecord(saved)) return;
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
-    notifyObserver("onLifecycle", options.onLifecycle, options.onObserverError, snapshot.data);
+    notifyObserver(
+      "onLifecycle",
+      options.onLifecycle,
+      options.onObserverError,
+      snapshot.data,
+    );
 }
 
 function observeSettledScan(

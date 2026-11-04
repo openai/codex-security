@@ -137,11 +137,11 @@ export interface Finding {
   preventiveControls?: TextList;
   provenance: {
     /**
-     * Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once.
+     * IDs of the Standard scan findings grouped into this Deep scan finding.
      */
     sourceFindingIds?: Text[];
     /**
-     * Original source payloads retained by the host for lossless semantic merges.
+     * Original Standard scan findings retained by the host.
      */
     sourceFindings?: {
       id: Text;

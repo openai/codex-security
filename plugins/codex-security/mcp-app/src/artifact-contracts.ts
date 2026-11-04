@@ -269,15 +269,13 @@ const draft_finding = z.looseObject({
           .array(nonEmptyText)
           .meta({ uniqueItems: true })
           .describe(
-            "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once.",
+            "IDs of the Standard scan findings grouped into this Deep scan finding.",
           ),
       )
       .optional(),
     sourceFindings: z
       .array(z.strictObject({ id: nonEmptyText, finding: z.looseObject({}) }))
-      .describe(
-        "Original source payloads retained by the host for lossless semantic merges.",
-      )
+      .describe("Original Standard scan findings retained by the host.")
       .optional(),
     source: nonEmptyText.describe(
       "The actual finding producer. Use local_plugin only for a finding discovered by this plugin.",
@@ -386,15 +384,6 @@ const draft_scanDraftInput = z.strictObject({
   findings: z.array(draft_finding),
   reviewState: draft_coverage,
 });
-
-const deep_reductionInput = draft_scanDraftInput
-  .omit({ reviewState: true })
-  .extend({
-    complete: z
-      .boolean()
-      .describe("Omit or set true when submitting the finished aggregate.")
-      .optional(),
-  });
 
 /** Native tool contracts; JSON resources are generated compatibility exports. */
 export const artifactSchemaDocuments = {

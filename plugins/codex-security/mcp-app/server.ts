@@ -1154,7 +1154,10 @@ export function createCodexSecurityServer(): McpServer {
           },
           abortSignalFromExtra(extra),
         );
-        return withScanTarget(await nativeScanCompletedResult(scan, "get-scan"), scan.scanId);
+        return withScanTarget(
+          await nativeScanCompletedResult(scan, "get-scan"),
+          scan.scanId,
+        );
       } catch (error: unknown) {
         if (startedScan) {
           const current = await runWorkbench([
@@ -1174,15 +1177,23 @@ export function createCodexSecurityServer(): McpServer {
               nativeScans,
             );
             if (terminal)
-              return withScanTarget(error instanceof ScanPermissionError
-                ? {
-                    ...terminal,
-                    ...toolErrorResult(deepScanInvocationFailureMessage(error)),
-                  }
-                : terminal, startedScan.scanId);
+              return withScanTarget(
+                error instanceof ScanPermissionError
+                  ? {
+                      ...terminal,
+                      ...toolErrorResult(
+                        deepScanInvocationFailureMessage(error),
+                      ),
+                    }
+                  : terminal,
+                startedScan.scanId,
+              );
           }
         }
-        return withScanTarget(toolErrorResult(deepScanInvocationFailureMessage(error)), startedScan?.scanId);
+        return withScanTarget(
+          toolErrorResult(deepScanInvocationFailureMessage(error)),
+          startedScan?.scanId,
+        );
       }
     },
   );
@@ -1198,7 +1209,10 @@ export function createCodexSecurityServer(): McpServer {
     const retained = await finalizeNativeStoppedScan(scanId, nativeScans, {
       threadId,
     });
-    return workspaceResult(retained.workspace as unknown as WorkspaceState, canceled.canceledScanId);
+    return workspaceResult(
+      retained.workspace as unknown as WorkspaceState,
+      canceled.canceledScanId,
+    );
   };
 
   server.registerTool(

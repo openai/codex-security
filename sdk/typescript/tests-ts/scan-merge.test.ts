@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { build } from "esbuild";
 import {
   combineScanCoverage,
+  confirmScanMerge,
   validateScanMerge as merge,
   scanMergePrompt,
   scanMergeModelInputs,
@@ -377,4 +378,102 @@ test("model input excludes all coverage and retains complete source evidence onc
     join(root, "artifacts/deep-scan/merge-inputs.json"),
   );
   expect({ previous, two }).toEqual(original);
+});
+
+test.each(["same", "survivor", "unavailable"] as const)(
+  "checks disputed source reports before accepting a proposed merge (%s)",
+  async (outcome) => {
+    const codeEvidence = [
+      {
+        id: "sink",
+        label: "Sink",
+        path: "src/render.js",
+        startLine: 1,
+        code: "render(input)",
+        explanation: "Caller-supplied input reaches the renderer.",
+      },
+    ];
+    const left = child("left", [finding("earlier", { codeEvidence })]);
+    const right = child("right", [
+      finding("later", { title: "Another caller", codeEvidence }),
+    ]);
+    const inputs = [left, right];
+    const proposed = merge(submission(["right:0", "left:0"]), inputs, null);
+    const calls: string[] = [];
+    const errors: unknown[] = [];
+    const result = await confirmScanMerge(
+      proposed,
+      inputs,
+      null,
+      async (prompt, schema) => {
+        const operation = Object.keys(schema["properties"] as object)[0]!;
+        calls.push(operation);
+        if (outcome === "unavailable")
+          throw new Error("Synthetic comparison failure.");
+        expect(prompt).toContain("Another caller");
+        if (operation === "reviews")
+          return JSON.stringify({
+            reviews: [
+              {
+                pair: 0,
+                decision: "same",
+                reason: "One common renderer",
+                leftEvidence: 0,
+                rightEvidence: 0,
+              },
+            ],
+          });
+        return JSON.stringify({
+          sources: [
+            {
+              id: 0,
+              fixA: "encode in render",
+              fixB: "encode the other caller",
+              survivingPaths:
+                outcome === "survivor" ? ["the other caller"] : [],
+              same: outcome !== "survivor",
+            },
+          ],
+        });
+      },
+      (error) => errors.push(error),
+    );
+    expect(calls).toEqual(
+      outcome === "unavailable" ? ["reviews"] : ["reviews", "sources"],
+    );
+    expect(result.aggregate.findings).toHaveLength(outcome === "same" ? 1 : 2);
+    expect(
+      result.aggregate.findings
+        .flatMap((entry) => entry.provenance.sourceFindingIds)
+        .sort(),
+    ).toEqual(["left:0", "right:0"]);
+    expect(result.newFindingScanIds).toEqual(
+      outcome === "same" ? ["left"] : ["left", "right"],
+    );
+    expect(errors).toHaveLength(outcome === "unavailable" ? 1 : 0);
+    if (outcome === "unavailable")
+      expect(result.aggregate.scope?.limitations?.[0]).toContain(
+        "Synthetic comparison failure",
+      );
+  },
+);
+
+test("an exact repeated report retains both sources without a confirmation turn", async () => {
+  const inputs = [child("left"), child("right")];
+  const proposed = merge(submission(["left:0", "right:0"]), inputs, null);
+  const result = await confirmScanMerge(
+    proposed,
+    inputs,
+    null,
+    () => {
+      throw new Error("An exact match required another turn");
+    },
+    (error) => {
+      throw error;
+    },
+  );
+  expect(result.aggregate.findings[0]?.provenance.sourceFindingIds).toEqual([
+    "left:0",
+    "right:0",
+  ]);
 });
