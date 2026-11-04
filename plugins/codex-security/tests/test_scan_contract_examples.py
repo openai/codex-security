@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, SchemaError, ValidationError
 from referencing import Registry, Resource
 from workbench_test_support import saved_coverage
 
@@ -54,13 +54,11 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_object(schema_path))
 
-    def test_standard_draft_requires_findings_and_coverage(self) -> None:
-        common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
-        scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
-        registry = Registry().with_resources(
-            (schema["$id"], Resource.from_contents(schema))
-            for schema in (common_schema, scan_draft_schema)
-        )
+    def test_schema_rejects_invalid_reference(self) -> None:
+        with self.assertRaisesRegex(SchemaError, "is not a 'uri-reference'"):
+            Draft202012Validator.check_schema({"$ref": "invalid reference"})
+
+    def test_standard_draft_requires_review_state(self) -> None:
         finding = {
             "ruleId": "cross-site-scripting.response",
             "identity": {"anchor": "response-output"},
@@ -86,9 +84,7 @@ class ScanContractExamplesTest(unittest.TestCase):
             "findings": [finding],
         }
 
-        standard_validator = Draft202012Validator(
-            scan_draft_schema, registry=registry, format_checker=FormatChecker()
-        )
+        standard_validator = schema_validator("tools/scan-draft", "definitions/artifact-common")
         standard_request = {
             **request,
             "reviewState": {**coverage, "deferred": []},
@@ -308,10 +304,3 @@ class ScanContractExamplesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise AssertionError(f"{path}: expected an object")
-    return payload
