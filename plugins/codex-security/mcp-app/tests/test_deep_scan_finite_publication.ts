@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -103,6 +103,8 @@ test("Deep engine publishes an accepted historical scan without another model tu
     promptPath: join(dirname(workerPath), "../prompt.md"),
     artifactDir: dirname(workerPath),
     resultManifestPath: workerPath,
+    acceptedResultPath: workerPath,
+    acceptedResultSha256: hash("sha256", rawWorker),
     completionSequence: 1,
     mergeState: "buffered" as const,
   };
