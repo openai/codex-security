@@ -575,9 +575,9 @@ describe("read-only finding verification", () => {
             seen.length === 1 &&
             (scenario === "SIGINT" || scenario === "SIGTERM")
           )
-            setImmediate(() => signals.emit(scenario));
+            queueMicrotask(() => signals.emit(scenario));
           if (seen.length === 1 && scenario === "repeated signal")
-            setImmediate(() => {
+            queueMicrotask(() => {
               signals.emit("SIGINT");
               signals.emit("SIGTERM");
             });
