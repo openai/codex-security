@@ -953,6 +953,7 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
         this.state,
+        "previously-accepted",
       );
       recovered.push({
         id: worker.id,
