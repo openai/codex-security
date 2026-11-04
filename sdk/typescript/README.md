@@ -703,6 +703,13 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+For a saved Checkmarx One CLI JSON or CxSAST XML report, use
+`readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
+To prepare a local import, pass `provider: "checkmarx"` and the verified
+`sourceRepositoryUrl` to `prepareLocalExternalImport`. Keep each batch of normalized
+Checkmarx findings scoped to one scan and its repository.
+[Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+
 Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
 [capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
