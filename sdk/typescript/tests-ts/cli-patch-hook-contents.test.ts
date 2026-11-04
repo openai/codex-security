@@ -26,10 +26,15 @@ const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-for (const mutate of [false, true])
+for (const change of [
+  "unchanged",
+  "contents",
+  ...(process.platform === "win32" ? [] : ["execute permission"]),
+])
   test.each(["post-checkout", "pre-commit", "pre-push"])(
-    `publication preserves hardlinked hook contents (mutate: ${mutate}, hook: %s)`,
+    `publication preserves hardlinked hooks (change: ${change}, hook: %s)`,
     async (hookName) => {
+      const mutate = change !== "unchanged";
       const { directory, git, remote } = await publicationRepository(fixtures);
       const outside = await fixtures.create("patch-hook-witness-");
       const witness = join(outside, "effect");
@@ -66,7 +71,9 @@ for (const mutate of [false, true])
             const paths = output?.appServer?.permissions?.readOnlyPaths ?? [];
             expect(paths).toContain(hook);
             expect(paths).not.toContain(alias);
-            if (mutate) await writeFile(alias, script("modified"));
+            if (change === "contents")
+              await writeFile(alias, script("modified"));
+            if (change === "execute permission") await chmod(alias, 0o644);
             await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
             output?.stdout.write(
               JSON.stringify({
@@ -89,10 +96,12 @@ for (const mutate of [false, true])
       );
       const final = await stat(hook, { bigint: true });
       const effect = await readFile(witness, "utf8").catch(() => null);
-      expect(modelCalls).toBe(1);
+      expect(modelCalls, outcome.stderr).toBe(1);
       expect(final.dev).toBe(initial.dev);
       expect(final.ino).toBe(initial.ino);
       expect(final.nlink).toBe(2n);
+      if (change === "execute permission")
+        expect(await readFile(hook, "utf8")).toBe(script("trusted"));
       expect(outcome.exitCode, outcome.stderr).toBe(mutate ? 2 : 0);
       expect(effect).toBe(mutate ? null : "trusted\n");
       if (mutate) {
