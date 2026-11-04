@@ -278,7 +278,6 @@ export async function runRecords(
             !(error instanceof RecordsReviewFailure) &&
             !(
               error instanceof HostExecutionError &&
-              error.code !== -32800 &&
               isolatableHostFailure.safeParse(error.data).success
             )
           )

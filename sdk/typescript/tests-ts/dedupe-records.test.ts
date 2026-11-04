@@ -1247,30 +1247,63 @@ test("records isolation propagates cancellation even with an isolatable failure"
   ).rejects.toThrow("stop");
 });
 
-test.each(["marked", "invalid", "missing", "release", "cancel"])(
-  "isolation protocol handles %s review failures without weakening cleanup",
+test.each([
+  "marked",
+  "invalid",
+  "missing",
+  "release",
+  "cancel",
+  "unmarked",
+  "unmarked-release",
+  "unmarked-cancel",
+])(
+  "isolation protocol handles %s review failures according to confirmed cleanup",
   async (failure) => {
     const data: DeduplicateRecordsInput = {
       version: 1,
       failurePolicy: "isolate",
-      observations: [record("a"), record("candidate")],
+      observations: [
+        record("a"),
+        record("candidate"),
+        record("b"),
+        record("other"),
+      ],
       candidateRelationships: [
         { observationId: "a", candidateObservationIds: ["candidate"] },
+        { observationId: "b", candidateObservationIds: ["other"] },
       ],
     };
+    let reviewedUnaffected = false;
     const host = fakeHost((message, send) => {
       if (
-        failure === "marked" ||
-        failure === "cancel" ||
+        message.method === "review.run" &&
+        message.params.attribution!.beneficiaryObservationIds.includes("b")
+      ) {
+        reviewedUnaffected = true;
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: answer(message.params),
+        });
+        return;
+      }
+      if (
+        ["marked", "cancel", "unmarked", "unmarked-cancel"].includes(failure) ||
         message.method === "review.release"
       ) {
         send({
           jsonrpc: "2.0",
           id: message.id,
           error: {
-            code: failure === "cancel" ? -32800 : -32000,
+            code: failure.endsWith("cancel") ? -32800 : -32000,
             message: "Synthetic failure",
-            data: { reviewFailure: { version: 1, disposition: "isolate" } },
+            ...(failure.startsWith("unmarked")
+              ? {}
+              : {
+                  data: {
+                    reviewFailure: { version: 1, disposition: "isolate" },
+                  },
+                }),
           },
         });
       } else if (failure === "missing") {
@@ -1279,7 +1312,7 @@ test.each(["marked", "invalid", "missing", "release", "cancel"])(
           id: message.id,
           result: { status: "missing_submission" },
         });
-      } else if (failure === "release") {
+      } else if (failure.endsWith("release")) {
         send({
           jsonrpc: "2.0",
           id: message.id,
@@ -1292,15 +1325,38 @@ test.each(["marked", "invalid", "missing", "release", "cancel"])(
     });
     const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
     host.send({ ...run, params: data });
-    const fatal = failure === "release" || failure === "cancel";
+    const fatal = failure.startsWith("unmarked");
     expect(await done).toBe(fatal ? 2 : 0);
+    expect(reviewedUnaffected).toBe(!fatal);
     if (fatal) expect(host.messages.at(-1)?.error).toBeDefined();
     else
       expect(host.messages.at(-1)?.result).toMatchObject({
         status: "completed",
-        groups: [{ representativeObservationId: "a", observationIds: ["a"] }],
+        groups: [
+          { representativeObservationId: "a", observationIds: ["a"] },
+          { representativeObservationId: "b", observationIds: ["b"] },
+        ],
         isolated: [{ observationId: "a", reason: "review_failed" }],
       });
+    host.stream.destroy();
+  },
+);
+
+test.each(["cancel", "disconnect"])(
+  "isolation stops the whole run on %s",
+  async (stop) => {
+    let reviews = 0;
+    const host = fakeHost((_message, send, stream) => {
+      reviews++;
+      if (stop === "cancel")
+        send({ jsonrpc: "2.0", method: "cancel", params: { id: run.id } });
+      else stream.destroy();
+    });
+    const done = runHostRecordsProtocol("dedupe", host.stream, host.output);
+    host.send({ ...run, params: { ...input(), failurePolicy: "isolate" } });
+    expect(await done).toBe(2);
+    expect(reviews).toBe(1);
+    expect(host.messages.at(-1)?.result).toBeUndefined();
     host.stream.destroy();
   },
 );

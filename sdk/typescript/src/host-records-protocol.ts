@@ -51,12 +51,7 @@ async function runDeduplicationReview(
         { requestId: request.requestId },
         undefined,
         "review.release",
-      ).catch((error: unknown) => {
-        throw new Error(
-          error instanceof Error ? error.message : "Review release failed.",
-          { cause: error },
-        );
-      });
+      );
       released.parse(receipt);
       return first.submission;
     }

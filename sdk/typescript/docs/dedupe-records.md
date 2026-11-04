@@ -252,10 +252,16 @@ validated `DISTINCT` verdict.
   `{ "reviewFailure": { "version": 1, "disposition": "isolate" } }` only after
   execution has ended and cleanup is confirmed. SDK hosts may instead throw
   `RecordsReviewFailure` under the same conditions.
-- Unmarked host errors remain fatal in isolation mode. Never mark cancellation,
-  access/security failures, or uncertain execution or cleanup outcomes as
-  isolatable. A failed `review.release` is fatal even if its error carries the
-  marker. Fatal errors stop the run and return no usable grouping result.
+- Error category alone does not prevent isolation. Review-level cancellation,
+  unclassified execution errors, and failed `review.release` calls can all carry
+  the marker once the host confirms execution has ended and cleanup succeeded,
+  including through recovery after an initial cleanup failure. Isolation does not
+  authorize retrying denied access or broadening permissions.
+- Unmarked errors and uncertain execution or cleanup outcomes stop the run:
+  the CLI has no confirmation that it is safe to continue. Cancellation of the
+  whole run (an aborted SDK signal, `cancel` notification, or SIGINT/SIGTERM) and
+  a host disconnect also stop scheduling. These are distinct from a canceled
+  individual review. A stopped run returns no usable grouping result.
 
 A successful isolation-mode run returns `status: "completed"`, `unresolved: []`,
 and an `isolated` array of `{ observationId, reason: "review_failed", message }`
