@@ -76,10 +76,12 @@ export interface CodexSdkWorkerArtifactContext {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
+  hasProviderEnvKey?: boolean;
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
   nativeProfile?: string;
+  profileMcpServerNames?: string[];
   cyberAccessProgram?: CyberAccessProgram;
 }
 
@@ -226,12 +228,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...(this.modelSettings.serviceTier === undefined
           ? {}
           : { service_tier: this.modelSettings.serviceTier }),
-        mcp_servers: {
-          // A disabled server still needs a valid transport during native resolution.
-          "codex-security": { command: "node", enabled: false },
-          ...(discovery &&
-            this.compactArtifactServer(discovery, includePathsFile)),
-        },
         ...(discovery
           ? workerSubagentConfig(
               discovery.subagents,
@@ -245,6 +241,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                   runtimeSettings.config.features),
                 apps: false,
                 plugins: false,
+                view_image: false,
+                image_generation: false,
+                computer_use: false,
                 ...(request.kind === "compare" && {
                   shell_tool: false,
                   unified_exec: false,
@@ -310,16 +309,27 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await preflightDeepScanWorkerPermissionProfile({
           ...preflightOptions,
           expectedProfile: workerProfile,
-          allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+          allowOpenAiApiKeyFallback: Boolean(
+            openAiApiKey && !codexApiKey && !runtimeSettings.hasProviderEnvKey,
+          ),
         });
-      if (!discovery) {
-        for (const name of mcpServerNames) {
-          if (name !== "codex-security")
-            configOverrides.push(
-              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
-            );
-        }
-      }
+      const inheritedServers = new Set([
+        ...mcpServerNames,
+        ...(runtimeSettings.profileMcpServerNames ?? []),
+      ]);
+      // Merge flags into the existing transports. Native -c splits dotted keys
+      // even when the server name is quoted; a single TOML table preserves it.
+      const servers = discovery
+        ? {
+            "codex-security": inheritedServers.has("codex-security")
+              ? { enabled: false }
+              : { command: "node", enabled: false },
+            ...this.compactArtifactServer(discovery, includePathsFile),
+          }
+        : Object.fromEntries(
+            [...inheritedServers].map((name) => [name, { enabled: false }]),
+          );
+      configOverrides.push(...profileConfigOverrides({ mcp_servers: servers }));
       const prompt =
         request.kind !== "discovery"
           ? request.prompt
@@ -743,7 +753,29 @@ export async function workerRuntimeSettings(
         "utf8",
       ),
     );
+    if (isRecord(nativeProfileConfig.mcp_servers)) {
+      settings.profileMcpServerNames = Object.keys(
+        nativeProfileConfig.mcp_servers,
+      );
+    }
     if (isRecord(nativeProfileConfig.model_providers)) {
+      const providerId = workerConfig.model_provider ?? selected.model_provider;
+      const provider =
+        typeof providerId === "string"
+          ? nativeProfileConfig.model_providers[providerId]
+          : undefined;
+      if (
+        isRecord(provider) &&
+        typeof provider.env_key === "string" &&
+        provider.auth == null
+      ) {
+        settings.hasProviderEnvKey =
+          environmentVariable(
+            settings.environment ?? {},
+            provider.env_key,
+            process.platform,
+          ) !== undefined;
+      }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
       );

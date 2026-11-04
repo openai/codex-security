@@ -79,6 +79,7 @@ export const runSchema = z
       sdkOwnsCompletion: z.boolean().optional(),
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
+      discoveryStarted: z.boolean().optional(),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,
