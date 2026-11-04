@@ -335,6 +335,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     let documentElement = false;
     let deletedDepth = 0;
     let instructionText = false;
+    // Paragraph properties list tab stops as w:tab elements inside w:tabs.
+    let tabStops = false;
     const append = (value: string) => {
       if (deletedDepth > 0) return;
       const field = fields.at(-1);
@@ -379,7 +381,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
           fields.at(-1)!.instructions = false;
         else if (type === "end") finishField(true);
       } else if (localName === "br" || localName === "cr") append("\n");
-      else if (localName === "tab") append("\t");
+      else if (localName === "tabs") tabStops = true;
+      else if (localName === "tab" && !tabStops) append("\t");
       else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, isSelfClosing }) => {
@@ -391,6 +394,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         append(content);
       }
       if (localName === "instrText") instructionText = false;
+      if (localName === "tabs") tabStops = false;
       if (!isSelfClosing && localName === "p") append("\n");
       if (
         localName === "del" ||
