@@ -432,7 +432,7 @@ for (const scenario of [
         candidateId: "candidate-one",
       });
     for (const row of sdk.unresolvedCandidates)
-      expect(row.provenance).toMatchObject({
+      expect(row["provenance"]).toMatchObject({
         workerId: worker.id,
         candidateId: "candidate-one",
       });
