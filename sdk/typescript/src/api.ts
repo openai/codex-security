@@ -4006,7 +4006,8 @@ export class CodexSecurity {
             this.#dependencies.hostedScan
               ? hostedScanFailureStatus(failure, callerCancellation) ===
                   "canceled"
-              : explicitlyCanceled(callerCancellation),
+              : !selectedDeepFinalization &&
+                explicitlyCanceled(callerCancellation),
             failure,
             snapshot?.cost,
           );
@@ -5720,7 +5721,11 @@ export async function runScanEvents(
     if (options.signal.reason instanceof ScanCostLimitExceededError) {
       throw options.signal.reason;
     }
-    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
+    if (
+      options.signal.aborted &&
+      !(error instanceof ScanInterruptedError) &&
+      !(error instanceof ScanExecutionError)
+    ) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; output directory: ${options.scanDir}.`,
         options.scanDir,
