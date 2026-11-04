@@ -159,6 +159,7 @@ const distModules = [
   "saved-scan",
   "saved-scan-bootstrap",
   "scan-skill-paths",
+  "server/embedding-tokenizer",
   "server/embeddings",
   "server/errors",
   "server/sqlite-store",
@@ -193,8 +194,11 @@ const distModules = [
   "scan-draft-publication",
 ];
 
-export const packageDistFiles = distModules.flatMap((module) =>
-  ["js", "js.map", "d.ts", "d.ts.map"].map(
-    (extension) => `package/dist/${module}.${extension}`,
+export const packageDistFiles = [
+  "package/dist/server/embedding-tokenizer.cdx.json",
+  ...distModules.flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
   ),
-);
+];

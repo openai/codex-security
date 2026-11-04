@@ -1,6 +1,7 @@
 import { mcpSmokeInput, mcpSmokeResponses } from "./fixtures/mcp-smoke.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -434,6 +435,38 @@ try {
       `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
     ],
     { cwd: consumer },
+  );
+
+  const { OpenAiFindingEmbedder } = await import(
+    pathToFileURL(join(installedRoot, "dist/server/api.js")).href
+  );
+  const finding = { description: "🔒 café 中文 ".repeat(1800) };
+  const chunks = [];
+  const embedder = new OpenAiFindingEmbedder(
+    "synthetic",
+    async (_url, init) => {
+      const { model, dimensions, input } = JSON.parse(init.body);
+      chunks.push(...input);
+      return Response.json({
+        model,
+        data: input.map((_, index) => ({
+          index,
+          embedding: Array(dimensions).fill(1),
+        })),
+      });
+    },
+  );
+  await embedder.embed([finding]);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.length),
+    [8192, 813],
+  );
+  // Generated with js-tiktoken 1.0.21 using cl100k_base on JSON.stringify(finding).
+  // The installed-package job runs in a clean checkout with no SDK build dependencies.
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(chunks.flat())).digest("hex"),
+    "ed8b5af712556ad433415337fcc69ea7a564c89f892855eea729c6d5c49bcf04",
+    "Installed embedding token IDs differ from the upstream cl100k_base encoding.",
   );
 
   await cp(

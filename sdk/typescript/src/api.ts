@@ -82,6 +82,7 @@ import {
 import { randomUUID } from "node:crypto";
 import {
   runDeepScans,
+  type DeepScanComposition,
   ScanCostTrackingError,
   DeepScanPublicationError,
   DeepScanRecoveryError,
@@ -711,6 +712,7 @@ interface CodexSecurityRuntimeOptions {
 
 interface ClientDependencies {
   stateDirectory?: string;
+  onDeepMergeCommitted?: DeepScanComposition["onMergeCommitted"];
   ambientExecution?: Parameters<typeof prepareAmbientExecution>[0];
   inheritedPermissions?: ScanPermissions;
   workerNumber?: (threadId: string) => number;
@@ -3648,6 +3650,7 @@ export class CodexSecurity {
                     : runtimePaths.CODEX_SECURITY_STARTED_AT,
                 signal,
                 workbench: ownedWorkbench,
+                onMergeCommitted: this.#dependencies.onDeepMergeCommitted,
                 writer: artifactWriter!,
                 projectChild: (
                   sourceScanId,

@@ -43,6 +43,7 @@ export class ScanMergeValidationError extends Error {}
 
 export interface ScanMergeResult {
   aggregate: ScanAggregate;
+  newFindingCount: number;
   /** Each novel issue belongs to the earliest input that discovered it. */
   newFindingScanIds: string[];
 }
@@ -199,6 +200,7 @@ export function reconcileScanMerge(
   });
   return {
     aggregate: { ...aggregate, findings: structuredClone(aggregate.findings) },
+    newFindingCount: groups.length - retained.size,
     newFindingScanIds: inputs
       .filter((_, index) => novelInputs.has(index))
       .map((input) => input.scanId),
@@ -483,17 +485,14 @@ async function confirmScanGroups(
         ? first
         : undefined;
     });
+    const repeats = (copy: number, group: number) =>
+      copies[copy] !== undefined &&
+      reports[group]!.some((report) => isDeepStrictEqual(copies[copy], report));
     const equal = (left: number, right: number) =>
-      copies[left] !== undefined &&
-      isDeepStrictEqual(copies[left], copies[right]);
-    let matches = new Map<number, Set<number>>();
-    if (!members.every((_, index) => equal(0, index))) {
-      try {
-        matches = await checkSameFix(members, compare);
-      } catch (error) {
-        onError(error);
-      }
-    }
+      left === right || repeats(left, right) || repeats(right, left);
+    const matches = members.every((_, index) => equal(0, index))
+      ? new Map<number, Set<number>>()
+      : await checkSameFix(members, compare, onError);
     const kept: number[][] = [];
     for (const [right] of members.entries()) {
       const group = kept.find((indices) =>

@@ -300,6 +300,11 @@ describe("local scan merging", () => {
       expect(
         scanAggregateRevisionArtifacts(aggregate, new Set(stored.revisionIds)),
       ).toEqual([]);
+      const original = artifacts.find(({ path }) =>
+        path.startsWith("artifacts/deep-scan/sources/"),
+      )!;
+      await rm(join(directory, original.path));
+      await expect(hydrateScanAggregate(directory, stored)).rejects.toThrow();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -742,6 +747,7 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
 
   test.each([
     "same",
+    "exact repeat",
     "survivor",
     "unavailable",
     "contradiction",
@@ -758,7 +764,11 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
         [earlier, attached],
         null,
       ).aggregate;
-      const incoming = child("c", [finding("c", { codeEvidence })]);
+      const incoming = child("c", [
+        outcome === "exact repeat"
+          ? attached.draft.findings[0]!
+          : finding("c", { codeEvidence }),
+      ]);
       const turns: string[] = [];
       const result = await mergeScans(
         parent,
@@ -819,19 +829,19 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
         },
         mergeOptions,
       );
-      expect(turns).toEqual(
-        outcome === "unavailable" || outcome === "uncited"
-          ? ["reviews"]
-          : ["reviews", "sources"],
-      );
+      const expectedTurns = outcome === "exact repeat" ? [] : ["reviews"];
+      if (["same", "survivor", "contradiction"].includes(outcome))
+        expectedTurns.push("sources");
+      expect(turns).toEqual(expectedTurns);
+      const accepted = outcome === "same" || outcome === "exact repeat";
       expect(
         result.aggregate.findings.map((f) => f.provenance.sourceFindingIds),
       ).toEqual(
-        outcome === "same"
+        accepted
           ? [["a:0", "b:0", "c:0"]]
           : [["a:0", "b:0"], ["c:0"]],
       );
-      expect(result.newFindingScanIds).toEqual(outcome === "same" ? [] : ["c"]);
+      expect(result.newFindingScanIds).toEqual(accepted ? [] : ["c"]);
       if (outcome === "unavailable")
         expect(result.aggregate.scope?.limitations).toContain(
           "Deep Scan could not check disputed duplicates: Comparison unavailable.",

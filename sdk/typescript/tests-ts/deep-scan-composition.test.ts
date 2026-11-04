@@ -1417,6 +1417,8 @@ test("projection failure never reexecutes a completed child", async () => {
 
 test("accepted matches replay publication without repeating matching or losing evidence", async () => {
   const h = await fixture();
+  const commits: unknown[] = [];
+  h.input.onMergeCommitted = (event) => commits.push(event);
   let matchingTurns = 0;
   let response: unknown;
   h.input.merge = async (prompt) => {
@@ -1471,6 +1473,14 @@ test("accepted matches replay publication without repeating matching or losing e
     h.publications.push(draft);
   };
   await runDeepScans(h.input);
+  expect(commits).toEqual([
+    {
+      scanId: h.input.scanId,
+      sourceScanIds: checkpoint!.mergedScanIds,
+      newFindings: 1,
+      retainedFindings: 1,
+    },
+  ]);
   expect(h.calls).toHaveLength(2);
   expect(matchingTurns).toBe(acceptedTurns);
   expect(h.publications.at(-1)!.findings).toHaveLength(1);

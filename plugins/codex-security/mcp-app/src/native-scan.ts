@@ -538,6 +538,15 @@ export async function prepareNativeScan(
       stateDirectory: input.stateDirectory,
       inheritedPermissions,
       ambientExecution,
+      onDeepMergeCommitted: (event) =>
+        console.error(
+          JSON.stringify({
+            component: "codex_security_deep_scan",
+            event: "dedup_committed",
+            count: event.sourceScanIds.length,
+            ...event,
+          }),
+        ),
       acquireScanExecution: (state, directory, nativeRoot) =>
         ownership &&
         state === ownership.stateDirectory &&
