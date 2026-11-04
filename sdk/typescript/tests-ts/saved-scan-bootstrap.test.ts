@@ -50,44 +50,50 @@ function writePythonProbe(path: string) {
   );
 }
 
-test("a rejected workspace excludes its checkout from Python discovery", async () => {
-  const root = await temporaryDirectory();
-  const checkout = join(root, "untrusted");
-  const candidate = join(checkout, "requested");
-  await mkdir(join(checkout, ".git"), { recursive: true });
-  await mkdir(candidate);
-  const database = new Database(join(root, "workbench.sqlite3"), {
-    create: true,
-  });
-  try {
-    database.exec(
-      "CREATE TABLE workspaces (target_path, target_path_unvalidated, target_id)",
-    );
-    database.query("INSERT INTO workspaces VALUES (?, 1, NULL)").run(candidate);
-  } finally {
-    database.close();
-  }
-  const boundaries = await savedCheckoutBoundaries({
-    CODEX_SECURITY_STATE_DIR: root,
-  });
-  expect(boundaries?.complete).toBe(true);
-  const roots = await savedDiscoveryRoots(boundaries, []);
-  expect(roots).toContain(candidate);
+test.each(["absolute", "relative"])(
+  "a rejected %s workspace excludes its checkout from Python discovery",
+  async (pathKind) => {
+    const root = await temporaryDirectory();
+    const checkout = join(root, "untrusted");
+    const candidate = join(checkout, "requested");
+    await mkdir(join(checkout, ".git"), { recursive: true });
+    await mkdir(candidate);
+    const database = new Database(join(root, "workbench.sqlite3"), {
+      create: true,
+    });
+    try {
+      database.exec(
+        "CREATE TABLE workspaces (target_path, target_path_unvalidated, target_id)",
+      );
+      database
+        .query("INSERT INTO workspaces VALUES (?, 1, NULL)")
+        .run(pathKind === "absolute" ? candidate : ".");
+    } finally {
+      database.close();
+    }
+    const boundaries = await savedCheckoutBoundaries({
+      CODEX_SECURITY_STATE_DIR: root,
+    });
+    expect(boundaries?.complete).toBe(pathKind === "absolute");
+    const roots = await savedDiscoveryRoots(boundaries, []);
+    if (pathKind === "absolute") expect(roots).toContain(candidate);
 
-  if (process.platform !== "win32") {
-    const marker = join(root, "probed");
-    await writePythonProbe(join(checkout, "python3"));
-    await expect(
-      resolvePluginPython({
-        configuredPath: "python3",
-        environment: { PATH: checkout, TEST_PYTHON_PROBE: marker },
-        discoveryProtectedRoots: roots,
-        managedRuntimeRoots: [],
-      }),
-    ).rejects.toThrow();
-    expect(existsSync(marker)).toBe(false);
-  }
-});
+    if (process.platform !== "win32") {
+      const marker = join(root, "probed");
+      await writePythonProbe(join(checkout, "python3"));
+      await expect(
+        resolvePluginPython({
+          configuredPath: "python3",
+          environment: { PATH: checkout, TEST_PYTHON_PROBE: marker },
+          discoveryProtectedRoots: roots,
+          allowPathLookup: boundaries?.complete,
+          managedRuntimeRoots: [],
+        }),
+      ).rejects.toThrow();
+      expect(existsSync(marker)).toBe(false);
+    }
+  },
+);
 
 function insertSavedTarget(
   db: Database,

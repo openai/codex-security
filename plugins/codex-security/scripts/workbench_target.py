@@ -292,8 +292,9 @@ def _resolve_git_executable(
                         return None
                     repositories.append(repository)
             for root in excluded_roots:
-                # Incomplete workspace input is an exclusion, not evidence that a
-                # checkout once existed at a now-unavailable historical path.
+                if not root.is_absolute():
+                    # Rejected inputs retain their literal text but not their original cwd.
+                    return None
                 repositories.extend(_historical_repository_roots(root))
     except (OSError, RuntimeError):
         return None

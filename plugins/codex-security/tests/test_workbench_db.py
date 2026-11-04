@@ -1903,6 +1903,30 @@ def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
         ).fetchone() == (stable_target_id(missing), 0)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+def test_relative_rejected_workspace_cannot_supply_git_to_later_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    requested, rejected = tmp_path / "requested", tmp_path / "rejected"
+    initialize_git_repository(requested)
+    initialize_git_repository(rejected)
+    create_workspace(state, str(uuid.uuid4()), "--target-path", str(requested))
+    monkeypatch.chdir(rejected)
+    workspace = create_workspace(state, str(uuid.uuid4()), "--target-path", ".")
+    assert workspace["targetPath"] == "."
+    assert workspace["setupValidation"]["valid"] is False
+
+    monkeypatch.chdir(requested)
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", str(rejected) + os.pathsep + os.environ["PATH"])
+    shim = rejected / "git"
+    shim.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexit 1\n')
+    shim.chmod(0o700)
+    run_workbench(state, "list-scans", "--repository", str(requested))
+    assert not (rejected / "git.ran").exists()
+
+
 def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"

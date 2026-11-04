@@ -4,7 +4,7 @@ import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, parse, resolve } from "node:path";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -462,6 +462,18 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
           `SELECT target_path, MAX(checkout_root) AS checkout_root
      FROM (${sources.join(" UNION ALL ")}) GROUP BY target_path`,
         );
+  const rejected = workspace.has("target_path_unvalidated")
+    ? readRows<{ target_path: string }>(
+        database,
+        "SELECT DISTINCT target_path FROM workspaces WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL",
+      ).map((row) => row.target_path)
+    : [];
+  // A relative rejected input has no saved cwd or, on Windows, drive.
+  const absoluteRejected = rejected.filter(
+    (path) =>
+      isAbsolute(path) &&
+      (process.platform !== "win32" || parse(path).root.length > 1),
+  );
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
     roots: [
@@ -469,15 +481,10 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
         rows.flatMap((row) => (row.checkout_root ? [row.checkout_root] : [])),
       ),
     ],
-    // A rejected workspace still excludes executables under that path or its checkout.
-    // It supplies no checkout identity and cannot invalidate otherwise complete history.
-    rejectedPaths: workspace.has("target_path_unvalidated")
-      ? readRows<{ target_path: string }>(
-          database,
-          "SELECT DISTINCT target_path FROM workspaces WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL",
-        ).map((row) => row.target_path)
-      : [],
-    complete: rows.every((row) => row.checkout_root !== null),
+    rejectedPaths: absoluteRejected,
+    complete:
+      absoluteRejected.length === rejected.length &&
+      rows.every((row) => row.checkout_root !== null),
   };
 }
 

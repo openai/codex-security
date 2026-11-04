@@ -165,7 +165,7 @@ def unvalidated_workspace_paths(connection: sqlite3.Connection) -> list[Path]:
     if "target_path_unvalidated" not in columns:
         return []
     return [
-        Path(row[0]).expanduser()
+        Path(row[0])
         for row in connection.execute(
             "SELECT DISTINCT target_path FROM workspaces "
             "WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL"
