@@ -32,6 +32,8 @@ import { pathToFileURL } from "node:url";
 import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
+// Full scans include native preflight and multiple Python workbench processes per worker.
+const scanTimeoutMs = 60_000;
 
 const pluginRoot = path.resolve(
   process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
@@ -2077,7 +2079,7 @@ async function testDetachedTargetReplay(
     );
 
     server.sendRequest(3, "tools/call", request);
-    const fresh = await server.waitForResponse(3, 60_000);
+    const fresh = await server.waitForResponse(3, scanTimeoutMs);
     assertNoError(fresh);
     assert.notEqual(fresh.result.structuredContent.scanId, scanId);
   } finally {
@@ -2394,7 +2396,7 @@ function startServer(serverPath: string, env: NodeJS.ProcessEnv) {
       env: env,
       stderr: "pipe",
     },
-    { component: "codex_security_deep_scan", timeoutMs: 15_000 },
+    { component: "codex_security_deep_scan", timeoutMs: scanTimeoutMs },
   );
 }
 
@@ -2729,7 +2731,7 @@ async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   label: string,
 ) {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + scanTimeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await delay(25);
