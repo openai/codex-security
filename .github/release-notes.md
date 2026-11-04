@@ -1,4 +1,4 @@
-<!-- release-version: 0.8.4 -->
+<!-- release-version: 0.9.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -16,6 +16,7 @@
 - publish hosted scanner findings to Cloud ([#2085](https://github.com/openai/codex-security/pull/2085))
 - honor bounded Retry-After on hosted scanner reads ([#2086](https://github.com/openai/codex-security/pull/2086))
 - handle disconnected child stdin on macOS ([#2275](https://github.com/openai/codex-security/pull/2275))
+- deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 
 <!-- release-section: highlights:end -->
 
@@ -23,6 +24,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+Review migration steps for these breaking changes:
+
+- deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 
 <!-- release-section: upgrades:end -->
