@@ -5,7 +5,10 @@ import { dirname, join, posix, relative, sep } from "node:path";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
-import { validateRetainedCoverage } from "../coverage-publication.js";
+import {
+  validateRetainedCoverage,
+  validateWorkerReport,
+} from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
   readAcceptedWorkerCheckpoints,
@@ -59,6 +62,8 @@ export function parseScanUnion(input: unknown): ScanUnion {
   return parsed;
 }
 
+type WorkerAdmission = "new" | "previously-accepted";
+
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
@@ -68,14 +73,15 @@ export async function validateDiscoveryArtifacts(
     ArtifactContext,
     "scope" | "includePaths" | "filePaths"
   > = {},
+  admission: WorkerAdmission = "new",
 ): Promise<ScanDraftInput> {
   const { context, result } = await readWorkerDraft(
     artifacts,
     resultPath,
     expectedScanId,
     boundScope,
+    admission,
   );
-  validateRetainedCoverage(result.reviewState);
   await validateWorkerReceipts(artifacts.workersRoot, context, result);
   return result;
 }
@@ -84,10 +90,8 @@ async function readWorkerDraft(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
+  boundScope: Pick<ArtifactContext, "scope" | "includePaths" | "filePaths">,
+  admission: WorkerAdmission,
 ) {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
@@ -112,6 +116,8 @@ async function readWorkerDraft(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  // Preserve the existing publication of previously accepted historical payloads.
+  if (admission === "new") validateWorkerReport(result);
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -193,18 +199,21 @@ export async function readAcceptedDiscovery(
     ArtifactContext,
     "scope" | "includePaths" | "filePaths"
   > = {},
+  admission: WorkerAdmission = "new",
 ): Promise<AcceptedDiscovery> {
   const draft = await readWorkerDraft(
     artifacts,
     worker.resultPath,
     scanId,
     boundScope,
+    admission,
   );
   const { context } = draft;
   let result = draft.result;
   clearWorkerOriginClaims(result.reviewState);
   function usableCheckpoint({ input }: { input: ScanDraftInput }) {
     try {
+      if (admission === "new") validateWorkerReport(input);
       validateRetainedCoverage(input.reviewState);
     } catch {
       return false;
@@ -249,14 +258,16 @@ export async function readAcceptedDiscovery(
       }
     }
   }
-  if (history.length)
+  if (history.length) {
     result = await reconcileAcceptedWorkerHistory(
       context,
       result,
       history,
       receiptDigests,
     );
-  validateRetainedCoverage(result.reviewState);
+    if (admission === "new") validateWorkerReport(result);
+    validateRetainedCoverage(result.reviewState);
+  }
   await validateWorkerReceipts(artifacts.workersRoot, context, result);
   const accepted = { ...worker, result };
   return {
