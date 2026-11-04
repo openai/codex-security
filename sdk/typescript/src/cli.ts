@@ -42,6 +42,7 @@ import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -10880,12 +10881,22 @@ async function patchGitRecords(
 async function patchObjectDirectory(
   repository: string,
   dependencies: CliDependencies,
+  source?: string[],
 ): Promise<string> {
   const objects = await dependencies.runRepositoryCommand(
     "git",
-    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    [
+      ...(source ?? []),
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "objects",
+    ],
     repository,
-    { trim: false },
+    {
+      trim: false,
+      environment: source ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
+    },
   );
   return realpath(objects.replace(/\n$/u, ""));
 }
@@ -10910,6 +10921,21 @@ async function retainPatchTrees(
     throw new CodexSecurityError(
       `Git pack output must be a directory inside the selected object database: ${pack}`,
     );
+  // Git creates temporary packs in its primary object database. Read the
+  // child's trees as alternates while keeping all pack writes in the parent.
+  const childObjects = await patchObjectDirectory(
+    repository,
+    dependencies,
+    source,
+  );
+  const quotedChild = `"${childObjects.replace(
+    /[\\"\u0000-\u001f\u007f]/gu,
+    (character) => `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
+  )}"`;
+  const alternates = environmentEntry(
+    dependencies.environment,
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  );
   await dependencies.runRepositoryCommand(
     "git",
     [...source, "pack-objects", "--revs", join(pack, "pack")],
@@ -10917,7 +10943,13 @@ async function retainPatchTrees(
     {
       // Grant the selected database, never a path resolved through the pack child.
       patchSnapshot: [objectDirectory],
-      environment: NESTED_PATCH_GIT_ENVIRONMENT,
+      environment: {
+        ...NESTED_PATCH_GIT_ENVIRONMENT,
+        GIT_OBJECT_DIRECTORY: objectDirectory,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates
+          ? [quotedChild, alternates].join(delimiter)
+          : quotedChild,
+      },
       input: trees.join("\n") + "\n",
     },
   );
