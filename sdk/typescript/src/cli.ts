@@ -9069,16 +9069,17 @@ async function patchPreflightRemoteSettings(
   );
   const settings: string[] = [];
   for (let index = 0; index + 2 < entries.length; index += 3) {
-    const entry = entries[index + 2]!;
-    const separator = entry.indexOf("\n");
-    const key = entry.slice("remote.origin.".length, separator);
+    const setting = entries[index + 2]!.slice("remote.origin.".length);
+    const separator = setting.indexOf("\n");
+    const key = separator < 0 ? setting : setting.slice(0, separator);
+    const value = separator < 0 ? undefined : setting.slice(separator + 1);
     if (key === "vcs")
       throw new CodexSecurityError(
         "Patch publication cannot use a Git remote helper selected through remote.origin.vcs.",
       );
     if (
       (key === "uploadpack" || key === "receivepack") &&
-      entry.slice(separator + 1) !==
+      value !==
         (key === "uploadpack" ? "git-upload-pack" : "git-receive-pack") &&
       !(await operatorPatchConfig(
         entries[index]!,
@@ -9090,7 +9091,8 @@ async function patchPreflightRemoteSettings(
         `Patch publication cannot use a checkout-selected remote.origin.${key} command.`,
       );
     // ls-remote uses the upload service. Push uses the real origin's receive service.
-    if (key !== "receivepack") settings.push(entry);
+    if (key !== "receivepack")
+      settings.push(value === undefined ? key : `${key}=${value}`);
   }
   return settings;
 }
@@ -9651,11 +9653,9 @@ async function preparePatchPublication(
     existing = Boolean(destination.existing);
     if (!existing) {
       const name = `codex-security-preflight-${randomUUID()}`;
-      const settings = destination.settings.flatMap((entry) => [
+      const settings = destination.settings.flatMap((setting) => [
         "-c",
-        entry
-          .replace(/^remote\.origin\./u, `remote.${name}.`)
-          .replace("\n", "="),
+        `remote.${name}.${setting}`,
       ]);
       const configurationCount = Number(
         environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,

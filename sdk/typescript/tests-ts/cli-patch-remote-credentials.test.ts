@@ -21,6 +21,8 @@ test.each(["github.example.test", "gitlab.com"])(
     const credential = "synthetic-token%40literal";
     const remote = `https://synthetic-user:${credential}@${host}/example/repository.git`;
     git("remote", "set-url", "origin", remote);
+    const serverOption = "option=first\nsecond";
+    git("config", "remote.origin.serverOption", serverOption);
     const diagnostic = `Synthetic transport failure: ${credential}`;
     const model = mock(async () => 0);
     const environment = {
@@ -61,6 +63,9 @@ test.each(["github.example.test", "gitlab.com"])(
                 commandOptions,
               ),
             ).toBe(remote);
+            expect(args).toContain(
+              `remote.${alias}.serveroption=${serverOption}`,
+            );
             expect(
               runGitRepositoryCommand(
                 "git",
