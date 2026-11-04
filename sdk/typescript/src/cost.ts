@@ -2443,15 +2443,16 @@ export class ScanCostTracker {
     const reportSecondary = (primary: Failure) => {
       if (!this.#options.onError) return;
       const seen = new Set([trackingFailureKey(primary.error, primary.path)]);
-      for (const { error, path } of failures) {
+      for (const failure of failures) {
+        if (failure === primary) continue;
+        const { error, path } = failure;
         const key = trackingFailureKey(error, path);
-        if (seen.has(key)) continue;
-        seen.add(key);
         const identity = path ?? "traversal";
         const previous = this.#reportedFailures.get(identity);
         this.#reportedFailures.set(identity, key);
-        if (previous !== key)
-          notify(() => this.#options.onError?.(error, true));
+        if (previous === key || seen.has(key)) continue;
+        seen.add(key);
+        notify(() => this.#options.onError?.(error, true));
       }
     };
     if (blocked && !observeHealthySessions) {

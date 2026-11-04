@@ -3135,7 +3135,7 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test("groups identical pathless read errors without suppressing the primary rejection", async () => {
+  test.each([false, true])("groups pathless reads %s", async (first) => {
     const { home, parent, worker, usage } = await workerSessionFixture();
     const other = await writeSession(home, "z-worker", usage, {
       parent: "scan-thread",
@@ -3143,28 +3143,40 @@ describe("live scan cost tracking", () => {
     const primary = logFailure("EACCES", "open", parent);
     const secondary = logFailure("EIO", "read");
     const stale = logFailure("ESTALE", "read");
-    let workerError = secondary;
+    const stableWorker = first ? other : worker;
+    let stableError: NodeJS.ErrnoException | undefined = secondary;
+    let changingError = secondary;
     const diagnostics: unknown[] = [];
     const { tracker } = manualCostTracker(home, {
       onSessionEvent: () => {},
       onError: (error) => diagnostics.push(error),
     });
     const reads: string[] = [];
+    const refresh = () => expect(tracker.refresh()).rejects.toBe(primary);
     try {
       using _listing = orderedLogDirectory(dirname(parent));
       using _opening = failLogReads((path) => {
         if (path === parent) return primary;
         reads.push(path);
-        return path === worker ? workerError : secondary;
+        return path === stableWorker ? stableError : changingError;
       });
-      await expect(tracker.refresh()).rejects.toBe(primary);
+      await refresh();
       expect(reads.toSorted()).toEqual([worker, other].toSorted());
       expect(diagnostics).toEqual([secondary]);
-      workerError = stale;
-      await expect(tracker.refresh()).rejects.toBe(primary);
-      workerError = secondary;
-      await expect(tracker.refresh()).rejects.toBe(primary);
-      expect(diagnostics).toEqual([secondary, stale, secondary]);
+      // Identify the stable worker so its ESTALE does not end the directory walk.
+      stableError = undefined;
+      await refresh();
+      await appendFile(stableWorker, "{}\n");
+      stableError = stale;
+      await refresh();
+      changingError = stale;
+      await refresh();
+      const count = diagnostics.length;
+      await refresh();
+      expect(diagnostics).toHaveLength(count);
+      changingError = secondary;
+      await refresh();
+      expect(diagnostics).toEqual([secondary, stale, stale, secondary]);
     } finally {
       await tracker.stop();
     }
