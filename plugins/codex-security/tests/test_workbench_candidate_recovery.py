@@ -1423,7 +1423,7 @@ def test_worker_receipt_recovery_retains_complete_evidence_archives(
 
 @pytest.mark.parametrize("archived", [False, True])
 @pytest.mark.parametrize(
-    "receipt", ["binary", "empty", "missing", "partial", "unverified-exclusion"]
+    "receipt", ["binary", "empty", "missing", "partial", "unverified-exclusion", "malformed-gap"]
 )
 def test_stopped_worker_receipts_survive_parent_publication_and_replay(
     tmp_path: Path, archived: bool, receipt: str
@@ -1447,7 +1447,7 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
     contents = b"" if receipt == "empty" else bytes([0, 255, 128, 10, 65])
     ref = "artifacts/review.bin"
     (output / "artifacts").mkdir()
-    missing = receipt in {"missing", "unverified-exclusion"}
+    missing = receipt in {"missing", "unverified-exclusion", "malformed-gap"}
     if not missing:
         (output / ref).write_bytes(contents)
     # The same name at the parent must not become the worker's proof.
@@ -1476,6 +1476,10 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
         "deferred": [],
     }
     draft["coverage"][field] = [decision]
+    if receipt == "malformed-gap":
+        draft["coverage"]["deferred"] = [
+            {"id": "authored-gap", "candidateId": "candidate", "paths": ["app.py"]}
+        ]
     result_path.write_text(json.dumps(draft))
     originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     environment = {"CODEX_HOME": str(codex_home)}
@@ -1500,6 +1504,9 @@ def test_stopped_worker_receipts_survive_parent_publication_and_replay(
         pending = manifest["scan"]["review"].get("unresolvedCandidates", [])
         coverage = read_review_state(state_dir, scan_dir)
         assert len(pending) == expected
+        if receipt == "malformed-gap":
+            assert pending[0]["paths"] == ["app.py"]
+            assert "receipt" in pending[0]["reason"]
         if archived:
             surface = next(row for row in coverage[field] if row.get("candidateId") == "candidate")
             assert surface["sourceWorkerId"] == worker_id

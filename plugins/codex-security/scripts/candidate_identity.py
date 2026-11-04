@@ -422,7 +422,6 @@ def recover_candidate_receipt_rows(
                         identity = None
                     pending = {
                         "candidateId": row["candidateId"],
-                        "reason": "\n".join(warnings[warning_start:]),
                         **(
                             {"surfaceIds": [identity]}
                             if field == "surfaces" and identity is not None
@@ -452,6 +451,8 @@ def recover_candidate_receipt_rows(
                             identity, suffix = f"{base}-{suffix}", suffix + 1
                         pending["id"] = identity
                     coverage["deferred"].append(pending)
+                if not isinstance(pending.get("reason"), str) or not pending["reason"].strip():
+                    pending["reason"] = "\n".join(warnings[warning_start:])
                 archive_candidate_payloads(pending, [row])
     if closures:
         # Reopened candidate work must not invalidate unrelated valid closures.

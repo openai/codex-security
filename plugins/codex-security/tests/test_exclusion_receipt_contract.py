@@ -125,6 +125,40 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
     assert all((scan_dir / name).read_bytes() == contents for name, contents in before.items())
 
 
+@pytest.mark.parametrize("prior_field", ["surfaces", "explicitExclusions"])
+@pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
+def test_case_colliding_exclusion_proof_reopens_only_its_candidate(
+    tmp_path: Path, prior_field: str, entrypoint: str
+):
+    state, scan_id, scan_dir, _, first = exclusion_scan(tmp_path, "rejected", "valid", prior_field)
+    path = scan_dir / "coverage.json"
+    coverage = json.loads(path.read_text())
+    ref = "artifacts/Review.bin"
+    (scan_dir / ref).write_bytes(b"Second proof")
+    coverage["explicitExclusions"].append(
+        {
+            **first,
+            "id": "second",
+            "candidateId": "second",
+            "receiptRefs": [*first["receiptRefs"], ref],
+        }
+    )
+    path.write_text(json.dumps(coverage))
+
+    publish(state, scan_id, scan_dir, entrypoint)
+    recovered = read_review_state(state, scan_dir)
+    assert recovered[prior_field][0]["receiptRefs"] == ["artifacts/review.bin"]
+    assert recovered[prior_field][0]["disposition"] == "rejected"
+    second = recovered["explicitExclusions"][-1]
+    assert second["receiptRefs"] == first["receiptRefs"]
+    assert second["disposition"] == "needs_follow_up"
+    pending = IDENTITY.unresolved_candidates(recovered, [])
+    assert [row["candidateId"] for row in pending] == ["second"]
+    assert "duplicate artifact path" in pending[0]["reason"]
+    FINALIZER.finalize_scan(scan_dir)
+    assert read_review_state(state, scan_dir) == recovered
+
+
 @pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
 @pytest.mark.parametrize("receipt", ["valid", "missing", "malformed"])
 def test_generic_exclusion_receipt_metadata_remains_opaque_on_publication(

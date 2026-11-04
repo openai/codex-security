@@ -1352,8 +1352,22 @@ def _recover_candidate_receipts(
             )["properties"]["resolvedDeferred"]
             closures = resolved_deferred_rows(parent, schema)
 
+        receipt_paths: dict[str, str] = {}
+        if source is None and isinstance(surfaces, list):
+            # Parent surfaces are published before exclusions in the artifact inventory.
+            for surface in surfaces:
+                refs = surface.get("receiptRefs") if isinstance(surface, dict) else None
+                for ref in refs if isinstance(refs, list) else []:
+                    try:
+                        _coverage_receipt_ref(scan_dir, ref, "coverage surface", receipt_paths)
+                    except ContractError:
+                        # Surface validation handles the original row independently.
+                        continue
+
         def validate_receipt(ref: Any, context: str) -> str:
-            return (directory / _coverage_receipt_ref(scan_dir, ref, context)).as_posix()
+            return (
+                directory / _coverage_receipt_ref(scan_dir, ref, context, receipt_paths)
+            ).as_posix()
 
         recover_candidate_receipt_rows(
             coverage,
@@ -1392,13 +1406,20 @@ def _recover_candidate_receipts(
     return parent
 
 
-def _coverage_receipt_ref(scan_dir: Path, ref: Any, context: str) -> str:
+def _coverage_receipt_ref(
+    scan_dir: Path, ref: Any, context: str, receipt_paths: dict[str, str] | None = None
+) -> str:
     if not isinstance(ref, str):
         raise ContractError(f"{context}: expected a string")
     normalized = _require_portable_relative_path(ref, context)
     if not normalized.startswith("artifacts/"):
         raise ContractError(f"{context}: expected a file under artifacts/")
     _require_scan_local_file(scan_dir, normalized, context)
+    if (
+        receipt_paths is not None
+        and receipt_paths.setdefault(normalized.lower(), normalized) != normalized
+    ):
+        raise ContractError(f"{context}: duplicate artifact path")
     return normalized
 
 
@@ -1482,12 +1503,9 @@ def _recover_unsealed_coverage(
                     for ref_index, ref in enumerate(receipt_refs):
                         ref_context = f"{context}.receiptRefs[{ref_index}]"
                         try:
-                            normalized_ref = _coverage_receipt_ref(scan_dir, ref, ref_context)
-                            key = normalized_ref.lower()
-                            previous = surface_receipt_paths.get(key)
-                            if previous is not None and previous != normalized_ref:
-                                raise ContractError(f"{ref_context}: duplicate artifact path")
-                            surface_receipt_paths[key] = normalized_ref
+                            normalized_ref = _coverage_receipt_ref(
+                                scan_dir, ref, ref_context, surface_receipt_paths
+                            )
                         except ContractError as exc:
                             warnings.append(
                                 f"Skipped malformed coverage receipt "
@@ -1956,23 +1974,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         disposition = _require_str(surface, "disposition", context)
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
-        receipt_refs = surface.get("receiptRefs", [])
-        if not isinstance(receipt_refs, list):
-            raise ContractError(f"{context}.receiptRefs: expected an array")
-        for ref_index, ref in enumerate(receipt_refs):
-            if not isinstance(ref, str):
-                raise ContractError(f"{context}.receiptRefs[{ref_index}]: expected a string")
-            normalized_ref = _require_portable_relative_path(
-                ref, f"{context}.receiptRefs[{ref_index}]"
-            )
-            if not normalized_ref.startswith("artifacts/"):
-                raise ContractError(
-                    f"{context}.receiptRefs[{ref_index}]: expected a file under artifacts/"
-                )
-            receipt_refs[ref_index] = normalized_ref
-            _require_scan_local_file(
-                scan_dir, normalized_ref, f"{context}.receiptRefs[{ref_index}]"
-            )
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
