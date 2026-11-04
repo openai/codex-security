@@ -7,12 +7,12 @@ import json
 import re
 import sys
 from bisect import bisect_right
-from itertools import chain, islice
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from report_projection import merged_root_cause
+from report_projection import code_evidence_rows, merged_root_cause
 from workbench_constants import (
     FINDING_ATTACK_PATH_PREVIEW_BYTES,
     FINDING_CODE_EVIDENCE_LIMIT,
@@ -35,14 +35,12 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ("rootCause", "root_cause"),
             FINDING_ROOT_CAUSE_PREVIEW_BYTES,
             (
-                "summary",
                 "description",
                 "detail",
                 "cause",
                 "rationale",
                 "why",
                 "explanation",
-                "evidenceRefs",
                 "evidence_refs",
             ),
             (
@@ -54,21 +52,13 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ("validation",),
             FINDING_VALIDATION_PREVIEW_BYTES,
             (
-                "summary",
                 "conclusion",
-                "method",
-                "status",
                 "disposition",
                 "result",
                 "rationale",
                 "evidenceRef",
                 "evidence_ref",
-                "evidenceRefs",
                 "evidence_refs",
-                "assertions",
-                "evidence",
-                "counterEvidence",
-                "limitations",
             ),
             (
                 (("summary", "conclusion", "rationale", "detail", "disposition"), 800),
@@ -85,23 +75,14 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ("attackPath",),
             FINDING_ATTACK_PATH_PREVIEW_BYTES,
             (
-                "narrative",
                 "summary",
                 "description",
-                "dataFlow",
                 "data_flow",
                 "dataflow",
                 "path",
-                "reachability",
-                "steps",
-                "authScope",
                 "auth_scope",
-                "vector",
-                "preconditions",
-                "assumptions",
                 "impact",
                 "likelihood",
-                "evidenceRefs",
                 "evidence_refs",
             ),
             (
@@ -277,6 +258,7 @@ def bounded_finding_section(
         key = next((alias for alias in aliases if alias in value), None)
         if key is not None:
             ordered[key] = bounded_json_value(value[key], [field_bytes])
+    # Reserved fields already come first. Order the remaining aliases and fields next.
     for key in (*priority_keys, *value):
         if key in value and key not in ordered:
             ordered[key] = value[key]
@@ -295,14 +277,8 @@ def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any
     if not catalogs:
         return evidence_keys[0], value[evidence_keys[0]]
     bounded = {}
-    for item in chain.from_iterable(catalogs):
-        if not (
-            isinstance(item, dict)
-            and isinstance(item.get("id"), str)
-            and bool(item["id"].strip())
-            and isinstance(item.get("code"), str)
-            and bool(item["code"].strip())
-        ):
+    for item in code_evidence_rows(*catalogs):
+        if not isinstance(item.get("id"), str) or not item["id"].strip():
             continue
         if item["id"] in bounded:
             continue
