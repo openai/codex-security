@@ -77,6 +77,8 @@
 - guide cross-mode matching with saved evidence ([#832](https://github.com/openai/codex-security/pull/832))
 - preserve valid evidence during stopped scan recovery ([#171](https://github.com/openai/codex-security/pull/171))
 - explain omitted informational findings ([#155](https://github.com/openai/codex-security/pull/155))
+- avoid worker dispatch for empty targets ([#2054](https://github.com/openai/codex-security/pull/2054))
+- honor native provider API-key settings for scans ([#139](https://github.com/openai/codex-security/pull/139))
 
 <!-- release-section: highlights:end -->
 
