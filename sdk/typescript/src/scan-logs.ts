@@ -23,6 +23,7 @@ interface ScanLogOptions {
   executionThreadIds?: readonly string[];
   codexHome: string | readonly string[];
   scanDirectory?: string;
+  startedAt?: string;
   completedAt?: string | null;
   logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
@@ -36,6 +37,7 @@ export type ScanLogSource = JsonObject & {
   mode?: string;
   scanDir?: string;
   logCompletedAt?: string | null;
+  lifecycle?: { startedAt: string; finishedAt?: string | null };
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -62,13 +64,14 @@ export function readSavedScanLogs(
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    startedAt: scan.lifecycle?.startedAt,
     // Legacy completion still bounds inferred workers, but cannot identify the
     // final scan turn when sealed artifacts were completed before a resume.
     completedAt:
       status === "running"
         ? null
         : terminal
-          ? (scan.progress?.updatedAt ?? "")
+          ? (scan.lifecycle?.finishedAt ?? scan.progress?.updatedAt ?? "")
           : "",
     logCompletedAt,
   });
@@ -137,7 +140,7 @@ export async function readScanLogs(options: ScanLogOptions) {
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
-  let children: Map<string | undefined, SessionLog[]> | undefined;
+
   const startsAfterCompletion = (timestamp: unknown) =>
     typeof options.logCompletedAt === "string" &&
     typeof timestamp === "string" &&
@@ -151,23 +154,54 @@ export async function readScanLogs(options: ScanLogOptions) {
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
-  for (const parentId of traversed) {
-    const parent = logs.get(parentId)?.[0];
-    // Parentless workers can only belong to the root, in discovery order.
-    children ??= Map.groupBy(
-      logs.values().map(([session]) => session),
-      (session) => session.parentThreadId ?? root?.threadId,
-    );
-    for (const session of children.get(parentId) ?? []) {
+  const children = Map.groupBy(
+    logs.values().map(([session]) => session),
+    (session) => session.parentThreadId,
+  );
+  // Comparisons have no spawn edge. The saved scan window also works for a
+  // shared Desktop owner, whose unrelated child threads must stay excluded.
+  const startedAt =
+    options.startedAt === undefined
+      ? root && traversed.has(root.threadId)
+        ? root.startedAt
+        : null
+      : sessionStartedAt(options.startedAt);
+  if (options.scanDirectory && startedAt !== null) {
+    const directories = [options.scanDirectory];
+    const name = basename(options.scanDirectory);
+    for (const marker of name.matchAll(/\.previous-/g)) {
+      if (!marker.index) continue;
+      const original = join(
+        dirname(options.scanDirectory),
+        name.slice(0, marker.index),
+      );
+      // A Desktop owner can work outside the scan directory. Its registered
+      // workers provide the same binding after archiving the output.
       if (
-        !traversed.has(session.threadId) &&
-        (session.parentThreadId === parentId
-          ? !startsAfterCompletion(session.timestamp)
-          : parent !== undefined && belongsToScan(session, parent, options))
+        (root?.workingDirectory != null &&
+          relative(original, root.workingDirectory) === "") ||
+        Array.from(traversed).some((threadId) => {
+          const cwd = logs.get(threadId)?.[0].workingDirectory;
+          return cwd != null && isScanArtifactDirectory(original, cwd);
+        })
+      )
+        directories.push(original);
+    }
+    for (const session of children.get(null) ?? []) {
+      if (
+        session !== root &&
+        belongsToScan(session, directories, startedAt, options)
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
       }
+    }
+  }
+  for (const parentId of traversed) {
+    for (const session of children.get(parentId) ?? []) {
+      if (startsAfterCompletion(session.timestamp)) continue;
+      included.add(session.threadId);
+      traversed.add(session.threadId);
     }
   }
   const sessions: SessionLog[] = [];
@@ -217,40 +251,25 @@ export async function readScanLogs(options: ScanLogOptions) {
 
 function belongsToScan(
   session: SessionLog,
-  root: SessionLog,
+  directories: string[],
+  startedAt: number,
   options: ScanLogOptions,
 ): boolean {
-  const { scanDirectory, completedAt } = options;
   if (
-    scanDirectory === undefined ||
     session.workingDirectory === null ||
-    root.startedAt === null ||
     session.startedAt === null ||
-    session.startedAt < root.startedAt
+    session.startedAt < startedAt
   ) {
     return false;
   }
   const beforeCompletion =
     typeof options.logCompletedAt === "string" && session.timestamp !== null
       ? compareTimestamps(session.timestamp, options.logCompletedAt) < 0
-      : completedAt == null || session.startedAt < Date.parse(completedAt);
+      : options.completedAt == null ||
+        session.startedAt < Date.parse(options.completedAt);
   if (!beforeCompletion) return false;
 
-  const roots = [scanDirectory];
-  const name = basename(scanDirectory);
-  const marker = name.lastIndexOf(".previous-");
-  if (
-    marker > 0 &&
-    root.workingDirectory !== null &&
-    relative(
-      join(dirname(scanDirectory), name.slice(0, marker)),
-      root.workingDirectory,
-    ) === ""
-  ) {
-    roots.push(root.workingDirectory);
-  }
-
-  for (const directoryRoot of roots) {
+  for (const directoryRoot of directories) {
     if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {
       return true;
     }

@@ -27,7 +27,10 @@ import {
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
-import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
+import {
+  guardianFindingId,
+  guardianSelectionFormat,
+} from "./semgrep-guardian-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -579,7 +582,7 @@ function storedFindingId(finding: ExternalFinding): string {
 function rejectGuardianSelection(input: ExternalFindings): void {
   const isGuardian = (row: ExternalFinding) =>
     row &&
-    (/^semgrep-guardian:[0-9a-f]{64}$/u.test(storedFindingId(row)) ||
+    (guardianFindingId.test(storedFindingId(row)) ||
       ownData(ownData(row.evidence, "source_data"), "format") ===
         guardianSelectionFormat);
   if (
