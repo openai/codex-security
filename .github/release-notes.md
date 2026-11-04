@@ -64,6 +64,7 @@
 - persist canceled scans with their measured cost ([#2307](https://github.com/openai/codex-security/pull/2307))
 - preserve Guardian repository identity during replay ([#2308](https://github.com/openai/codex-security/pull/2308))
 - recover the latest public findings on interruption ([#2310](https://github.com/openai/codex-security/pull/2310))
+- forward component scan lifecycle and deep progress ([#2317](https://github.com/openai/codex-security/pull/2317))
 
 <!-- release-section: highlights:end -->
 
