@@ -32,6 +32,8 @@ updates:
       third-party:
         patterns:
           - "*"
+        exclude-patterns:
+          - promptfoo
         update-types:
           - minor
           - patch
