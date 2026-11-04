@@ -2778,10 +2778,11 @@ truncating any selected finding. The CLI prints verdicts in selection order
 after every request returns valid results. For these selections the CLI omits
 per-event progress and update notices so stderr cannot delay the verdicts.
 
-If one finding exceeds the input limit on its own, verification stops before
-the first request. The error reports its occurrence ID and required request
-size. To verify another open occurrence from that scan, run
-`codex-security verify-fix --scan SCAN_ID OCCURRENCE_ID`.
+If a finding would exceed the input limit, `validate`, `patch`, and `verify-fix`
+automatically put the complete finding data in a temporary file and ask Codex
+to read it in bounded chunks. No manual splitting or truncation is needed.
+The file remains available until the task finishes and is then removed. The
+SDK's local `validate()` and `patch()` methods use the same fallback.
 
 `--verification-mode static` selects source-only assessment, as described above
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
