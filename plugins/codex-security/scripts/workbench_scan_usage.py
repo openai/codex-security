@@ -279,6 +279,10 @@ def _scan_worker_directories(
 ) -> dict[str, bool]:
     if scan["mode"] != "deep":
         return {}
+    if connection.execute(
+        "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? AND worker_usage_gap = 1", (scan["id"],)
+    ).fetchone():
+        warnings.add("worker_thread_unavailable")
     artifacts = Path(scan["scan_dir"]) / "artifacts"
     # Comparison turns run in this directory without a discovery worker row.
     directories = {str(artifacts / "deep_discovery"): False}
@@ -293,11 +297,11 @@ def _scan_worker_directories(
             # An attempt that started without a saved ID must be found by its assigned cwd.
             missing_thread = bool(row["started_at"] and not row["sdk_thread_id"])
             directories[row["artifact_dir"]] = missing_thread
-            if missing_thread and row["attempt"] > 1:
-                # Retries share a cwd. A rollout from an older attempt cannot prove the new one.
-                warnings.add("worker_thread_unavailable")
         else:
             directories[str(artifacts)] = False
+        if row["attempt"] > 1 and row["started_at"] and not row["sdk_thread_id"]:
+            # Retries share a cwd. A rollout from an older attempt cannot prove the new one.
+            warnings.add("worker_thread_unavailable")
     return directories
 
 

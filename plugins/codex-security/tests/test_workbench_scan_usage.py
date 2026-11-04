@@ -1682,7 +1682,10 @@ def test_budget_distinguishes_fresh_retry_from_resumed_worker(tmp_path: Path, re
     prompt.write_text("Review the fixture.", encoding="utf-8")
     parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)])
     earlier = _rollout(tmp_path, "earlier", [_token_event(counted, 100, 0)])
-    _state_graph(fixture.environment, {"scan-parent": parent, "earlier": earlier}, [])
+    later = _rollout(tmp_path, "later", [_token_event(counted, 5, 0)])
+    _state_graph(
+        fixture.environment, {"scan-parent": parent, "earlier": earlier, "later": later}, []
+    )
     with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
         db.execute(
             "UPDATE threads SET cwd = ?, created_at = ? WHERE id = 'earlier'",
@@ -1708,10 +1711,16 @@ def test_budget_distinguishes_fresh_retry_from_resumed_worker(tmp_path: Path, re
     running("2", *(["--sdk-thread-id", "earlier"] if resume else []))
     # Repeat an update without the optional ID, as the worker runner does after an error.
     running("2")
-    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
-    assert usage["coverage"] == ("complete" if resume else "partial")
-    assert usage["totalTokens"] == 110
-    assert ("worker_thread_unavailable" in usage.get("warnings", [])) == (not resume)
+
+    def assert_usage(total: int) -> None:
+        usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+        assert usage["coverage"] == ("complete" if resume else "partial")
+        assert usage["totalTokens"] == total
+        assert ("worker_thread_unavailable" in usage.get("warnings", [])) == (not resume)
+
+    assert_usage(110)
+    running("3", "--sdk-thread-id", "later")
+    assert_usage(115)
 
 
 @pytest.mark.cross_platform

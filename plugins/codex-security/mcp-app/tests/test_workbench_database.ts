@@ -375,8 +375,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
   });
 }
 
-test("worker thread history survives retry, replay, and worker retirement", (t) => {
-  const database = memory(t, 49);
+function insertRunningWorker(database: DatabaseSync) {
   insertScan(database);
   database.exec(`
     INSERT INTO deep_scan_runs (
@@ -389,6 +388,29 @@ test("worker thread history survives retry, replay, and worker retirement", (t) 
     ) VALUES ('worker', 'scan', 'discovery', 'running', '/synthetic/prompt.md',
       '/synthetic/output', 1, 'first-thread', 'created', 'updated');
   `);
+}
+
+test("legacy worker retries require a distinct registered thread for each attempt", (t) => {
+  for (const attempts of [2, 3]) {
+    const database = memory(t, 62);
+    insertRunningWorker(database);
+    database
+      .prepare(
+        "UPDATE deep_scan_workers SET attempt = ?, sdk_thread_id = 'retry-thread'",
+      )
+      .run(attempts);
+    applyMigrations(database);
+    assert.equal(
+      database.prepare("SELECT worker_usage_gap FROM deep_scan_runs").get()
+        ?.worker_usage_gap,
+      attempts === 2 ? 0 : 1,
+    );
+  }
+});
+
+test("worker thread history survives retry, replay, and worker retirement", (t) => {
+  const database = memory(t, 49);
+  insertRunningWorker(database);
   applyMigrations(database);
   database.exec(`
     UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
