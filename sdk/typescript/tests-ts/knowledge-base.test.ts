@@ -507,7 +507,10 @@ describe("scan knowledge bases", () => {
     );
     await writeFile(
       join(root, "self-closing-tab.docx"),
-      docx("User", "Permission", "<w:tab/>"),
+      docxBody(
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1701"/></w:tabs></w:pPr>' +
+          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t></w:r></w:p>",
+      ),
     );
     await writeFile(
       join(root, "non-breaking-hyphen.docx"),
