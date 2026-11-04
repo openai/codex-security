@@ -3,6 +3,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  explicitlyCanceled,
   hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
@@ -6117,17 +6118,6 @@ function notifyScanLifecycle(
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
     notifyObserver(options, "onLifecycle")(snapshot.data);
-}
-
-function explicitlyCanceled(signal?: AbortSignal): boolean {
-  return (
-    signal?.aborted === true &&
-    !(signal.reason instanceof ScanCostLimitExceededError) &&
-    !(
-      signal.reason instanceof DOMException &&
-      signal.reason.name === "TimeoutError"
-    )
-  );
 }
 
 async function stopRegisteredScan(

@@ -291,6 +291,8 @@ After dispatch the CLI aborts its executor signal, emits
 before returning a canceled result. For a registered scan, the durable lifecycle
 and final scan receipt record cancellation even if the executor reports failure.
 The `execution` field retains that failure, its diagnostics, and any usage.
+A caller deadline expiring after registration records a failed scan, including
+when the executor acknowledges the deadline with a canceled execution.
 If the executor reports `acceptance_unknown`, the local scan records `failed`
 and the host receives `acceptance_unknown` for reconciliation.
 

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
-import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "./errors.js";
 import type { ScanActivity } from "./scan-activity.js";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
 
@@ -110,6 +114,17 @@ export class ScanExecutionError extends CodexSecurityError {
   }
 }
 
+export function explicitlyCanceled(signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true &&
+    !(signal.reason instanceof ScanCostLimitExceededError) &&
+    !(
+      signal.reason instanceof DOMException &&
+      signal.reason.name === "TimeoutError"
+    )
+  );
+}
+
 /** Classify the scan separately from the executor's retained outcome. */
 export function hostedScanFailureStatus(
   error: unknown,
@@ -120,9 +135,9 @@ export function hostedScanFailureStatus(
     error instanceof ScanExecutionError ? error.result : execution
   )?.status;
   if (status === "acceptance_unknown") return status;
-  return signal?.aborted ||
-    status === "canceled" ||
-    error instanceof ScanInterruptedError
+  if (signal?.aborted)
+    return explicitlyCanceled(signal) ? "canceled" : "failed";
+  return status === "canceled" || error instanceof ScanInterruptedError
     ? "canceled"
     : "failed";
 }

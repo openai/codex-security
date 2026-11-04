@@ -1276,51 +1276,64 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
-test("cancellation after registration retains scan identity before executor dispatch", async () => {
-  const input = await fixture();
-  const controller = new AbortController();
-  const executor = noExecution();
-  const result = await runHostedScan(input, {
-    signal: controller.signal,
-    onEvent(event) {
-      if (
-        event.type === "progress" &&
-        event.progress.phase === "preflight" &&
-        event.progress.filesTotal > 0
-      )
-        controller.abort();
-    },
-    executor,
-  });
-  expect(result.status).toBe("canceled");
-  expect(executor.run).not.toHaveBeenCalled();
-  expect(result.scanId).toBeString();
-  expect(result.execution).toBeUndefined();
-  const history = await runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+test.each([false, true])(
+  "stopping after registration retains scan identity before executor dispatch (timeout=%p)",
+  async (timedOut) => {
+    const input = await fixture();
+    const controller = new AbortController();
+    const executor = noExecution();
+    const result = await runHostedScan(input, {
+      signal: controller.signal,
+      onEvent(event) {
+        if (
+          event.type === "progress" &&
+          event.progress.phase === "preflight" &&
+          event.progress.filesTotal > 0
+        )
+          controller.abort(
+            timedOut
+              ? new DOMException("Host deadline exceeded", "TimeoutError")
+              : undefined,
+          );
       },
-    },
-    ["list-scans", "--repository", input.repository],
-  );
-  expect(history["scans"]).toMatchObject([
-    {
-      scanId: result.scanId,
-      scanDir: result.outputDirectory,
-      progress: { status: "canceled" },
-      lifecycle: { status: "canceled" },
-    },
-  ]);
-});
+      executor,
+    });
+    const status = timedOut ? "failed" : "canceled";
+    expect(result.status).toBe(status);
+    expect(executor.run).not.toHaveBeenCalled();
+    expect(result.scanId).toBeString();
+    expect(result.execution).toBeUndefined();
+    const history = await runWorkbench(
+      {
+        python: pythonExecutable()!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          SYSTEMROOT: process.env["SYSTEMROOT"],
+          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+        },
+      },
+      ["list-scans", "--repository", input.repository],
+    );
+    expect(history["scans"]).toMatchObject([
+      {
+        scanId: result.scanId,
+        scanDir: result.outputDirectory,
+        progress: { status },
+        lifecycle: { status },
+      },
+    ]);
+  },
+);
 
-test.each(["canceled", "failed", "acceptance_unknown"] as const)(
-  "SDK cancellation retains the executor's %s outcome and usage",
-  async (executionStatus) => {
+test.each([
+  ["canceled", false, "canceled"],
+  ["failed", false, "canceled"],
+  ["acceptance_unknown", false, "acceptance_unknown"],
+  ["canceled", true, "failed"],
+] as const)(
+  "SDK cancellation retains the executor's %s outcome and usage (timeout=%p, scan=%s)",
+  async (executionStatus, timedOut, scanStatus) => {
     const input = await fixture();
     const controller = new AbortController();
     input.severityRubric = { ...severityRubric };
@@ -1334,7 +1347,11 @@ test.each(["canceled", "failed", "acceptance_unknown"] as const)(
             "markdown",
             "Edited by executor.",
           );
-          controller.abort();
+          controller.abort(
+            timedOut
+              ? new DOMException("Host deadline exceeded", "TimeoutError")
+              : undefined,
+          );
           expect(options.signal.aborted).toBe(true);
           await Promise.resolve();
           return receipt(request, {
@@ -1348,11 +1365,7 @@ test.each(["canceled", "failed", "acceptance_unknown"] as const)(
     });
     input.severityRubric.markdown = "Edited by caller.";
     const result = await pending;
-    expect(result.status).toBe(
-      executionStatus === "acceptance_unknown"
-        ? "acceptance_unknown"
-        : "canceled",
-    );
+    expect(result.status).toBe(scanStatus);
     expect(
       readSavedScanLifecycle(
         { CODEX_SECURITY_STATE_DIR: input.stateDirectory },
@@ -1360,7 +1373,7 @@ test.each(["canceled", "failed", "acceptance_unknown"] as const)(
       ),
     ).toMatchObject({
       scanId: result.scanId,
-      status: executionStatus === "acceptance_unknown" ? "failed" : "canceled",
+      status: scanStatus === "acceptance_unknown" ? "failed" : scanStatus,
     });
     expect(result.severityRubric).toEqual(severityRubric);
     expect(result.execution).toMatchObject({
