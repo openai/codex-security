@@ -543,7 +543,23 @@ export async function mergeBatch(
   if (unseen.size > (previous ? 0 : 1)) {
     try {
       records = originals.map((finding, id) => report(finding, id < previous));
-      repairs = await compareRecords(records, compare);
+      // Exact repeats share an assignment. Keep every original for provenance
+      // and counts without sending identical reports to the model again.
+      const unique = new Map<string, number>();
+      const distinct: ComparisonReport[] = [];
+      const assignments = exact.map((key, id) => {
+        const existing = unique.get(key);
+        if (existing !== undefined) return existing;
+        const index = distinct.length;
+        unique.set(key, index);
+        distinct.push(records[id]!);
+        return index;
+      });
+      const keys = await compareRecords(distinct, compare);
+      repairs = new Map();
+      for (const [id, assignment] of assignments.entries()) {
+        if (keys.has(assignment)) repairs.set(id, keys.get(assignment));
+      }
       if (repairs.size < records.length)
         limitation = `Deep Scan comparison omitted ${records.length - repairs.size} of ${records.length} reports from its repair assignments.`;
     } catch (error) {

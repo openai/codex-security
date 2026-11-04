@@ -1268,10 +1268,13 @@ test("repeated original observations require one source comparison", async () =>
     maxDiscoveryRuns: 1,
     stopAfterNoNew: 1,
     comparisons: [
-      () => ({
-        uncertain: observations.map((_, i) => i).concat(observations.length),
-        defects: [],
-      }),
+      (rows) => {
+        assert.deepEqual(
+          rows.map(({ title }) => title),
+          [lookup.title, alias.title],
+        );
+        return { uncertain: rows.map(({ id }) => id), defects: [] };
+      },
     ],
     sameFix: approvePairs,
     sameSource: () => {
