@@ -19,9 +19,9 @@ from finalize_scan_contract import _read_scan_local_json
 from review_state import review_state, uses_legacy_review
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
+from workbench_constants import PHASES
 from workbench_coverage_receipts import matches_worker_checkpoint
 from workbench_saved_results import _worker_checkpoint_head
-from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_validation import optional_text, require_uuid, user_context_argument
@@ -1617,6 +1617,13 @@ def upsert_deep_scan_worker(
                 worker_id,
             ),
         )
+        if args.terminal_failure:
+            # Persist the first terminal cause with its worker. An adopting coordinator
+            # completes the normal failure path after active workers have settled.
+            connection.execute(
+                "UPDATE deep_scan_runs SET error_message = ? WHERE scan_id = ? AND error_message IS NULL",
+                (error_message, scan_id),
+            )
         if args.status == "succeeded" and result_manifest_path is not None:
             validate_accepted_checkpoint(scan, require_deep_scan_worker(connection, worker_id))
         result = deep_scan_result(connection, scan_id)
@@ -1687,13 +1694,6 @@ def record_deep_scan_iteration(
             "UPDATE scan_progress SET deep_review_pass = COALESCE(deep_review_pass, 0) + 1, updated_at = ? WHERE scan_id = ?",
             (now, scan_id),
         )
-        if args.terminal_failure:
-            # Persist the first terminal cause with its worker. An adopting coordinator
-            # completes the normal failure path after active workers have settled.
-            connection.execute(
-                "UPDATE deep_scan_runs SET error_message = ? WHERE scan_id = ? AND error_message IS NULL",
-                (error_message, scan_id),
-            )
     return deep_scan_result(connection, scan_id)
 
 

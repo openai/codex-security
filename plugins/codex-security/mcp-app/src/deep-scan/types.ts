@@ -50,6 +50,7 @@ export interface DeepScanRunState {
   executionSettings?: DeepScanExecutionSettingsSnapshot | null;
   status: DeepScanRunStatus;
   coordinatorGeneration?: number;
+  discoveryStarted?: boolean;
   createdAt?: string;
   updatedAt?: string;
   targetPath: string;

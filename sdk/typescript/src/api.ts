@@ -2338,7 +2338,7 @@ export class CodexSecurity {
             ...withoutOpenAiApiKeys(
               this.#createSessionEnvironment(session, {}, options.auth),
             ),
-            ...(session.externalProvider === null && session.apiKey !== null
+            ...(session.providerEnvKey === undefined && session.apiKey !== null
               ? { CODEX_API_KEY: session.apiKey }
               : {}),
           },
@@ -4412,7 +4412,7 @@ export class CodexSecurity {
         },
       };
     }
-    const { runtime, runtimeHome, externalProvider, apiKey, sessionConfig } =
+    const { runtime, runtimeHome, providerEnvKey, apiKey, sessionConfig } =
       session;
     const environment = this.#createSessionEnvironment(
       session,
