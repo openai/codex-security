@@ -860,6 +860,22 @@ describe("scan knowledge bases", () => {
     ]);
   });
 
+  test("skips LibreOffice lock files while a document is open", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "policy.docx"), docx("Access policy."));
+    await writeFile(
+      join(root, ".~lock.policy.docx#"),
+      ",Example User,example-host,01.01.2026 09:00,file:///home/example/.config/libreoffice/4;",
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Access policy.\n",
+    ]);
+  });
+
   test("skips macOS metadata files copied next to documents", async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
