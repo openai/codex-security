@@ -175,6 +175,7 @@ import {
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  azureBaseUrl,
   externalProviderTable,
   isExternalModelProvider,
   mergeCodexOverrides,
@@ -11848,16 +11849,18 @@ export function parseCodexOverrides(
     }
     if (provider === "azure") {
       const providers = resolveCodexProfile(configured)["model_providers"];
-      result["model_providers"] = {
-        ...(isJsonObject(result["model_providers"])
+      const azure = isJsonObject(providers) ? providers["azure"] : undefined;
+      const baseUrl = azureBaseUrl(
+        environment,
+        isJsonObject(azure) ? azure["base_url"] : undefined,
+      );
+      // Save the resource alongside explicit overrides so reruns can reload the file profile.
+      result["model_providers"] = mergeCodexOverrides(
+        isJsonObject(result["model_providers"])
           ? result["model_providers"]
-          : {}),
-        azure: externalProviderTable(
-          "azure",
-          environment,
-          isJsonObject(providers) ? providers["azure"] : undefined,
-        ),
-      };
+          : {},
+        { azure: { base_url: baseUrl } },
+      );
     }
   }
   return result;

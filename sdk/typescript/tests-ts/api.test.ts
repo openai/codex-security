@@ -62,7 +62,6 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
-  AZURE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
@@ -73,6 +72,9 @@ import {
   ScanCostTracker,
   type ScanCost,
 } from "../src/cost.js";
+import { main } from "../src/cli.js";
+import { dependencies as cliDependencies } from "./cli-fixtures.js";
+import { captureCli } from "./support/cli-run.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
@@ -1238,17 +1240,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("pins each Azure file profile's registered endpoint when replayed with a changed environment", async () => {
-    const sourceHome = await temporaryDirectory();
-    await writeFile(
-      join(sourceHome, "review.config.toml"),
-      [
-        'model="incident-review"',
-        'model_provider="azure"',
-        "[model_providers.azure.http_headers]",
-        'X-Private = "synthetic-private-header"',
-      ].join("\n"),
-    );
+  test("replays each Azure endpoint and explicit override while reloading its file profile", async () => {
     async function run(
       codexOverrides: JsonObject,
       environment: NodeJS.ProcessEnv,
@@ -1283,21 +1275,57 @@ describe("CodexSecurity orchestration", () => {
     await Promise.all(
       ["first", "second"].map(async (name) => {
         const endpoint = `https://${name}.openai.azure.com`;
+        const base_url = endpoint + "/openai/v1";
         const environment = {
-          CODEX_HOME: sourceHome,
+          CODEX_HOME: await temporaryDirectory(),
           CODEX_SECURITY_STATE_DIR: await temporaryDirectory(),
           AZURE_OPENAI_API_KEY: `synthetic-key-${name}`,
         };
-        const base_url = endpoint + "/openai/v1";
-        const azure = {
-          ...AZURE_CODEX_PROVIDER,
-          ...(name === "first" ? { base_url } : {}),
-          env_http_headers: { "X-Extra": "SYNTHETIC_HEADER" },
-        };
-        const { recipe, native } = await run(
-          { profile: "review", model_providers: { azure } },
-          { ...environment, AZURE_OPENAI_ENDPOINT: endpoint },
-        );
+        const writeProfile = (retry: number) =>
+          writeFile(
+            join(environment.CODEX_HOME, "review.config.toml"),
+            [
+              'model = "incident-review"',
+              'model_provider = "azure"',
+              "[model_providers.azure]",
+              `auth = { command = "synthetic-auth-${retry}" }`,
+              `request_max_retries = ${retry}`,
+              `http_headers = { X-Private = "synthetic-header-${retry}" }`,
+            ].join("\n"),
+          );
+        await writeProfile(1);
+        const initial = { ...environment, AZURE_OPENAI_ENDPOINT: endpoint };
+        let explicit!: JsonObject;
+        const cli = captureCli(main, "stderr");
+        expect(
+          await cli.run(
+            [
+              "scan",
+              ".",
+              "--provider",
+              "azure",
+              "--codex",
+              'profile="review"',
+              "--codex",
+              'model_providers.azure.env_http_headers.X-Extra="SYNTHETIC_HEADER"',
+              ...(name === "first"
+                ? ["--codex", `model_providers.azure.base_url="${base_url}"`]
+                : []),
+              "--json",
+            ],
+            cliDependencies({
+              environment: initial,
+              onConfig: (config) => {
+                explicit = config.codexOverrides!;
+              },
+            }),
+          ),
+          cli.text(),
+        ).toBe(0);
+        const { recipe, native } = await run(explicit, initial);
+        expect(native).toMatchObject({
+          model_providers: { azure: { auth: { command: "synthetic-auth-1" } } },
+        });
         expect(recipe.config).toMatchObject({
           profile: "review",
           model_provider: "azure",
@@ -1307,6 +1335,7 @@ describe("CodexSecurity orchestration", () => {
         });
         expect(recipe.providerProfile).toBeDefined();
         expect(JSON.stringify(recipe)).not.toContain("synthetic-");
+        await writeProfile(2);
         const overrides = await restoreProviderProfile(
           recipe.config,
           recipe.providerProfile,
@@ -1318,13 +1347,14 @@ describe("CodexSecurity orchestration", () => {
             ? { AZURE_OPENAI_ENDPOINT: "https://changed.example" }
             : {}),
         });
-        expect(replay.native).toEqual(native);
         expect(replay.native).toMatchObject({
           model_providers: {
             azure: {
-              ...azure,
               base_url,
-              http_headers: { "X-Private": "synthetic-private-header" },
+              auth: { command: "synthetic-auth-2" },
+              request_max_retries: 2,
+              http_headers: { "X-Private": "synthetic-header-2" },
+              env_http_headers: { "X-Extra": "SYNTHETIC_HEADER" },
             },
           },
         });
