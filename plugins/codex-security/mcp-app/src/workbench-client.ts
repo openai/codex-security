@@ -51,13 +51,14 @@ export async function runWorkbench(
   }
 }
 
-async function executeWorkbench(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-  options: WorkbenchOptions = {},
-): Promise<JsonObject> {
-  const timeout = [
+function workbenchTimeout(args: string[]): number {
+  if (
+    args[0] === "mark-handoff-delivered" &&
+    args.includes("--return-context")
+  ) {
+    return 300_000;
+  }
+  return [
     "begin-deep-scan",
     "cancel-scan",
     "fail-scan",
@@ -85,6 +86,15 @@ async function executeWorkbench(
   ].includes(args[0] ?? "")
     ? 300_000
     : 30_000;
+}
+
+async function executeWorkbench(
+  pythonCommand: string,
+  args: string[],
+  input?: string | Buffer,
+  options: WorkbenchOptions = {},
+): Promise<JsonObject> {
+  const timeout = workbenchTimeout(args);
   const execution = execFileAsync(
     pythonCommand,
     [

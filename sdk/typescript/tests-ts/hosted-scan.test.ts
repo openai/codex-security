@@ -1266,6 +1266,21 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
+async function hostedHistory(input: HostedScanInput) {
+  return runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+}
+
 test("cancellation after registration retains scan identity before executor dispatch", async () => {
   const input = await fixture();
   const controller = new AbortController();
@@ -1286,23 +1301,12 @@ test("cancellation after registration retains scan identity before executor disp
   expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
-  const history = await runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-      },
-    },
-    ["list-scans", "--repository", input.repository],
-  );
+  const history = await hostedHistory(input);
   expect(history["scans"]).toMatchObject([
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "failed", phase: "preflight" },
     },
   ]);
 });
@@ -1337,6 +1341,13 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
     sessionId: "canceled-session",
     usage: { input_tokens: 42 },
   });
+  const history = await hostedHistory(input);
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      progress: { status: "failed", phase: "threat_model" },
+    },
+  ]);
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {

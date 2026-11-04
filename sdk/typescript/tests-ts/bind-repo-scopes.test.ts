@@ -277,15 +277,22 @@ for (const location of ["absolute", "relative", "unc"] as const)
         location === "unc" ? windowsLoopbackPath(caller) : caller;
       const argument = (path: string) =>
         location === "absolute" ? path : relative(caller, path);
-      const launcher = windowsHelperFixture(f.root, {
-        CODEX_SECURITY_TARGET_PATHS_FILE: argument(scopes),
-      });
-      const repository = join(f.root, "repository %USERNAME% !EXPAND! café's");
+      const repository = join(
+        f.root,
+        "repository %USERNAME% !EXPAND! O’Brien café's",
+      );
       mkdirSync(join(repository, "café"), { recursive: true });
       mkdirSync(join(repository, "src"));
       writeFileSync(join(repository, "café", "雪.py"), "source\n");
       writeFileSync(join(repository, "src", "source.py"), "source\n");
       const scanDir = join(f.root, "scan %USERNAME% !EXPAND! \u96ea's");
+      const environment: NodeJS.ProcessEnv = {
+        CODEX_SECURITY_REPOSITORY: argument(repository),
+        CODEX_SECURITY_SCAN_DIR: argument(scanDir),
+        CODEX_SECURITY_TARGET_PATHS_FILE: argument(scopes),
+      };
+      const launcher = windowsHelperFixture(f.root, environment);
+      environment["CODEX_SECURITY_PLUGIN_ROOT"] = argument(launcher.plugin);
       const expandedScanDir = scanDir.replace("%USERNAME%", "expanded-user");
       for (const directory of [scanDir, expandedScanDir]) mkdirSync(directory);
       const initial = {
@@ -294,16 +301,10 @@ for (const location of ["absolute", "relative", "unc"] as const)
       for (const powershell of launcher.powershells) {
         const generated = await launcher.run(
           powershell,
-          "skills/security-scan/SKILL.md",
-          {
-            "<plugin_dir>": argument(launcher.plugin),
-            "<repo_root>": argument(repository),
-            "<scan_dir>": argument(scanDir),
-          },
+          "skills/security-scan/references/scoped-paths.md",
+          {},
           undefined,
           workingDirectory,
-          undefined,
-          1,
         );
         expect(generated.status, generated.diagnostics).toBe(0);
         expect(
@@ -319,11 +320,8 @@ for (const location of ["absolute", "relative", "unc"] as const)
         }
         const result = await launcher.run(
           powershell,
-          "skills/security-scan/SKILL.md",
-          {
-            "<plugin_dir>": argument(launcher.plugin),
-            "<scan_dir>": argument(scanDir),
-          },
+          "skills/security-scan/references/sdk-files.md",
+          {},
           undefined,
           workingDirectory,
         );
