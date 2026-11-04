@@ -9358,6 +9358,80 @@ function isSshPatchRemote(remote: string): boolean {
   );
 }
 
+async function operatorPatchConfig(
+  scope: string,
+  origin: string,
+  repository: string,
+): Promise<boolean> {
+  return (
+    (scope === "system" || scope === "global" || scope === "command") &&
+    (!origin.startsWith("file:") ||
+      isOutsidePath(
+        relative(
+          await realpath(repository),
+          await realpath(resolve(repository, origin.slice(5))),
+        ),
+      ))
+  );
+}
+
+// Git accumulates helpers (including URL-specific entries) until an empty helper resets them.
+// Replay only operator configuration in its original order, including conditional user includes.
+async function patchCredentialEnvironment(
+  remotes: readonly string[],
+  repository: string,
+  dependencies: CliDependencies,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<NodeJS.ProcessEnv> {
+  if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
+    return environment;
+  const records = await dependencies
+    .runRepositoryCommand(
+      "git",
+      [
+        "config",
+        "--null",
+        "--show-scope",
+        "--show-origin",
+        "--get-regexp",
+        "^(credential(\\..*)?\\.helper|core\\.askpass)$",
+      ],
+      repository,
+      { trim: false, environment: { GIT_CONFIG: undefined } },
+    )
+    .catch((error: unknown) => {
+      if (isJsonObject(error) && (error["code"] === 1 || error["status"] === 1))
+        return "";
+      throw error;
+    });
+  const pinned = { ...environment };
+  let count = Number(
+    environment["GIT_CONFIG_COUNT"] ??
+      environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ??
+      0,
+  );
+  const set = (key: string, value: string) => {
+    pinned[`GIT_CONFIG_KEY_${count}`] = key;
+    pinned[`GIT_CONFIG_VALUE_${count++}`] = value;
+  };
+  set("credential.helper", "");
+  set("core.askPass", "");
+  const entries = records.split("\0");
+  for (let i = 0; i + 2 < entries.length; i += 3) {
+    const entry = entries[i + 2]!;
+    const newline = entry.indexOf("\n");
+    const key = newline < 0 ? entry : entry.slice(0, newline);
+    const value = newline < 0 ? "" : entry.slice(newline + 1);
+    if (
+      !value ||
+      (await operatorPatchConfig(entries[i]!, entries[i + 1]!, repository))
+    )
+      set(key, value);
+  }
+  pinned["GIT_CONFIG_COUNT"] = String(count);
+  return pinned;
+}
+
 async function publicationSshCommand(
   repository: string,
   dependencies: CliDependencies,
@@ -9389,14 +9463,9 @@ async function publicationSshCommand(
   );
   const [scope, origin, command] = value.split("\0");
   if (
-    (scope !== "system" && scope !== "global" && scope !== "command") ||
-    (origin?.startsWith("file:") &&
-      !isOutsidePath(
-        relative(
-          await realpath(repository),
-          await realpath(resolve(repository, origin.slice(5))),
-        ),
-      ))
+    !scope ||
+    !origin ||
+    !(await operatorPatchConfig(scope, origin, repository))
   )
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
@@ -10022,16 +10091,21 @@ async function preparePatchPublication(
               ],
               repository,
               {
-                environment: {
-                  ...environment,
-                  ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
-                  GIT_CONFIG_PARAMETERS: [
-                    dependencies.environment["GIT_CONFIG_PARAMETERS"],
-                    config,
-                  ]
-                    .filter(Boolean)
-                    .join(" "),
-                },
+                environment: await patchCredentialEnvironment(
+                  [remote],
+                  repository,
+                  dependencies,
+                  {
+                    ...environment,
+                    ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
+                    GIT_CONFIG_PARAMETERS: [
+                      dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                      config,
+                    ]
+                      .filter(Boolean)
+                      .join(" "),
+                  },
+                ),
               },
             );
           },
@@ -10412,9 +10486,16 @@ async function publishPatchBranch(
           branch,
         ],
         repository,
-        remotes.some(isSshPatchRemote)
-          ? { environment: { GIT_SSH_COMMAND: await getSshCommand() } }
-          : undefined,
+        {
+          environment: await patchCredentialEnvironment(
+            remotes,
+            repository,
+            dependencies,
+            remotes.some(isSshPatchRemote)
+              ? { GIT_SSH_COMMAND: await getSshCommand() }
+              : {},
+          ),
+        },
       );
       url = await run(
         command,
