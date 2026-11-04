@@ -634,7 +634,7 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
 
 @pytest.mark.parametrize("scope", ["subdir/extract.py", "./subdir/extract.py", "subdir"])
 def test_deadline_scope_filters_replays_before_identity_reconciliation(
-    workbench_api, workbench_db, publication_scan, scope
+    workbench_db, publication_scan, scope
 ):
     scan = publication_scan(paths=[scope])
     result_path = scan.add_worker(status="canceled")
@@ -666,9 +666,7 @@ def test_deadline_scope_filters_replays_before_identity_reconciliation(
             "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
             (scan.scan_id,),
         )
-    assert (
-        finish(workbench_api, workbench_db, scan, terminal_reason="capped")["status"] == "succeeded"
-    )
+    assert scan.finish(terminal_reason="capped")["status"] == "succeeded"
     assert scan.complete()["findingCount"] == 1
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 1
