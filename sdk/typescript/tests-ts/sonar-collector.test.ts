@@ -204,6 +204,7 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
     expect(query.get("componentKeys")).toBe(project);
     expect(query.get("branch")).toBe(branch);
     expect(query.get("impactSoftwareQualities")).toBe("SECURITY");
+    expect(query.get("ps")).toBe("500");
     expect(query.get("additionalFields")).toBe("rules");
     expect(query.get("issueStatuses")).toBe("OPEN,CONFIRMED");
   }
@@ -248,7 +249,7 @@ test("collects the exact issue keys and PR selected in the plugin handoff", asyn
 
 const largeSelection = Array.from(
   { length: 2_000 },
-  (_, index) => "example-issue-" + index,
+  (_, index) => "issue-" + index,
 );
 
 function exactIssuePage(

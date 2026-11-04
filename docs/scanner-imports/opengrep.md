@@ -1,146 +1,60 @@
 # Import OpenGrep findings
 
-Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` in the command environment to enable external imports.
+Use native OpenGrep JSON, plain or gzipped. A scan can return matches alongside
+parse errors or timeouts. The preview shows both.
 
-Import native OpenGrep JSON, including gzip-compressed reports, into the local
-workbench or Cloud. This reader accepts scanner output, not SARIF, normalized
-JSONL, or an API summary. It preserves findings as unassessed scanner evidence.
+## Quick start
 
-From the source repository root, use a fresh report directory outside the
-checkout. The following commands use the shell's temporary directory:
+[Enable external imports](README.md#preview-a-report). From the scanned checkout
+root, choose a saved report or run OpenGrep in the same shell.
+
+**Saved report.** Set the path to your OpenGrep JSON file.
 
 ```sh
+opengrep_report=../reports/opengrep.json
+```
+
+**Run OpenGrep.** Supply your rules and save the report outside the checkout.
+Add `--verbose` for details about skipped targets. Check the scan's exit status.
+[OpenGrep output options](https://github.com/opengrep/opengrep/blob/main/src/osemgrep/cli_scan/Scan_CLI.ml)
+
+```sh
+opengrep_report=
 report_dir=$(mktemp -d) &&
-opengrep scan --config /path/to/rules.yaml --json --output "$report_dir/opengrep.json" . &&
-codex-security publish findings "$report_dir/opengrep.json" --to local \
-  --provider opengrep --source-key opengrep/ORGANIZATION/PROJECT/BRANCH \
-  --source-repository-url https://github.com/example/project \
-  --repository . --dry-run --format json
+  opengrep scan --config /path/to/rules.yaml --json --output "$report_dir/opengrep.json" . &&
+  opengrep_report="$report_dir/opengrep.json"
 ```
 
-Native JSON includes dataflow traces when the scanner produces them.
-`--dataflow-traces` controls text and SARIF rendering; it is not required for JSON.
-See OpenGrep's [output options](https://github.com/opengrep/opengrep/blob/main/src/osemgrep/cli_scan/Scan_CLI.ml)
-and [JSON formatter](https://github.com/opengrep/opengrep/blob/main/src/osemgrep/reporting/Cli_json_output.ml).
-
-Review the source repository, findings, exclusions, diagnostics, and destination.
-Repeat the import without `--dry-run` to confirm interactively, or add `--yes`
-after reviewing the preview. Local imports require no Cloud login or model call.
-Read the stored evidence with:
+**Preview the report.** Replace the example URL with the checkout's
+credential-free HTTP(S) URL. Choose a distinct OpenGrep source key for your
+organization, project and branch.
 
 ```sh
-codex-security findings imported . --format json
+codex-security publish findings "$opengrep_report" --to local --repository . \
+  --provider opengrep --source-repository-url https://github.com/example/project \
+  --source-key opengrep/example/project/main --dry-run --format json
 ```
 
-For Cloud, use the same report and source namespace with a Cloud destination:
-
-```sh
-codex-security publish findings "$report_dir/opengrep.json" --to cloud \
-  --provider opengrep --source-key opengrep/ORGANIZATION/PROJECT/BRANCH \
-  --source-repository-url https://github.com/example/project \
-  --repository https://github.com/example/project --dry-run --format json
-```
-
-`--source-repository-url` is required and declares where the report came from.
-The importer checks it against configured local Git remotes or the selected
-Cloud repository. It does not infer the scanner's revision from the current
-checkout. Cloud preview requires the existing ChatGPT login and an authorized
-repository and environment; review the preview before approving the upload.
+Check the findings, exclusions and `report.errors`, even if the findings list
+is empty. Cloud requires at least one supported finding. Keep `--provider opengrep`
+when you [save locally or publish to Cloud](README.md#save-or-publish-and-verify).
 
 ## Provider identity and evidence
 
-`--provider opengrep` selects the OpenGrep reader. Local storage and Cloud use the
-existing `semgrep` source-provider contract for compatibility, while typed
-`scanner_origin` identifies **OpenGrep**. The preview shows this mapping. This
-does not add a native OpenGrep provider to the Cloud service. Cloud publication
-requires that deployment to support the existing Semgrep import contract;
-successful local imports do not verify hosted availability.
+Both destinations store `semgrep` as the provider and `OpenGrep` in
+`details.scanner_origin`. The rule, path and range identify each occurrence.
+Moving a match or changing the spelling of a Windows path can create a new
+record. [Imported evidence](schema-guide.md)
 
-Keep an OpenGrep-specific source key, such as
-`opengrep/ORGANIZATION/PROJECT/BRANCH`, stable across runs. Occurrence IDs use the
-rule, path, and source range. The importer normalizes redundant slash-separated
-components in repository-relative paths and preserves literal backslashes in
-filenames. An unmapped path keeps its original spelling in the occurrence ID.
-Keep Windows path spellings consistent across runs because changing them can
-create a second record. Multiple dataflow traces for the same occurrence are
-grouped into one finding. For Cloud imports, check `excluded` for traces that
-could not fit. If independently valid traces exceed the 256 KiB limit together,
-the whole occurrence is excluded. Moving a match creates a new record and leaves
-its earlier record intact. The raw scanner
-fingerprints remain evidence and do not override this location-based identity.
-Omitting a finding from a later report does not close or delete it.
-
-The adapter retains rule metadata, source ranges, snippets, traces, ignored state,
-and original severity. Normalized severity is `unknown`: OpenGrep rule levels
-such as `ERROR` or `WARNING` are not a verified vulnerability severity. Ignored
-matches remain source evidence, separate from a Codex assessment. Importing a
-report does not assess findings, apply fixes, or create a completed Codex scan.
+The reader groups traces at the same occurrence. It keeps the rule level,
+snippets, ignored state and fingerprints when present. Severity is `unknown`
+because OpenGrep levels such as `ERROR` describe rule matches. Cloud excludes
+the whole occurrence if individually valid traces together exceed its 256 KiB
+evidence limit.
 
 ## Diagnostics and coverage
 
-OpenGrep can return matches alongside parse failures, partial parsing, timeouts,
-and other diagnostics. Warning diagnostics can accompany exit code 0 with the
-default `--no-strict`; `--strict` changes warning handling, while `--error`
-separately makes findings produce exit code 1. Inspect the report's diagnostics
-and the scanner's exit status. Neither zero findings nor a successful exit
-establishes complete coverage. See OpenGrep's
-[error classification](https://github.com/opengrep/opengrep/blob/main/src/core/Core_error.ml).
-
-The JSON preview and result retain the native report envelope, without `results`,
-in `report`, including diagnostics and path metadata for an empty local report.
-Individual stored findings retain the original observations in
-`source_data.results` and a `source_data.scan_error_count`. Their compact
-`source_data.report` retains only the scanner version, keeping scan-wide metadata
-such as diagnostics and matching explanations outside each finding's evidence
-budget. Full report metadata is
-returned by the SDK and CLI; it is not saved as a separate durable scan record.
-Keep the original JSON if you need the complete run metadata later.
-Add OpenGrep's `--verbose` when collecting
-skipped-target details; its [output handling](https://github.com/opengrep/opengrep/blob/main/src/osemgrep/reporting/Output.ml)
-can omit those details otherwise.
-
-Publication status describes import processing and acknowledged records, not
-scanner coverage. A `complete` publication does not resolve scan diagnostics or
-establish a clean security result. Cloud publication requires at least one
-supported finding; an empty report can still be previewed locally with its
-metadata. Review exclusions before approving either destination.
-
-## Assess an imported finding locally
-
-Copy an imported record's `id` from `findings imported --format json`. Use an
-authorized checkout corresponding to the report's revision, then pass its
-evidence to the existing SDK validator:
-
-```ts
-import {
-  CodexSecurity,
-  listLocalExternalFindings,
-} from "@openai/codex-security";
-
-const repositoryPath = "/path/to/repository";
-const [record] = await listLocalExternalFindings({
-  repository: repositoryPath,
-  id: "IMPORTED_FINDING_ID",
-});
-if (!record) throw new Error("Imported finding not found.");
-
-const security = new CodexSecurity();
-try {
-  const assessment = await security.validate({
-    repositoryPath,
-    finding: record.evidence,
-  });
-  console.log(record.id, assessment.disposition);
-  console.log(assessment.report);
-} finally {
-  await security.close();
-}
-```
-
-Validation sends the finding evidence, including snippets and traces, to the
-configured Codex model provider. A hosted provider requires network connectivity.
-The validator reads the checkout in a read-only tool sandbox with network access
-disabled. It returns an assessment and leaves the stored import `not_assessed`. See
-[standalone validation](../../sdk/typescript/README.md#validate-an-existing-finding)
-for dispositions and report handling. Hosts that already provide model execution
-can use [validateRecords](../../sdk/typescript/docs/validate-records.md) instead.
+Keep the original report for run-wide diagnostics. The preview includes the
+scan metadata in `report`. Each stored finding keeps the scanner version, the
+observations in `source_data.results` and the diagnostic count in
+`source_data.scan_error_count`.
