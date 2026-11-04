@@ -742,7 +742,13 @@ test.each([
       if (expectedAlternates !== undefined)
         expect(expectedAlternates.length).toBeGreaterThan(0);
       for (const binding of bindings) {
-        if (expectedAlternates === undefined)
+        if (selector === "GIT_CONFIG_COUNT")
+          expect(binding).toMatchObject({
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.fsmonitor",
+            GIT_CONFIG_VALUE_0: "false",
+          });
+        else if (expectedAlternates === undefined)
           expect(binding).toHaveProperty(selector, environment[selector]);
         else {
           expect(binding).toHaveProperty(selector);

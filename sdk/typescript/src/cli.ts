@@ -11587,6 +11587,8 @@ async function retainPatchTrees(
     dependencies,
     checkout,
     gitDirectory,
+    // Git also creates its temporary pack in the primary object database.
+    { writeObjectsTo: objectDirectory },
   );
   await nested.runRepositoryCommand(
     "git",
@@ -11819,7 +11821,13 @@ async function nestedPatchGitDependencies(
   dependencies: CliDependencies,
   checkout: string,
   gitDirectory?: string,
-  inspectWorktreeBinding = false,
+  {
+    inspectWorktreeBinding,
+    writeObjectsTo,
+  }: {
+    inspectWorktreeBinding?: boolean;
+    writeObjectsTo?: string;
+  } = {},
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
@@ -11832,10 +11840,9 @@ async function nestedPatchGitDependencies(
       { trim: false, environment: { GIT_OBJECT_DIRECTORY: "." } },
     )
   ).replace(/\n$/u, "");
-  const objectDirectory = await configuredPatchObjectDirectory(
-    repository,
-    dependencies,
-  );
+  const objectDirectory =
+    writeObjectsTo ??
+    (await configuredPatchObjectDirectory(repository, dependencies));
   let alternateObjects: string | undefined;
   const nested: CliDependencies = {
     ...dependencies,
@@ -12925,9 +12932,12 @@ async function runSkill(
                   current,
                   checkout,
                   undefined,
-                  args.length === 2 &&
-                    args[0] === "rev-parse" &&
-                    args[1] === "--show-toplevel",
+                  {
+                    inspectWorktreeBinding:
+                      args.length === 2 &&
+                      args[0] === "rev-parse" &&
+                      args[1] === "--show-toplevel",
+                  },
                 );
           let gitArgs = args;
           if (commandOptions?.callerContext) {
