@@ -2,6 +2,7 @@ import {
   scanDraftInputSchema,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
+import { z } from "zod";
 import { asRecord } from "../record.js";
 import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
@@ -201,6 +202,10 @@ function hasAdditionalControl(a: Finding, b: Finding) {
   );
 }
 
+function separateControls(a: Finding, b: Finding) {
+  return hasAdditionalControl(a, b) || hasAdditionalControl(b, a);
+}
+
 function sourcesNeedSeparateReports(a: Finding, b: Finding) {
   return a.provenance.sourceFindings?.some((left, i) => {
     const worker = left.id.slice(0, left.id.lastIndexOf(":") + 1);
@@ -210,8 +215,7 @@ function sourcesNeedSeparateReports(a: Finding, b: Finding) {
       if (right.id.startsWith(worker) && differentWorkerSites(source, other))
         return true;
       return (
-        hasAdditionalControl(source, other) ||
-        hasAdditionalControl(other, source) ||
+        separateControls(source, other) ||
         ((i > 0 || j > 0) && separateSinks(source, other))
       );
     });
@@ -245,7 +249,7 @@ function distinctIdentity(
   );
 }
 
-function addLocations(finding: Finding, source: Finding) {
+function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
   for (const location of source.locations) {
     if (
       !finding.locations.some(
@@ -262,31 +266,114 @@ function addLocations(finding: Finding, source: Finding) {
 
 // Keep the original repair groups as comparison inputs even after two reports
 // are published as one. A later batch must see the same reports after a resume.
-type RepairGroup = { order: number; sources: string[] };
+const repairGroupSchema = z.strictObject({
+  order: z.number().int().nonnegative(),
+  sources: z.array(z.string()),
+});
+const repairGroupsSchema = z.array(repairGroupSchema).min(1);
+type RepairGroup = z.infer<typeof repairGroupSchema>;
+
+function sourceIds(finding: Finding) {
+  return (
+    finding.provenance.sourceFindingIds ??
+    finding.provenance.sourceFindings?.map(({ id }) => id) ??
+    []
+  );
+}
+
+// The persisted schema accepts partial original records from older reducers.
+// Only groups with all their original reports can enter semantic comparisons.
+function hasCompleteSources(finding: Finding) {
+  const ids = sourceIds(finding);
+  const sources = finding.provenance.sourceFindings ?? [];
+  const known = new Set(sources.map(({ id }) => id));
+  return (
+    ids.length > 0 &&
+    ids.length === sources.length &&
+    known.size === ids.length &&
+    ids.every((id) => known.has(id)) &&
+    sources.every(
+      ({ finding }) =>
+        scanDraftInputSchema.shape.findings.element.safeParse(finding).success,
+    )
+  );
+}
+
 function restoreRepairGroups(findings: Finding[]) {
-  const groups: { finding: Finding; target: number }[] = [];
-  for (const [id, visible] of findings.entries()) {
-    const parts = visible.provenance.deepScanRepairGroups as
-      RepairGroup[] | undefined;
-    if (!parts) {
-      groups[id] = { finding: visible, target: id };
+  function visibleGroups() {
+    // Pre-rewrite reducers could write arbitrary fields in provenance.
+    return findings.map((finding, target) => {
+      delete finding.provenance.deepScanRepairGroups;
+      return { finding, target };
+    });
+  }
+  if (findings[0]?.provenance.deepScanRepairGroups === undefined)
+    return visibleGroups();
+
+  const groups = new Map<number, { finding: Finding; target: number }>();
+  let previousTarget = -1;
+  for (const visible of findings) {
+    const parts = repairGroupsSchema.safeParse(
+      visible.provenance.deepScanRepairGroups,
+    ).data;
+    if (!parts || parts[0]!.order <= previousTarget) return visibleGroups();
+    const target = parts[0]!.order;
+    previousTarget = target;
+    if (parts.length === 1) {
+      // Singletons already carry the visible report, even if a legacy source
+      // has only a title or a reference with no archived finding.
+      const ids = sourceIds(visible);
+      const sources = parts[0]!.sources;
+      if (
+        groups.has(target) ||
+        ids.length !== sources.length ||
+        !ids.every((id, i) => id === sources[i])
+      )
+        return visibleGroups();
+      delete visible.provenance.deepScanRepairGroups;
+      groups.set(target, { finding: visible, target });
       continue;
     }
     const originals = new Map(
-      visible.provenance.sourceFindings!.map((source) => [source.id, source]),
+      visible.provenance.sourceFindings?.map((source) => [source.id, source]),
     );
     for (const { order, sources } of parts) {
-      const members = sources.map((id) => originals.get(id)!);
-      const finding = structuredClone(members[0]!.finding) as Finding;
+      if (!sources.length || order < target || groups.has(order))
+        return visibleGroups();
+      const members = [];
+      for (const id of sources) {
+        const source = originals.get(id);
+        if (!source) return visibleGroups();
+        originals.delete(id);
+        members.push(source);
+      }
+      const finding = scanDraftInputSchema.shape.findings.element.safeParse(
+        members[0]!.finding,
+      ).data;
+      if (!finding) return visibleGroups();
       delete finding.provenance.deepScanRepairGroups;
       finding.provenance.sourceFindingIds = sources;
       finding.provenance.sourceFindings = members;
-      for (const member of members.slice(1))
-        addLocations(finding, member.finding as Finding);
-      groups[order] = { finding, target: parts[0]!.order };
+      for (const member of members.slice(1)) {
+        const locations =
+          scanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
+            member.finding.locations,
+          ).data;
+        if (!locations) return visibleGroups();
+        addLocations(finding, { locations });
+      }
+      groups.set(order, { finding, target });
     }
+    if (originals.size) return visibleGroups();
   }
-  return groups;
+  // Validate the dense sequence before assigning any array indexes.
+  const ordered = [];
+  for (let order = 0; order < groups.size; order++) {
+    const group = groups.get(order);
+    if (!group) return visibleGroups();
+    ordered.push(group);
+  }
+  return ordered;
 }
 
 export async function mergeBatch(
@@ -311,8 +398,15 @@ export async function mergeBatch(
     JSON.stringify({ ...finding, provenance: undefined });
   const exact = originals.map(content);
   const copies = new Map<string, (typeof retained)[number]>();
+  const incomplete = new Set<number>();
   for (const group of retained) {
     copies.set(exact[group.id]!, group);
+    if (!hasCompleteSources(group.finding)) {
+      incomplete.add(group.target);
+      continue;
+    }
+    // A legacy checkpoint can include all originals without the separate ID array.
+    group.finding.provenance.sourceFindingIds ??= sourceIds(group.finding);
     for (const source of group.finding.provenance.sourceFindings ?? [])
       copies.set(content(source.finding), group);
   }
@@ -352,6 +446,7 @@ export async function mergeBatch(
         retained.find((prior) => {
           const other = repairs?.get(prior.id);
           if (
+            incomplete.has(prior.target) ||
             !key ||
             !other ||
             key.length !== other.length ||
@@ -375,7 +470,7 @@ export async function mergeBatch(
                   source,
                   finding,
                   id.startsWith(worker.id + ":"),
-                ),
+                ) || separateControls(source, finding as Finding),
             )
           );
         });
@@ -394,7 +489,9 @@ export async function mergeBatch(
       const sourceId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
       const { finding } = group;
-      (finding.provenance.sourceFindingIds ??= []).push(sourceId);
+      (finding.provenance.sourceFindingIds ??= sourceIds(finding)).push(
+        sourceId,
+      );
       (finding.provenance.sourceFindings ??= []).push({
         id: sourceId,
         finding: structuredClone(source),
@@ -423,43 +520,40 @@ export async function mergeBatch(
     group.target = group.id;
     group.worker = worker;
   }
-  if (
-    repairs &&
-    retained.some((group) => group.worker >= 0) &&
-    retained.every(
-      ({ finding }) =>
-        finding.provenance.sourceFindings?.length &&
-        finding.provenance.sourceFindingIds?.length,
-    )
-  ) {
-    let matches: Map<number, Set<number>> | undefined;
-    try {
-      const sources = new Map<number, Record<string, unknown>[]>();
-      for (const group of retained) {
-        const members = sources.get(group.target) ?? [];
-        members.push(
-          ...group.finding.provenance.sourceFindings!.map((s) => s.finding),
-        );
-        sources.set(group.target, members);
-      }
-      matches = await checkSameFix(
-        retained.filter((group) => group.target === group.id),
-        priorTargets,
-        records,
-        repairs,
-        sources,
-        compare,
+  if (repairs && retained.some((group) => group.worker >= 0)) {
+    const sources = new Map<number, Record<string, unknown>[]>();
+    for (const group of retained) {
+      if (incomplete.has(group.target)) continue;
+      const members = sources.get(group.target) ?? [];
+      members.push(
+        ...group.finding.provenance.sourceFindings!.map((s) => s.finding),
       );
-    } catch (error) {
-      onError(error);
+      sources.set(group.target, members);
+    }
+    const reviewFailures = new Set<string>();
+    const matches = await checkSameFix(
+      retained.filter(
+        (group) => group.target === group.id && !incomplete.has(group.target),
+      ),
+      priorTargets,
+      records,
+      repairs,
+      sources,
+      compare,
+      (error) => {
+        onError(error);
+        reviewFailures.add(errorMessage(error));
+      },
+    );
+    if (reviewFailures.size) {
       limitation = [
         limitation,
-        `Deep Scan could not check disputed duplicates: ${errorMessage(error)}`,
+        `Deep Scan could not check disputed duplicates: ${[...reviewFailures].join(" / ")}`,
       ]
         .filter(Boolean)
         .join(" ");
     }
-    if (matches?.size) {
+    if (matches.size) {
       const kept = new Map<number, typeof retained>();
       for (const group of retained) {
         const earlier = matches.get(group.id);
@@ -505,7 +599,7 @@ export async function mergeBatch(
       }
       (target.provenance.deepScanRepairGroups as RepairGroup[]).push({
         order,
-        sources: group.finding.provenance.sourceFindingIds!,
+        sources: sourceIds(group.finding),
       });
     }
     aggregate.findings = [...visible.values()];
