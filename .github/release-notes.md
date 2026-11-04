@@ -54,6 +54,7 @@
 - preserve distinct findings and bound duplicate comparisons ([#2313](https://github.com/openai/codex-security/pull/2313))
 - bump the third-party group across 3 directories with 2 updates ([#2334](https://github.com/openai/codex-security/pull/2334))
 - build the bundled plugin for rotating property tests ([#2337](https://github.com/openai/codex-security/pull/2337))
+- reject invalid saved attempt numbers ([#2292](https://github.com/openai/codex-security/pull/2292))
 
 <!-- release-section: highlights:end -->
 
