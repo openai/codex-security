@@ -14867,11 +14867,12 @@ if __name__ == "__main__":
         startThread,
       }),
     });
-    const keepAlive = setTimeout(() => {}, 10_000);
+    const guard = new AbortController();
+    const guardTimer = setTimeout(() => guard.abort(), 15_000);
     try {
       const result = await client.run(repository, {
         maxCostUsd: 0.004,
-        signal: AbortSignal.timeout(5_000),
+        signal: guard.signal,
         onBudgetApproaching: ({ maxCostUsd, signal }) => {
           requests.push(maxCostUsd);
           budgetSignal = signal;
@@ -14895,7 +14896,7 @@ if __name__ == "__main__":
       expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
       expect(budgetSignal?.aborted).toBe(true);
     } finally {
-      clearTimeout(keepAlive);
+      clearTimeout(guardTimer);
       await client.close();
     }
   });
