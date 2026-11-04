@@ -87,6 +87,7 @@
 - show direct coordinator events in verbose CLI scans ([#2323](https://github.com/openai/codex-security/pull/2323))
 - report completed audits and batch consolidation ([#2305](https://github.com/openai/codex-security/pull/2305))
 - reject unpublishable worker report metadata ([#2319](https://github.com/openai/codex-security/pull/2319))
+- distinguish empty reports from failed scanners and exclusions ([#2082](https://github.com/openai/codex-security/pull/2082))
 
 <!-- release-section: highlights:end -->
 
