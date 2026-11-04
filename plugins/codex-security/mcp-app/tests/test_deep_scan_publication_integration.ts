@@ -19,6 +19,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { buildServer } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
+import { finding as sourceFinding } from "./scan-draft-fixture.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import type {
   DeepScanRunState,
@@ -43,12 +44,14 @@ type HostModule = Pick<
   > &
   Pick<
     typeof import("../src/artifact-scan-draft.ts"),
-    "recordCodexSecurityScanDraftViaWorkbench"
+    | "recordCodexSecurityScanDraftViaWorkbench"
+    | "recordCodexSecurityWorkerScanDraft"
   >;
 type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
 interface FixturePaths {
   target?: string;
   scanRoot?: string;
+  deepConfig?: string;
 }
 type Scenario = readonly [
   label: string,
@@ -92,7 +95,7 @@ const host = (await importModule({
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
-      'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
+      'export { recordCodexSecurityScanDraftViaWorkbench, recordCodexSecurityWorkerScanDraft } from "./src/artifact-scan-draft.ts";',
     ].join("\n"),
     resolveDir: mcpAppRoot,
   },
@@ -103,7 +106,92 @@ const {
   DeepScanCoordinator,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  recordCodexSecurityWorkerScanDraft,
 } = host;
+
+test("three Standard scans publish two distinct findings with their original evidence", async (t) => {
+  const { run, store, call, runWorkbench } = await createFixture(t, {
+    deepConfig:
+      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 3\n",
+  });
+  const { run: claimed } = await store.claimCoordinator({
+    scanId: run.scanId,
+    threadId: owner,
+  });
+  const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+    requireRunning: true,
+  });
+  const coordinator = new DeepScanCoordinator({
+    run: claimed,
+    store,
+    pluginRoot,
+    executor: {
+      async run(request) {
+        const label = path.basename(path.dirname(request.workingDirectory));
+        const sink =
+          label === "discovery-0002"
+            ? "response.write(account)"
+            : "response.write(tenant)";
+        const finding = sourceFinding("query", "fixture.py");
+        await recordCodexSecurityWorkerScanDraft(
+          {
+            ...request.artifactContext!,
+            repoRoot: run.targetPath,
+            scanId: run.scanId,
+          },
+          {
+            scanId: run.scanId,
+            findings: [
+              {
+                ...finding,
+                identity: undefined,
+                title: sink,
+                codeEvidence: [
+                  {
+                    id: "sink",
+                    label: "Output",
+                    explanation: "Unescaped response",
+                    path: "fixture.py",
+                    startLine: 1,
+                    code: sink,
+                  },
+                ],
+              },
+            ],
+            reviewState,
+          },
+        );
+        return {};
+      },
+    },
+    onComplete: async (draft, signal, publication) => {
+      await recordCodexSecurityScanDraftViaWorkbench(
+        context,
+        draft,
+        runWorkbench,
+        signal,
+        publication,
+      );
+    },
+  });
+  coordinator.start();
+  const terminal = await coordinator.wait(undefined, 30_000);
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(terminal.dispatchedCount, 3);
+  assertSuccess(
+    await call("complete_codex_security_scan", { scanId: run.scanId }),
+  );
+  const saved = JSON.parse(
+    (await snapshot(run)).files["findings.json"]!,
+  ).findings;
+  assert.deepEqual(
+    saved.map(
+      (f: { provenance: { sourceFindingIds: string[] } }) =>
+        f.provenance.sourceFindingIds.length,
+    ),
+    [2, 1],
+  );
+});
 
 test("public partial drafts retain checkpoints after coordinator adoption", async (t) => {
   const fixture = await createFixture(t);
@@ -708,6 +796,11 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
     }).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
   delete environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+  if (paths.deepConfig) {
+    const configDir = path.join(environment.CODEX_HOME, "codex-security");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "config.toml"), paths.deepConfig);
+  }
   const instant = new Date().toISOString();
   let now = instant;
   const runWorkbench: RunArtifactWorkbench = async (args, input) => {
@@ -802,16 +895,6 @@ async function commitReducers(
       reducerLabels?.[batch] ?? `dedup-${String(batch + 1).padStart(4, "0")}`;
     const artifact = await workerArtifact(run, "dedup", label);
     const id = ids[batch];
-    await store.claimDedup({ id, scanId: run.scanId, workerIds, ...artifact });
-    await store.updateWorker({
-      id,
-      scanId: run.scanId,
-      kind: "dedup",
-      status: "running",
-      attempt: 1,
-      threadId: `session-${label}`,
-      ...artifact,
-    });
     const resultManifestPath = path.join(artifact.artifactDir, "result.json");
     await writeFile(
       resultManifestPath,
@@ -822,11 +905,13 @@ async function commitReducers(
       }),
     );
     fixture.setTime(offsets[batch]);
-    await store.commitDedup({
+    await store.recordIteration({
       id,
       scanId: run.scanId,
-      resultManifestPath,
-      newFindings: 0,
+      workerIds,
+      resultPath: resultManifestPath,
+      noNewStreak: (batch + 1) * workerIds.length,
+      consecutiveErrors: 0,
     });
     fixture.setTime(0);
     results.push(resultManifestPath);
@@ -845,9 +930,12 @@ async function workerArtifact(
     "deep_discovery",
     kind,
     label,
-    "output",
+    ...(kind === "workers" ? ["output"] : []),
   );
-  const promptPath = path.join(path.dirname(artifactDir), "prompt.md");
+  const promptPath = path.join(
+    kind === "workers" ? path.dirname(artifactDir) : artifactDir,
+    "prompt.md",
+  );
   await mkdir(artifactDir, { recursive: true });
   await writeFile(promptPath, `Synthetic ${label}\n`);
   return { artifactDir, promptPath };

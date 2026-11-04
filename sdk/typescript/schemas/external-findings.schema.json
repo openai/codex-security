@@ -387,7 +387,8 @@
             "inspector",
             "blackduck",
             "veracode",
-            "sonar"
+            "sonar",
+            "continuum"
           ],
           "title": "Provider",
           "type": "string"
