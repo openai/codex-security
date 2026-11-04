@@ -46,8 +46,8 @@ Cloud private inbox imports came after [version 0.8.2](https://github.com/openai
 | [GitHub Dependabot](github-dependabot.md)                   | Dependency alerts exported from one repository                                  |
 | [GitHub Security Advisories](github-security-advisories.md) | Selected repository or global advisories                                        |
 | [OpenGrep](opengrep.md)                                     | Native scan JSON, optionally gzip-compressed                                    |
-| [Semgrep Code](semgrep.md)                                  | CLI/CI JSON, self-contained SARIF, or selected Platform API pages (local SDK)   |
-| [Snyk Open Source](snyk.md)                                 | CLI JSON, a Codex plugin export, or SARIF                                       |
+| [Semgrep](semgrep.md)                                       | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
+| [Snyk](snyk.md)                                             | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
 | [SonarQube Cloud](sonar.md)                                 | Issues selected with the signed-in Sonar CLI, or saved issue-search pages       |
 | [Veracode Static Analysis](veracode.md)                     | Findings API pages for one application's policy flaws                           |
 | [Wiz](wiz.md)                                               | Native JSON, normalized JSONL, or detailed repository package vulnerability CSV |

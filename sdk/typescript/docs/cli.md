@@ -977,6 +977,15 @@ The setting does not control configured OpenTelemetry exporters, integrations,
 authentication, or CLI update checks. Validation uses isolated configuration;
 patching and verification preserve ambient project trust.
 
+For scan outcomes, the workbench saves a separate, local `lifecycle` record
+with the scan ID, launch surface, available release versions, mode, timestamps,
+and committed status. A completed scan indicates whether it produced reportable
+findings. Use `codex-security scans list --json` for the current repository.
+To find an offline import, use `codex-security scans list --scan-root <DIR> --json`
+with its output directory. Imported scans have lifecycle mode `import`. The SDK
+exposes `onLifecycle`, and the CLI includes observations in verbose diagnostics.
+Applications can choose how to collect and export these observations.
+
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
 
@@ -1253,6 +1262,11 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
+If a nonempty committed line in `results.jsonl` contains invalid JSON or lacks
+a string task ID, the command reports its line number and leaves the ledger untouched.
+Restore a complete ledger backup that includes every committed attempt, or start
+a separate campaign in a new `--output-dir`.
+
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
 stops only that repository for this invocation. Failed recovery checkouts remain;
@@ -1326,7 +1340,7 @@ Each guide shows how to preview its input for a local repository. Follow the [sh
 to confirm the import and read the resulting records.
 
 Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable `publish findings`,
-`findings imported`, `import sonar`, and `import github-advisories`. Only `1`
+`findings imported`, `import sonar`, `import semgrep`, `import snyk`, and `import github-advisories`. Only `1`
 enables these commands in help and schemas. The SDK's corresponding operations
 require the flag in their effective environment. Pure normalizers, file readers,
 and the existing `import github` alert collector remain available independently.
@@ -1344,6 +1358,13 @@ configured Git remotes as described in the provider guide. Reimporting the same
 source key and finding ID reports created, updated, or unchanged records.
 Records omitted from the new selection stay stored. An import with exclusions
 exits with status 1. Local imports can retain evidence that exceeds Cloud's per-finding limits.
+
+Use `publish findings FILE --provider semgrep --to local` for a
+[selected Guardian MCP capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings)
+or a [saved Semgrep Web API selection](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#existing-platform-findings).
+Guardian uses its existing sign-in. Its imported IDs are separate from Web API IDs.
+To [collect a full Semgrep project and branch](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#collect-a-platform-project-and-branch), use
+`import semgrep PROJECT --semgrep-deployment SLUG --semgrep-ref REF [--semgrep-product sast|sca|ai_sast]`. Both saved formats support local and Cloud import.
 
 For completed scans exported in the Codex Security JSON or CSV format, use
 [scan import](#import-findings-as-a-saved-scan).
@@ -1466,7 +1487,14 @@ Progress goes to stderr and JSON results to stdout. The repository publisher
 uploads sequentially and uses up to four concurrent requests for lookups and
 readback.
 
-### Import Snyk Open Source findings
+### Import Snyk findings
+
+For an existing monitored Snyk project, use
+`codex-security import snyk PROJECT_ID --snyk-org ORG_ID --source-repository-url URL --format json`
+and save its output for `publish findings --provider snyk` with `--to local` or `--to cloud`. Set
+`SNYK_TOKEN` with read access. The default product is Open Source. Select
+`--snyk-product code` for Code and `--snyk-api-origin` for a regional API
+(default `https://api.snyk.io`). See the [hosted import example](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/snyk.md#existing-issues-from-snyk).
 
 Use `--provider snyk` for Open Source SCA vulnerabilities. Native CLI JSON, plugin
 exports, and Open Source SARIF can produce different occurrence IDs. Use a

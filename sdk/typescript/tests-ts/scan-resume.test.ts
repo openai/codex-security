@@ -447,7 +447,8 @@ test("CLI resumes through native execution with current permissions and preserve
   let resumedThread: string | undefined;
   const { stderr, runCli } = createCliTest(main);
 
-  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+  const flags = ["scans", "resume", f.scanId, "--json", "--verbose"];
+  const code = await runCli(flags, {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
     runWorkbench: f.command,
     createSecurity: (config) =>
@@ -532,6 +533,7 @@ test("CLI resumes through native execution with current permissions and preserve
       }),
   });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).not.toContain("debug: scan.lifecycle ");
   expect(stderr.text()).toContain(`scans show ${f.scanId}`);
   expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
@@ -654,6 +656,38 @@ test.each([false, true])(
     );
   },
 );
+
+test("resuming reports a committed cancellation once without another launch", async () => {
+  const f = await interruptedScan();
+  const { stderr, runCli } = createCliTest(main);
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json", "--verbose"],
+    resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread: (threadId) => ({
+        id: threadId,
+        async runStreamed() {
+          await f.command([
+            "cancel-scan",
+            "--scan-id",
+            f.scanId,
+            "--thread-id",
+            threadId,
+          ]);
+          throw new Error("Synthetic transport disconnected");
+        },
+      }),
+    })),
+  );
+  expect(code).not.toBe(0);
+  const lifecycle = stderr
+    .text()
+    .split("\n")
+    .filter((line) => line.includes("debug: scan.lifecycle "));
+  expect(lifecycle).toHaveLength(1);
+  expect(lifecycle[0]).toContain(`scan_id=${JSON.stringify(f.scanId)}`);
+  expect(lifecycle[0]).toContain('status="canceled"');
+});
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {
   const f = await interruptedScan("deep", false, {}, false, "amazon-bedrock");
