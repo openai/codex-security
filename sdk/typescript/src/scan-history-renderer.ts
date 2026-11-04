@@ -124,7 +124,8 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
+    const label = severity === "INFORMATIONAL" ? "INFO" : severity;
+    const badge = paint(label.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
     wrap(title, 14, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
