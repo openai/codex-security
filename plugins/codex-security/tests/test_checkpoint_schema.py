@@ -1,3 +1,5 @@
+"""Check that upgrading the checkpoint-head schema preserves scans and lets current readers proceed during a write."""
+
 from __future__ import annotations
 
 import json
