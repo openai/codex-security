@@ -3,9 +3,9 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export function bashCommand(): string {
-  if (process.platform !== "win32") return "bash";
-  const git = Bun.which("git");
+export function bashCommand(
+  git = process.platform === "win32" ? Bun.which("git") : null,
+): string {
   if (git === null) return "bash";
   const parent = dirname(dirname(git));
   const nestedGit =

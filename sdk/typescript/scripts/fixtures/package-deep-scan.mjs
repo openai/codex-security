@@ -91,7 +91,7 @@ try {
   if (failures.length > 0)
     throw new AggregateError(failures, "Deep Scan package checks failed.");
   console.log(
-    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
+    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, worker checkpoints, finding union, restart before finalization, and sealed results.",
   );
 } catch (error) {
   for (const name of ["installed", "detached"]) {
@@ -124,7 +124,7 @@ async function fixture(name, pluginRoot, executable) {
   );
   await writeFile(
     join(home, "codex-security", "config.toml"),
-    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 2\n",
+    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
   );
   const env = Object.fromEntries(
     [
@@ -439,7 +439,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
-      stopAfterNoNew: 1,
+      stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
       onScanRegistered(scan) {
         scanId = scan.scanId;
@@ -491,17 +491,16 @@ async function assertExecutions(f, scanId) {
     );
   }
   const workers = executions.filter((entry) => entry.phase === "worker");
-  const reducers = executions.filter((entry) => entry.phase === "reducer");
+
   const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;
   assert.equal(workers.length, 2 + incomplete);
   assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
-  assert.equal(reducers.length, 1);
   assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    4 + incomplete,
+    3 + incomplete,
   );
-  for (const execution of [...workers, ...reducers]) {
+  for (const execution of workers) {
     assert.equal(execution.scanId, scanId);
     assert.equal(execution.home, f.home);
     assert.equal(execution.hasApiKey, true);
