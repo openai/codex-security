@@ -314,214 +314,196 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           }),
       );
       // A running coordinator retains its settings if the source file changes.
-      for (const kind of ["discovery", "dedup"] as const) {
-        for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-          launches.length = 0;
-          await Promise.all(
-            executors.map((executor, index) => {
-              // Each concurrent launch snapshots its own scan environment.
-              process.env.CODEX_SECURITY_CONFIG_PATH = scanConfigPaths[index];
-              if (providerKeys[index] === undefined) {
-                delete process.env.SYNTHETIC_GATEWAY_KEY;
-              } else {
-                process.env.SYNTHETIC_GATEWAY_KEY = providerKeys[index];
-              }
-              return executor.run({
-                kind,
-                promptPath,
-                workingDirectory: workerDirectory,
-                subagents: 0,
-                resumeThreadId,
-                artifactContext: {
-                  root: fixture.root,
-                  layout: kind === "dedup" ? "reducer" : "worker",
-                  ...(kind === "dedup"
-                    ? {
-                        deepReducer: {
-                          scanRoot: fixture.root,
-                          claimedWorkers: [],
-                        },
-                      }
-                    : {}),
-                },
-                signal: new AbortController().signal,
-              });
-            }),
-          );
-          const workerLaunches = launches.filter(
-            ({ args }) => args[0] === "exec",
-          );
-          assert.equal(workerLaunches.length, settings.length);
-          for (const [
-            index,
-            { model, reasoningEffort },
-          ] of settings.entries()) {
-            const workerLaunch = workerLaunches.find(({ args }) =>
-              model === undefined
-                ? !args.includes("--model")
-                : args[args.indexOf("--model") + 1] === model,
-            );
-            assert.ok(workerLaunch, `missing worker launch for ${model}`);
-            assert.equal(
-              workerLaunch.command,
-              process.platform === "win32"
-                ? path.toNamespacedPath(process.execPath)
-                : process.execPath,
-            );
-            assert.equal(
-              workerLaunch.environment!.CODEX_CLI_PATH,
-              process.execPath,
-            );
-            assert.equal(
-              workerLaunch.environment!.CODEX_HOME,
-              await realpath(codexHome),
-            );
-            assert.equal(
-              workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
-              scanConfigPaths[index],
-            );
-            assert.equal(
-              workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-            );
-            assert.deepEqual(
-              JSON.parse(
-                JSON.stringify(
-                  parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
-                    .permissions,
-                ),
-              ),
-              {
-                codex_security_deep_scan_worker: deniedWorkerPermissionProfile,
-              },
-            );
-            const invocation = await readJson(workerLaunch.markerPath);
-            assert.equal(invocation.providerKey, providerKeys[index]);
-            assertFlagPair(invocation.argv, "--cd", workerDirectory);
-            if (relative) {
-              const argument = (invocation.argv as string[]).find((value) =>
-                value.startsWith("model_instructions_file="),
-              );
-              assert.ok(argument);
-              const selected = JSON.parse(
-                argument.slice("model_instructions_file=".length),
-              );
-              assert.equal(
-                await readFile(path.resolve(workerDirectory, selected), "utf8"),
-                `synthetic instructions ${index}`,
-              );
-            }
-            if (commandAuth) {
-              assert.equal(
-                invocation.codexConfig,
-                await readFile(path.join(codexHome, "config.toml"), "utf8"),
-              );
-            }
-            assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
-            assert.equal(
-              process.env.SYNTHETIC_GATEWAY_KEY,
-              providerKeys.at(-1),
-            );
-            const clearedFiles = modelFiles && index % 2 === 0;
-            assertConfigOverrides(invocation.argv, {
-              model_reasoning_summary: expected,
-              model_catalog_json:
-                modelFiles && !clearedFiles
-                  ? path.join(fixture.root, `catalog-${index}.json`)
-                  : undefined,
-              experimental_compact_prompt_file:
-                modelFiles && !clearedFiles
-                  ? path.join(fixture.root, `compact-${index}.md`)
-                  : undefined,
-              model_instructions_file:
-                instructions && !clearedFiles
-                  ? path.join(fixture.root, `instructions-${index}.md`)
-                  : undefined,
-              model_verbosity: instructions
-                ? index % 2 === 0
-                  ? "high"
-                  : "low"
-                : undefined,
-              web_search: instructions
-                ? index % 2 === 0
-                  ? "disabled"
-                  : "cached"
-                : undefined,
-
-              "features.shell_tool": commandAuth ? false : undefined,
-              "features.unified_exec": commandAuth ? false : undefined,
-            });
-            assert.deepEqual(
-              invocation.argv.filter((arg: string) =>
-                arg.startsWith("model_reasoning_effort="),
-              ),
-              reasoningEffort === undefined
-                ? []
-                : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
-            );
-            if (model === undefined) {
-              assert.equal(invocation.argv.includes("--model"), false);
+      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+        launches.length = 0;
+        await Promise.all(
+          executors.map((executor, index) => {
+            // Each concurrent launch snapshots its own scan environment.
+            process.env.CODEX_SECURITY_CONFIG_PATH = scanConfigPaths[index];
+            if (providerKeys[index] === undefined) {
+              delete process.env.SYNTHETIC_GATEWAY_KEY;
             } else {
-              assertFlagPair(invocation.argv, "--model", model);
+              process.env.SYNTHETIC_GATEWAY_KEY = providerKeys[index];
             }
-            if (configuration.includes('model = "native-model"')) {
-              assert.equal(
-                invocation.argv.some((arg: string) =>
-                  arg.startsWith("profile="),
-                ),
-                false,
-              );
-            }
-            assert.equal(
-              invocation.argv.includes("resume"),
-              resumeThreadId !== undefined,
-            );
-            assert.equal(invocation.configPath, scanConfigPaths[index]);
-            assert.partialDeepStrictEqual(
-              invocation.gitEnvironment,
-              gitEnvironment,
-            );
-            for (const [name, value] of Object.entries(gitEnvironment)) {
-              assert.equal(process.env[name], value);
-            }
-            assert.equal(invocation.python, python);
-            assertConfigOverrides(invocation.argv, {
-              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
-                helperPython,
+            return executor.run({
+              kind: "discovery",
+              promptPath,
+              workingDirectory: workerDirectory,
+              subagents: 0,
+              resumeThreadId,
+              artifactContext: {
+                root: fixture.root,
+                layout: "worker",
+              },
+              signal: new AbortController().signal,
             });
-            assert.equal(process.env.PYTHON, python);
-            assert.equal(
-              invocation.deepConfigPath,
-              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+          }),
+        );
+        const workerLaunches = launches.filter(
+          ({ args }) => args[0] === "exec",
+        );
+        assert.equal(workerLaunches.length, settings.length);
+        for (const [index, { model, reasoningEffort }] of settings.entries()) {
+          const workerLaunch = workerLaunches.find(({ args }) =>
+            model === undefined
+              ? !args.includes("--model")
+              : args[args.indexOf("--model") + 1] === model,
+          );
+          assert.ok(workerLaunch, `missing worker launch for ${model}`);
+          assert.equal(
+            workerLaunch.command,
+            process.platform === "win32"
+              ? path.toNamespacedPath(process.execPath)
+              : process.execPath,
+          );
+          assert.equal(
+            workerLaunch.environment!.CODEX_CLI_PATH,
+            process.execPath,
+          );
+          assert.equal(
+            workerLaunch.environment!.CODEX_HOME,
+            await realpath(codexHome),
+          );
+          assert.equal(
+            workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
+            scanConfigPaths[index],
+          );
+          assert.equal(
+            workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+          );
+          assert.deepEqual(
+            JSON.parse(
+              JSON.stringify(
+                parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
+                  .permissions,
+              ),
+            ),
+            {
+              codex_security_deep_scan_worker: deniedWorkerPermissionProfile,
+            },
+          );
+          const invocation = await readJson(workerLaunch.markerPath);
+          assert.equal(invocation.providerKey, providerKeys[index]);
+          assertFlagPair(invocation.argv, "--cd", workerDirectory);
+          if (relative) {
+            const argument = (invocation.argv as string[]).find((value) =>
+              value.startsWith("model_instructions_file="),
             );
-            assertReadOnlyWorkerPolicy(invocation.argv);
-            assertWorkerSubagentPolicy(
-              invocation.argv,
-              0,
-              codeMode
-                ? {
-                    enabled: index % 2 === 0,
-                    excluded_tool_namespaces: [`synthetic_tools_${index}`],
-                  }
+            assert.ok(argument);
+            const selected = JSON.parse(
+              argument.slice("model_instructions_file=".length),
+            );
+            assert.equal(
+              await readFile(path.resolve(workerDirectory, selected), "utf8"),
+              `synthetic instructions ${index}`,
+            );
+          }
+          if (commandAuth) {
+            assert.equal(
+              invocation.codexConfig,
+              await readFile(path.join(codexHome, "config.toml"), "utf8"),
+            );
+          }
+          assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+          assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, providerKeys.at(-1));
+          const clearedFiles = modelFiles && index % 2 === 0;
+          assertConfigOverrides(invocation.argv, {
+            model_reasoning_summary: expected,
+            model_catalog_json:
+              modelFiles && !clearedFiles
+                ? path.join(fixture.root, `catalog-${index}.json`)
                 : undefined,
-            );
+            experimental_compact_prompt_file:
+              modelFiles && !clearedFiles
+                ? path.join(fixture.root, `compact-${index}.md`)
+                : undefined,
+            model_instructions_file:
+              instructions && !clearedFiles
+                ? path.join(fixture.root, `instructions-${index}.md`)
+                : undefined,
+            model_verbosity: instructions
+              ? index % 2 === 0
+                ? "high"
+                : "low"
+              : undefined,
+            web_search: instructions
+              ? index % 2 === 0
+                ? "disabled"
+                : "cached"
+              : undefined,
+
+            "features.shell_tool": commandAuth ? false : undefined,
+            "features.unified_exec": commandAuth ? false : undefined,
+          });
+          assert.deepEqual(
+            invocation.argv.filter((arg: string) =>
+              arg.startsWith("model_reasoning_effort="),
+            ),
+            reasoningEffort === undefined
+              ? []
+              : [`model_reasoning_effort=${JSON.stringify(reasoningEffort)}`],
+          );
+          if (model === undefined) {
+            assert.equal(invocation.argv.includes("--model"), false);
+          } else {
+            assertFlagPair(invocation.argv, "--model", model);
           }
-          for (const launch of launches.filter(({ args }) =>
-            args.includes("app-server"),
-          )) {
-            const preflight = await readJson(launch.markerPath);
-            assert.partialDeepStrictEqual(
-              preflight.gitEnvironment,
-              gitEnvironment,
-            );
+          if (configuration.includes('model = "native-model"')) {
             assert.equal(
-              workerPermissionProfileOverride(launch.args),
-              workerPermissionProfileOverride(workerLaunches[0].args),
+              invocation.argv.some((arg: string) => arg.startsWith("profile=")),
+              false,
             );
           }
-          for (const selected of new Set(scanConfigPaths)) {
-            await writeFile(selected, 'model_reasoning_summary = "detailed"\n');
+          assert.equal(
+            invocation.argv.includes("resume"),
+            resumeThreadId !== undefined,
+          );
+          assert.equal(invocation.configPath, scanConfigPaths[index]);
+          assert.partialDeepStrictEqual(
+            invocation.gitEnvironment,
+            gitEnvironment,
+          );
+          for (const [name, value] of Object.entries(gitEnvironment)) {
+            assert.equal(process.env[name], value);
           }
+          assert.equal(invocation.python, python);
+          assertConfigOverrides(invocation.argv, {
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
+              helperPython,
+          });
+          assert.equal(process.env.PYTHON, python);
+          assert.equal(
+            invocation.deepConfigPath,
+            process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+          );
+          assertReadOnlyWorkerPolicy(invocation.argv);
+          assertWorkerSubagentPolicy(
+            invocation.argv,
+            0,
+            codeMode
+              ? {
+                  enabled: index % 2 === 0,
+                  excluded_tool_namespaces: [`synthetic_tools_${index}`],
+                }
+              : undefined,
+          );
+        }
+        for (const launch of launches.filter(({ args }) =>
+          args.includes("app-server"),
+        )) {
+          const preflight = await readJson(launch.markerPath);
+          assert.partialDeepStrictEqual(
+            preflight.gitEnvironment,
+            gitEnvironment,
+          );
+          assert.equal(
+            workerPermissionProfileOverride(launch.args),
+            workerPermissionProfileOverride(workerLaunches[0].args),
+          );
+        }
+        for (const selected of new Set(scanConfigPaths)) {
+          await writeFile(selected, 'model_reasoning_summary = "detailed"\n');
         }
       }
     }
