@@ -46,15 +46,7 @@ export const classifySeverityRecordsInputSchema = z
     version: z.literal(1),
     rubric: severityRubricSnapshotSchema.optional(),
     model: text,
-    effort: z.enum([
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ]),
+    effort: z.string(),
     records: z.array(
       z
         .object({
