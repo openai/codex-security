@@ -7,7 +7,7 @@ import {
 } from "../../../../sdk/typescript/src/runtime.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import {
-  promptFileDigest,
+  modelFileDigests,
   restoreScanKnowledge,
 } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
@@ -70,9 +70,8 @@ export interface NativeScanSemanticInputs {
   deepScanSettings: Required<DeepScanOptions>;
   config: JsonObject;
   modelSettings: ReturnType<typeof scanModelConfiguration>;
-  instructionSettingsMatch: boolean;
-  modelInstructionsFileSha256: string | null;
-  compactPromptFileSha256: string | null;
+  modelInputSettingsMatch: boolean;
+  fileDigests: Awaited<ReturnType<typeof modelFileDigests>>;
 }
 
 export interface NativeScanInput {
@@ -238,23 +237,11 @@ export async function readNativeScanSemanticInputs(
     knowledgeBaseSnapshot,
     deepScanSettings,
     config,
-    instructionSettingsMatch: [
+    modelInputSettingsMatch: [
       "developer_instructions",
-      "model_instructions_file",
-      "experimental_compact_prompt_file",
+      ...MODEL_FILE_SETTINGS,
     ].every((key) => config[key] === savedConfig[key]),
-    modelInstructionsFileSha256: await promptFileDigest(
-      typeof config["model_instructions_file"] === "string"
-        ? config["model_instructions_file"]
-        : undefined,
-      signal,
-    ),
-    compactPromptFileSha256: await promptFileDigest(
-      typeof config["experimental_compact_prompt_file"] === "string"
-        ? config["experimental_compact_prompt_file"]
-        : undefined,
-      signal,
-    ),
+    fileDigests: await modelFileDigests(config, signal),
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

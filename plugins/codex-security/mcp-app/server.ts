@@ -1071,24 +1071,23 @@ export function createCodexSecurityServer(): McpServer {
               ? begun.deepScanSettings
               : undefined,
           );
-          // Profile-only instructions are compared in memory. Only readable recipe
+          // Profile-only model inputs are compared in memory. Only readable recipe
           // fields cross the workbench process boundary.
           const savedConfig = savedRecipe?.config;
           begun = await begin([
             "--completed-inputs-json",
             JSON.stringify({
-              completedScanId: semanticInputs.instructionSettingsMatch
+              completedScanId: semanticInputs.modelInputSettingsMatch
                 ? begun.scan.scanId
                 : null,
               developerInstructions:
                 savedConfig?.["developer_instructions"] ?? null,
               modelInstructionsFile:
                 savedConfig?.["model_instructions_file"] ?? null,
-              modelInstructionsFileSha256:
-                semanticInputs.modelInstructionsFileSha256,
               compactPromptFile:
                 savedConfig?.["experimental_compact_prompt_file"] ?? null,
-              compactPromptFileSha256: semanticInputs.compactPromptFileSha256,
+              modelCatalogFile: savedConfig?.["model_catalog_json"] ?? null,
+              ...semanticInputs.fileDigests,
               knowledgeBase: scanInputIdentity(
                 undefined,
                 semanticInputs.knowledgeBaseSnapshot,

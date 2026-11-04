@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { syntheticModelCatalog } from "../../../../sdk/typescript/tests-ts/support/model-catalog.ts";
 import { loadSourceModule, privateDirectory } from "./helpers/source.mjs";
 
 const applicationRoot = path.resolve(import.meta.dirname, "..");
@@ -104,16 +105,26 @@ for (const scenario of [
   "compact prompt file removed",
   "compact prompt file explicit",
   "compact prompt file running",
+  "model catalog file unchanged",
+  "model catalog file content changed",
+  "model catalog file changed",
+  "model catalog file legacy",
   "running scan ID",
   "running target",
 ]) {
-  const change = scenario.replace(/^compact prompt file /, "instruction file ");
-  const promptFile = scenario.startsWith("compact prompt file ")
-    ? "experimental_compact_prompt_file"
-    : "model_instructions_file";
-  const promptFileDigestKey = scenario.startsWith("compact prompt file ")
-    ? "compactPromptFileSha256"
-    : "modelInstructionsFileSha256";
+  const change = scenario.replace(
+    /^(compact prompt|model catalog) file /,
+    "instruction file ",
+  );
+  const catalog = scenario.startsWith("model catalog file ");
+  const [promptFile, promptFileDigestKey] = catalog
+    ? (["model_catalog_json", "modelCatalogFileSha256"] as const)
+    : scenario.startsWith("compact prompt file ")
+      ? ([
+          "experimental_compact_prompt_file",
+          "compactPromptFileSha256",
+        ] as const)
+      : (["model_instructions_file", "modelInstructionsFileSha256"] as const);
   test(`native target reuse after MCP restart: ${scenario}`, async () => {
     const root = await privateDirectory("native-completed-reuse-");
     const repository = path.join(root, "repository");
@@ -128,8 +139,26 @@ for (const scenario of [
       ? path.join(root, "project", "scan.json")
       : undefined;
     const selectedConfigPath = path.join(root, "selected.toml");
-    const originalInstructionFile = path.join(root, "instructions-a.md");
-    const changedInstructionFile = path.join(root, "instructions-b.md");
+    const originalInstructionFile = path.join(
+      root,
+      catalog ? "a.json" : "instructions-a.md",
+    );
+    const changedInstructionFile = path.join(
+      root,
+      catalog ? "b.json" : "instructions-b.md",
+    );
+    const fileContents = (text: string) =>
+      catalog
+        ? JSON.stringify({
+            models: [
+              {
+                ...syntheticModelCatalog.models[0],
+                slug: model,
+                base_instructions: text,
+              },
+            ],
+          })
+        : text;
     const environment = {
       ...process.env,
       CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
@@ -261,11 +290,15 @@ for (const scenario of [
           originalInstructionFile,
           change === "instruction file empty"
             ? ""
-            : "Original synthetic model instructions.\n",
+            : fileContents("Original synthetic model instructions.\n"),
         );
         await writeFile(
           changedInstructionFile,
-          "Different synthetic model instructions.\n",
+          fileContents(
+            catalog
+              ? "Original synthetic model instructions.\n"
+              : "Different synthetic model instructions.\n",
+          ),
         );
       }
       const nativeConfig = instructionFileCase
@@ -484,7 +517,7 @@ for (const scenario of [
       if (change === "instruction file content changed")
         await writeFile(
           originalInstructionFile,
-          "Changed instructions at the same path.\n",
+          fileContents("Changed instructions at the same path.\n"),
         );
       if (
         [

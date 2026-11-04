@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
   cp,
@@ -438,6 +438,11 @@ test.each([
       parentId,
     ]);
     const config = (saved["recipe"] as JsonObject)["config"] as JsonObject;
+    expect((saved["recipe"] as JsonObject)["scanInputs"]).toMatchObject({
+      modelCatalogFileSha256: createHash("sha256")
+        .update(await readFile(replaySettings.model_catalog_json))
+        .digest("hex"),
+    });
     const replayProvider = {
       ...provider,
       auth: { ...provider.auth, cwd: h.home },

@@ -52,6 +52,22 @@ export async function promptFileDigest(
         .digest("hex");
 }
 
+export async function modelFileDigests(
+  config: JsonObject,
+  signal?: AbortSignal,
+) {
+  const digest = (setting: string) =>
+    promptFileDigest(
+      typeof config[setting] === "string" ? config[setting] : undefined,
+      signal,
+    );
+  return {
+    modelInstructionsFileSha256: await digest("model_instructions_file"),
+    compactPromptFileSha256: await digest("experimental_compact_prompt_file"),
+    modelCatalogFileSha256: await digest("model_catalog_json"),
+  };
+}
+
 export async function saveScanKnowledge(
   scanDir: string,
   snapshot: KnowledgeBaseSnapshot,

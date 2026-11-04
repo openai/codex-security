@@ -8,7 +8,7 @@ import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
 import { join } from "node:path";
 import { workflowDigest } from "./finding-workflow.js";
-import { promptFileDigest } from "./scan-inputs.js";
+import { modelFileDigests } from "./scan-inputs.js";
 
 /** Validated saved execution options shared by SDK and native resume. */
 export interface SavedScanRecipe {
@@ -51,8 +51,7 @@ export async function registerScan(options: {
   packageVersion: string;
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
-  modelInstructionsFile?: string;
-  compactPromptFile?: string;
+  workerConfig?: JsonObject;
   expectation: ScanExpectation;
   scanDir: string;
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
@@ -82,12 +81,7 @@ export async function registerScan(options: {
   if (!resumed && expectation.mode === "deep") {
     recipe["scanInputs"] = {
       ...(recipe["scanInputs"] as JsonObject),
-      modelInstructionsFileSha256: await promptFileDigest(
-        options.modelInstructionsFile,
-      ),
-      compactPromptFileSha256: await promptFileDigest(
-        options.compactPromptFile,
-      ),
+      ...(await modelFileDigests(options.workerConfig ?? {})),
     };
   }
   const registration =

@@ -194,6 +194,8 @@ def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) ->
         == requested.get("modelInstructionsFileSha256")
         and config.get("experimental_compact_prompt_file") == requested.get("compactPromptFile")
         and inputs.get("compactPromptFileSha256") == requested.get("compactPromptFileSha256")
+        and config.get("model_catalog_json") == requested.get("modelCatalogFile")
+        and inputs.get("modelCatalogFileSha256") == requested.get("modelCatalogFileSha256")
     )
 
 

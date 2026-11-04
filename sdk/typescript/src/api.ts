@@ -2772,14 +2772,7 @@ export class CodexSecurity {
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
-        modelInstructionsFile:
-          typeof workerConfig["model_instructions_file"] === "string"
-            ? workerConfig["model_instructions_file"]
-            : undefined,
-        compactPromptFile:
-          typeof workerConfig["experimental_compact_prompt_file"] === "string"
-            ? workerConfig["experimental_compact_prompt_file"]
-            : undefined,
+        workerConfig,
         expectation,
         scanDir,
         workbench: (args, input) => workbench(workbenchOptions, args, input),
