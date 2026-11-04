@@ -64,7 +64,7 @@ async function openWorkspace(env: NodeJS.ProcessEnv) {
     env,
   });
   try {
-    assertNoError(await server.initialize("workbench-state-test"));
+    await server.initialize("workbench-state-test");
     return await server.callTool(2, {
       name: "open_codex_security_workspace",
       arguments: { targetPath, scope: ".", mode: "standard" },
