@@ -36,6 +36,7 @@ describe("scan output schema", () => {
     const schema = await scanOutputSchema();
     expect(schema).toMatchObject({
       anyOf: [
+        { type: "integer", minimum: 0 },
         {
           properties: {
             findings: { type: "object" },
@@ -68,6 +69,17 @@ describe("scan output schema", () => {
     });
     const validate = new Ajv2020({ strict: false }).compile(schema);
     expect(validate({})).toBe(false);
+    const output = capture();
+    expect(
+      await main(
+        ["scan", "--json", "--dry-run", "--token-count"],
+        output.stream,
+        capture().stream,
+        dependencies({ preflight: fakePreflight() }),
+      ),
+    ).toBe(0);
+    expect(validate(JSON.parse(output.text()))).toBe(true);
+    expect(validate(-1)).toBe(false);
   });
 
   test.each(["partial", "unknown"] as const)(
@@ -250,6 +262,7 @@ test.each(retainedThreatModels)(
     const schema = await scanOutputSchema();
     expect(schema).toMatchObject({
       anyOf: [
+        { type: "integer" },
         {
           properties: {
             threatModel: { anyOf: [{ type: "object" }, { type: "null" }] },
