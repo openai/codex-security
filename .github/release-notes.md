@@ -18,6 +18,7 @@
 - handle disconnected child stdin on macOS ([#2275](https://github.com/openai/codex-security/pull/2275))
 - deep scan upgrade ([#2118](https://github.com/openai/codex-security/pull/2118))
 - simplify scanner imports and clarify Cloud receipts ([#2271](https://github.com/openai/codex-security/pull/2271))
+- avoid repeated repository and Snyk project checks ([#2187](https://github.com/openai/codex-security/pull/2187))
 
 <!-- release-section: highlights:end -->
 
