@@ -2134,8 +2134,9 @@ sealed artifacts; interruption preserves completed comparisons. Model/effort
 changes alone do not invalidate cached decisions.
 
 If a matching batch fails, `scans match --all` continues with later scans.
-A partial success reports `unmatchedBatches` in JSON. Rerun without `--force`
-to retry unsaved comparisons. A cancellation, storage failure, or invalid
+A partial success reports `unmatchedBatches` in JSON. An ordinary rerun retries
+unsaved comparisons. When retrying a forced rebuild, keep `--force` so pairs
+with older cached decisions are compared again. A cancellation, storage failure, or invalid
 authentication or configuration stops the command.
 
 ```ts

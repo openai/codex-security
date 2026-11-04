@@ -532,7 +532,7 @@ export function renderScanHistory(
     if (failed) {
       lines.push(
         `  ${paint(
-          `Failed to match ${clean(failed)} scan batch${failed === 1 ? "" : "es"}. Rerun to retry.`,
+          `Failed to match ${clean(failed)} scan batch${failed === 1 ? "" : "es"}. Rerun the same command to retry.`,
           33,
         )}`,
       );

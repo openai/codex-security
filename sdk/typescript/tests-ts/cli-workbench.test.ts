@@ -7,7 +7,6 @@ import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import {
   AuthenticationRequiredError,
-  ConfigurationError,
   DiffTarget,
   type ScanOptions,
 } from "../src/index.js";
@@ -1213,6 +1212,7 @@ describe("CLI workbench", () => {
         })),
       }));
       return {
+        batches,
         saved,
         onWorkbench(args: readonly string[]): JsonObject {
           if (args[0] === "list-unmatched-scan-pairs") return { batches };
@@ -1308,9 +1308,40 @@ describe("CLI workbench", () => {
       );
     });
 
+    test.each(["malformed", "unreadable"])(
+      "stops on %s native config after saving an empty pair",
+      async (problem) => {
+        await using home = await scopedTemporaryDirectory("match-all-config-");
+        const file = join(home.path, "config.toml");
+        if (problem === "malformed") await writeFile(file, "[broken\n");
+        else await mkdir(file);
+        const { batches, saved, onWorkbench } = batchWorkbench([
+          "empty",
+          "match",
+          "later",
+        ]);
+        batches[0]!.afterFindings.length = 0;
+        batches[2]!.afterFindings.length = 0;
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const code = await runCli(
+          argv,
+          dependencies({
+            environment: { CODEX_HOME: home.path },
+            onWorkbench,
+            onMatch: matchScanFindings,
+          }),
+        );
+        expect(code).toBe(2);
+        expect(saved).toEqual([["source", "empty"]]);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          "Could not read the configured Codex provider",
+        );
+      },
+    );
+
     test.each([
       ["save", new Error("Storage failed")],
-      ["configuration", new ConfigurationError("Invalid native configuration")],
       [
         "authentication",
         new AuthenticationRequiredError("Missing native credentials"),

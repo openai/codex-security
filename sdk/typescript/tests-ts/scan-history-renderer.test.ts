@@ -536,7 +536,7 @@ describe("scan history renderer", () => {
       "2 related pairs recorded",
       "1 uncertain pair",
       "2 scans unavailable",
-      "Failed to match 1 scan batch. Rerun to retry.",
+      "Failed to match 1 scan batch. Rerun the same command to retry.",
     ]) {
       expect(output).toContain(expected);
     }
