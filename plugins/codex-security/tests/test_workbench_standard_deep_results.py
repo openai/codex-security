@@ -1198,6 +1198,8 @@ def accepted_standard_worker(
     scan_id: str,
     *,
     name: str = "standard-worker",
+    findings: list[dict[str, object]] | None = None,
+    legacy: bool = True,
     run=run_workbench,
 ) -> tuple[str, Path]:
     worker_id = str(uuid.uuid4())
@@ -1223,7 +1225,7 @@ def accepted_standard_worker(
         json.dumps(
             {
                 "scanId": scan_id,
-                "findings": [],
+                "findings": findings or [],
                 "coverage": saved_coverage(),
                 "threatModel": {"summary": "The ordinary Standard worker threat model."},
             }
@@ -1238,6 +1240,8 @@ def accepted_standard_worker(
         str(result_path),
         environment=environment,
     )
+    if not legacy:
+        return worker_id, result_path
     # These fixtures represent workers saved before immutable attempt acceptance.
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         accepted = connection.execute(
@@ -1351,11 +1355,14 @@ def test_failure_preserves_last_committed_reducer_without_parent_draft(
     tmp_path: Path, with_coverage: bool
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    worker_id, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)
-    contract_dir = standard_contract(tmp_path, scan_id, target)
-    draft = json.loads(result_path.read_text())
-    draft["findings"] = json.loads((contract_dir / "findings.json").read_text())["findings"]
-    result_path.write_text(json.dumps(draft))
+    worker_id, result_path = accepted_standard_worker(
+        state_dir,
+        codex_home,
+        scan_dir,
+        scan_id,
+        findings=[standard_finding(tmp_path, scan_id, target)],
+        legacy=False,
+    )
     _, _, reducer_path = worker_paths(scan_dir, "dedup-0001")
     reducer_path.write_bytes(result_path.read_bytes())
     run_workbench(
