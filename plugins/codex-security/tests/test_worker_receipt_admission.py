@@ -8,7 +8,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
