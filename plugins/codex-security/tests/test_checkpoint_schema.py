@@ -118,22 +118,16 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
-        for original, updated in zip(before, after, strict=True):
-            retained_heads = updated.pop("retained_checkpoint_heads_json")
-            assert retained_heads == original.get("retained_checkpoint_heads_json")
-            original.pop("retained_checkpoint_heads_json", None)
-            if "source_scopes_json" not in original:
-                source_scopes = updated.pop("source_scopes_json")
-                assert source_scopes is None
-            for field in (
-                "launch_surface",
-                "launch_package_version",
-                "launch_plugin_version",
-                "launch_kind",
-                "parent_scan_role",
-            ):
-                assert updated.pop(field) == original.pop(field, None)
-            assert updated == original
+        nullable_columns = {
+            "retained_checkpoint_heads_json": None,
+            "source_scopes_json": None,
+            "launch_surface": None,
+            "launch_package_version": None,
+            "launch_plugin_version": None,
+            "launch_kind": None,
+            "parent_scan_role": None,
+        }
+        assert after == [nullable_columns | row for row in before]
 
         connection.execute(
             "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)
