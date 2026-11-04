@@ -30,13 +30,11 @@ Before editing, inspect the affected implementation, its direct callers, nearby 
 
 Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
 
-### Credentials exposed in source
+### Credential exposure
 
-Remove the literal using the consumer's established secret store or configuration mechanism. Use synthetic credentials for local checks. Never replay the exposed credential or contact its issuer.
+Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
 
-Give the credential owner steps specific to the issuer and consumer. For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
-
-If retirement is unconfirmed, keep any verified source change and report `blocked`. In the reason, say what was cleaned up, including any cleanup already present, and what the owner still needs to confirm.
+If only a runtime leak path is established, verify its repair and recommend checking affected deployments. If a credential was committed or otherwise disclosed and retirement is unconfirmed, keep the verified source change and report `blocked`. Say what was cleaned up and what the owner still needs to identify or retire.
 
 ## Implementation Workflow
 

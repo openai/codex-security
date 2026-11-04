@@ -21,9 +21,11 @@ New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, a
 - Attack-path analysis must be concise. Record the realistic attacker boundary, the minimum trigger sequence, and the concrete outcome. Use code evidence for the important transitions instead of repeating the full validation narrative.
 - Populate only evidence-backed fields. Omit unknown values instead of adding placeholders.
 
-For a credential exposed in source, identify its type, location, and who could read it. Keep the value out of titles and prose. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence.
+### Credential exposure
 
-In `remediation`, name the issuer or affected service when known. Tell the credential owner how to revoke or replace the old credential, update consumers, and confirm the old value has been disabled. Recommend reviewing prior use when audit logs are available. Give the developer a separate source change. Removing the literal cannot establish that the old credential stopped working.
+Identify the credential type, where it could be obtained, and who could obtain it. Keep the value out of titles and prose. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence.
+
+In `remediation`, tell the code owner how to close the disclosure. Replace a committed literal with the project's secret-store lookup, or stop a runtime leak, for example by removing a token from a public status response. A committed credential is exposed to source readers. If past runtime disclosure is unknown, ask the owner to check affected deployments and rotate any credentials they exposed. For a committed or otherwise disclosed credential, name the issuer when known and explain how to replace or revoke the credential, update consumers, confirm the old value is disabled, and review prior use.
 
 ## Concise Workspace Projection
 

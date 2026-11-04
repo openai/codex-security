@@ -36,6 +36,8 @@ const negatedSecretCategory = new RegExp(
   String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
   "i",
 );
+// Deep Scan recognizes sink as a word in a final finding's free-text location role.
+const sinkRole = /(?:^|[^a-z])sink(?:$|[^a-z])/i;
 const supportingLocation = (location: SourceLocation) =>
   /^(?:supporting|support|context|consumer|expected_control)$/.test(
     location.role ?? "",
@@ -81,7 +83,11 @@ function matchesLocation(location: SourceLocation, expected: Expected) {
   );
 }
 
-function matches(finding: Finding, expected: Expected) {
+function matches(
+  finding: Finding,
+  expected: Expected,
+  cwes = finding.taxonomy?.cwe ?? [],
+) {
   const category = (finding.taxonomy?.category ?? "")
     .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -95,7 +101,7 @@ function matches(finding: Finding, expected: Expected) {
   return (
     !negatedSecretCategory.test(category) &&
     relevantCategory &&
-    finding.taxonomy?.cwe?.some((value) => {
+    cwes.some((value) => {
       const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
       return (
         expected.cwes.includes(cwe) ||
@@ -178,7 +184,7 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
             !matchedCases.some(
               (expected) =>
                 matchesLocation(location, expected) ||
-                (location.role === "sink" &&
+                (sinkRole.test(location.role ?? "") &&
                   matchesConsumer(location, expected)),
             )),
       )
@@ -189,12 +195,7 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
       cwes.length === 0 ||
       cwes.some(
         (cwe) =>
-          !fixture.positives.some((expected) =>
-            matches(
-              { ...finding, taxonomy: { ...finding.taxonomy, cwe: [cwe] } },
-              expected,
-            ),
-          ),
+          !matchedCases.some((expected) => matches(finding, expected, [cwe])),
       )
     ) {
       return [{ index, reason: "no expected secret location and taxonomy" }];

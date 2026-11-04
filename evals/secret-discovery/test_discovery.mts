@@ -677,7 +677,7 @@ test("accepts real credential-use sinks without treating them as separate exposu
       path: expected.path,
       startLine: expected.consumerLine,
       endLine: expected.lineCount,
-      role: "sink",
+      role: "credential-use sink",
     };
     result.findings[index].locations.push(sink);
     const onlyConsumer = retainedResult();
@@ -686,13 +686,14 @@ test("accepts real credential-use sinks without treating them as separate exposu
   }
   assert.equal(gradeResult(result, fixture).passed, true);
 
-  for (const location of [
-    { path: "README.md", startLine: 1 },
-    { path: "src/absent.py", startLine: 5 },
-    { path: "src/client.py", startLine: 1 },
-  ]) {
+  for (const [path, startLine, role] of [
+    ["README.md", 1, "sink"],
+    ["src/absent.py", 5, "sink"],
+    ["src/client.py", 1, "credential-use sink"],
+    ["src/client.py", 7, "sinking"],
+  ] as const) {
     const invalid = retainedResult();
-    invalid.findings[0].locations.push({ ...location, role: "sink" });
+    invalid.findings[0].locations.push({ path, startLine, role });
     assert.equal(gradeResult(invalid, fixture).falsePositiveCount, 1);
   }
 });
