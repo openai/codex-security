@@ -6,7 +6,7 @@ import { asRecord } from "../src/record.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { DeepScanRunState } from "../src/deep-scan/types.js";
 import {
-  claimDedupInputs,
+  iterationInputs,
   createCoordinator,
   FakeExecutor,
   FakeStore,
@@ -92,11 +92,11 @@ for (const continueReduction of [false, true]) {
           return outcome;
         };
       }
-      store.dedupCommitResponseGate = Promise.withResolvers<void>();
+      store.iterationResponseGate = Promise.withResolvers<void>();
       const original = createCoordinator(fixture, store, executor);
       original.start();
       await Promise.race([
-        store.dedupCommitted.promise,
+        store.iterationCommitted.promise,
         original
           .settled()
           .then((terminal: DeepScanRunState) =>
@@ -107,7 +107,7 @@ for (const continueReduction of [false, true]) {
           ),
       ]);
       original.cancel("mcp server process restarted");
-      store.dedupCommitResponseGate.resolve();
+      store.iterationResponseGate.resolve();
       await original.settled();
 
       const accepted = [...store.workers.values()].filter(
@@ -151,7 +151,7 @@ for (const continueReduction of [false, true]) {
           maxDiscoveryRuns: continueReduction ? 3 : 2,
         },
         persistedWorkers: structuredClone([...store.workers.values()]),
-        persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
+        persistedDedupInputs: store.iterations.flatMap(iterationInputs),
       };
       const replacement = new FakeExecutor({
         discoveryDeferred: [
@@ -174,7 +174,7 @@ for (const continueReduction of [false, true]) {
       );
       assert.deepEqual(
         retained.map((row) => asRecord(row.provenance)?.workerId).sort(),
-        [...store.dedupClaims[0].workerIds].sort(),
+        [...store.iterations[0].workerIds].sort(),
       );
       assert.ok(
         retained.every(
@@ -183,7 +183,6 @@ for (const continueReduction of [false, true]) {
         ),
       );
       assert.equal(replacement.discoveryCalls, Number(continueReduction));
-      assert.equal(replacement.dedupCalls, Number(continueReduction));
       if (reducerVersion === "current") {
         assert.deepEqual(
           published[0].reviewState.deferred
@@ -194,11 +193,11 @@ for (const continueReduction of [false, true]) {
             )
             .map((row) => asRecord(row.provenance)?.workerId)
             .sort(),
-          [...store.dedupClaims[0].workerIds].sort(),
+          [...store.iterations[0].workerIds].sort(),
         );
       }
       if (continueReduction) {
-        const reducer = store.workers.get(store.dedupClaims.at(-1)!.id)!;
+        const reducer = store.workers.get(store.iterations.at(-1)!.id)!;
         const result = await readJson(reducer.resultManifestPath!);
         assert.equal(
           result.unresolvedCandidates.length,
@@ -246,7 +245,7 @@ for (const receipt of ["artifacts/missing.txt", "artifacts/../outside.txt"]) {
     await writeJson(resultPath, result);
     await assert.rejects(
       validateDiscoveryArtifacts(artifacts, resultPath, fixture.run.scanId, {
-        recoverCandidateReceipts: true,
+        workerId: "worker",
       }),
       /requested artifact is unavailable|safe scan-relative|Invalid string/,
     );

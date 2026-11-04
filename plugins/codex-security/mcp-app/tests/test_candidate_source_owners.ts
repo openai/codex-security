@@ -11,14 +11,11 @@ const { recordCodexSecurityWorkerScanDraft } = await importSource(
   "../src/artifact-scan-draft.ts",
   { absWorkingDir: import.meta.dirname },
 );
-const { getCodexSecurityDeepReducerInputs, recordCodexSecurityDeepReduction } =
-  await importSource("../src/artifact-deep-reducer.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
-const { validateReducerArtifacts } = await importSource(
-  "../src/deep-scan/artifact-validation.ts",
-  { absWorkingDir: import.meta.dirname },
-);
+import {
+  mergeWorkerFiles,
+  persistedScanUnion,
+  parseScanUnion,
+} from "./scan-union-fixture.ts";
 const { createDeepScanArtifacts } = await importSource(
   "../src/deep-scan/artifacts.ts",
   { absWorkingDir: import.meta.dirname },
@@ -48,7 +45,7 @@ const cases = [
 ];
 
 for (const { reference, reopened, owner, currentWorker } of cases) {
-  test(`resumed reducer preserves ${reference}, owner=${owner}, current=${currentWorker}, reopened=${reopened}`, async (t) => {
+  test(`resumed Deep Scan union preserves ${reference}, owner=${owner}, current=${currentWorker}, reopened=${reopened}`, async (t) => {
     const root = await temporaryDirectory("candidate-source-owner-", true);
     t.after(() => rm(root, { recursive: true, force: true }));
     const artifacts = createDeepScanArtifacts(root);
@@ -78,15 +75,6 @@ for (const { reference, reopened, owner, currentWorker } of cases) {
           },
         ],
       }),
-    );
-    await validateReducerArtifacts(
-      {
-        artifacts,
-        artifactDir: artifacts.dedupRoot,
-        resultPath: previousPath,
-        reducerId: "previous",
-      },
-      scanId,
     );
     const retained = new Map<string, Buffer>();
     retained.set(previousPath, await readFile(previousPath));
@@ -141,53 +129,17 @@ for (const { reference, reopened, owner, currentWorker } of cases) {
         retained.set(resultPath, await readFile(resultPath));
         claimedWorkers.push({ id: workerId, resultPath });
       }
-      const reducerRoot = path.join(
-        artifacts.dedupRoot,
-        `round-${round}`,
-        "output",
+      const aggregate = await mergeWorkerFiles(
+        root,
+        claimedWorkers,
+        await readJson(previousPath),
       );
-      await mkdir(reducerRoot, { recursive: true });
-      const context = {
-        root: reducerRoot,
-        repoRoot: root,
-        scanId,
-        layout: "reducer" as const,
-        deepReducer: {
-          scanRoot: root,
-          claimedWorkers,
-          previousReducerResultPath: previousPath,
-        },
-      };
-      const inputs = await getCodexSecurityDeepReducerInputs(context);
-      await recordCodexSecurityDeepReduction(context, {
-        scanId,
-        findings: [
-          ...inputs.previous.findings,
-          ...inputs.discoveries.flatMap(
-            (source: { result: { findings: Record<string, unknown>[] } }) =>
-              source.result.findings,
-          ),
-        ].map((row: Record<string, unknown>) => {
-          const result = structuredClone(row);
-          const provenance = result.provenance as Record<string, unknown>;
-          delete provenance.sourceFindings;
-          delete provenance.previousFindings;
-          return result;
-        }),
-      });
-      const resultPath = path.join(reducerRoot, "result.json");
-      await validateReducerArtifacts(
-        {
-          artifacts,
-          artifactDir: reducerRoot,
-          resultPath,
-          reducerId: `round-${round}`,
-          previousReducerResultPath: previousPath,
-          sources: inputs,
-        },
-        scanId,
+      const resultPath = path.join(artifacts.dedupRoot, `round-${round}.json`);
+      await writeFile(
+        resultPath,
+        JSON.stringify(persistedScanUnion(aggregate)),
       );
-      const saved = await readJson(resultPath);
+      const saved = parseScanUnion(await readJson(resultPath));
       assert.equal(saved.findings.length, currentWorker ? 2 : 1);
       assert.equal(saved.findings[0].provenance.candidateId, "candidate-one");
       assert.equal(saved.findings[0].provenance.sourceWorkerId, owner);

@@ -686,7 +686,7 @@ function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   return isDeepStrictEqual(content(left), content(right));
 }
 
-function requiresWorkerReceipt(surface: JsonObject): boolean {
+export function requiresWorkerReceipt(surface: JsonObject): boolean {
   return (
     candidateKey(surface.candidateId) !== undefined ||
     "candidate" in surface ||

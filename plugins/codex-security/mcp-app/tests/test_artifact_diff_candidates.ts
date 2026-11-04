@@ -39,7 +39,7 @@ import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
 const { recordCodexSecurityWorkerScanDraft } = await loadModule(
   "artifact-scan-draft.ts",
 );
-const { discoveryReductionInput, reconcileDeepReduction } = await loadModule(
+const { validateDiscoveryArtifacts, addScanCoverage } = await loadModule(
   "deep-scan/artifact-validation.ts",
 );
 const { recordCodexSecurityCandidateValidations } = await loadModule(
@@ -579,7 +579,12 @@ test("bound worker ownership overrides imported metadata and preserves its evide
   );
   assert.deepEqual(saved.reviewState.deferred, []);
   for (const workerId of ["actual-worker", "imported-worker"]) {
-    const reduced = discoveryReductionInput(saved, workerId);
+    const reduced = await validateDiscoveryArtifacts(
+      { workersRoot: context.root },
+      path.join(context.root, "result.json"),
+      saved.scanId,
+      { workerId },
+    );
     assert.equal(reduced.findings[0].provenance.sourceWorkerId, workerId);
     assert.deepEqual(
       reduced.findings[0].provenance.previousFindings[0].provenance
@@ -2518,7 +2523,7 @@ for (const changed of [true, false]) {
 }
 
 for (const sharedCandidate of [true, false]) {
-  test(`Deep reduction retains distinct proof gaps sharedCandidate=${sharedCandidate}`, () => {
+  test(`Deep Scan union retains distinct proof gaps sharedCandidate=${sharedCandidate}`, () => {
     const rows = [
       {
         id: "first-gap",
@@ -2535,18 +2540,19 @@ for (const sharedCandidate of [true, false]) {
         candidate: { evidence: "Second source evidence." },
       },
     ];
-    const discovery = {
-      ...draft(),
-      complete: true,
-      unresolvedCandidates: rows,
+    const actual = {
+      scanId: draft().scanId,
+      findings: [],
+      unresolvedCandidates: [],
     };
-    delete (discovery as FixtureObject).reviewState;
-    const reducer = { ...draft(), complete: true };
-    delete (reducer as FixtureObject).reviewState;
-    const actual = reconcileDeepReduction(
-      reducer,
-      [{ workerId: "worker-one", result: discovery }],
-      null,
+    addScanCoverage(
+      actual,
+      {
+        id: "worker-one",
+        resultPath: "/scan/workers/worker-one/output/result.json",
+        result: draft(rows),
+      },
+      "/scan",
     );
     assert.deepEqual(actual.unresolvedCandidates, rows);
   });

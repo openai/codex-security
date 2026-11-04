@@ -9,14 +9,15 @@ import {
   fixture,
   recordCodexSecurityScanDraft,
 } from "./scan-draft-recovery-fixture.ts";
-import { finding, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  mergeWorkerFiles,
+  parseScanUnion,
+  persistedScanUnion,
+  scanUnionToDraft,
+} from "./scan-union-fixture.ts";
+import { finding } from "./scan-draft-fixture.ts";
 
-const {
-  deepReductionToScanDraft,
-  discoveryReductionInput,
-  reconcileDeepReduction,
-  validateDiscoveryArtifacts,
-} = await importSource(
+const { addScanCoverage, validateDiscoveryArtifacts } = await importSource(
   new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
 );
 const { preserveDiffCandidateDecisions } = await importSource(
@@ -469,10 +470,18 @@ for (const field of ["surfaces", "deferred"] as const) {
         f.context.scanId,
       );
       assert.deepEqual(restored.reviewState[field][0].sourceWorkerId, owner);
-      assert.deepEqual(
-        discoveryReductionInput(restored, "actual-worker").unresolvedCandidates,
-        [{ ...saved.reviewState.deferred[0], sourceWorkerId: "actual-worker" }],
+      const aggregate = parseScanUnion({
+        scanId: restored.scanId,
+        findings: [],
+      });
+      addScanCoverage(
+        aggregate,
+        { id: "actual-worker", resultPath, result: restored },
+        path.dirname(f.root),
       );
+      assert.deepEqual(aggregate.unresolvedCandidates, [
+        { ...saved.reviewState.deferred[0], sourceWorkerId: "actual-worker" },
+      ]);
       assert.equal(await readFile(resultPath, "utf8"), contents);
     });
   }
@@ -576,37 +585,22 @@ test("publishes colliding worker-local deferred IDs without changing their evide
     reason: "Synthetic validation remains pending.",
     candidate: { evidence: "Retain the saved review evidence." },
   };
-  const discoveries = ["worker-one", "worker-two", "worker-three"].map(
-    (workerId, index) => ({
-      workerId,
-      result: discoveryReductionInput(
-        workerDraft([], {
-          scanId: context.scanId,
-          reviewState: {
-            completeness: "partial",
-            surfaces: [],
-            explicitExclusions: [],
-            deferred: [
-              {
-                ...candidate,
-                ...(index === 2
-                  ? { id: "candidate-review-2", candidateId: "reserved-review" }
-                  : {}),
-              },
-            ],
-          },
-        }),
-        workerId,
-      ),
-    }),
-  );
-  const aggregate = reconcileDeepReduction(
-    { scanId: context.scanId, findings: [] },
-    discoveries,
-    null,
-  );
+  // A persisted iteration can contain identical worker-local deferred IDs.
+  const aggregate = parseScanUnion({
+    scanId: context.scanId,
+    findings: [],
+    unresolvedCandidates: ["worker-one", "worker-two", "worker-three"].map(
+      (sourceWorkerId, index) => ({
+        ...candidate,
+        sourceWorkerId,
+        ...(index === 2
+          ? { id: "candidate-review-2", candidateId: "reserved-review" }
+          : {}),
+      }),
+    ),
+  });
   const original = structuredClone(aggregate);
-  const projected = deepReductionToScanDraft(aggregate);
+  const projected = scanUnionToDraft(aggregate);
   let published = false;
   await recordCodexSecurityScanDraftViaWorkbench(
     context,
@@ -629,7 +623,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
   );
   assert.equal(published, true);
   assert.deepEqual(aggregate, original);
-  assert.deepEqual(deepReductionToScanDraft(aggregate), projected);
+  assert.deepEqual(scanUnionToDraft(aggregate), projected);
 });
 
 for (const mode of ["standard", "diff"] as const) {
@@ -1244,128 +1238,94 @@ for (const reopened of [false, true]) {
     });
   }
 
-  for (const submittedState of ["preserved", "omitted", "cleared"]) {
-    test(`Deep reducer retains reopened candidate review: ${reopened}/${submittedState}`, async (t) => {
-      const f = await fixture(t, "deep");
-      const workerRoot = path.join(
-        f.root,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "worker-a",
-        "output",
-      );
-      const reducerRoot = path.join(
-        f.root,
-        "artifacts",
-        "deep_discovery",
-        "dedup",
-        "round",
-        "output",
-      );
-      await mkdir(workerRoot, { recursive: true });
-      await mkdir(reducerRoot, { recursive: true });
-      const historical = {
-        ...finding("reopened", "src/handler.ts"),
-        provenance: {
-          source: "local_plugin",
-          candidateId: "candidate-one",
-          candidateReopened: reopened,
-        },
-      };
-      const pending = {
-        id: "candidate-one",
+  test(`Deep Scan publishes reopened candidate review: ${reopened}`, async (t) => {
+    const f = await fixture(t, "deep");
+    const workerRoot = path.join(
+      f.root,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      "worker-a",
+      "output",
+    );
+    await mkdir(workerRoot, { recursive: true });
+    const historical = {
+      ...finding("reopened", "src/handler.ts"),
+      provenance: {
+        source: "local_plugin",
         candidateId: "candidate-one",
-        reason: "New evidence requires further review.",
-      };
-      const resultPath = path.join(workerRoot, "result.json");
-      const draft = f.draft({ deferred: [pending] });
-      const { handoffClaimToken, ...worker } = draft;
-      await draftApi.recordCodexSecurityWorkerScanDraft(
-        {
-          root: workerRoot,
-          repoRoot: f.root,
-          scanId: f.context.scanId,
-          layout: "worker",
-        },
-        { ...worker, complete: true, findings: [historical] },
-      );
-      const original = await readFile(resultPath, "utf8");
-      const {
-        getCodexSecurityDeepReducerInputs,
-        recordCodexSecurityDeepReduction,
-      } = await importSource(
-        new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-      );
-      const context = {
-        root: reducerRoot,
+        candidateReopened: reopened,
+      },
+    };
+    const pending = {
+      id: "candidate-one",
+      candidateId: "candidate-one",
+      reason: "New evidence requires further review.",
+    };
+    const resultPath = path.join(workerRoot, "result.json");
+    const draft = f.draft({ deferred: [pending] });
+    const { handoffClaimToken, ...worker } = draft;
+    await draftApi.recordCodexSecurityWorkerScanDraft(
+      {
+        root: workerRoot,
         repoRoot: f.root,
         scanId: f.context.scanId,
-        layout: "reducer",
-        deepReducer: {
-          scanRoot: f.root,
-          claimedWorkers: [{ id: "worker-a", resultPath }],
-        },
-      };
-      const inputs = await getCodexSecurityDeepReducerInputs(context);
-      const discovery = inputs.discoveries[0].result;
-      const expected = reopened
-        ? [{ ...pending, sourceWorkerId: "worker-a" }]
-        : [];
-      assert.deepEqual(discovery.unresolvedCandidates ?? [], expected);
-      const { unresolvedCandidates } = await importSource(
-        new URL("../../../../sdk/typescript/src/candidates.ts", import.meta.url)
-          .pathname,
+        layout: "worker",
+      },
+      { ...worker, complete: true, findings: [historical] },
+    );
+    const original = await readFile(resultPath, "utf8");
+    const expected = reopened
+      ? [{ ...pending, sourceWorkerId: "worker-a" }]
+      : [];
+    const { unresolvedCandidates } = await importSource(
+      new URL("../../../../sdk/typescript/src/candidates.ts", import.meta.url)
+        .pathname,
+    );
+    for (let replay = 0; replay < 2; replay++) {
+      const saved = await mergeWorkerFiles(
+        f.root,
+        [{ id: "worker-a", resultPath }],
+        { scanId: f.context.scanId, findings: [] },
       );
-      const submitted = structuredClone(discovery.findings);
-      if (submittedState === "omitted")
-        delete submitted[0].provenance.candidateReopened;
-      if (submittedState === "cleared")
-        submitted[0].provenance.candidateReopened = false;
-      for (let replay = 0; replay < 2; replay++) {
-        await recordCodexSecurityDeepReduction(context, {
-          scanId: f.context.scanId,
-          findings: submitted,
-        });
-        const saved = JSON.parse(
-          await readFile(path.join(reducerRoot, "result.json"), "utf8"),
-        );
-        assert.deepEqual(saved.unresolvedCandidates ?? [], expected);
+      assert.deepEqual(saved.unresolvedCandidates ?? [], expected);
+      assert.equal(
+        saved.findings[0].provenance.candidateReopened === true,
+        reopened,
+      );
+      await f.write({
+        ...scanUnionToDraft(saved),
+        handoffClaimToken,
+      });
+      const coverage = await f.read();
+      const published = JSON.parse(
+        await readFile(path.join(f.root, "findings.json"), "utf8"),
+      );
+      assert.equal(
+        unresolvedCandidates(coverage, published.findings).length,
+        expected.length,
+      );
+      assert.equal(coverage.deferred.length, expected.length);
+      if (reopened) {
+        assert.equal(coverage.deferred[0].reason, pending.reason);
         assert.equal(
-          saved.findings[0].provenance.candidateReopened === true,
-          reopened,
+          coverage.deferred[0].provenance.candidateId,
+          pending.candidateId,
         );
-        await f.write({
-          ...deepReductionToScanDraft(saved),
-          handoffClaimToken,
-        });
-        const coverage = await f.read();
-        const published = JSON.parse(
-          await readFile(path.join(f.root, "findings.json"), "utf8"),
-        );
-        assert.equal(
-          unresolvedCandidates(coverage, published.findings).length,
-          expected.length,
-        );
-        assert.deepEqual(coverage.deferred, expected);
-        assert.equal(await readFile(resultPath, "utf8"), original);
+        assert.equal(coverage.deferred[0].provenance.workerId, "worker-a");
       }
-    });
-  }
+      assert.equal(await readFile(resultPath, "utf8"), original);
+    }
+  });
 }
 
-test("Deep reducer clears historical reopening after the same worker accepts the candidate", async (t) => {
+test("Deep Scan clears historical reopening after the same worker accepts the candidate", async (t) => {
   const f = await fixture(t, "deep");
   const workerRoot = path.join(
     f.root,
     "artifacts/deep_discovery/workers/worker-a/output",
   );
-  const reducerRoot = path.join(
-    f.root,
-    "artifacts/deep_discovery/dedup/round-1/output",
-  );
   await mkdir(workerRoot, { recursive: true });
-  await mkdir(reducerRoot, { recursive: true });
   const workerContext = {
     root: workerRoot,
     repoRoot: f.root,
@@ -1392,32 +1352,16 @@ test("Deep reducer clears historical reopening after the same worker accepts the
       },
     ],
   });
-  const {
-    getCodexSecurityDeepReducerInputs,
-    recordCodexSecurityDeepReduction,
-  } = await importSource(
-    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-  );
-  const context = {
-    root: reducerRoot,
-    repoRoot: f.root,
+  const workers = [{ id: "worker-a", resultPath }];
+  const previous = await mergeWorkerFiles(f.root, workers, {
     scanId: f.context.scanId,
-    layout: "reducer",
-    deepReducer: {
-      scanRoot: f.root,
-      claimedWorkers: [{ id: "worker-a", resultPath }],
-    },
-  };
-  const inputs = await getCodexSecurityDeepReducerInputs(context);
-  await recordCodexSecurityDeepReduction(context, {
-    scanId: f.context.scanId,
-    findings: inputs.discoveries[0].result.findings,
+    findings: [],
   });
-  const previousPath = path.join(reducerRoot, "result.json");
+  const previousPath = path.join(f.root, "saved-iteration.json");
+  await writeFile(previousPath, JSON.stringify(persistedScanUnion(previous)));
   const previousBytes = await readFile(previousPath, "utf8");
-  const previous = JSON.parse(previousBytes);
   assert.equal(previous.unresolvedCandidates.length, 1);
-  await f.write({ ...deepReductionToScanDraft(previous), handoffClaimToken });
+  await f.write({ ...scanUnionToDraft(previous), handoffClaimToken });
   await draftApi.recordCodexSecurityWorkerScanDraft(workerContext, {
     ...worker,
     complete: true,
@@ -1429,32 +1373,15 @@ test("Deep reducer clears historical reopening after the same worker accepts the
       deferred: [],
     },
   });
-  const nextRoot = path.join(
-    f.root,
-    "artifacts/deep_discovery/dedup/round-2/output",
-  );
-  await mkdir(nextRoot, { recursive: true });
-  const next = {
-    ...context,
-    root: nextRoot,
-    deepReducer: {
-      ...context.deepReducer,
-      previousReducerResultPath: previousPath,
-    },
-  };
-  const refreshed = await getCodexSecurityDeepReducerInputs(next);
-  assert.equal(refreshed.discoveries[0].result.unresolvedCandidates, undefined);
   for (let replay = 0; replay < 2; replay++) {
-    await recordCodexSecurityDeepReduction(next, {
-      scanId: f.context.scanId,
-      findings: previous.findings,
-    });
-    const saved = JSON.parse(
-      await readFile(path.join(nextRoot, "result.json"), "utf8"),
+    const saved = await mergeWorkerFiles(
+      f.root,
+      workers,
+      JSON.parse(previousBytes),
     );
     assert.equal(saved.unresolvedCandidates, undefined);
     assert.notEqual(saved.findings[0].provenance.candidateReopened, true);
-    await f.write({ ...deepReductionToScanDraft(saved), handoffClaimToken });
+    await f.write({ ...scanUnionToDraft(saved), handoffClaimToken });
     assert.deepEqual((await f.read()).deferred, []);
     assert.equal(await readFile(previousPath, "utf8"), previousBytes);
   }

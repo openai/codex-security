@@ -18,14 +18,7 @@ const { createScanArtifactContext } = await importSource(
   "../src/artifact-context.ts",
   { absWorkingDir: import.meta.dirname },
 );
-const { getCodexSecurityDeepReducerInputs, recordCodexSecurityDeepReduction } =
-  await importSource("../src/artifact-deep-reducer.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
-const { validateDiscoveryArtifacts, deepReductionToScanDraft } =
-  await importSource("../src/deep-scan/artifact-validation.ts", {
-    absWorkingDir: import.meta.dirname,
-  });
+import { mergeWorkerFiles, scanUnionToDraft } from "./scan-union-fixture.ts";
 
 for (const mode of ["standard", "worker"] as const) {
   for (const scenario of [
@@ -169,34 +162,13 @@ for (const mode of ["standard", "worker"] as const) {
         );
       } else {
         const resultPath = path.join(context.root, "result.json");
-        await validateDiscoveryArtifacts(
-          { workersRoot: context.root },
-          resultPath,
-          context.scanId,
-        );
         const originalResult = await readFile(resultPath);
-        const reducerRoot = path.join(
-          f.root,
-          "artifacts/deep_discovery/dedup/reducer/output",
-        );
-        await mkdir(reducerRoot, { recursive: true });
-        const reducerContext = {
-          root: reducerRoot,
-          repoRoot: target,
-          scanId: context.scanId,
-          layout: "reducer",
-          deepReducer: {
-            scanRoot: f.root,
-            claimedWorkers: [{ id: "worker-one", resultPath }],
-          },
-        };
-        const inputs = await getCodexSecurityDeepReducerInputs(reducerContext);
         for (let replay = 0; replay < 2; replay++) {
-          await recordCodexSecurityDeepReduction(reducerContext, {
-            scanId: context.scanId,
-            findings: inputs.discoveries[0].result.findings,
-          });
-          const reduced = await readJson(reducerRoot, "result.json");
+          const reduced = await mergeWorkerFiles(
+            f.root,
+            [{ id: "worker-one", resultPath }],
+            { scanId: context.scanId, findings: [] },
+          );
           assert.equal(
             (reduced.unresolvedCandidates ?? []).length,
             Number(expectedPending),
@@ -212,7 +184,7 @@ for (const mode of ["standard", "worker"] as const) {
             reopened,
           );
           assert.equal(
-            deepReductionToScanDraft(reduced).reviewState.deferred.length,
+            scanUnionToDraft(reduced).reviewState.deferred.length,
             Number(expectedPending),
           );
         }

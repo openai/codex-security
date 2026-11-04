@@ -12,6 +12,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
+import {
+  mergeWorkerFiles,
+  scanUnionToDraft,
+  persistedScanUnion,
+  parseScanUnion,
+} from "./scan-union-fixture.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
@@ -23,18 +29,9 @@ const {
 } = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
 );
-const { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } =
-  await importSource(
-    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-  );
-const { archiveDirectory, createDeepScanArtifacts } = await importSource(
+const { archiveDirectory } = await importSource(
   new URL("../src/deep-scan/artifacts.ts", import.meta.url).pathname,
 );
-const { deepReductionToScanDraft, validateReducerArtifacts } =
-  await importSource(
-    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url)
-      .pathname,
-  );
 const { unresolvedCandidates } = await importSource(
   new URL("../../../../sdk/typescript/src/candidates.ts", import.meta.url)
     .pathname,
@@ -50,34 +47,18 @@ async function fixture() {
     "worker-a",
   );
   const output = path.join(workerRoot, "output");
-  const reducerRoot = path.join(
-    root,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    "reducer",
-    "output",
-  );
   await mkdir(output, { recursive: true });
-  await mkdir(reducerRoot, { recursive: true });
+  const source = {
+    id: "worker-a",
+    resultPath: path.join(output, "result.json"),
+  };
   return {
     root,
     workerRoot,
     output,
-    reducerRoot,
+    source,
     worker: { root: output, repoRoot: root, layout: "worker", scanId },
-    reducer: {
-      root: reducerRoot,
-      repoRoot: root,
-      layout: "reducer",
-      scanId,
-      deepReducer: {
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-a", resultPath: path.join(output, "result.json") },
-        ],
-      },
-    },
+    merge: () => mergeWorkerFiles(root, [source]),
   };
 }
 
@@ -160,17 +141,9 @@ print(json.dumps(unresolved_candidates(recovered['reviewState'],recovered['findi
         for (let replay = 0; replay < 2; replay++) {
           if (archived)
             await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
-          const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
-          assert.equal(
-            inputs.discoveries[0].result.unresolvedCandidates?.length ?? 0,
-            valid ? 0 : 1,
-          );
-          await recordCodexSecurityDeepReduction(f.reducer, {
-            scanId,
-            findings: [],
-          });
-          const saved = await readJson(path.join(f.reducerRoot, "result.json"));
-          const published = deepReductionToScanDraft(saved);
+          const saved = await f.merge();
+          assert.equal(saved.unresolvedCandidates?.length ?? 0, valid ? 0 : 1);
+          const published = scanUnionToDraft(saved);
           assert.equal(
             unresolvedCandidates(published.reviewState, published.findings)
               .length,
@@ -292,13 +265,7 @@ for (const receipt of [
           assert.deepEqual(exclusion.receiptRefs, []);
         }
       }
-      await recordCodexSecurityDeepReduction(f.reducer, {
-        scanId,
-        findings: [],
-      });
-      const published = deepReductionToScanDraft(
-        await readJson(path.join(f.reducerRoot, "result.json")),
-      );
+      const published = scanUnionToDraft(await f.merge());
       const valid = ["original", "empty"].includes(receipt);
       assert.equal(
         unresolvedCandidates(published.reviewState, published.findings).length,
@@ -414,11 +381,7 @@ for (const savedGap of [false, true]) {
         await writeFile(resultPath, JSON.stringify(worker));
       }
       const original = await readFile(resultPath);
-      await recordCodexSecurityDeepReduction(f.reducer, {
-        scanId,
-        findings: [],
-      });
-      const saved = await readJson(path.join(f.reducerRoot, "result.json"));
+      const saved = await f.merge();
       const pending = saved.unresolvedCandidates[0];
       assert.ok(
         pending.originalCandidates.some(
@@ -435,7 +398,7 @@ for (const savedGap of [false, true]) {
           ),
         );
       }
-      const publication = deepReductionToScanDraft(saved);
+      const publication = scanUnionToDraft(saved);
       assert.equal(
         unresolvedCandidates(publication.reviewState, publication.findings)
           .length,
@@ -450,23 +413,23 @@ for (const savedGap of [false, true]) {
 
 for (const mode of ["current", "previous", "merged"]) {
   for (const association of ["supported", "unsupported"]) {
-    test(`reducer source candidate associations: ${mode}/${association}`, async () => {
+    test(`Deep Scan source candidate associations: ${mode}/${association}`, async () => {
       const f = await fixture();
       try {
         const originalFinding = {
           ...finding("confirmed", "src/confirmed.ts"),
-          provenance: { source: "local_plugin", candidateId: "confirmed" },
+          provenance: {
+            source: "local_plugin",
+            candidateId: "confirmed",
+            ...(association === "unsupported" && {
+              sourceWorkerId: mode === "merged" ? "worker-c" : "worker-b",
+            }),
+          },
         };
         await recordCodexSecurityWorkerScanDraft(
           f.worker,
           workerDraft([originalFinding]),
         );
-        const originals = new Map([
-          [
-            f.reducer.deepReducer.claimedWorkers[0]!.resultPath,
-            await readFile(path.join(f.output, "result.json")),
-          ],
-        ]);
         const pendingOwner = mode === "merged" ? "worker-c" : "worker-b";
         const otherOutput = path.join(
           path.dirname(f.workerRoot),
@@ -492,13 +455,13 @@ for (const mode of ["current", "previous", "merged"]) {
           }),
         );
         const claimed = [
-          ...f.reducer.deepReducer.claimedWorkers,
+          f.source,
           {
             id: pendingOwner,
             resultPath: path.join(otherOutput, "result.json"),
           },
         ];
-        let refs = ["worker-a:0"];
+
         if (mode === "merged") {
           const mergedOutput = path.join(
             path.dirname(f.workerRoot),
@@ -514,89 +477,46 @@ for (const mode of ["current", "previous", "merged"]) {
             id: "worker-b",
             resultPath: path.join(mergedOutput, "result.json"),
           });
-          refs.push("worker-b:0");
         }
-        let previousReducerResultPath;
+        const originals = await Promise.all(
+          claimed.map(
+            async ({ resultPath }) =>
+              [resultPath, await readFile(resultPath)] as const,
+          ),
+        );
+        let previous;
         if (mode === "previous") {
-          const previousRoot = path.join(
-            path.dirname(f.reducerRoot),
-            "previous",
-          );
-          await mkdir(previousRoot);
-          await recordCodexSecurityDeepReduction(
-            { ...f.reducer, root: previousRoot },
-            {
-              scanId,
-              findings: [
-                {
-                  ...originalFinding,
-                  provenance: {
-                    ...originalFinding.provenance,
-                    sourceFindingIds: refs,
-                  },
-                },
-              ],
-            },
-          );
-          previousReducerResultPath = path.join(previousRoot, "result.json");
-          originals.set(
-            previousReducerResultPath,
-            await readFile(previousReducerResultPath),
-          );
+          previous = persistedScanUnion(await f.merge());
           claimed.shift();
         }
-        const submitted = {
-          ...originalFinding,
-          provenance: {
-            ...originalFinding.provenance,
-            candidateId:
-              association === "unsupported" ? pendingId : "confirmed",
-            sourceWorkerId:
-              association === "unsupported"
-                ? pendingOwner
-                : mode === "merged"
-                  ? "worker-b"
-                  : "worker-a",
-            sourceFindingIds: refs,
-          },
-        };
-        await recordCodexSecurityDeepReduction(
-          {
-            ...f.reducer,
-            deepReducer: {
-              ...f.reducer.deepReducer,
-              claimedWorkers: claimed,
-              ...(previousReducerResultPath
-                ? { previousReducerResultPath }
-                : {}),
-            },
-          },
-          { scanId, findings: [submitted] },
-        );
-        const saved = await readJson(path.join(f.reducerRoot, "result.json"));
-        const projection = deepReductionToScanDraft(saved);
+        const saved = await mergeWorkerFiles(f.root, claimed, previous);
+        const projection = scanUnionToDraft(saved);
         assert.equal(
           unresolvedCandidates(projection.reviewState, projection.findings)
             .length,
           1,
         );
         assert.equal(saved.findings[0].provenance.candidateId, "confirmed");
-        assert.ok(
-          ["worker-a", ...(mode === "merged" ? ["worker-b"] : [])].includes(
-            saved.findings[0].provenance.sourceWorkerId,
-          ),
+        assert.equal(saved.findings[0].provenance.sourceWorkerId, "worker-a");
+        assert.equal(
+          saved.unresolvedCandidates[0].sourceWorkerId,
+          pendingOwner,
         );
-        if (association === "supported")
-          assert.equal(
-            saved.findings[0].provenance.sourceWorkerId,
-            submitted.provenance.sourceWorkerId,
-          );
-        else
+        assert.equal(saved.unresolvedCandidates[0].candidateId, pendingId);
+        assert.deepEqual(
+          saved.findings[0].provenance.sourceFindingIds,
+          mode === "merged" ? ["worker-a:0", "worker-b:0"] : ["worker-a:0"],
+        );
+        if (association === "unsupported") {
+          const history =
+            saved.findings[0].provenance.sourceFindings[0].finding.provenance
+              .previousFindings;
           assert.ok(
-            saved.findings[0].provenance.previousFindings.some(
+            history.some(
               (row: any) => row.provenance.sourceWorkerId === pendingOwner,
             ),
           );
+        }
         for (const [file, bytes] of originals)
           assert.deepEqual(await readFile(file), bytes);
       } finally {
@@ -644,13 +564,7 @@ for (const archived of [false, true]) {
         const original = await readFile(path.join(source, "result.json"));
         if (archived)
           await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
-        await recordCodexSecurityDeepReduction(f.reducer, {
-          scanId,
-          findings: [],
-        });
-        const published = deepReductionToScanDraft(
-          await readJson(path.join(f.reducerRoot, "result.json")),
-        );
+        const published = scanUnionToDraft(await f.merge());
         assert.equal(
           unresolvedCandidates(published.reviewState, published.findings)
             .length,
@@ -707,28 +621,11 @@ for (const archived of [false, true]) {
         const original = await readFile(path.join(source, "result.json"));
         if (archived)
           await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
-        const sources = await getCodexSecurityDeepReducerInputs(f.reducer);
-        await recordCodexSecurityDeepReduction(f.reducer, {
-          scanId,
-          findings: [],
-        });
-        const accepted = await validateReducerArtifacts(
-          {
-            artifacts: createDeepScanArtifacts(f.root),
-            artifactDir: f.reducerRoot,
-            resultPath: path.join(f.reducerRoot, "result.json"),
-            reducerId: "reducer",
-            sources,
-          },
-          scanId,
-        );
-        assert.equal(accepted.result.unresolvedCandidates.length, 1);
+        const accepted = parseScanUnion(persistedScanUnion(await f.merge()));
+        assert.equal(accepted.unresolvedCandidates.length, 1);
+        assert.equal(accepted.unresolvedCandidates[0].candidateId, candidateId);
         assert.equal(
-          accepted.result.unresolvedCandidates[0].candidateId,
-          candidateId,
-        );
-        assert.equal(
-          accepted.result.unresolvedCandidates[0].sourceWorkerId,
+          accepted.unresolvedCandidates[0].sourceWorkerId,
           "worker-a",
         );
         assert.deepEqual(
@@ -849,16 +746,7 @@ for (const outcome of [
           workerDraft([], { complete: true }),
         );
         const saved = await readJson(path.join(f.output, "result.json"));
-        const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
-        await recordCodexSecurityDeepReduction(f.reducer, {
-          scanId,
-          findings: inputs.discoveries.flatMap(
-            (input: any) => input.result.findings,
-          ),
-        });
-        const reduced = deepReductionToScanDraft(
-          await readJson(path.join(f.reducerRoot, "result.json")),
-        );
+        const reduced = scanUnionToDraft(await f.merge());
         for (const published of [saved, reduced]) {
           assert.equal(
             unresolvedCandidates(published.reviewState, published.findings)
@@ -869,7 +757,9 @@ for (const outcome of [
             assert.equal(published.findings.length, 0);
             assert.deepEqual(
               published.reviewState.deferred.find(
-                (row: any) => row.candidateId === "candidate",
+                (row: any) =>
+                  (row.provenance?.candidateId ?? row.candidateId) ===
+                  "candidate",
               ).finding,
               original,
             );
@@ -922,8 +812,7 @@ for (const id of [7, { opaque: [1, null] }, "", " ", "metadata-id"]) {
           JSON.parse(original.toString()).reviewState.explicitExclusions[0].id,
           id,
         );
-        const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
-        const pending = inputs.discoveries[0].result.unresolvedCandidates;
+        const { unresolvedCandidates: pending } = await f.merge();
         assert.equal(pending.length, 1);
         assert.equal(pending[0].candidateId, "candidate");
         assert.equal(pending[0].surfaceIds, undefined);
