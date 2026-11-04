@@ -771,7 +771,8 @@ individual scan folder.
 Failures do not stop other components. Failed scans or
 failed matching return `2`; severity-policy violations return `1`. Retry with
 `--components-file retry-components.json` and a new empty output directory.
-The retry report covers only those components.
+The retry report covers only those components. Each registered component keeps its
+scan ID in the summary, including when the scan fails.
 
 `--max-cost` applies per component, excluding planning and matching. `--model`
 and `--effort` also apply to matching; `--auth` applies throughout. Planning and

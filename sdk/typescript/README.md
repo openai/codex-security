@@ -412,6 +412,10 @@ await security.run(repository, {
 });
 ```
 
+For `runComponentScans()`, subscribe to `onScanEvent` and select events with
+`type === "lifecycle"` to correlate each snapshot with its `componentId`. Deep
+component scans also emit `deep-progress` events with independent review counts.
+
 Group observations by `scanId`. A completed scan with
 `hasReportableFindings: false` finished with zero reportable findings.
 The field is `null` until that outcome is known. Saved scan history retains
