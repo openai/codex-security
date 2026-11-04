@@ -43,7 +43,7 @@ import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
-  importGitProtectionRoots,
+  commandGitProtectionRoots,
 } from "./local-git-metadata.js";
 import {
   blackDuckReportRepositories,
@@ -685,7 +685,7 @@ async function localContext(
     ...new Set([
       repository,
       ...(await abortable(
-        () => importGitProtectionRoots(path, environment, dependencies.signal),
+        () => commandGitProtectionRoots(path, environment, dependencies.signal),
         dependencies.signal,
       )),
     ]),

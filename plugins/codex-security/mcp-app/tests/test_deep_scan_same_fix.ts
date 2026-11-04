@@ -44,6 +44,7 @@ for (const pass of ["pair review", "source confirmation"]) {
                     : [confirmation],
               },
         ),
+      assert.fail,
     );
     assert.equal(matches.size, 0);
   });
@@ -86,6 +87,7 @@ test("repeated observations are compared once without dropping distinct attack o
         })),
       });
     },
+    assert.fail,
   );
   assert.deepEqual(observed, [
     [left.attackPath, left.validation],
