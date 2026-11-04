@@ -216,6 +216,7 @@ import {
   type ScanLogSource,
 } from "./scan-logs.js";
 import { sendFeedback } from "./feedback.js";
+import { terminalDisplayText } from "./terminal-text.js";
 import {
   renderScanHistory,
   type HistoryCommand,
@@ -2091,8 +2092,10 @@ export async function main(
     return await prompt.select(
       "Which report would you like to review?",
       reports.map((report) => ({
-        label: `${report.reportName} · ${report.vendor} · ${report.findingCount.toLocaleString("en-US")} findings · ${report.createdAt.slice(0, 16).replace("T", " ")} · ${report.id.slice(0, 8)}`,
-        short: report.reportName,
+        label: terminalDisplayText(
+          `${report.reportName} · ${report.vendor} · ${report.findingCount.toLocaleString("en-US")} findings · ${report.createdAt.slice(0, 16).replace("T", " ")} · ${report.id.slice(0, 8)}`,
+        ),
+        short: terminalDisplayText(report.reportName),
         value: report.id,
       })),
       undefined,
@@ -2118,15 +2121,19 @@ export async function main(
       throw new CodexSecurityError("This report has no findings to assess.");
     }
     const choices = findings.map((finding) => ({
-      label: [
-        finding.advisoryIds[0] ?? finding.title,
-        `${finding.package["name"] ?? "Unknown package"}@${finding.package["version"] ?? "Unknown version"}`,
-        dependencySeverityLabel(finding.originalSeverity),
-        finding.assessment?.verdict.replaceAll("_", " ") ?? "Not assessed",
-      ].join(" · "),
-      description: finding.title,
-      searchText: [finding.title, ...finding.advisoryIds].join(" "),
-      short: finding.title,
+      label: terminalDisplayText(
+        [
+          finding.advisoryIds[0] ?? finding.title,
+          `${finding.package["name"] ?? "Unknown package"}@${finding.package["version"] ?? "Unknown version"}`,
+          dependencySeverityLabel(finding.originalSeverity),
+          finding.assessment?.verdict.replaceAll("_", " ") ?? "Not assessed",
+        ].join(" · "),
+      ),
+      description: terminalDisplayText(finding.title),
+      searchText: terminalDisplayText(
+        [finding.title, ...finding.advisoryIds].join(" "),
+      ),
+      short: terminalDisplayText(finding.title),
       value: finding.id,
     }));
     for (;;) {
@@ -2185,7 +2192,9 @@ export async function main(
       } else if (error instanceof Error && error.name === "ExitPromptError") {
         exitCode = 130;
       } else {
-        errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+        errorOutput.write(
+          `codex-security: ${terminalDisplayText(errorMessage(error))}\n`,
+        );
         exitCode = 2;
       }
       return undefined;

@@ -1,3 +1,4 @@
+import { terminalDisplayText } from "./terminal-text.js";
 import type { JsonObject } from "./config.js";
 import type {
   DependencyAssessmentDetails,
@@ -27,7 +28,9 @@ const VERDICTS = {
 
 /** Display the vendor severity without its export enum prefix. */
 export function dependencySeverityLabel(severity: string | null): string {
-  const value = severity?.replace(/^FINDING_LEVEL_/, "").toLowerCase();
+  const value = terminalDisplayText(severity ?? "")
+    .replace(/^FINDING_LEVEL_/, "")
+    .toLowerCase();
   return value ? value[0]!.toUpperCase() + value.slice(1) : "Unspecified";
 }
 
@@ -44,7 +47,7 @@ export function renderDependencyFindings(
   const lines = ["", `  ${strong("CODEX SECURITY / DEPENDENCY FINDINGS")}`, ""];
   const wrap = (value: string, indent = 2): void => {
     let line = "";
-    for (const word of value.split(/\s+/)) {
+    for (const word of terminalDisplayText(value).split(/\s+/)) {
       if (line && line.length + word.length + 1 > width - indent) {
         lines.push(`${" ".repeat(indent)}${line}`);
         line = word;

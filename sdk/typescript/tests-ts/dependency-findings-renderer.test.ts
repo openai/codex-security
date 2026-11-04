@@ -73,6 +73,22 @@ describe("dependency findings renderer", () => {
     expect(output).not.toContain("\u001B[");
   });
 
+  test("terminal styling belongs to the renderer and leaves the report unchanged", () => {
+    const reportName = "\u001b[31mThird-party\u001b[0m\tadvisories";
+    const saved = { ...report, reportName };
+    for (const color of [false, true]) {
+      const output = renderDependencyFindings(
+        json({ report: saved }),
+        "import",
+        { color },
+      );
+      expect(output).toContain("Third-party advisories");
+      expect(output).not.toContain("\u001b[31m");
+      expect(output.includes("\u001b[1m")).toBe(color);
+    }
+    expect(saved.reportName).toBe(reportName);
+  });
+
   test("show separates scanner severity from assessment and preserves pagination filters", () => {
     for (const columns of [48, 96]) {
       for (const originalSeverity of ["critical", "FINDING_LEVEL_CRITICAL"]) {

@@ -1,3 +1,4 @@
+import { terminalDisplayText as clean } from "./terminal-text.js";
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
@@ -37,12 +38,6 @@ const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   timeZone: "UTC",
 });
-
-function clean(value: unknown): string {
-  return String(value)
-    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
-}
 
 function findingSeverity(finding: JsonObject): string {
   const severity = finding["severity"];

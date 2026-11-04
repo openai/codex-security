@@ -219,6 +219,7 @@ const distFiles = new Set(
     "scan-comparison",
     "scan-dashboard",
     "scan-history-renderer",
+    "terminal-text",
     "scan-logs",
     "security-policy",
     "security-policy-cli",

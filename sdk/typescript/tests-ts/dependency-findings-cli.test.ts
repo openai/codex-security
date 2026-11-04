@@ -230,7 +230,8 @@ describe("dependency findings terminal workflow", () => {
     const findings = Array.from({ length: 101 }, (_, index) =>
       finding(index + 1),
     );
-    const saved = report();
+    const saved = { ...report(), reportName: "\u001b[31mReport\u001b[0m" };
+    findings[100]!.title = "\u001b[31mAffected parser 101\u001b[0m";
     saved.findingCount = findings.length;
     const result = completed();
     const { deps, calls } = fixture({
@@ -257,6 +258,8 @@ describe("dependency findings terminal workflow", () => {
     let findingPrompts = 0;
     deps.dependencyFindingsPrompt!.select = async (_question, choices) => {
       reportPrompts++;
+      expect(choices[0]!.label).toStartWith("Report · ");
+      expect(choices[0]!.short).toBe("Report");
       return choices[0]!.value;
     };
     deps.dependencyFindingsPrompt!.input = async () => {
@@ -281,7 +284,8 @@ describe("dependency findings terminal workflow", () => {
       expect(choices[0]!.label).toContain("parser-101");
       expect(choices[0]!.label.toLowerCase()).toContain("high");
       expect(choices[0]!.label.toLowerCase()).toMatch(/pending|not assessed/);
-      expect(choices[0]!.description).toContain("Affected parser 101");
+      expect(choices[0]!.description).toBe("Affected parser 101");
+      expect(choices[0]!.short).toBe("Affected parser 101");
       return [choices[0]!.value];
     };
     const stdout = capture(true);
@@ -431,7 +435,10 @@ describe("dependency findings terminal workflow", () => {
       const state = fixture({
         runSkill: async (signal) => {
           expect(state.timers).toHaveLength(1);
-          if (outcome === "failure") throw new Error("Assessment failed");
+          if (outcome === "failure")
+            throw new Error(
+              "\u001b[31mResolver failed: token EXAMPLE_IDENTIFIER; required module missing\u001b[0m",
+            );
           if (outcome === "cancel") {
             state.signals.emit("SIGINT");
             signal!.throwIfAborted();
@@ -462,7 +469,9 @@ describe("dependency findings terminal workflow", () => {
         ),
       ).toBe(true);
       if (outcome === "failure")
-        expect(stderr.text()).toContain("Assessment failed");
+        expect(stderr.text()).toContain(
+          "codex-security: Resolver failed: token EXAMPLE_IDENTIFIER; required module missing\n",
+        );
     }
   });
 
