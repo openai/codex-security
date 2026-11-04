@@ -11077,7 +11077,7 @@ async function executeScan(
           auth = await chooseInteractiveAuthentication(
             {
               auth,
-              provider: providerOptions.provider,
+              config: restored,
               command: "scan",
               signal: preparationAbortController.signal,
             },

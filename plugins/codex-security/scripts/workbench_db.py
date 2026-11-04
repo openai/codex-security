@@ -31,7 +31,6 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
-from check_deep_scan_target import check_selected_targets
 from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import (
     PRODUCER_NAME,
@@ -113,8 +112,11 @@ from workbench_setup import (
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
+    check_registered_deep_target,
     expected_target_kinds,
     public_scan_recipe,
+    requested_finding_scope,
+    requested_scan_file_paths,
     requested_scan_paths,
     safe_source_path,
 )
@@ -215,20 +217,6 @@ def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False)
     apply_schema_migrations(
         connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
     )
-
-
-def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
-    # Older scans did not record path kinds. Retain their lexical scope semantics
-    # rather than infer the original target from a possibly changed checkout.
-    if scan["recipe_json"] is None:
-        return []
-    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-    return recipe.get("scopeFilePaths", [])
-
-
-def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
-    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
-    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
@@ -3403,15 +3391,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "begin-deep-scan":
             result = begin_deep_scan(connection, args)
         elif args.command == "check-deep-scan-target":
-            scan = require_scan(connection, args.scan_id)
-            try:
-                check_selected_targets(
-                    Path(scan["target_path"]),
-                    requested_scan_paths(scan),
-                    requested_scan_file_paths(scan),
-                )
-            except (OSError, ValueError) as exc:
-                raise SystemExit(str(exc)) from exc
+            check_registered_deep_target(require_scan(connection, args.scan_id))
             result = {}
         elif args.command == "get-scan":
             if args.check_target:
