@@ -5660,12 +5660,11 @@ describe("CLI", () => {
 
   test("explains the resolved cost limit in a dry-run plan", async () => {
     const { stdout, runCli } = createCliTest(main);
-    const preflight = { ...fakePreflight("repo"), maxCostUsd: 5 };
 
     expect(
       await runCli(
         ["scan", "repo", "--max-cost", "5", "--dry-run", "--json"],
-        dependencies({ preflight }),
+        dependencies(),
       ),
     ).toBe(0);
     const plan = JSON.parse(stdout.text());
