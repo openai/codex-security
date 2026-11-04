@@ -340,12 +340,15 @@ When a scan finds a credential, share its type and location with the owner.
 Source snippets and diffs can contain the value, and previous commits or copies
 can retain it after cleanup.
 
-- **If you own the code**, remove the literal and load the replacement from
-  the project’s secret store.
-- **If you own the credential**, revoke it immediately if you suspect misuse.
-  Otherwise, deploy a replacement, check that consumers still work,
-  then revoke the old value and confirm it is disabled. For a signing key,
-  update the verifiers that trust it. Review issuer logs for the exposure window.
+- **If you own the code**, replace a committed literal with a lookup in the
+  project’s secret store, or stop the runtime leak. For example, remove the
+  token from a public status response.
+- **If you own the credential**, a committed value is exposed to source readers.
+  For a runtime leak, check which deployments and credentials were affected.
+  Revoke an exposed credential immediately if you suspect misuse. Otherwise,
+  deploy a replacement, verify consumers still work, and confirm the issuer
+  has disabled the old credential. For signing keys, update the verifiers that
+  trust the old key. Review issuer logs for the exposure window.
 
 ### Generation options and saved files
 

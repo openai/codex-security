@@ -30,13 +30,13 @@ Before editing, inspect the affected implementation, its direct callers, nearby 
 
 Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
 
-### Credentials exposed in source
+### Credential exposure
 
-Remove the literal using the consumer's established secret store or configuration mechanism. Use synthetic credentials for local checks. Never replay the exposed credential or contact its issuer.
+Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
 
 Give the credential owner steps specific to the issuer and consumer. For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
 
-Use caller-supplied issuer or owner confirmation for the specific old credential to establish retirement. While retirement is unconfirmed, return the verified code outcome (`verified` or `no_change`) with `credentialRevocationPending: true` and the outstanding owner action in the verification text. If an older patch schema cannot represent the marker, keep the source change and report `blocked` with the reason. In direct CLI or interactive output, say “Removed from source; revocation pending” or “Already removed; revocation pending.” For an independently reported runtime disclosure bug, verify the code path normally.
+Use caller-supplied issuer or owner confirmation for the specific old credential to establish retirement. While retirement is unconfirmed, return the verified code outcome (`verified` or `no_change`) with `credentialRevocationPending: true` and the outstanding owner action in the verification text. If an older patch schema cannot represent the marker, keep the source change and report `blocked` with the reason. In direct CLI or interactive output, say “Removed from source; revocation pending” or “Already removed; revocation pending.” For a runtime leak path, verify the repair and ask the owner to check whether any deployed value reached callers.
 
 ## Implementation Workflow
 

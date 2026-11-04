@@ -32,12 +32,14 @@ export interface Result {
 
 const explicitSecretTerms =
   /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
-const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposures?`;
+const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?(?:exposure|disclosure)s?`;
 const explicitSecretCategory = new RegExp(
   String.raw`\b(?:${explicitSecretTerms.source})\b`,
   "i",
 );
 const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
+const responseCategory =
+  /^(?:sensitive information in response|insertion of sensitive information into sent data)$/i;
 const negatedSecretCategory = new RegExp(
   String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
   "i",
@@ -87,7 +89,11 @@ function matchesLocation(location: SourceLocation, expected: Expected) {
   );
 }
 
-function matches(finding: Finding, expected: Expected) {
+function matches(
+  finding: Finding,
+  expected: Expected,
+  codes = finding.taxonomy?.cwe ?? [],
+) {
   const category = (finding.taxonomy?.category ?? "")
     .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
@@ -97,19 +103,20 @@ function matches(finding: Finding, expected: Expected) {
     !finding.locations?.some((location) => matchesLocation(location, expected))
   )
     return false;
-  const cwes = (finding.taxonomy?.cwe ?? []).map((value) =>
+  const cwes = codes.map((value) =>
     value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1"),
   );
   if (
     expected.id === "private-key" &&
     cwes.includes("CWE-321") &&
-    /\b(?:signing|cryptographic)[- ]+keys?\b/i.test(category) &&
-    !/^(?:no|not|non|without)\b|\bpublic[- ]+(?:signing[- ]+)?keys?\b/i.test(
+    /^(?:embedded[- ]+)?(?:cryptographic(?:[- ]+signing)?|signing)[- ]+keys?(?:[- ]+(?:exposure|disclosure))?$/i.test(
       category,
     )
   )
     return true;
   if (expected.category === "sensitive-data-exposure") {
+    if (responseCategory.test(category.replaceAll("-", " ")))
+      return cwes.includes("CWE-201");
     // The endpoint returns a value loaded at runtime. Source storage is a different defect.
     return (
       (/disclos|expos|leak|authenticat|authoriz|access[- ]control/i.test(
@@ -215,8 +222,7 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
                   location.startLine === fixture.statusAccessLine &&
                   (location.endLine ?? location.startLine) ===
                     fixture.statusAccessLine) ||
-                (location.role === "sink" &&
-                  matchesConsumer(location, expected)),
+                matchesConsumer(location, expected),
             )),
       )
       .map((location) => location.path);
@@ -226,12 +232,7 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
       cwes.length === 0 ||
       cwes.some(
         (cwe) =>
-          !fixture.positives.some((expected) =>
-            matches(
-              { ...finding, taxonomy: { ...finding.taxonomy, cwe: [cwe] } },
-              expected,
-            ),
-          ),
+          !matchedCases.some((expected) => matches(finding, expected, [cwe])),
       )
     ) {
       return [{ index, reason: "no expected secret location and taxonomy" }];
