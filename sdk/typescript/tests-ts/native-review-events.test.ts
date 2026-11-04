@@ -86,6 +86,29 @@ test.each([trail, trail.Records[1], ocsf, batch])(
   },
 );
 
+test("native extensions cannot replace the event, its source, or its citation", () => {
+  const extensions = {
+    schemaVersion: 1,
+    groups: [],
+    Records: [],
+    eventID: "extension",
+  };
+  for (const [input, source, id] of [
+    [
+      { ...extensions, ...trail.Records[0] },
+      "aws.cloudtrail",
+      trail.Records[0].eventID,
+    ],
+    [{ ...ocsf, ...extensions }, "ocsf", ocsf.metadata.uid],
+  ] as const) {
+    expect(securityEventInputSchema.parse(input)).toEqual(input);
+    const batch = parseSecurityEventBatch(input);
+    expect(batch.source).toBe(source);
+    expect(batch.groups[0]!.events).toEqual([input]);
+    expect(securityEventId(batch.groups[0]!.events[0]!)).toBe(id);
+  }
+});
+
 test("UID-less OCSF citations are stable across object key order without mutating evidence", async () => {
   const event = structuredClone(ocsf);
   delete event.metadata.uid;

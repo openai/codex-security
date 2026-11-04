@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { z } from "zod";
 import type { CodexSecuritySurface } from "./api.js";
@@ -13,6 +13,7 @@ import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
+import { canonicalJson, isRecord } from "./record.js";
 import type { ScanSettings } from "./scan-settings.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 
@@ -63,28 +64,17 @@ type SecurityEvent = z.infer<typeof eventSchema>;
 /** @internal Stable citations without adding fields to native events. */
 export function securityEventId(event: SecurityEvent): string {
   // CEF's event class ID names a type, not an individual occurrence.
-  if (typeof event === "string")
-    return `sha256:${createHash("sha256").update(event).digest("hex")}`;
-  if ("eventID" in event && typeof event.eventID === "string")
-    return event.eventID;
+  if (typeof event === "string") return `sha256:${hash("sha256", event)}`;
   if (
-    "metadata" in event &&
-    event.metadata &&
-    typeof event.metadata === "object" &&
-    !Array.isArray(event.metadata)
-  ) {
-    if (typeof event.metadata.uid === "string") return event.metadata.uid;
-    // Sort object keys recursively; array order remains significant.
-    const canonical = JSON.stringify(event, (_key, value) =>
-      value && typeof value === "object" && !Array.isArray(value)
-        ? Object.fromEntries(
-            Object.entries(value).sort(([a], [b]) =>
-              a < b ? -1 : a > b ? 1 : 0,
-            ),
-          )
-        : value,
-    );
-    return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+    "eventID" in event &&
+    typeof event.eventID === "string" &&
+    (!("metadata" in event) || cloudTrailEventSchema.safeParse(event).success)
+  )
+    return event.eventID;
+  if ("metadata" in event && isRecord(event.metadata)) {
+    return typeof event.metadata.uid === "string"
+      ? event.metadata.uid
+      : `sha256:${hash("sha256", canonicalJson(event))}`;
   }
   return (event as z.infer<typeof legacyEventSchema>).id;
 }
@@ -102,14 +92,38 @@ export const securityEventBatchSchema = z.strictObject({
   groups: z.array(groupSchema),
 });
 
-/** Native records or the optional grouping/history envelope. */
+function nativeBatch(
+  source: string,
+  input: SecurityEvent | SecurityEvent[],
+): SecurityEventBatch {
+  const events = Array.isArray(input) ? input : [input];
+  return { schemaVersion: 1, source, groups: [{ id: "events", events }] };
+}
+
+// Normalize in the matching schema: native extensions can have names like
+// "groups" or "Records" without turning a single event into an envelope.
+const nativeBatchSchemas = [
+  z
+    .union([cefEventSchema, z.array(cefEventSchema)])
+    .transform((input) => nativeBatch("cef", input)),
+  cloudTrailEventSchema.transform((event) =>
+    nativeBatch("aws.cloudtrail", event),
+  ),
+  ocsfEventSchema.transform((event) => nativeBatch("ocsf", event)),
+  z
+    .object({ Records: z.array(cloudTrailEventSchema) })
+    .catchall(z.json())
+    .transform(({ Records }) => nativeBatch("aws.cloudtrail", Records)),
+];
+const normalizedBatchSchema = z.union([
+  securityEventBatchSchema,
+  ...nativeBatchSchemas,
+]);
+
+/** Native records or the optional grouping/history envelope, unchanged. */
 export const securityEventInputSchema = z.union([
   securityEventBatchSchema,
-  cefEventSchema,
-  z.array(cefEventSchema),
-  cloudTrailEventSchema,
-  z.object({ Records: z.array(cloudTrailEventSchema) }).catchall(z.json()),
-  ocsfEventSchema,
+  ...nativeBatchSchemas.map((schema) => schema.in),
 ]);
 export type SecurityEventInput = z.infer<typeof securityEventInputSchema>;
 
@@ -123,37 +137,7 @@ export function parseSecurityEventInputText(input: string): unknown {
 
 /** @internal */
 export function parseSecurityEventBatch(input: unknown): SecurityEventBatch {
-  const parsed = securityEventInputSchema.parse(input);
-  let batch: SecurityEventBatch;
-  if (typeof parsed === "string" || Array.isArray(parsed)) {
-    batch = {
-      schemaVersion: 1,
-      source: "cef",
-      groups: [
-        {
-          id: "events",
-          events: typeof parsed === "string" ? [parsed] : parsed,
-        },
-      ],
-    };
-  } else if (
-    "groups" in parsed &&
-    Array.isArray(parsed.groups) &&
-    parsed.schemaVersion === 1
-  ) {
-    batch = parsed as SecurityEventBatch;
-  } else {
-    const cloudTrail = "eventID" in parsed || "Records" in parsed;
-    const events =
-      "Records" in parsed && Array.isArray(parsed.Records)
-        ? (parsed.Records as z.infer<typeof cloudTrailEventSchema>[])
-        : [parsed as SecurityEvent];
-    batch = {
-      schemaVersion: 1,
-      source: cloudTrail ? "aws.cloudtrail" : "ocsf",
-      groups: [{ id: "events", events }],
-    };
-  }
+  const batch = normalizedBatchSchema.parse(input);
   const { groups } = batch;
   if (new Set(groups.map(({ id }) => id)).size !== groups.length) {
     throw new CodexSecurityError(
@@ -375,10 +359,10 @@ export async function reviewSecurityEventsInternal(
     );
     options.signal?.throwIfAborted();
     const { observations } = observationsSchema.parse(JSON.parse(response));
-    const newIds = new Set(events.map(securityEventId));
+    const newIds = new Set(evidence.eventReferences.events);
     const knownIds = new Set([
       ...newIds,
-      ...(group.contextEvents ?? []).map(securityEventId),
+      ...evidence.eventReferences.contextEvents,
     ]);
     for (const { eventIds } of observations) {
       if (
