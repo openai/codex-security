@@ -89,15 +89,6 @@ def update_progress(
                 coordinator["status"] == "running" or args.coordinator_generation is not None
             ):
                 require_current_coordinator(coordinator, args)
-            if coordinator is not None and args.phase == "discovery":
-                connection.execute(
-                    """
-                    UPDATE deep_scan_runs
-                    SET phase = 'discovery', updated_at = ?
-                    WHERE scan_id = ? AND phase = 'setup'
-                    """,
-                    (timestamp, scan_id),
-                )
         elif args.coordinator_generation is not None:
             raise SystemExit("Coordinator leases apply only to Deep Scan progress.")
         require_current_continuation(
