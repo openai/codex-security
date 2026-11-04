@@ -1013,7 +1013,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             excluded = set(ignored.stdout.split(b"\0"))
             pending = [path for raw, path in candidates.items() if raw not in excluded]
     paths.extend(junctions.values())
-    return sorted({str(path): path for path in paths}.values(), key=str)
+    entries = {str(portable_relative_path(path, target)): path for path in paths}
+    return [entries[name] for name in sorted(entries)]
 
 
 def source_directory_snapshot_paths(

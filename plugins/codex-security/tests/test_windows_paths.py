@@ -3,6 +3,7 @@ from __future__ import annotations
 import ntpath
 import os
 import sqlite3
+import subprocess
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
@@ -171,3 +172,20 @@ def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Pa
         assert connection.execute(
             "SELECT path FROM scan_artifacts WHERE scan_id = ?", (scan_id,)
         ).fetchone() == (str(archived / "report.md"),)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows path spelling")
+def test_git_snapshot_digest_is_independent_of_root_spelling(tmp_path: Path):
+    paths = load_script("windows_paths")
+    target = load_script("workbench_target")
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    (tmp_path / "z.txt").write_text("short")
+    nested = tmp_path
+    while len(str(nested / "a.txt")) < paths.WINDOWS_DIRECTORY_PATH_LIMIT:
+        nested /= "alpha-" * 6
+    paths.filesystem_path(nested).mkdir(parents=True, exist_ok=True)
+    paths.filesystem_path(nested / "a.txt").write_text("long")
+    assert target.directory_content_digest(tmp_path) == target.directory_content_digest(
+        paths.extended_path(tmp_path)
+    )
