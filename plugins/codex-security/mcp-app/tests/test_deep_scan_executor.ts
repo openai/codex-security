@@ -979,7 +979,7 @@ async function testSdkInvocationAndThreadCapture() {
     assertFlagPair(invocation.argv, "--model", "gpt-5.6-luna");
     assertConfigOverrides(invocation.argv, {
       model_reasoning_effort: "xhigh",
-      "mcp_servers.codex-security.command": "node",
+      "mcp_servers.codex-security.command": undefined,
       "mcp_servers.codex-security.enabled": false,
     });
     assertReadOnlyWorkerPolicy(invocation.argv);
@@ -995,7 +995,9 @@ async function testSdkInvocationAndThreadCapture() {
     const preflight = await readJson(fixture.preflightMarkerPath);
     assert.deepEqual(
       nativeConfigOverrides(preflight.argv),
-      nativeConfigOverrides(invocation.argv),
+      nativeConfigOverrides(invocation.argv).filter(
+        (arg) => !arg.startsWith("mcp_servers="),
+      ),
     );
     assertWorkerSubagentPolicy(invocation.argv, 3);
     assertFlagPair(invocation.argv, "--cd", workingDirectory);
@@ -1032,12 +1034,23 @@ async function testReportOnlyComparison() {
       "responses_api_metadata.codex_security_worker_role": "compare",
       "mcp_servers.cs_artifacts": undefined,
       "features.shell_tool": false,
+      "features.image_generation": false,
+      "features.view_image": false,
+      "features.computer_use": false,
       "features.multi_agent_v2": false,
       web_search: "disabled",
     });
-    assert.ok(
-      invocation.argv.includes('mcp_servers."fixture.catalog".enabled=false'),
-    );
+    const preflight = await readJson(fixture.preflightMarkerPath);
+    assertConfigOverrides(preflight.argv, {
+      "mcp_servers.codex-security.command": undefined,
+    });
+    const servers = nativeConfigOverrides(invocation.argv)
+      .map((arg) => parseToml(arg).mcp_servers)
+      .findLast(Boolean);
+    assert.deepEqual(JSON.parse(JSON.stringify(servers)), {
+      "fixture.catalog": { enabled: false },
+      "codex-security": { enabled: false },
+    });
   });
 }
 
@@ -2556,7 +2569,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeConfigOverrides(launch.args).filter(
               (override) => !override.startsWith("model_providers="),
             ),
-            nativeConfigOverrides(execution.args),
+            nativeConfigOverrides(execution.args).filter(
+              (override) => !override.startsWith("mcp_servers="),
+            ),
           );
         }
         await Promise.all(
@@ -2617,6 +2632,9 @@ async function testBedrockCredentialsReachWorker(
   await writeFile(
     path.join(codexHome, `${nativeProfile}.config.toml`),
     stringifyToml({
+      mcp_servers: {
+        "profile.catalog": { url: "https://fixture.invalid/mcp" },
+      },
       model_providers: { "amazon-bedrock": providerConfig },
     }),
   );
@@ -2695,6 +2713,19 @@ async function testBedrockCredentialsReachWorker(
         model_reasoning_summary: "none",
       });
     }
+    await executor.compareFindings(
+      "Compare the supplied reports.",
+      workingDirectory,
+      new AbortController().signal,
+      { type: "object", properties: { reviews: { type: "array" } } },
+    );
+    const comparison = await readJson(fixture.markerPath);
+    const servers = nativeConfigOverrides(comparison.argv)
+      .map((arg) => parseToml(arg).mcp_servers)
+      .findLast(Boolean);
+    assert.deepEqual(JSON.parse(JSON.stringify(servers))["profile.catalog"], {
+      enabled: false,
+    });
   } finally {
     for (const [name, value] of previousEnvironment) {
       restoreEnv(name, value);
