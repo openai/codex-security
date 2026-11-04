@@ -74,7 +74,7 @@ Standard scans and Deep Standard scan workers include validation directly in the
 - Per-finding validation report: `<findings_dir>/<candidate_id>/validation_report.md`
 - Per-finding validation artifacts: `<findings_dir>/<candidate_id>/validation_artifacts/`
 
-For each candidate in a retained phase workflow, save its validation report and record its method, evidence or exact proof gap, disposition, and report or evidence reference in its phase receipt. Use the storage policy for retained files. Include existing `<context_dir>/false_positive_feedback.json` as reviewer evidence.
+For each candidate in a retained phase workflow, save its validation report and record its method, evidence or exact proof gap, disposition, and report or evidence reference in its phase receipt. Use the storage policy for retained files. Include the caller's supplied reviewer feedback as evidence.
 
 For repository-wide or scoped-path retained phases, preserve a closure table with the candidate/ledger row ID, instance key, source reference and seed anchor when supplied, root-control location, entrypoint/source, sink/control, disposition, counterevidence or proof gap, and `survives: yes|no|uncertain`.
 

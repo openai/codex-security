@@ -74,7 +74,7 @@ from workbench_constants import (
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
@@ -691,7 +691,6 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target_kind=diff_target["kind"] if diff_target is not None else None,
         )
         target_root = scan_target_root(args.scan_root, target)
-        create_private_directory(target_root)
         require_working_tree_unchanged(target, diff_target)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
@@ -731,6 +730,15 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        if workspace["default_mode"] == "deep":
+            pending = deep_scan.concurrent_launch_confirmation(
+                connection, getattr(args, "confirmed_concurrent_scan_id", [])
+            )
+            if pending:
+                if manages_transaction:
+                    connection.commit()
+                return pending
+        create_private_directory(target_root)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -860,7 +868,7 @@ def _start_prompt_driven_scan(
             if existing is not None:
                 connection.commit()
                 return {
-                    **scan_context(connection, existing["id"]),
+                    **scan_context(connection, existing["id"], include_investigation_policy=True),
                     "startDisposition": "joined",
                 }
             create_private_directory(target_root)
@@ -933,7 +941,10 @@ def _start_prompt_driven_scan(
         except BaseException:
             connection.rollback()
             raise
-    return {**scan_context(connection, scan_id), "startDisposition": "created"}
+    return {
+        **scan_context(connection, scan_id, include_investigation_policy=True),
+        "startDisposition": "created",
+    }
 
 
 def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
@@ -2446,6 +2457,8 @@ def scan_context(
     connection: sqlite3.Connection,
     scan_id: str,
     occurrence_id: str | None = None,
+    *,
+    include_investigation_policy: bool = False,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     result = scan_result(connection, scan, occurrence_id=occurrence_id)
@@ -2465,6 +2478,19 @@ def scan_context(
         "scan": result,
         "workspace": workspace,
     }
+    scan_dir = Path(scan["scan_dir"])
+    if (
+        scan["status"] == "running"
+        and scan["mode"] != "deep"
+        and scan_local_regular_file(scan_dir, FALSE_POSITIVE_FEEDBACK_PATH)
+    ):
+        context["reviewerFeedbackPath"] = str(scan_dir / FALSE_POSITIVE_FEEDBACK_PATH)
+    if (
+        include_investigation_policy
+        and result["progress"]["status"] == "running"
+        and scan["investigation_policy"] is not None
+    ):
+        context["investigationPolicy"] = scan["investigation_policy"]
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
         context["recipe"] = public_scan_recipe(scan)
@@ -2472,7 +2498,9 @@ def scan_context(
 
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    result = scan_context(
+        connection, args.scan_id, args.occurrence_id, include_investigation_policy=True
+    )
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
         try:

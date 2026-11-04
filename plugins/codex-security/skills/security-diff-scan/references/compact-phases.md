@@ -8,7 +8,7 @@ Use every page of the prepared inventory from `list_codex_security_review_items`
 
 ## Validation
 
-Read every page from `list_codex_security_candidates({ scanId, cursor?, limit? })`. Include existing `artifacts/01_context/false_positive_feedback.json` from the scan as reviewer evidence. Submit one disposition for each candidate through `record_codex_security_candidate_validations({ scanId, validations: [{ candidateId, validation }] })`. The [validation schema](../../../schemas/tools/candidate-validations.schema.json) requires a `rubric` naming the security property assessed. Include `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from discovery. Use `artifacts/02_discovery/validation_artifacts/<candidate_id>/` only for actual retained evidence and reference those files from the validation. A validation phase invoked with no candidates submits `validations: []`.
+Read every page from `list_codex_security_candidates({ scanId, cursor?, limit? })`. Use the reviewer feedback supplied by the caller or scan context (`reviewerFeedbackPath`) as evidence. Submit one disposition for each candidate through `record_codex_security_candidate_validations({ scanId, validations: [{ candidateId, validation }] })`. The [validation schema](../../../schemas/tools/candidate-validations.schema.json) requires a `rubric` naming the security property assessed. Include `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from discovery. Use `artifacts/02_discovery/validation_artifacts/<candidate_id>/` only for actual retained evidence and reference those files from the validation. A validation phase invoked with no candidates submits `validations: []`.
 
 ## Attack-path analysis
 

@@ -9,7 +9,7 @@ Run one independent general audit while the parent maps the repository's securit
 
 ## Host And Setup
 
-Use the host-supplied scan runtime instructions for startup, progress, checkpoint storage and completion. For a native invocation, resolve the `standard-scan` topic as described in `../../references/skill-runtime.md` before reviewing source. Preserve authoritative ownership throughout the scan.
+Use the host-supplied scan runtime instructions for startup, progress, checkpoint storage and completion. For a native invocation, resolve the `standard-scan` topic as described in `../../references/skill-runtime.md` before reviewing source. Preserve authoritative ownership throughout the scan. Use the supplied reviewer feedback and grading criteria. The default grading criteria are in [the bundled severity rubric](../../references/default-severity-rubric.md).
 
 Read `../../references/scan-prologue.md` and `../../references/scan-runtime.md` once after resolving authoritative scan context, before source review.
 

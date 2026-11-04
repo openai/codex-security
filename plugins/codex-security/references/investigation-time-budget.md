@@ -1,6 +1,6 @@
 # Investigation time allowance
 
-The caller allows {{budgetMinutes}} minutes for this Standard scan's source investigation, starting at {{startedAt}}. Aim to finish investigation by {{deadlineAt}}. This is advisory, not a hard timeout or minimum runtime. Deep Scan, separate custom validation, post-scan work, and final report preparation are outside this allowance.
+The caller allows {{budgetMinutes}} minutes for this scan's source investigation, starting at {{startedAt}}. Aim to finish investigation by {{deadlineAt}}. This is advisory, not a hard timeout or minimum runtime. Deep Scan, separate custom validation, post-scan work, and final report preparation are outside this allowance.
 
 While time remains, pursue the most valuable concrete source-backed check: an unreviewed boundary, alternate attack path, pending candidate, proof gap, or counterevidence. Do not stop at the first plausible finding when useful work remains. Preserve established findings and counterevidence; do not repeat completed phases or reopen settled questions without new evidence.
 

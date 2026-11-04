@@ -980,6 +980,7 @@ export class CodexSecurity {
       const { runtime } = session;
       const validationInstructions = await standaloneValidationPrompt(
         runtime.plugin.pluginRoot,
+        "json",
       );
       const git = await inspectTrustedExecutable(
         "git",
@@ -1132,7 +1133,7 @@ export class CodexSecurity {
           const model = scanModelConfiguration(session.effectiveConfig);
           const binding = {
             // Increment when the standalone validation prompt or execution contract changes.
-            version: 4,
+            version: 5,
             codexVersion: CODEX_EXECUTABLE_VERSION,
             source,
             scope: {},
@@ -2871,8 +2872,31 @@ export class CodexSecurity {
           "The Codex Security workbench returned an invalid scan registration.",
         );
       }
-      const targetRevision =
-        registeredRevision === "unversioned" ? null : registeredRevision;
+      const targetBindings = [
+        ["targetId", "CODEX_SECURITY_TARGET_ID", targetId],
+        ["displayName", "CODEX_SECURITY_TARGET_DISPLAY_NAME", basename(repo)],
+        ["kind", "CODEX_SECURITY_TARGET_KIND", targetKind],
+        [
+          "revision",
+          "CODEX_SECURITY_TARGET_REVISION",
+          registeredRevision === "unversioned" ? undefined : registeredRevision,
+        ],
+        [
+          "snapshotDigest",
+          "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
+          targetKind === "git_revision" ? undefined : snapshotDigest,
+        ],
+      ] as const;
+      const targetInstructions = targetBindings.flatMap(
+        ([field, name, value]) =>
+          value === undefined
+            ? []
+            : [
+                `Use exactly ${shellEnvironmentReference(name)} as scan.target.${field}.`,
+              ],
+      );
+      if (targetKind === "git_revision")
+        targetInstructions.push("Omit scan.target.snapshotDigest.");
       const registeredFileCount = registration["scopeFileCount"];
       scopeFileCount =
         typeof registeredFileCount === "number" &&
@@ -2982,6 +3006,7 @@ export class CodexSecurity {
         ),
         mode,
         expectedCoverageMode(normalized, mode),
+        targetInstructions,
         skillName,
         scanId,
         knowledgeBase !== null,
@@ -3073,15 +3098,9 @@ export class CodexSecurity {
         CODEX_SECURITY_STATE_DIR: stateDirectory,
         CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
-        CODEX_SECURITY_TARGET_ID: targetId,
-        CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
-        CODEX_SECURITY_TARGET_KIND: targetKind,
-        ...(targetRevision === null
-          ? {}
-          : { CODEX_SECURITY_TARGET_REVISION: targetRevision }),
-        ...(typeof snapshotDigest === "string"
-          ? { CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: snapshotDigest }
-          : {}),
+        ...Object.fromEntries(
+          targetBindings.map(([, name, value]) => [name, value]),
+        ),
         ...(knowledgeBase === null
           ? {}
           : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
@@ -4058,7 +4077,7 @@ export class CodexSecurity {
   async #createSessionCodex(
     session: PreparedSession,
     { command, mode }: { command: string; mode?: ScanMode },
-    runtimePaths: Record<string, string>,
+    runtimePaths: ProcessEnvironment,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
@@ -4070,12 +4089,10 @@ export class CodexSecurity {
   }> {
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
-      const environment = {
-        ...definedEnvironment(
-          environmentWithGit(session.runtime.environment, git),
-        ),
-        ...runtimePaths,
-      };
+      const environment = bindRuntimeEnvironment(
+        environmentWithGit(session.runtime.environment, git),
+        runtimePaths,
+      );
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -4170,29 +4187,31 @@ export class CodexSecurity {
       sessionConfig,
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
-    const environment: ProcessEnvironment = {
-      ...environmentWithGit(
-        pluginExecutionEnvironment(
-          python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              commandAuth
-                ? withoutOpenAiApiKeys(runtime.environment)
-                : runtime.environment,
-              auth,
-              modelProvider,
-              externalProvider?.env_key,
+    const environment = bindRuntimeEnvironment(
+      {
+        ...environmentWithGit(
+          pluginExecutionEnvironment(
+            python,
+            withoutCodexHome(
+              selectedScanEnvironment(
+                commandAuth
+                  ? withoutOpenAiApiKeys(runtime.environment)
+                  : runtime.environment,
+                auth,
+                modelProvider,
+                externalProvider?.env_key,
+              ),
             ),
           ),
+          git,
         ),
-        git,
-      ),
-      ...(externalProvider === null
-        ? {}
-        : { [externalProvider.env_key]: apiKey! }),
-      CODEX_HOME: runtime.codexHome,
-      ...runtimePaths,
-    };
+        ...(externalProvider === null
+          ? {}
+          : { [externalProvider.env_key]: apiKey! }),
+        CODEX_HOME: runtime.codexHome,
+      },
+      runtimePaths,
+    );
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
         delete environment[name];
@@ -5588,6 +5607,7 @@ function scanPrompt(
   targetDescription: string,
   mode: ScanMode,
   coverageMode: ReturnType<typeof expectedCoverageMode>,
+  targetInstructions: string[],
   skillName: string,
   scanId: string,
   hasKnowledgeBase = false,
@@ -5644,11 +5664,7 @@ function scanPrompt(
     `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
     `Use this exact scan directory for all scan output: ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}`,
     `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest and findings.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_ID")} as scan.target.targetId; do not derive a different target ID.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_DISPLAY_NAME")} as scan.target.displayName; do not infer a display name from the Git remote.`,
-    `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_KIND")} as scan.target.kind; do not infer the target kind from the checkout.`,
-    `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} is set, use its exact value as scan.target.revision.`,
-    `When ${shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST")} is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.`,
+    ...targetInstructions,
     'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(skillName === "security-scan"
       ? [
@@ -6799,6 +6815,19 @@ function standaloneFindingForPrompt(finding: string | object): string {
     );
   }
   return jsonForPrompt(finding);
+}
+
+// The registration owns its runtime bindings, including deliberately absent ones.
+function bindRuntimeEnvironment(
+  inherited: ProcessEnvironment,
+  bindings: ProcessEnvironment,
+): Record<string, string> {
+  const environment = definedEnvironment(inherited);
+  if (process.platform === "win32") {
+    for (const name of Object.keys(environment))
+      if (Object.hasOwn(bindings, name.toUpperCase())) delete environment[name];
+  }
+  return definedEnvironment({ ...environment, ...bindings });
 }
 
 function definedEnvironment(

@@ -508,5 +508,10 @@
       "UPDATE scans SET launch_plugin_version = json_extract(recipe_json, '$.pluginVersion')\nWHERE launch_plugin_version IS NULL AND CASE WHEN json_valid(recipe_json) THEN\n    json_type(recipe_json, '$.pluginVersion') = 'text'\n        AND trim(json_extract(recipe_json, '$.pluginVersion'), char(9, 10, 11, 12, 13, 32)) <> ''\nEND;",
       "CREATE VIEW scan_lifecycles AS\nSELECT scans.id AS scan_id, json_object(\n    'scanId', scans.id,\n    'mode', CASE WHEN launch_kind = 'import' THEN 'import' ELSE scans.mode END,\n    'startedAt', scans.started_at,\n    'status', CASE WHEN canceled_at IS NOT NULL THEN 'canceled'\n                   WHEN scans.status = 'complete' THEN 'completed' ELSE scans.status END,\n    'finishedAt', COALESCE(canceled_at, completed_at),\n    'hasReportableFindings', json(CASE\n        WHEN scans.status = 'complete' AND canceled_at IS NULL\n        THEN (SELECT CASE WHEN reportable_findings_count > 0 THEN 'true' ELSE 'false' END\n              FROM scan_progress WHERE scan_id = scans.id) END),\n    'surface', launch_surface,\n    'packageVersion', launch_package_version,\n    'pluginVersion', launch_plugin_version,\n    'mock', json(CASE WHEN launch_kind = 'mock' THEN 'true'\n                      WHEN launch_kind IS NOT NULL THEN 'false' END)\n) AS snapshot\nFROM scans;"
     ]
+  },
+  {
+    "version": 63,
+    "name": "retain native investigation time allowances",
+    "statements": ["ALTER TABLE scans ADD COLUMN investigation_policy TEXT;"]
   }
 ]

@@ -18,6 +18,8 @@ from workbench_constants import (
 )
 from workbench_validation import bounded_output_text
 
+FALSE_POSITIVE_FEEDBACK_PATH = "artifacts/01_context/false_positive_feedback.json"
+
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
     rows = connection.execute(

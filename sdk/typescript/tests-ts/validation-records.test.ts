@@ -29,7 +29,7 @@ const result = {
 test("passes source-only instructions and context to one host review", async () => {
   const run = mock(async (request: ValidationReviewRequest) => {
     expect(request.trustedInstructions).toBe(
-      await standaloneValidationPrompt(await bundledPluginRoot()),
+      await standaloneValidationPrompt(await bundledPluginRoot(), "json"),
     );
     expect(request.prompt).toContain(JSON.stringify(input.findings));
     expect(request.prompt).toContain(JSON.stringify(input.context));

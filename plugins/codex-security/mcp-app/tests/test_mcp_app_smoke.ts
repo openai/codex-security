@@ -2475,6 +2475,26 @@ try {
     longUserContext,
   );
 
+  const budget = await testServer.callTool(92012, {
+    name: "update_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId, maxTimeMinutes: 2.5 },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assertNoError(budget);
+  assert.equal(
+    budget.result.structuredContent.scan.userContext,
+    longUserContext,
+  );
+  const policy = budget.result.structuredContent.investigationPolicy;
+  assert.ok(typeof policy === "string" && policy.includes("2.5"));
+  const resumedBudget = await testServer.callTool(92019, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assertNoError(resumedBudget);
+  assert.ok(resumedBudget.result.content[0].text.includes(policy));
+
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
   const appUpdatedContext = await testServer.callTool(92011, {
     name: "update_codex_security_scan_context_from_app",
@@ -2581,6 +2601,15 @@ try {
     arguments: { handoffClaimToken, scanId },
   });
   assertNoError(completed);
+  const historical = await testServer.callTool(92029, {
+    name: "get_codex_security_scan_context",
+    arguments: { scanId },
+  });
+  assertNoError(historical);
+  assert.equal(
+    historical.result.structuredContent.investigationPolicy,
+    undefined,
+  );
   assert.deepEqual(completed.result.structuredContent.scan.warnings, [
     "Directory contents changed while the scan was running; results were saved for the original snapshot.",
   ]);

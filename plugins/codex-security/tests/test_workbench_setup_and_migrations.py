@@ -105,6 +105,7 @@ EXPECTED_MIGRATIONS = [
     (60, "record classification rubric provenance"),
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
+    (63, "retain native investigation time allowances"),
 ]
 
 
