@@ -2623,7 +2623,6 @@ export class CodexSecurity {
           };
         }
       }
-      const openaiBaseUrl = workerRuntimeConfig["openai_base_url"];
       let replayOverrides: JsonObject = {};
       if (fileProfile) {
         recipeConfig["profile"] = profileName;
@@ -2633,8 +2632,21 @@ export class CodexSecurity {
         delete recipeConfig["model_providers"];
         replayOverrides = privateReplayOverrides(overrides, recipeConfig);
         resolveNestedConfigPaths(replayOverrides, scanDir);
-      } else if (openaiBaseUrl !== undefined) {
-        replayOverrides["openai_base_url"] = openaiBaseUrl;
+      } else {
+        // The readable recipe can contain a provider's defaults in place of its overrides.
+        for (const key of [
+          "openai_base_url",
+          "chatgpt_base_url",
+          "model_providers",
+        ]) {
+          const value = workerRuntimeConfig[key];
+          if (
+            value !== undefined &&
+            !isDeepStrictEqual(value, recipeConfig[key])
+          ) {
+            replayOverrides[key] = value;
+          }
+        }
       }
       if (
         options.resumeScanId === undefined &&
