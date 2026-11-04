@@ -257,7 +257,8 @@ membership has changed. Retry the collection if it reports a change.
 
 On HTTP 429, the collector retries the same GET once if `Retry-After` specifies
 a wait of 10 seconds or less, in whole seconds or as an HTTP date. Zero or a
-past date triggers an immediate retry. Cancellation stops the wait.
+past date triggers an immediate retry. Cancellation stops the wait. Failed requests report
+the HTTP status and up to 64 KiB of the vendor response.
 
 A finding that identifies its repository only by name can use the project name,
 the Git URL path, or the final path component of either. For any other name,
