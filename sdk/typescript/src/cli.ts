@@ -313,6 +313,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
@@ -1997,7 +1998,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          providerEnvKey,
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -5232,11 +5232,10 @@ export async function main(
                     config,
                     scanCodexHome(dependencies.environment),
                   );
-                  if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider(effectiveConfig),
+                      config: effectiveConfig,
                       command: "policy",
                       signal,
                     },
@@ -8818,6 +8817,7 @@ async function matchAllScans(
     const input: ScanComparisonInput = {
       before,
       after: afterFindings,
+      ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
     const matching =
@@ -10619,23 +10619,29 @@ async function publishPatchBranch(
           throw error;
         })
       ).filter(Boolean);
-      const enabledRecursion = new Set([
+      const supportedRecursion = new Set([
         "push.recursesubmodules\ncheck",
         "push.recursesubmodules\non-demand",
         "push.recursesubmodules\nonly",
-        "submodule.recurse\ntrue",
-      ]);
-      const disabledRecursion = new Set([
         "push.recursesubmodules\nfalse",
+        "submodule.recurse\ntrue",
         "submodule.recurse\nfalse",
       ]);
-      const knownSettings = recursionSettings.every(
-        (setting) =>
-          enabledRecursion.has(setting) || disabledRecursion.has(setting),
-      );
-      const disabled =
-        knownSettings && disabledRecursion.has(recursionSettings.at(-1) ?? "");
-      if (knownSettings && !disabled)
+      if (recursionSettings.some((entry) => !supportedRecursion.has(entry)))
+        throw new CodexSecurityError(
+          "Invalid Git submodule recursion configuration. Correct the settings before resuming patch publication.",
+        );
+      const recursion = recursionSettings.at(-1);
+      if (recursion === "push.recursesubmodules\nonly")
+        throw new CodexSecurityError(
+          "Automatic patch publication cannot publish child repositories. Publish the submodule commits separately, then resume the parent with push.recurseSubmodules=check.",
+        );
+      const skipSubmoduleCheck =
+        recursion === "push.recursesubmodules\nfalse" ||
+        recursion === "submodule.recurse\nfalse";
+      // Child remotes have their own transport configuration. Never start a
+      // nested push from a parent-only publication, including on resume.
+      if (!skipSubmoduleCheck)
         await checkDeinitializedPatchSubmodules(
           repository,
           branch,
@@ -10645,8 +10651,9 @@ async function publishPatchBranch(
         "git",
         [
           "push",
-          // Nested transports have separate configuration from the validated parent.
-          disabled ? "--recurse-submodules=no" : "--recurse-submodules=check",
+          skipSubmoduleCheck
+            ? "--recurse-submodules=no"
+            : "--recurse-submodules=check",
           "--set-upstream",
           `--force-with-lease=refs/heads/${branch}:`,
           "origin",
@@ -13832,24 +13839,25 @@ function diagnosticValue(value: unknown): string {
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
-    provider: unknown;
+    config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanAuthMode | undefined> {
-  const { auth, provider, signal } = options;
+  const { auth, config, signal } = options;
   if (
     errorOutput.isTTY !== true ||
-    isExternalModelProvider(provider) ||
+    hasCommandAuth(config) ||
+    scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
   const authentication = scanAuthentication(
     dependencies.environment,
     auth,
-    provider,
+    scanModelProvider(config),
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -14112,7 +14120,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              config: effectiveConfiguration,
               command: "scan",
               signal: preparationAbortController.signal,
             },

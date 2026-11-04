@@ -105,6 +105,10 @@ describe("deinitialized patch submodule availability", () => {
     const commitUpdate = async () => {
       await writeFile(join(nested, "app.ts"), "fixed\n");
       inner("commit", "-am", "Synthetic nested update");
+      if (published) {
+        repositoryGit(childRemote)("fetch", nested, "HEAD:refs/heads/main");
+        inner("fetch", "origin");
+      }
       return inner("rev-parse", "HEAD");
     };
     let preparedCommit = "";
@@ -113,15 +117,12 @@ describe("deinitialized patch submodule availability", () => {
     } else {
       // Configuration setup precedes capture; the patch changes only the gitlink.
       preparedCommit = await commitUpdate();
-      if (published) inner("push", "origin", "HEAD:main");
       git("submodule", "deinit", "--force", "--", "nested");
     }
     const update = async () => {
       const commit = initialized ? await commitUpdate() : preparedCommit;
-      if (initialized) {
-        if (published) inner("push", "origin", "HEAD:main");
-        git("add", "nested");
-      } else git("update-index", "--cacheinfo", `160000,${commit},nested`);
+      if (initialized) git("add", "nested");
+      else git("update-index", "--cacheinfo", `160000,${commit},nested`);
       return commit;
     };
     return {
@@ -263,16 +264,27 @@ describe("deinitialized patch submodule availability", () => {
   type ConfigurationCase = {
     name: string;
     settings: readonly Setting[];
-    expected: "blocked" | "success" | "opt-out" | "native" | "unpublished";
+    expected:
+      | "blocked"
+      | "success"
+      | "opt-out"
+      | "invalid"
+      | "check-only"
+      | "child-only";
     published?: boolean;
     initialized?: boolean;
   };
   const configurations: ConfigurationCase[] = [
-    ...["check", "on-demand", "only"].map((value): ConfigurationCase => ({
+    ...["check", "on-demand"].map((value): ConfigurationCase => ({
       name: `unpublished child with push recursion ${value}`,
       settings: [["push.recurseSubmodules", value]],
       expected: "blocked",
     })),
+    {
+      name: "child-only mode refuses to publish the parent",
+      settings: [["push.recurseSubmodules", "only"]],
+      expected: "child-only",
+    },
     {
       name: "unpublished child with submodule recursion true",
       settings: [["submodule.recurse", "true"]],
@@ -302,16 +314,22 @@ describe("deinitialized patch submodule availability", () => {
       initialized: true,
       published: true,
     },
-    ...["on-demand", "only"].map((value): ConfigurationCase => ({
-      name: `initialized child with push recursion ${value}`,
-      settings: [["push.recurseSubmodules", value]],
-      expected: "unpublished",
+    {
+      name: "initialized child-only mode refuses to publish the parent",
+      settings: [["push.recurseSubmodules", "only"]],
+      expected: "child-only",
       initialized: true,
-    })),
+    },
+    {
+      name: "initialized child with push recursion on-demand",
+      settings: [["push.recurseSubmodules", "on-demand"]],
+      expected: "check-only",
+      initialized: true,
+    },
     {
       name: "initialized child with submodule recursion true",
       settings: [["submodule.recurse", "true"]],
-      expected: "unpublished",
+      expected: "check-only",
       initialized: true,
     },
     ...[
@@ -350,17 +368,17 @@ describe("deinitialized patch submodule availability", () => {
       expected: "opt-out",
     },
     ...["invalid-mode", "true", undefined].map((value): ConfigurationCase => ({
-      name: `native invalid push recursion ${value ?? "valueless"}`,
+      name: `invalid push recursion ${value ?? "valueless"}`,
       settings: [["push.recurseSubmodules", value]],
-      expected: "native",
+      expected: "invalid",
     })),
     {
-      name: "native handling of invalid push recursion followed by check",
+      name: "invalid push recursion followed by check",
       settings: [
         ["push.recurseSubmodules", "invalid-mode"],
         ["push.recurseSubmodules", "check"],
       ],
-      expected: "native",
+      expected: "invalid",
     },
   ];
 
@@ -390,7 +408,10 @@ describe("deinitialized patch submodule availability", () => {
           );
         const originalConfiguration = configured();
         const interrupted =
-          phase === "resume" && configuration.expected !== "blocked";
+          phase === "resume" &&
+          !["blocked", "child-only", "invalid"].includes(
+            configuration.expected,
+          );
         if (interrupted) current.interruptPublication();
         let commit = "";
         const initial = await current.run(
@@ -419,11 +440,19 @@ describe("deinitialized patch submodule availability", () => {
         expect(configured()).toBe(originalConfiguration);
         expect(current.counts().modelRuns).toBe(1);
 
-        if (configuration.expected === "blocked") {
+        if (
+          configuration.expected === "blocked" ||
+          configuration.expected === "child-only" ||
+          configuration.expected === "invalid"
+        ) {
           expect(initial.exitCode).toBe(2);
           expect(result.exitCode).toBe(2);
           expect(result.stderr).toContain(
-            "not available in its remote-tracking refs",
+            configuration.expected === "blocked"
+              ? "not available in its remote-tracking refs"
+              : configuration.expected === "invalid"
+                ? "Invalid Git submodule recursion configuration"
+                : "cannot publish child repositories",
           );
           expect(current.git("ls-remote", "origin")).toBe("");
           expect(repositoryGit(current.childRemote)("show-ref")).not.toContain(
@@ -449,7 +478,7 @@ describe("deinitialized patch submodule availability", () => {
         );
         expect(current.nativePushes).toHaveLength(1);
         const native = current.nativePushes[0]!;
-        if (configuration.expected === "unpublished") {
+        if (configuration.expected === "check-only") {
           expect(result.exitCode).toBe(2);
           expect(native.exitCode).not.toBe(0);
           expect(current.git("ls-remote", "origin")).toBe("");
@@ -459,21 +488,6 @@ describe("deinitialized patch submodule availability", () => {
           expect(current.counts().creations).toBe(0);
           continue;
         }
-        if (configuration.expected === "native") {
-          // Git versions differ on an invalid value overwritten by a later valid one.
-          // Preserve the native push result and diagnostic in either case.
-          expect(result.exitCode).toBe(native.exitCode === 0 ? 0 : 2);
-          if (native.exitCode !== 0) {
-            expect(native.stderr).not.toBe("");
-            expect(result.stderr).toContain(native.stderr);
-            expect(current.git("ls-remote", "origin")).toBe("");
-          }
-          expect(current.counts().creations).toBe(
-            native.exitCode === 0 ? 1 : 0,
-          );
-          continue;
-        }
-
         expect(native.exitCode).toBe(0);
         expect(result.exitCode).toBe(0);
         expect(current.counts().creations).toBe(1);

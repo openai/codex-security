@@ -104,6 +104,13 @@ the stored login. Patch follow-up assessments and `scan --patch` retain the
 chosen authentication. Environment keys do not replace the saved login.
 The SDK uses `auth` on `run()`, `validate()`, and `preflight()`.
 
+For a scan using a custom native provider, `auto` and `api-key` use the
+environment variable declared by `model_providers.<id>.env_key`, including
+when a Codex file profile selects that provider. Set that variable before
+starting the scan. To use `--auth chatgpt`, select a provider configured for
+account authentication. A custom provider that requires its own key cannot
+honor that combination.
+
 Stored OpenAI credentials live in
 `$CODEX_SECURITY_STATE_DIR/codex-home`, or
 `$CODEX_HOME/state/plugins/codex-security/codex-home`. Keep this private home
@@ -1145,8 +1152,12 @@ report and lists unvalidated candidates as follow-up work. Reaching a configured
 limit with a valid finalized report returns `0` by default, or `1` if findings
 meet a configured failure threshold.
 
-When Codex reports an exhausted usage limit, Deep Scan cancels active workers
-and stops retrying or launching replacements. Completed worker artifacts are retained.
+When a worker turn fails with a known cybersecurity policy refusal or an
+exhausted usage limit, Deep Scan stops retries and replacements, cancels active
+siblings, and retains completed worker artifacts. A capability check can succeed
+before a later request is refused. Use `scans show SCAN_ID` to inspect the failed
+scan and its retained results. To run it again from a saved recipe, use
+`scans rerun SCAN_ID`, which starts fresh discovery.
 
 At 80% of a single interactive scan's limit, the dashboard offers a higher total
 budget. Enter a larger total, or leave it blank/press Escape to keep the limit.
@@ -2152,6 +2163,13 @@ One comparison ID is compared with the latest completed scan.
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
 
+When a saved Standard scan and a Deep scan have the same recorded target,
+revision, and snapshot digest, matching flags findings that have different
+anchors but share a unique rule, first displayed source range, and optional
+instance. Matching preserves the case of saved paths. Codex can request the
+saved evidence to distinguish separate causes at that site. Automatic matching
+under a cost limit keeps its single comparison call.
+
 Only high-confidence root-cause matches are grouped. Uncertain and related
 findings remain separate. Rebuilding retains stable identities, triage, and
 sealed artifacts; interruption preserves completed comparisons. Model/effort
@@ -2771,15 +2789,13 @@ All configured push destinations are checked for existing branch namespace
 collisions before patching. Separate remote servers cannot be updated atomically:
 a remote can change or fail after that check, leaving an earlier push complete.
 
-Publication uses Git's submodule availability check by default. Existing
-`push.recurseSubmodules` and `submodule.recurse` settings pass through to Git
-unchanged. When recursion is enabled, publication also checks retained local
-metadata for changed, deinitialized submodules. This supplemental check uses
-remote-tracking refs; it does not fetch or publish child commits. Initialized
-submodules retain Git's configured recursive push behavior, and explicit settings
-that disable recursion skip the supplemental check. If publication reports an
-unpublished submodule commit, publish that commit from the submodule first, then
-resume the saved parent commit.
+Automatic publication pushes the parent repository only. By default it checks
+that changed submodule commits are available and also checks remote-tracking
+refs in the retained metadata of deinitialized submodules. An explicit setting
+that disables recursion skips these checks. On-demand recursion and
+`submodule.recurse=true` use check-only mode. Child-only push mode stops
+publication. Publish missing child commits separately, then resume the saved
+parent from a configuration that allows a parent push.
 
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
