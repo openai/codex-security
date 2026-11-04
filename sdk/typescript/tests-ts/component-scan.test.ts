@@ -506,7 +506,7 @@ test.each([true, false])(
     expect(typeof receipt.scanId).toBe("string");
     expect(events.filter((event) => event.type === "lifecycle")).toMatchObject(
       observe
-        ? ["running", "failed"].map((status) => ({
+        ? ["running", "canceled"].map((status) => ({
             componentId: receipt.id,
             value: { status, scanId: receipt.scanId },
           }))
