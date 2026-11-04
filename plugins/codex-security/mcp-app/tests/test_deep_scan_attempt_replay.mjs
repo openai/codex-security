@@ -261,7 +261,10 @@ async function testResponseLoss(responseLosses) {
     assert.notEqual(frozen, resultPath);
     await rm(resultPath);
     const resumed = await recover();
-    assert.deepEqual(await resumed.restoreUnion(resultPath, recovered), result);
+    assert.deepEqual(await resumed.restoreUnion(resultPath, recovered), {
+      result,
+      resultPath: frozen,
+    });
     assert.equal(await readFile(frozen, "utf8"), bytes);
     await writeFile(discovery.worker.resultPath, "\n", { flag: "a" });
     await assert.rejects(

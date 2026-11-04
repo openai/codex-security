@@ -18,7 +18,7 @@ import type {
 } from "../src/deep-scan/types.js";
 import { mock } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -2303,6 +2303,11 @@ async function testRestartRestoresDispatchOrderAfterMixedResults() {
   await writeJson(
     second.resultManifestPath,
     standardScanDraft(fixture.run.scanId, "issue", "discovery-0002"),
+  );
+  second.acceptedResultPath = second.resultManifestPath;
+  second.acceptedResultSha256 = hash(
+    "sha256",
+    await readFile(second.acceptedResultPath),
   );
   for (const worker of persisted) store.workers.set(worker.id, worker);
   Object.assign(store.run, {

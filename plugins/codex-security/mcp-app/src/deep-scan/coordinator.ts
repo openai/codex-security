@@ -54,6 +54,10 @@ const RETRY_DELAYS_MS = [60_000, 180_000, 540_000] as const;
 const COORDINATOR_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_HOURS = 96;
 
+function acceptedResult(path?: string, sha256?: string) {
+  return path && sha256 ? { path, sha256 } : undefined;
+}
+
 interface LoopResult {
   reason: DeepScanTerminalReason;
   result?: ScanUnion;
@@ -847,7 +851,7 @@ export class DeepScanCoordinator {
         relative(this.artifacts.dedupRoot, resultPath).split(sep)[0]!,
         "dedup",
       );
-    let resultPath = persisted
+    const latestCheckpoint = persisted
       .flatMap((worker) =>
         worker.kind === "dedup" &&
         worker.status === "succeeded" &&
@@ -856,10 +860,12 @@ export class DeepScanCoordinator {
           : [],
       )
       .sort((a, b) => Number(checkpointNumber(b) - checkpointNumber(a)))[0];
-    const result = await this.restoreUnion(
-      resultPath,
+    const restored = await this.restoreUnion(
+      latestCheckpoint,
       accepted.filter((w) => merged.has(w.id)),
     );
+    const result = restored.result;
+    let resultPath = restored.resultPath;
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
@@ -1033,11 +1039,11 @@ export class DeepScanCoordinator {
   private async restoreUnion(
     resultPath: string | undefined,
     merged: AcceptedDiscovery[],
-  ): Promise<ScanUnion> {
+  ): Promise<{ result: ScanUnion; resultPath?: string }> {
     if (!resultPath) {
       if (merged.length)
         throw new Error("Deep Scan is missing its saved iteration result.");
-      return { scanId: this.state.scanId, findings: [] };
+      return { result: { scanId: this.state.scanId, findings: [] } };
     }
     const checkpoint = this.state.persistedWorkers?.find(
       (worker) =>
@@ -1045,17 +1051,25 @@ export class DeepScanCoordinator {
     );
     const claim = this.state.persistedMergeClaims?.find(
       (item) =>
-        item.previousWorkerId === checkpoint?.id && item.previousResultPath,
+        item.previousWorkerId === checkpoint?.id &&
+        item.previousResultPath &&
+        item.previousResultSha256,
     );
-    const path =
-      checkpoint?.acceptedResultPath ?? claim?.previousResultPath ?? resultPath;
-    await requireRegularFile(path, this.artifacts.dedupRoot);
+    const reference =
+      acceptedResult(
+        checkpoint?.acceptedResultPath,
+        checkpoint?.acceptedResultSha256,
+      ) ??
+      acceptedResult(claim?.previousResultPath, claim?.previousResultSha256);
+    if (!reference)
+      throw new Error(
+        "Saved Deep Scan iteration is missing its accepted result digest.",
+      );
+    await requireRegularFile(reference.path, this.artifacts.dedupRoot);
     const result = parseStoredScanDraft(
-      await readJsonObject(path, {
+      await readJsonObject(reference.path, {
         scanRoot: this.artifacts.scanDir,
-        sha256: checkpoint?.acceptedResultPath
-          ? checkpoint.acceptedResultSha256
-          : claim?.previousResultSha256,
+        sha256: reference.sha256,
       }),
       "Saved Deep Scan iteration",
       this.state.scanId,
@@ -1064,7 +1078,7 @@ export class DeepScanCoordinator {
     if (!result.sourceCoverage)
       for (const worker of merged)
         addScanCoverage(result, worker, this.artifacts.scanDir);
-    return result;
+    return { result, resultPath: reference.path };
   }
 
   private async scanBatch(
@@ -1112,20 +1126,26 @@ export class DeepScanCoordinator {
         (input) =>
           input.discoveryWorkerId === worker.id &&
           (input.attempt === undefined || input.attempt === worker.attempt) &&
-          input.resultManifestPath,
+          input.resultManifestPath &&
+          input.resultManifestSha256,
       );
-      const resultPath =
-        worker.acceptedResultPath ??
-        claimedInput?.resultManifestPath ??
-        worker.resultManifestPath;
-      if (!resultPath || !worker.completionSequence) {
+      const reference =
+        acceptedResult(
+          worker.acceptedResultPath,
+          worker.acceptedResultSha256,
+        ) ??
+        acceptedResult(
+          claimedInput?.resultManifestPath,
+          claimedInput?.resultManifestSha256,
+        );
+      if (!reference || !worker.completionSequence) {
         throw new Error(
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
       const result = await validateDiscoveryArtifacts(
         this.artifacts,
-        resultPath,
+        reference.path,
         this.state.scanId,
         {
           ...this.state,
@@ -1133,19 +1153,13 @@ export class DeepScanCoordinator {
           validateWriteups:
             this.state.workflowVersion === "deep-security-scan/v2",
           artifactDir: worker.artifactDir,
-          resultSha256:
-            (resultPath === worker.acceptedResultPath
-              ? worker.acceptedResultSha256
-              : undefined) ??
-            (resultPath === claimedInput?.resultManifestPath
-              ? claimedInput.resultManifestSha256
-              : undefined),
+          resultSha256: reference.sha256,
         },
       );
       recovered.push({
         id: worker.id,
         artifactDir: worker.artifactDir,
-        resultPath,
+        resultPath: reference.path,
         result,
         attempt: worker.attempt,
       });

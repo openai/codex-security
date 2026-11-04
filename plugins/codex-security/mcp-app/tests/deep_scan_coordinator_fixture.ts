@@ -181,6 +181,8 @@ export class FakeStore {
       update.status === "succeeded" &&
       !persisted.completionSequence
     ) {
+      persisted.acceptedResultPath = update.resultManifestPath;
+      persisted.acceptedResultSha256 = update.validatedResultSha256;
       persisted.completionSequence = ++this.completionSequence;
       persisted.mergeState = "buffered";
       this.run.consecutiveErrors = 0;
@@ -205,6 +207,8 @@ export class FakeStore {
       promptPath: input.resultPath,
       artifactDir: path.dirname(input.resultPath),
       resultManifestPath: input.resultPath,
+      acceptedResultPath: input.resultPath,
+      acceptedResultSha256: input.validatedResultSha256,
     });
     this.iterations.push(structuredClone(input));
     this.run.noNewStreak = input.noNewStreak;
