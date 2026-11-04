@@ -3037,7 +3037,7 @@ def test_completion_recovers_replaced_deep_worker_threads(
 def test_deep_usage_retains_bound_sessions_without_directory_metadata(
     tmp_path: Path, missing: str
 ) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     fixture.write_parent_rollout([_token_event(fixture.started_at, 10, 3)])
     with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
         db.execute(f"ALTER TABLE threads DROP COLUMN {missing}")

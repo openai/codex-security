@@ -523,6 +523,7 @@ def test_accepted_result_does_not_reopen_replaced_path(
         attempt=1,
         sdk_thread_id="synthetic-worker",
         error_message=None,
+        terminal_failure=False,
         replaceable_failure_kind=None,
         coordinator_generation=None,
     )
