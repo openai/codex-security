@@ -84,6 +84,10 @@ result validation finished; it does not imply that a patch fixed the finding:
   still works. If the selected mode cannot establish that, use `inconclusive`
   unless the evidence shows the finding is still vulnerable.
 
+For a fresh `verified` or `no_change` result, the executor must return a
+boolean `credentialRevocationPending`. The SDK omits the field from the public
+result when false. A missing executor decision is an invalid result.
+
 For a credential exposed in source, `patch.status` describes code cleanup.
 When `patch.credentialRevocationPending` is `true`, show the owner action in
 `patch.verification` and keep the credential finding open. The owner can revoke

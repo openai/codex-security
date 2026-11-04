@@ -581,6 +581,7 @@ function patchOutcomeFromResponse(
     case "verified":
       if (
         changedFiles.length === 0 ||
+        response.credentialRevocationPending === undefined ||
         verificationReport === null ||
         reason !== null
       )
@@ -589,6 +590,7 @@ function patchOutcomeFromResponse(
     case "no_change":
       if (
         changedFiles.length !== 0 ||
+        response.credentialRevocationPending === undefined ||
         verificationReport === null ||
         reason !== null
       )

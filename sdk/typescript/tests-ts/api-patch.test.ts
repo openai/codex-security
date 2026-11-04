@@ -524,6 +524,9 @@ describe("CodexSecurity headless patching", () => {
     "returns the structured $status outcome",
     async (outcome) => {
       const response = {
+        ...(outcome.status === "no_change"
+          ? { credentialRevocationPending: false }
+          : {}),
         ...outcome,
         verificationReport: outcome.verificationReport ?? null,
         reason: outcome.reason ?? null,
@@ -596,6 +599,11 @@ describe("CodexSecurity headless patching", () => {
 
     for (const [response, complete, message] of [
       ["not JSON", true, "invalid result"],
+      [
+        { ...verifiedResponse, credentialRevocationPending: undefined },
+        true,
+        "invalid result",
+      ],
       [
         { ...verifiedResponse, verificationReport: " " },
         true,

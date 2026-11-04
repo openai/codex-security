@@ -315,8 +315,10 @@ the replacement can affect their guidance too.
 
 Codex looks for credentials in the selected source, including tests and unused
 code. It assesses exposure offline. Severity reflects who can read the value
-and what access the evidence supports. Live status stays unknown unless the
-issuer or credential owner provides evidence.
+and what access the evidence supports. Findings say “Validity unchecked”
+unless you supply dated evidence from the issuer or owner that establishes
+the status of that specific credential. If you use custom validation, include
+the confirmation in your validation workflow.
 
 If another scanner handles known-format API keys and tokens, add one line to
 the repository’s root `SECURITY.md`:
@@ -2700,6 +2702,9 @@ The assessment does not change the patch or merge state.
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
+For a direct patch request, `--json` includes the agent's `report` even when no
+files change. Read it for any setup or credential retirement steps. With
+`--full-output --json`, the report is under `data.report`.
 File changes alone do not prove a fix; saved findings require a verified result.
 
 For a controlled container providing its own isolation:
@@ -2717,9 +2722,10 @@ patch-risk assessment still uses its read-only sandbox.
 and add instructions. The interactive finding browser lists critical, high,
 medium, then low findings, preserving scan order within each severity.
 Patch results are `verified`, `no_change`, `blocked`, or `failed`. A verified
-patch or an already-fixed finding clears the severity threshold unless an
-exposed credential still needs retirement. In that case the code change is
-available for review and the finding still counts toward the threshold.
+patch or an already-fixed finding clears the severity threshold for that run
+unless an exposed credential still needs retirement. A later scan evaluates the
+source as it exists then. To [verify retirement](#verify-fixes), use the original
+finding and the issuer’s or owner’s confirmation that the old credential was disabled.
 
 ### Create or resume a draft pull request
 

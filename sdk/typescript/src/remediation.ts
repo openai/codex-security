@@ -5,19 +5,19 @@ import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
 
-export const FindingPatchSchema = z.object({
+const FindingPatchSchema = z.object({
   occurrenceId: z.string(),
   status: z.enum(["verified", "no_change", "blocked", "failed"]),
   files: z.array(z.string()),
   verification: z.string().optional(),
-  credentialRevocationPending: z
-    .boolean()
-    .transform((pending) => pending || undefined)
-    .optional(),
+  credentialRevocationPending: z.boolean().optional(),
   reason: z.string().optional(),
 });
 
-export type FindingPatch = z.infer<typeof FindingPatchSchema>;
+export type FindingPatch = Omit<
+  z.infer<typeof FindingPatchSchema>,
+  "credentialRevocationPending"
+> & { credentialRevocationPending?: true };
 
 export const FindingVerificationSchema = z.object({
   id: z.string(),
@@ -107,8 +107,8 @@ export async function remediationPrompt(input: RemediationPromptInput) {
     );
     if (input.structuredPatch) {
       prompt.push(
-        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
-          "Include the boolean credentialRevocationPending. Set it to true for verified or no_change source-credential patches unless caller-supplied issuer or owner evidence confirms the specific old credential is retired. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
+        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"credentialRevocationPending":false,"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
+          "Set credentialRevocationPending to true for verified or no_change source-credential patches unless caller-supplied issuer or owner evidence confirms the specific old credential is retired. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
           (staticVerification
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
@@ -194,20 +194,22 @@ export function parseFindingPatch(
       "No complete patch result was returned for this finding.",
     );
   }
-  const patch = parsed.data.patches[0]!;
-  if (
-    (patch.status === "verified" || patch.status === "no_change") &&
-    !patch.verification?.trim()
-  ) {
-    throw new CodexSecurityError("Patch verification was not reported.");
-  }
-  if (
-    (patch.status === "blocked" || patch.status === "failed") &&
-    !patch.reason?.trim()
-  ) {
+  const { credentialRevocationPending, ...patch } = parsed.data.patches[0]!;
+  if (patch.status === "verified" || patch.status === "no_change") {
+    if (!patch.verification?.trim())
+      throw new CodexSecurityError("Patch verification was not reported.");
+    if (credentialRevocationPending === undefined)
+      throw new CodexSecurityError(
+        "Credential retirement status was not reported.",
+      );
+    if (patch.status === "no_change" && patch.files.length > 0)
+      throw new CodexSecurityError("A no-change patch listed modified files.");
+  } else if (!patch.reason?.trim()) {
     throw new CodexSecurityError(
       "The patch failure or blocker was not explained.",
     );
   }
-  return patch;
+  return credentialRevocationPending
+    ? { ...patch, credentialRevocationPending: true }
+    : patch;
 }

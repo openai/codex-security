@@ -100,6 +100,7 @@ test.each([
                     occurrenceId: input.finding.id,
                     status: "verified",
                     files: ["guard.ts"],
+                    credentialRevocationPending: false,
                     verification: evidence,
                   },
                 ],
@@ -234,6 +235,13 @@ test.each([true, false])(
 );
 
 test.each([
+  { status: "verified", verification: "Only source cleanup was verified." },
+  {
+    status: "no_change",
+    verification: "Already configured.",
+    files: ["app.ts"],
+    credentialRevocationPending: false,
+  },
   { status: "verified", verification: undefined },
   { status: "no_change", verification: " " },
   { status: "blocked", reason: undefined },

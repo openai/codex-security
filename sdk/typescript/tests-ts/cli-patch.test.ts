@@ -76,7 +76,10 @@ function completePatches(
         status,
         files: status === "verified" ? [finding.locations[0]!.path] : [],
         ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
+          ? {
+              verification: "The exploit fails and focused tests pass.",
+              credentialRevocationPending: false,
+            }
           : { reason: "The required service is unavailable." }),
       })),
     }),
@@ -455,6 +458,7 @@ describe("scan and patch workflow", () => {
                     occurrenceId: "occ_1",
                     status: "verified",
                     files: ["guard.ts"],
+                    credentialRevocationPending: false,
                     verification: report,
                   },
                 ],
@@ -1842,57 +1846,76 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("keeps a saved finding's source edits and reports why code verification is blocked", async () => {
-    await using temp = await scopedTemporaryDirectory("credential-patch-");
-    const repository = temp.path;
-    const path = "deploy.env";
-    const file = join(repository, path);
-    const result = resultWithFindings(["high"]);
-    const patch = {
-      occurrenceId: "occ_1",
-      status: "blocked",
-      files: [path],
-      verification: "The deployment reads the token from its environment.",
-      credentialRevocationPending: true,
-      reason:
-        "The replacement token has not been provisioned, so deployment verification is blocked.",
-    };
-    fixtureGit(repository, "init", "--initial-branch=main");
-    await writeFile(file, "TOKEN=synthetic-fixture\n");
-    fixtureGit(repository, "add", path);
-    fixtureGit(repository, "commit", "--no-gpg-sign", "-m", "Fixture");
-
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: repository,
-        result,
-        onWorkbench: () => savedScan(result, "scan-1", repository),
-        onRepositoryCommand: runGitRepositoryCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(file, "TOKEN=${REGISTRY_TOKEN}\n");
-          output?.stdout.write(JSON.stringify({ patches: [patch] }));
-          return 0;
-        },
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(1);
-    expect(outcome.stderr).toContain("BLOCKED");
-    expect(outcome.stderr).toContain(patch.reason);
-    const response = JSON.parse(outcome.stdout);
-    expect(response).toMatchObject({
-      applied: true,
-      files: [path],
-      patches: [patch],
-    });
-    expect(response.pullRequest).toBeUndefined();
-    expect(fixtureGit(repository, "diff", "--name-only")).toBe(path);
-    expect(fixtureGit(repository, "branch", "--show-current")).toBe("main");
-  });
-
-  test.each(["verified", "no_change"] as const)(
-    "keeps pending credential retirement blocking CI after a %s code patch",
+  test.each(["blocked", "no_change"] as const)(
+    "keeps source edits available for review when a worker reports %s",
     async (status) => {
+      await using temp = await scopedTemporaryDirectory("credential-patch-");
+      const repository = temp.path;
+      const path = "deploy.env";
+      const file = join(repository, path);
+      const result = resultWithFindings(["high"]);
+      const reason =
+        status === "blocked"
+          ? "The replacement token has not been provisioned, so deployment verification is blocked."
+          : "The patch reported no change but modified files.";
+      const patch = {
+        occurrenceId: "occ_1",
+        status,
+        files: status === "blocked" ? [path] : [],
+        verification: "The deployment reads the token from its environment.",
+        credentialRevocationPending: status === "blocked",
+        ...(status === "blocked" ? { reason } : {}),
+      };
+      fixtureGit(repository, "init", "--initial-branch=main");
+      await writeFile(file, "TOKEN=synthetic-fixture\n");
+      fixtureGit(repository, "add", path);
+      fixtureGit(repository, "commit", "--no-gpg-sign", "-m", "Fixture");
+
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: repository,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", repository),
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            await writeFile(file, "TOKEN=${REGISTRY_TOKEN}\n");
+            output?.stdout.write(JSON.stringify({ patches: [patch] }));
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        status === "blocked" ? 1 : 2,
+      );
+      expect(outcome.stderr).toContain(
+        status === "blocked" ? "BLOCKED" : "FAILED",
+      );
+      expect(outcome.stderr).toContain(reason);
+      const response = JSON.parse(outcome.stdout);
+      expect(response).toMatchObject({
+        applied: true,
+        files: [path],
+        patches: [
+          status === "blocked"
+            ? patch
+            : { status: "failed", files: [path], reason },
+        ],
+      });
+      expect(response.pullRequest).toBeUndefined();
+      expect(fixtureGit(repository, "diff", "--name-only")).toBe(path);
+      expect(fixtureGit(repository, "branch", "--show-current")).toBe("main");
+    },
+  );
+
+  test.each([
+    ["verified", true, 1],
+    ["no_change", true, 1],
+    ["no_change", false, 0],
+    ["no_change", undefined, 2],
+  ] as const)(
+    "gates credential retirement after %s with pending=%p",
+    async (status, pending, exitCode) => {
       const files = status === "verified" ? ["src/finding-1.ts"] : [];
       let publishedBody: string | undefined;
       const outcome = await runWorkflow(
@@ -1915,8 +1938,10 @@ describe("scan and patch workflow", () => {
                     status,
                     files,
                     verification:
-                      "The application now reads its password from the configured store.",
-                    credentialRevocationPending: true,
+                      pending === false
+                        ? "The old password was removed and its owner confirmed it was disabled."
+                        : "The application reads its password from the secret store. Ask the database owner to rotate the old password.",
+                    credentialRevocationPending: pending,
                   },
                 ],
               }),
@@ -1934,12 +1959,23 @@ describe("scan and patch workflow", () => {
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(1);
-      expect(JSON.parse(outcome.stdout).patches).toMatchObject([
-        { status, credentialRevocationPending: true },
-      ]);
-      expect(outcome.stderr).toContain("REVOCATION PENDING");
-      expect(outcome.stderr).toContain("Confirm revocation");
+      expect(outcome.exitCode, outcome.stderr).toBe(exitCode);
+      const [patch] = JSON.parse(outcome.stdout).patches;
+      if (pending === undefined) {
+        expect(patch.status).toBe("failed");
+        expect(patch.reason).toContain(
+          "Credential retirement status was not reported",
+        );
+      } else {
+        expect(patch.status).toBe(status);
+        expect(patch.credentialRevocationPending).toBe(pending || undefined);
+      }
+      if (pending) {
+        expect(outcome.stderr).toContain("REVOCATION PENDING");
+        expect(outcome.stderr).toContain(
+          "Ask the database owner to rotate the old password.",
+        );
+      }
       if (status === "verified") {
         expect(publishedBody).toContain("Confirm revocation");
       } else {
@@ -1969,7 +2005,11 @@ describe("scan and patch workflow", () => {
         {
           result: resultWithFindings(["high"]),
           onCodex: (_args, output) => {
-            output?.stdout.write(JSON.stringify({ patches: [patch] }));
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [{ credentialRevocationPending: false, ...patch }],
+              }),
+            );
             return 0;
           },
           onRepositoryCommand: (command, args) => {
