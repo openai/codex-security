@@ -9048,6 +9048,17 @@ async function patchPublicationDestination(
     await remoteUrl(["remote", "get-url", "--push", "--all", "origin"])
   ).split("\n");
   const fetchRemote = await remoteUrl(["remote", "get-url", "origin"]);
+  // Git dispatches helper names literally, including schemes that URL would lowercase.
+  for (const url of [fetchRemote, ...pushRemotes]) {
+    if (
+      /^[A-Za-z0-9+.-]+::/u.test(url) ||
+      (/^[A-Za-z0-9+.-]+:\/\//u.test(url) &&
+        !/^(?:https?|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
+    )
+      throw new CodexSecurityError(
+        "Patch publication cannot use a Git remote helper selected by the checkout.",
+      );
+  }
   const remote = pushRemotes.find(isNetworkPatchRemote);
   if (!remote)
     throw new CodexSecurityError(
