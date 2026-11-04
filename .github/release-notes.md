@@ -41,6 +41,8 @@
 - recognize usage limits reported during compaction ([#1844](https://github.com/openai/codex-security/pull/1844))
 - omit DOCX drawing positions and sizes from extracted text ([#2051](https://github.com/openai/codex-security/pull/2051))
 - report a failed ignored-but-tracked file listing ([#864](https://github.com/openai/codex-security/pull/864))
+- check resolved path types before scan registration ([#549](https://github.com/openai/codex-security/pull/549))
+- preserve worker activity when a session log is unreadable ([#970](https://github.com/openai/codex-security/pull/970))
 
 <!-- release-section: highlights:end -->
 
