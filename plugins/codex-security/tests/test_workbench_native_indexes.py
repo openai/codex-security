@@ -34,9 +34,9 @@ def complete_scan(
         workspace = save_workspace(
             state_dir, str(workspace["id"]), str(target), include_paths[0], "standard"
         )
-    started = start_delivered_scan(state_dir, "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    started = start_delivered_scan(state_dir, str(workspace["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(str(started["scanDir"]))
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -259,7 +259,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         "Fixture close decision.",
     )
     running_workspace = create_saved_workspace(state_dir, first_target)
-    older_running = start_delivered_scan(state_dir, "--workspace-id", str(running_workspace["id"]))
+    older_running = start_delivered_scan(state_dir, str(running_workspace["id"]))
     complete_scan(state_dir, first_target, identity_anchor="first-finding")
     distinct_first = complete_scan(
         state_dir,
@@ -269,7 +269,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
         relative_path="docs/extract.py",
     )
     latest_second = complete_scan(state_dir, second_target, identity_anchor="second-finding")
-    update_progress(state_dir, str(older_running["results"]["scanId"]), "--phase", "discovery")
+    update_progress(state_dir, str(older_running["scanId"]), "--phase", "discovery")
     second_target.rename(tmp_path / "moved-second-repo")
 
     repositories = run_workbench(state_dir, "list-repositories")["repositories"]

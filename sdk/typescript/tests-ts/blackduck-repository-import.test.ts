@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -108,9 +107,7 @@ test("Black Duck keeps package occurrences unassessed across replay, mitigation,
     prepareNormalizedLocalImport(altered, options, dependencies),
   ).rejects.toThrow(/retained scanner repository/i);
   const remote = sourceRepositoryUrl + "?repo=other";
-  execFileSync("git", ["remote", "set-url", "origin", remote], {
-    cwd: fixture.repository,
-  });
+  fixture.git("remote", "set-url", "origin", remote);
   await expect(
     prepareNormalizedLocalImport(first.preview, options, dependencies),
   ).rejects.toThrow(/does not match a configured remote/);
@@ -138,13 +135,7 @@ test("Black Duck binds normalized summaries to native findings and comparable re
       { environment: fixture.environment, sourceRepositories },
     );
 
-  execFileSync(
-    "git",
-    ["remote", "add", "upstream", other + "?repo=different"],
-    {
-      cwd: fixture.repository,
-    },
-  );
+  fixture.git("remote", "add", "upstream", other + "?repo=different");
   const typed = (id: string, url: string) => ({
     source_finding_id: id,
     evidence: {
@@ -210,9 +201,7 @@ test("Black Duck binds normalized summaries to native findings and comparable re
   await prepare(native, alias);
   await prepare(typed("sdk-source", source), alias);
 
-  execFileSync("git", ["remote", "set-url", "upstream", other], {
-    cwd: fixture.repository,
-  });
+  fixture.git("remote", "set-url", "upstream", other);
   const reference = { url: other, platform: "github" as const };
   sourceRepositories.push(reference);
   const pending = prepare(native);
@@ -312,7 +301,7 @@ test("a Wiz file can combine projected and native package repositories", async (
 
   const source = "https://git.example.test/Team/Project";
   const remote = source.toLowerCase();
-  execFileSync("git", ["-C", f.repository, "remote", "add", "origin", remote]);
+  f.git("remote", "add", "origin", remote);
   record.vulnerableAsset.cloudProviderURL = remote + "/tree/main";
   const projected = {
     ...record,
