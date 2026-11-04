@@ -1,0 +1,3 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+# Promptfoo resolves this $ref from the eval package's working directory.
+$ref: ./promptfooconfig.sastbench.yaml

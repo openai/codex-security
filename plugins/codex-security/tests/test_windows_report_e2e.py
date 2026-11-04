@@ -11,8 +11,9 @@ from unittest import mock
 
 from workbench_test_support import (
     SCRIPT,
-    create_saved_workspace,
-    run_workbench,
+    empty_target_paths,
+    start_saved_scan,
+    windows_file_backend,
     write_completed_contract,
 )
 
@@ -24,51 +25,16 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     separately cover the Win32 handle semantics.
     """
 
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "src" / "extract.py"
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
-    saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
     (scan_dir / "report.html").write_text("stale report")
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan_id,))
-
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     finalizer = sys.modules[namespace["finalize_scan"].__module__]
-    backend = mock.Mock()
-
-    def open_read_fd(root: Path, relative_path: str, _context: str) -> int:
-        return os.open(root / relative_path, os.O_RDONLY)
-
-    def atomic_write(
-        root: Path,
-        relative_path: str,
-        payload: bytes,
-        *,
-        expected_root_identity: tuple[int, int] | None = None,
-    ) -> None:
-        path = root / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-
-    backend.open_read_fd.side_effect = open_read_fd
-    backend.atomic_write.side_effect = atomic_write
-    backend.unlink_if_exists.side_effect = lambda root, relative_path: (
-        root / relative_path
-    ).unlink(missing_ok=True)
+    backend = windows_file_backend()
 
     with (
         mock.patch.object(finalizer.os, "supports_dir_fd", set()),
@@ -82,8 +48,10 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
             connection,
             SimpleNamespace(claim_token=None, cost_json=None, scan_id=scan_id),
         )["scan"]
-        exported = namespace["export_findings"](
-            connection, SimpleNamespace(scan_id=scan_id, format="csv")
+        exported = namespace["publication"].export_findings(
+            namespace["_WORKBENCH_PUBLICATION_CONTEXT"],
+            connection,
+            SimpleNamespace(scan_id=scan_id, format="csv"),
         )
 
     assert completed["progress"]["status"] == "complete"

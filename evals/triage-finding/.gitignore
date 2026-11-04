@@ -1,0 +1,4 @@
+node_modules/
+.promptfoo/
+artifacts/
+tests/calibration-oss.yaml

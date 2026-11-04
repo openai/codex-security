@@ -1,12 +1,15 @@
+import { resolving } from "./support/promises.js";
+import { cancelInspection } from "./support/workbench-fakes.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import {
   checkScanPublicationInternal,
   type CheckScanPublicationDependencies,
   type CheckScanPublicationOptions,
 } from "../src/publish.js";
 import type { PreparedScanPublication } from "../src/publication.js";
+import { fail } from "./support/errors.js";
 
 const OPTIONS: CheckScanPublicationOptions = {
   destination: "linear",
@@ -15,7 +18,6 @@ const OPTIONS: CheckScanPublicationOptions = {
 };
 const PUBLICATION: PreparedScanPublication = {
   scanId: "scan-example",
-  uploadId: "scan-example",
   scanDirectory: join(tmpdir(), "completed-scan"),
   destination: {
     type: "linear",
@@ -130,9 +132,7 @@ function readClient(
         canAccessAnyPublicTeam: options.publicTeamAccess ?? true,
       };
     },
-    createIssue: () => {
-      throw new Error("Preflight must not create issues.");
-    },
+    createIssue: () => fail("Preflight must not create issues."),
   } as unknown as ReadClient;
 }
 
@@ -142,9 +142,7 @@ describe("read-only publication preflight", () => {
       "scan",
       OPTIONS,
       dependencies({
-        linearClient: () => {
-          throw new Error("No remote client should be constructed.");
-        },
+        linearClient: () => fail("No remote client should be constructed."),
       }),
     );
     expect(result).toEqual({
@@ -378,9 +376,7 @@ describe("read-only publication preflight", () => {
         "scan",
         { ...OPTIONS, linearApiKey: "synthetic-key" },
         dependencies({
-          inspectPublicationStore: async () => {
-            throw new Error("Missing local history.");
-          },
+          inspectPublicationStore: async () => fail("Missing local history."),
           linearClient: () => readClient(calls),
         }),
       ),
@@ -392,9 +388,7 @@ describe("read-only publication preflight", () => {
         "scan",
         { ...OPTIONS, signal: controller.signal },
         dependencies({
-          prepare: async () => {
-            throw new Error("Must not prepare after cancellation.");
-          },
+          prepare: async () => fail("Must not prepare after cancellation."),
         }),
       ),
     ).rejects.toThrow("Canceled preflight.");
@@ -409,19 +403,8 @@ describe("read-only publication preflight", () => {
         "scan",
         { ...OPTIONS, signal: controller.signal },
         dependencies({
-          inspectPublicationStore: async (
-            _publication,
-            _environment,
-            signal,
-          ) => {
-            expect(signal).toBe(controller.signal);
-            controller.abort(reason);
-            signal!.throwIfAborted();
-            return [];
-          },
-          linearClient: () => {
-            throw new Error("Canceled checks must not contact Linear.");
-          },
+          inspectPublicationStore: cancelInspection(controller, reason),
+          linearClient: () => fail("Canceled checks must not contact Linear."),
         }),
       ),
     ).rejects.toBe(reason);
@@ -430,7 +413,7 @@ describe("read-only publication preflight", () => {
   test("stops before inspecting history when preparation is canceled", async () => {
     const controller = new AbortController();
     const reason = new Error("Preparation canceled.");
-    let inspected = false;
+    const inspectPublicationStore = mock(resolving([]));
     await expect(
       checkScanPublicationInternal(
         "scan",
@@ -441,22 +424,18 @@ describe("read-only publication preflight", () => {
             controller.abort(reason);
             return PUBLICATION;
           },
-          inspectPublicationStore: async () => {
-            inspected = true;
-            return [];
-          },
+          inspectPublicationStore,
         }),
       ),
     ).rejects.toBe(reason);
-    expect(inspected).toBe(false);
+    expect(inspectPublicationStore).not.toHaveBeenCalled();
   });
 
   test("does not echo provider response data on an access failure", async () => {
     const key = "lin_api_SYNTHETIC_PRIVATE_KEY";
     const client = readClient([]);
-    client.team = (() => {
-      throw new Error(`Provider response included ${key}`);
-    }) as ReadClient["team"];
+    client.team = (() =>
+      fail(`Provider response included ${key}`)) as ReadClient["team"];
     await expect(
       checkScanPublicationInternal(
         "scan",

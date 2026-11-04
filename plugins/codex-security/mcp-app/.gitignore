@@ -1,3 +1,4 @@
 .preview/
 dist/
 node_modules/
+/reports/
