@@ -7,6 +7,20 @@ import {
 
 const nonempty = z.string().min(1);
 
+export const DEFAULT_DECISIONS_CUTOFF = 0.95;
+export const ReviewEventSettingsSchema = z.strictObject({
+  screen_with_decisions: z.boolean().optional().meta({
+    default: false,
+    description:
+      "Screen event groups with the OpenAI Decisions API (requires OPENAI_API_KEY).",
+  }),
+  decisions_cutoff: z.number().min(0).max(1).optional().meta({
+    default: DEFAULT_DECISIONS_CUTOFF,
+    description:
+      "Minimum confidence for a routine Decisions answer to skip full review (0–1, default 0.95).",
+  }),
+});
+
 export const ProjectScopeSchema = z.union([
   z.strictObject({
     paths: z
@@ -36,6 +50,7 @@ export const ProjectConfigInputSchema = z.strictObject({
   auth: ScanSettingsSchema.shape.auth.describe(
     "Credential-source choice only; never a credential value.",
   ),
+  review_events: ReviewEventSettingsSchema.optional(),
   scan: z
     .strictObject({
       mode: ScanSettingsSchema.shape.mode,

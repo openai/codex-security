@@ -4,6 +4,7 @@ export const CODEX_SECURITY_THREAD_SOURCES = {
   remediation: "security_remediation",
   scanComparison: "security_scan_comparison",
   severityClassification: "security_severity_classification",
+  eventReview: "security_event_review",
   suggestOwners: "security_suggest_owners",
 } as const;
 

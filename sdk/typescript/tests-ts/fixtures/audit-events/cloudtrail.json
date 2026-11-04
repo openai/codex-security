@@ -1,0 +1,61 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.11",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "EXAMPLEROLE:deploy",
+        "arn": "arn:aws:sts::123456789012:assumed-role/example-deploy/deploy",
+        "accountId": "123456789012"
+      },
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "192.0.2.10",
+      "userAgent": "aws-cli/2.0",
+      "responseElements": {
+        "assumedRoleUser": {
+          "arn": "arn:aws:sts::123456789012:assumed-role/example-deploy/deploy",
+          "assumedRoleId": "EXAMPLEROLE:deploy"
+        }
+      },
+      "eventType": "AwsApiCall",
+      "managementEvent": true,
+      "recipientAccountId": "123456789012",
+      "eventCategory": "Management",
+      "eventID": "00000000-0000-4000-8000-000000000001",
+      "eventTime": "2026-01-01T12:00:00Z",
+      "eventSource": "sts.amazonaws.com",
+      "eventName": "AssumeRole",
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::123456789012:role/example-deploy",
+        "roleSessionName": "deploy"
+      },
+      "readOnly": false
+    },
+    {
+      "eventVersion": "1.11",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "EXAMPLEROLE:deploy",
+        "arn": "arn:aws:sts::123456789012:assumed-role/example-deploy/deploy",
+        "accountId": "123456789012"
+      },
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "192.0.2.10",
+      "userAgent": "aws-cli/2.0",
+      "responseElements": null,
+      "eventType": "AwsApiCall",
+      "managementEvent": true,
+      "recipientAccountId": "123456789012",
+      "eventCategory": "Management",
+      "eventID": "00000000-0000-4000-8000-000000000002",
+      "eventTime": "2026-01-01T12:02:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "AttachRolePolicy",
+      "requestParameters": {
+        "roleName": "example-deploy",
+        "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess"
+      },
+      "readOnly": false
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "source": "example-audit-feed",
+  "serviceContext": "Deployment sessions normally read build artifacts and should not grant administrative access.",
+  "groups": [
+    {
+      "id": "deploy-session",
+      "events": [
+        "CEF:0|Example|Audit Service|1.0|role-grant|Administrative role granted|High|rt=1767268920000 suser=deploy duser=deploy act=grant cs1=administrator cs1Label=role externalId=evt-2"
+      ],
+      "contextEvents": [
+        "CEF:0|Example|Audit Service|1.0|session-start|Session started|Low|rt=1767268800000 suser=deploy src=192.0.2.10 externalId=evt-1"
+      ]
+    }
+  ]
+}

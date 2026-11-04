@@ -45,3 +45,5 @@ expected contents.
 
 The bundled plugin's own example artifacts are separate and remain part of the
 package.
+
+- [CEF audit events](audit-events/): native CEF records and optional grouping/history.
