@@ -37,6 +37,7 @@ interface SavedCheckout {
 interface SavedBoundaries {
   byTarget: Map<string, string | null>;
   roots: string[];
+  rejectedPaths: string[];
   complete: boolean;
 }
 
@@ -309,7 +310,7 @@ export async function savedDiscoveryRoots(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const targets = [...new Set(paths)];
+  const targets = [...new Set([...paths, ...(checkouts?.rejectedPaths ?? [])])];
   const currentRoots = await Promise.all(
     targets.map((path) => gitProtectionRoots(path, signal)),
   );
@@ -468,6 +469,14 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
         rows.flatMap((row) => (row.checkout_root ? [row.checkout_root] : [])),
       ),
     ],
+    // A rejected workspace still excludes executables under that path or its checkout.
+    // It supplies no checkout identity and cannot invalidate otherwise complete history.
+    rejectedPaths: workspace.has("target_path_unvalidated")
+      ? readRows<{ target_path: string }>(
+          database,
+          "SELECT DISTINCT target_path FROM workspaces WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL",
+        ).map((row) => row.target_path)
+      : [],
     complete: rows.every((row) => row.checkout_root !== null),
   };
 }

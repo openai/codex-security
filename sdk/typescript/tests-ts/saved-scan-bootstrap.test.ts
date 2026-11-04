@@ -16,7 +16,11 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
-import { savedScanWorkbench } from "../src/saved-scan-bootstrap.js";
+import {
+  savedCheckoutBoundaries,
+  savedDiscoveryRoots,
+  savedScanWorkbench,
+} from "../src/saved-scan-bootstrap.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { resolveCompletedScan } from "../src/saved-scan.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
@@ -45,6 +49,45 @@ function writePythonProbe(path: string) {
     { mode: 0o700 },
   );
 }
+
+test("a rejected workspace excludes its checkout from Python discovery", async () => {
+  const root = await temporaryDirectory();
+  const checkout = join(root, "untrusted");
+  const candidate = join(checkout, "requested");
+  await mkdir(join(checkout, ".git"), { recursive: true });
+  await mkdir(candidate);
+  const database = new Database(join(root, "workbench.sqlite3"), {
+    create: true,
+  });
+  try {
+    database.exec(
+      "CREATE TABLE workspaces (target_path, target_path_unvalidated, target_id)",
+    );
+    database.query("INSERT INTO workspaces VALUES (?, 1, NULL)").run(candidate);
+  } finally {
+    database.close();
+  }
+  const boundaries = await savedCheckoutBoundaries({
+    CODEX_SECURITY_STATE_DIR: root,
+  });
+  expect(boundaries?.complete).toBe(true);
+  const roots = await savedDiscoveryRoots(boundaries, []);
+  expect(roots).toContain(candidate);
+
+  if (process.platform !== "win32") {
+    const marker = join(root, "probed");
+    await writePythonProbe(join(checkout, "python3"));
+    await expect(
+      resolvePluginPython({
+        configuredPath: "python3",
+        environment: { PATH: checkout, TEST_PYTHON_PROBE: marker },
+        discoveryProtectedRoots: roots,
+        managedRuntimeRoots: [],
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(marker)).toBe(false);
+  }
+});
 
 function insertSavedTarget(
   db: Database,
