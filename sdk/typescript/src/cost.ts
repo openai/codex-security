@@ -2398,58 +2398,73 @@ export class ScanCostTracker {
         : this.#options.repository;
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
-    const unreadable: Array<{
-      path: string;
-      session: SessionUsage;
-      error: unknown;
-    }> = [];
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
+    const unreadable = new Map<
+      SessionUsage,
+      { path: string; error: unknown }
+    >();
+    let blocked: { error: unknown } | undefined;
     const compressedWithoutDecoder: string[] = [];
     const homes = new Set([this.#options.codexHome]);
     if (this.#workerCodexHome) homes.add(this.#workerCodexHome);
     // Recovery restores workers to their recorded home; the SDK parent can
     // continue in the current home. Apply the same scan membership to both.
     const directories = new Set<string>();
-    for (const home of homes) {
-      for (const location of ["sessions", "archived_sessions"]) {
-        let directory: string;
-        try {
-          directory = await realpath(join(home, location));
-        } catch (error) {
-          if (isMissingFile(error)) continue;
-          throw error;
-        }
-        if (directories.has(directory)) continue;
-        directories.add(directory);
-        for await (const path of sessionFiles(directory, true)) {
-          if (
-            path.endsWith(".zst") &&
-            typeof zlib.createZstdDecompress !== "function"
-          ) {
-            compressedWithoutDecoder.push(path);
-            continue;
-          }
-          let session = this.#sessions.get(path);
-          if (session === undefined) {
-            session = createSessionUsage(observeUsage);
-            this.#sessions.set(path, session);
-          }
+    try {
+      for (const home of homes) {
+        for (const location of ["sessions", "archived_sessions"]) {
+          let directory: string;
           try {
-            await readSessionUsage(
-              path,
-              session,
-              repository,
-              this.#attribution,
-              progressThread,
-            );
+            directory = await realpath(join(home, location));
           } catch (error) {
-            if (session.threadId === null) {
-              if (!path.endsWith(".zst")) throw error;
-              this.#sessions.delete(path);
+            if (isMissingFile(error)) continue;
+            throw error;
+          }
+          if (directories.has(directory)) continue;
+          directories.add(directory);
+          for await (const path of sessionFiles(directory, true)) {
+            if (
+              path.endsWith(".zst") &&
+              typeof zlib.createZstdDecompress !== "function"
+            ) {
+              compressedWithoutDecoder.push(path);
+              continue;
             }
-            unreadable.push({ path, session, error });
+            let session = this.#sessions.get(path);
+            if (session === undefined) {
+              session = createSessionUsage(observeUsage);
+              this.#sessions.set(path, session);
+            }
+            try {
+              await readSessionUsage(
+                path,
+                session,
+                repository,
+                this.#attribution,
+                progressThread,
+              );
+            } catch (error) {
+              const failure = { path, error };
+              if (session.threadId === null) {
+                if (path.endsWith(".zst")) this.#sessions.delete(path);
+                else {
+                  if (!observeHealthySessions || !isDeniedLogRead(error))
+                    throw error;
+                  blocked ??= failure;
+                }
+              }
+              unreadable.set(session, failure);
+            }
           }
         }
       }
+    } catch (error) {
+      if (!blocked) throw error;
     }
 
     const included = this.#attribution
@@ -2495,8 +2510,9 @@ export class ScanCostTracker {
       }
       changed = included.size !== previousSize;
     }
-    for (const { path, session, error } of unreadable) {
-      const threadId = session.threadId ?? compressedSessionThreadId(path);
+    for (const [session, failure] of unreadable) {
+      const threadId =
+        session.threadId ?? compressedSessionThreadId(failure.path);
       // A filename alone cannot exclude an undiscovered descendant. Only a
       // decoded counterpart supplies the identity used by existing membership.
       if (
@@ -2507,8 +2523,9 @@ export class ScanCostTracker {
           )) ||
         included.has(threadId)
       )
-        throw error;
+        blocked ??= failure;
     }
+    if (blocked && !observeHealthySessions) throw blocked.error;
     if (this.#options.maxCostUsd !== undefined) {
       for (const path of compressedWithoutDecoder) {
         for (const threadId of included) {
@@ -2538,35 +2555,46 @@ export class ScanCostTracker {
     const counterSessions = new Map<string, SessionUsage>();
     for (const [path, session] of this.#sessions) {
       const threadId = session.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
+      if (
+        threadId === null ||
+        !included.has(threadId) ||
+        unreadable.has(session)
+      )
+        continue;
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
-        // Replay event history through the already-read snapshot without
-        // replacing its authoritative progress, usage, or partial-line decoder.
-        const replay: SessionUsage = createSessionUsage(false);
-        replay.events = [];
-        await readSessionUsage(
-          path,
-          replay,
-          undefined,
-          this.#attribution,
-          undefined,
-          session.offset,
-        );
-        if (replay.offset === session.offset) {
-          session.events = replay.events;
-          // At stop there is no next poll to read usage appended during replay.
-          if (this.#timer === null)
-            await readSessionUsage(
-              path,
-              session,
-              repository,
-              this.#attribution,
-              progressThread,
-              "file-size",
-            );
+        try {
+          // Replay event history through the already-read snapshot without
+          // replacing its authoritative progress, usage, or partial-line decoder.
+          const replay: SessionUsage = createSessionUsage(false);
+          replay.events = [];
+          await readSessionUsage(
+            path,
+            replay,
+            undefined,
+            this.#attribution,
+            undefined,
+            session.offset,
+          );
+          if (replay.offset === session.offset) {
+            session.events = replay.events;
+            // At stop there is no next poll to read usage appended during replay.
+            if (this.#timer === null)
+              await readSessionUsage(
+                path,
+                session,
+                repository,
+                this.#attribution,
+                progressThread,
+                "file-size",
+              );
+          }
+        } catch (error) {
+          if (!observeHealthySessions) throw error;
+          blocked ??= { error };
+          continue;
         }
       }
       let worker: number | undefined;
@@ -2726,6 +2754,8 @@ export class ScanCostTracker {
       if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
         incomplete = true;
     }
+    // Healthy sessions can report activity even when a read blocks the total.
+    if (blocked) throw blocked.error;
     let usage: ScanTokenUsage | null = null;
     let unmeasuredSession = false;
     for (const value of usages.values()) {
@@ -4414,6 +4444,14 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isDeniedLogRead(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
+  );
 }
 
 function isMissingFile(error: unknown): boolean {
