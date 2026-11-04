@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   candidateKey,
   coverageCandidateKey,
+  coverageCandidateOwner,
   findingCandidateKey,
   isCurrentCandidateFinding,
   isTerminalCandidateDecision,
@@ -319,10 +320,7 @@ function isGeneratedFollowUp(
         other.surfaceIds.some(
           (id) =>
             surfaceReferenceKey(id, other, surfaces) ===
-            candidateKey(
-              surface.id,
-              surface.sourceWorkerId ?? surface.workerId,
-            ),
+            candidateKey(surface.id, coverageCandidateOwner(surface)),
         ),
     )
   );
@@ -459,9 +457,7 @@ export function preserveDiffCandidateDecisions(
   const surfaces: DraftCoverage["surfaces"] = inputSurfaces
     .map((item) =>
       !retainDecision(item) &&
-      pendingReferences.has(
-        candidateKey(item.id, item.sourceWorkerId ?? item.workerId),
-      )
+      pendingReferences.has(candidateKey(item.id, coverageCandidateOwner(item)))
         ? { ...item, disposition: "reported" as const }
         : item,
     )
@@ -784,10 +780,7 @@ export function preserveUnresolvedDiffCandidates(
             other.surfaceIds.some(
               (id) =>
                 surfaceReferenceKey(id, other, input.reviewState.surfaces) ===
-                candidateKey(
-                  surface.id,
-                  surface.sourceWorkerId ?? surface.workerId,
-                ),
+                candidateKey(surface.id, coverageCandidateOwner(surface)),
             ),
         )
       )
@@ -833,10 +826,7 @@ export function preserveUnresolvedDiffCandidates(
           surfaceIds.some(
             (id) =>
               surfaceReferenceKey(id, item, surfaces) ===
-              candidateKey(
-                surface.id,
-                surface.sourceWorkerId ?? surface.workerId,
-              ),
+              candidateKey(surface.id, coverageCandidateOwner(surface)),
           ),
       )
     )

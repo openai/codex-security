@@ -45,38 +45,45 @@ for (const field of ["surfaces", "explicitExclusions", "deferred"] as const) {
   });
 }
 
-test("a resolved legacy candidate preserves a surface shared with pending work", () => {
-  const surface = {
-    id: "shared-review",
-    workerId: "legacy-worker",
-    candidateId: "accepted",
-    label: "Synthetic shared review",
-    disposition: "rejected",
-  };
-  const pending = {
-    candidateId: "pending",
-    workerId: "legacy-worker",
-    reason: "Independent synthetic evidence remains unresolved.",
-    surfaceIds: [surface.id],
-  };
-  const result = preserveDiffCandidateDecisions(
-    {
-      findings: [
-        { provenance: { candidateId: "accepted", workerId: "legacy-worker" } },
-      ],
-      reviewState: {
-        surfaces: [surface],
-        explicitExclusions: [],
-        deferred: [pending],
+for (const sourceWorkerId of [undefined, " "]) {
+  test(`a resolved legacy candidate preserves a surface shared with pending work: owner=${JSON.stringify(sourceWorkerId)}`, () => {
+    const surface = {
+      id: "shared-review",
+      sourceWorkerId,
+      notes: "Retain the shared evidence.",
+      receiptRefs: ["artifacts/shared.txt"],
+      workerId: "legacy-worker",
+      candidateId: "accepted",
+      label: "Synthetic shared review",
+      disposition: "rejected",
+    };
+    const pending = {
+      candidateId: "pending",
+      workerId: "legacy-worker",
+      reason: "Independent synthetic evidence remains unresolved.",
+      surfaceIds: [surface.id],
+    };
+    const result = preserveDiffCandidateDecisions(
+      {
+        findings: [
+          {
+            provenance: { candidateId: "accepted", workerId: "legacy-worker" },
+          },
+        ],
+        reviewState: {
+          surfaces: [surface],
+          explicitExclusions: [],
+          deferred: [pending],
+        },
       },
-    },
-    [],
-  );
-  assert.deepEqual(result.reviewState.surfaces, [
-    { ...surface, disposition: "reported" },
-  ]);
-  assert.deepEqual(result.reviewState.deferred, [pending]);
-});
+      [],
+    );
+    assert.deepEqual(result.reviewState.surfaces, [
+      { ...surface, disposition: "reported" },
+    ]);
+    assert.deepEqual(result.reviewState.deferred, [pending]);
+  });
+}
 
 for (const layout of ["standard", "deep"] as const) {
   for (const sourceWorkerId of [undefined, "", " "]) {

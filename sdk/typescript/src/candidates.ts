@@ -53,7 +53,7 @@ export function coverageCandidateId(
   row: Record<string, unknown>,
 ): string | undefined {
   const id = row["candidateId"];
-  if (typeof id !== "string" || !id.trim()) return undefined;
+  if (typeof id !== "string") return undefined;
   const provenance = row["provenance"];
   const sourceId =
     isRecord(provenance) && candidateOwner(provenance["workerId"])

@@ -271,7 +271,7 @@ describe("ScanResult", () => {
     expect(result.coverage).toEqual(original);
   });
 
-  test.each(["", " ", "projected"])(
+  test.each(["", " ", "projected", "blank projected alias"])(
     "a saved finding resolves the candidate from its originating worker %j",
     (sourceWorkerId) => {
       const result = fakeResult(["high"]);
@@ -283,9 +283,13 @@ describe("ScanResult", () => {
       result.coverage.deferred = ["worker-one", "worker-two"].map(
         (workerId) => ({
           id: `${workerId}/pending`,
-          ...(sourceWorkerId === "projected"
+          ...(sourceWorkerId === "projected" ||
+          sourceWorkerId === "blank projected alias"
             ? {
-                candidateId: `${workerId}-attempt-1-candidate-projected`,
+                candidateId:
+                  sourceWorkerId === "projected"
+                    ? `${workerId}-attempt-1-candidate-projected`
+                    : " ",
                 provenance: {
                   workerId,
                   attempt: 1,
