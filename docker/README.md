@@ -228,6 +228,16 @@ fallback is no longer supported. The entrypoint preserves Codex sandbox settings
 Source inspection needs a host that supports Bubblewrap; do not disable sandboxing
 to work around host restrictions.
 
+The bundled Compose seccomp profile allows direct socket calls for Unix sockets,
+IPv4, IPv6, and the route netlink sockets Bubblewrap uses to configure loopback.
+It blocks the legacy IPv4 packet socket type and limits direct socket pairs to
+Unix sockets. Normal IP networking remains available. Use a network policy to
+restrict outbound destinations. On amd64, 32-bit i386 programs retain a legacy
+socket interface whose arguments seccomp cannot filter.
+
+The profile also blocks `ptrace`, `process_vm_readv`, and `process_vm_writev`.
+Debuggers and other tools that rely on these calls may fail inside the container.
+
 `run --rm` removes only the finished runner container. Preserve its host mounts
 for later stages and retries; use the same image version and source paths.
 Stop active runners before backing up the entire results and state directories,
