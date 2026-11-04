@@ -784,7 +784,10 @@ export class DeepScanCoordinator {
       signal.throwIfAborted();
       if (batch.length) {
         // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
-        const { counts: newCounts, stop } = await this.mergeAcceptedBatch(result, batch);
+        const { counts: newCounts, stop } = await this.mergeAcceptedBatch(
+          result,
+          batch,
+        );
         for (const count of newCounts) {
           streak = count ? 0 : streak + 1;
         }
