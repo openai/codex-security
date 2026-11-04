@@ -81,7 +81,11 @@ async function testCoordinatorCommitResponseRecovery(
   let failureWrites = 0;
   let committedManifest: string | undefined;
   const store = new WorkbenchDeepScanStore(
-    async (args, input, selectFinalization = false) => {
+    async (
+      args: string[],
+      input?: string | Buffer,
+      selectFinalization = false,
+    ) => {
       const result = await runWorkbench(
         args,
         input,
