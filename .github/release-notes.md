@@ -88,6 +88,8 @@
 - report completed audits and batch consolidation ([#2305](https://github.com/openai/codex-security/pull/2305))
 - reject unpublishable worker report metadata ([#2319](https://github.com/openai/codex-security/pull/2319))
 - distinguish empty reports from failed scanners and exclusions ([#2082](https://github.com/openai/codex-security/pull/2082))
+- preserve worker configuration, retry and failure diagnostics ([#2309](https://github.com/openai/codex-security/pull/2309))
+- run report comparisons without interactive tools ([#2304](https://github.com/openai/codex-security/pull/2304))
 
 <!-- release-section: highlights:end -->
 
