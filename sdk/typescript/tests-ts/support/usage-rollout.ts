@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
+import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
 export const scanThreadId = "scan-thread";
@@ -24,6 +25,51 @@ export const ownedPythonUsage = {
   reasoningOutputTokens: 0,
   totalTokens: 110,
 };
+
+export function progressMarker(
+  phase: string,
+  filesCompleted: number,
+  filesTotal: number,
+): string {
+  return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
+}
+
+export function nativeCommand(
+  command: string | readonly string[],
+  output: string,
+  id?: string,
+) {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        type: "CommandExecution",
+        ...(id === undefined ? {} : { id }),
+        command: typeof command === "string" ? [command] : command,
+        aggregated_output: output,
+      },
+    },
+  };
+}
+
+export function completedCommand(
+  command: string,
+  output: string,
+  id = command,
+): ThreadEvent {
+  return {
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      id,
+      command,
+      aggregated_output: output,
+      status: "completed",
+      exit_code: 0,
+    },
+  };
+}
 
 function uuid7TaskStarted(turnId: string): Record<string, unknown> {
   return {
@@ -84,6 +130,11 @@ export function ownershipRollout(
     uuid7TokenSnapshot(1_000, 100),
     uuid7TaskStarted(higherUuid7Turn),
     uuid7TokenSnapshot(1_100, 110),
+    {
+      type: "event_msg",
+      timestamp: uuid7EventTimestamp,
+      payload: { type: "task_complete" },
+    },
   ];
 }
 
@@ -100,12 +151,12 @@ export function readPythonRolloutUsage(
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage",
     "session = workbench_scan_usage.RolloutSession(sys.argv[3], sys.argv[4], Path(sys.argv[2]))",
-    "usage, warnings = workbench_scan_usage._read_rollout_usage(",
+    "usage = workbench_scan_usage._read_rollout_usage(",
     "    session,",
     "    started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),",
     "    completed_at=None,",
     ")",
-    "print(json.dumps({'usage': usage, 'warnings': sorted(warnings)}, sort_keys=True))",
+    "print(json.dumps({'usage': usage.tokens, 'warnings': sorted(usage.warnings)}, sort_keys=True))",
   ].join("\n");
   const result = runNodePython(python!, [
     "-c",

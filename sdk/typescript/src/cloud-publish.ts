@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "incur";
+import { z } from "zod";
 import { parse as parseToml } from "smol-toml";
 import { loadContract, sha256Text as sha256 } from "./contract.js";
 import {
@@ -24,9 +24,7 @@ import {
   expandHome,
 } from "./runtime.js";
 import { VERSION } from "./version.js";
-
-const CLOUD_PUBLISH_URL =
-  "https://chatgpt.com/backend-api/aardvark/cli/findings";
+import { cloudBaseUrl } from "./cloud-endpoint.js";
 const CHATGPT_LOGIN_REQUIRED =
   "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
 
@@ -119,23 +117,6 @@ export async function publishFindingsCsvToCloud(
     scanId,
     findings,
   });
-  const coverageDocument = JSON.stringify({
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId,
-    mode: "repository",
-    inventoryStrategy: "custom",
-    includePaths: ["."],
-    excludePaths: [],
-    surfaces: findings.map((finding) => ({
-      id: finding.occurrenceId,
-      label: finding.title,
-      disposition: "reported",
-      receiptRefs: [],
-    })),
-    explicitExclusions: [],
-    deferred: [],
-  });
   const scan: ScanManifest["scan"] = {
     id: scanId,
     producer: { name: "codex-security-cli", version: VERSION },
@@ -154,17 +135,13 @@ export async function publishFindingsCsvToCloud(
       excludePaths: [],
       summary: "Findings imported from a Codex Security CSV export.",
     },
-    coverageRef: "coverage.json",
+    mode: "repository",
+    review: { excludedPaths: [] },
     findingsRef: "findings.json",
     artifacts: [
       {
         path: "findings.json",
         sha256: sha256(findingsDocument),
-        mediaType: "application/json",
-      },
-      {
-        path: "coverage.json",
-        sha256: sha256(coverageDocument),
         mediaType: "application/json",
       },
       {
@@ -192,12 +169,11 @@ async function publishCloudPayload(
       findings,
     };
   }
-  const credentials = await readCloudCredentials(
-    dependencies.environment ?? process.env,
-  );
+  const environment = dependencies.environment ?? process.env;
   const publishUrl =
-    dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
-    CLOUD_PUBLISH_URL;
+    environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
+    `${cloudBaseUrl(environment)}/cli/findings`;
+  const credentials = await readCloudCredentials(environment);
   const timeout = AbortSignal.timeout(30_000);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
@@ -268,7 +244,8 @@ async function publishCloudPayload(
   };
 }
 
-async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+/** @internal Shared sign-in for local Cloud publishers. */
+export async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
   const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
     configuredHome?.trim() ? configuredHome : "~/.codex",

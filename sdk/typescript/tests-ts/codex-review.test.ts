@@ -129,6 +129,7 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Request refused due to cybersecurity policy violation.",
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
+  "rate-limit-turn": "Rate limit reached",
   "server-error": "Provider temporarily unavailable",
   "connection-error": "Provider stream disconnected",
   "unauthorized-turn": "Authentication required",
@@ -153,6 +154,7 @@ const failureReasons: Record<string, string> = {
 const retriedFailures = new Set([
   "text-only",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "invalid-json",
@@ -162,6 +164,7 @@ const retriedFailures = new Set([
 ]);
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
+  "recover-rate-limit-code": "rate-limit-turn",
   "recover-server-error": "server-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
@@ -173,6 +176,7 @@ const modelFailures = new Set([
   "policy-turn-code",
   "policy-turn",
   "failed-turn",
+  "rate-limit-turn",
   "server-error",
   "connection-error",
   "unauthorized-turn",
@@ -190,7 +194,13 @@ const transportCases: {
   windowsConfig?: JsonObject;
   expectedWindowsSandbox?: string;
   surface?: CodexSecuritySurface;
+  permissionPathSuffix?: string;
 }[] = [
+  {
+    scenario: "correction",
+    name: "literal permission paths",
+    permissionPathSuffix: "literal.path-雪\u007f-",
+  },
   {
     scenario: "recover-server-error",
     name: "CLI attribution survives a retried review session",
@@ -264,12 +274,15 @@ for (const {
   windowsConfig,
   expectedWindowsSandbox,
   surface,
+  permissionPathSuffix = "",
 } of transportCases) {
   const runCase = test.skipIf(windowsOnly && process.platform !== "win32");
   runCase(`Codex review transport: ${name}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
     const checkout = await temporaryDirectory("codex-review-source-", true);
-    const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
+    const ghConfig = await mkdtemp(
+      join(tmpdir(), `codex-review-gh-${permissionPathSuffix}`),
+    );
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
     let starts = 0;
@@ -562,12 +575,17 @@ for (const {
       const permissions = args.find((argument) =>
         argument.startsWith("permissions.codex_security_review="),
       );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(modelHome))}="deny"`,
-      );
-      expect(permissions).toContain(
-        `${JSON.stringify(resolve(ghConfig))}="deny"`,
-      );
+      expect(parse(permissions!)).toMatchObject({
+        permissions: {
+          codex_security_review: {
+            extends: ":read-only",
+            filesystem: {
+              [resolve(modelHome)]: "deny",
+              [resolve(ghConfig)]: "deny",
+            },
+          },
+        },
+      });
       if (scenario !== "cancel") {
         const messages = parseJsonLines<{
           method?: string;

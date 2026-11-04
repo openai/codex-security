@@ -1,4 +1,4 @@
-import { outputText, hasTriageJson } from "./output.mts";
+import { gradeFailures, outputText, hasTriageJson } from "./output.mts";
 import type { AssertionContext } from "../types.ts";
 
 const expectedPatterns: Record<string, RegExp[]> = {
@@ -52,33 +52,27 @@ export default (output: unknown, context: AssertionContext) => {
   const subissueBehavior = String(context.vars.expected_linear_subissues || "");
   const patterns = Object.hasOwn(expectedPatterns, behavior)
     ? expectedPatterns[behavior]
-    : [];
+    : undefined;
   const subissuePatterns = Object.hasOwn(
     expectedSubissuePatterns,
     subissueBehavior,
   )
     ? expectedSubissuePatterns[subissueBehavior]
-    : [];
+    : undefined;
   const failures = [];
 
-  if (
-    (!behavior && !subissueBehavior) ||
-    (behavior && !Object.hasOwn(expectedPatterns, behavior))
-  ) {
+  if ((!behavior && !subissueBehavior) || (behavior && !patterns)) {
     failures.push(`unknown expected_ticket_failure: ${behavior}`);
   }
-  if (
-    subissueBehavior &&
-    !Object.hasOwn(expectedSubissuePatterns, subissueBehavior)
-  ) {
+  if (subissueBehavior && !subissuePatterns) {
     failures.push(`unknown expected_linear_subissues: ${subissueBehavior}`);
   }
 
-  for (const pattern of patterns) {
+  for (const pattern of patterns ?? []) {
     if (!pattern.test(text))
       failures.push(`missing recovery detail matching ${pattern}`);
   }
-  for (const pattern of subissuePatterns) {
+  for (const pattern of subissuePatterns ?? []) {
     if (!pattern.test(text))
       failures.push(`missing Linear sub-issue detail matching ${pattern}`);
   }
@@ -92,12 +86,8 @@ export default (output: unknown, context: AssertionContext) => {
     failures.push("must stop before repository analysis or verdicting");
   }
 
-  return {
-    pass: failures.length === 0,
-    score: failures.length === 0 ? 1 : 0,
-    reason:
-      failures.length === 0
-        ? "Ticket connector failure produced recovery guidance without triage output."
-        : failures.join("; "),
-  };
+  return gradeFailures(
+    failures,
+    "Ticket connector failure produced recovery guidance without triage output.",
+  );
 };

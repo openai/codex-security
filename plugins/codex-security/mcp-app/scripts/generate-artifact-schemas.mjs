@@ -7,7 +7,8 @@ import * as z from "zod/v4";
 
 const bundled = await build({
   stdin: {
-    contents: `export * from "../src/artifact-contracts.ts";`,
+    contents: `export * from "../src/artifact-contracts.ts";
+      export * from "./canonical-schemas.mts";`,
     resolveDir: fileURLToPath(new URL(".", import.meta.url)),
   },
   bundle: true,
@@ -15,7 +16,11 @@ const bundled = await build({
   format: "esm",
   write: false,
 });
-const { artifactSchemaDocuments, artifactJsonMetadata } = await import(
+const {
+  artifactSchemaDocuments,
+  artifactJsonMetadata,
+  canonicalSchemaDocuments,
+} = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].contents).toString("base64")}`
 );
 const registry = z.registry();
@@ -77,6 +82,53 @@ for (const [path, { $defs, ...header }] of Object.entries(
     },
     (_key, schema) =>
       JSON.stringify(schema) === '{"not":{}}' ? false : schema,
+  );
+}
+for (const [path, { title, schema, definitions = {} }] of Object.entries(
+  canonicalSchemaDocuments,
+)) {
+  const previousMetadata = new Map(
+    Object.values(definitions).map((definition) => [
+      definition,
+      z.globalRegistry.get(definition),
+    ]),
+  );
+  for (const [id, definition] of Object.entries(definitions))
+    z.globalRegistry.add(definition, {
+      ...z.globalRegistry.get(definition),
+      id,
+    });
+  await save(
+    path,
+    {
+      $id: `https://openai.com/codex-security/schemas/${path}.schema.json`,
+      title,
+      ...z.toJSONSchema(schema, {
+        io: "input",
+        override: ({ jsonSchema }) => {
+          if (jsonSchema.const !== undefined || jsonSchema.enum)
+            delete jsonSchema.type;
+          if (JSON.stringify(jsonSchema.additionalProperties) === "{}")
+            delete jsonSchema.additionalProperties;
+        },
+      }),
+    },
+    legacyTypeArrays,
+  );
+  for (const [definition, metadata] of previousMetadata) {
+    z.globalRegistry.remove(definition);
+    if (metadata) z.globalRegistry.add(definition, metadata);
+  }
+}
+// Run after Zod resolves reused branches. Only explicitly marked canonical
+// unions use this historical representation; other anyOf schemas stay intact.
+function legacyTypeArrays(_key, schema) {
+  if (!Array.isArray(schema?.type) || !schema.anyOf) return schema;
+  const { anyOf, ...rest } = schema;
+  return Object.assign(
+    {},
+    ...anyOf.map((part) => legacyTypeArrays("", part)),
+    rest,
   );
 }
 async function save(path, schema, replacer) {

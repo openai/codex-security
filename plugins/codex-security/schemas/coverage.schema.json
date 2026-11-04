@@ -1,31 +1,12 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openai.com/codex-security/schemas/coverage.schema.json",
   "title": "Codex Security scan coverage",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": [
-    "documentType",
-    "schemaVersion",
-    "scanId",
-    "mode",
-    "inventoryStrategy",
-    "includePaths",
-    "excludePaths",
-    "surfaces",
-    "explicitExclusions",
-    "deferred"
-  ],
   "properties": {
-    "documentType": {
-      "const": "codex-security.coverage"
-    },
-    "schemaVersion": {
-      "const": "1.0"
-    },
-    "scanId": {
-      "type": "string",
-      "minLength": 1
-    },
+    "documentType": { "const": "codex-security.coverage" },
+    "schemaVersion": { "const": "1.0" },
+    "scanId": { "type": "string", "minLength": 1 },
     "mode": {
       "enum": [
         "repository",
@@ -38,45 +19,17 @@
       ]
     },
     "inventoryStrategy": {
-      "enum": [
-        "repository",
-        "scoped_path",
-        "diff",
-        "directory",
-        "custom"
-      ]
+      "enum": ["repository", "scoped_path", "diff", "directory", "custom"]
     },
-    "includePaths": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "excludePaths": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
+    "includePaths": { "type": "array", "items": { "type": "string" } },
+    "excludePaths": { "type": "array", "items": { "type": "string" } },
     "surfaces": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "id",
-          "label",
-          "disposition",
-          "receiptRefs"
-        ],
         "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "label": {
-            "type": "string",
-            "minLength": 1
-          },
+          "id": { "type": "string", "minLength": 1 },
+          "label": { "type": "string", "minLength": 1 },
           "disposition": {
             "enum": [
               "reported",
@@ -94,111 +47,88 @@
               "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$"
             }
           },
-          "riskArea": {
-            "type": "string",
-            "minLength": 1
-          },
-          "notes": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
+          "riskArea": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string", "minLength": 1 }
+        },
+        "required": ["id", "label", "disposition", "receiptRefs"]
       }
     },
     "explicitExclusions": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "pattern",
-          "reason"
-        ],
         "properties": {
-          "pattern": {
-            "type": "string",
-            "minLength": 1
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
+          "pattern": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "required": ["pattern", "reason"]
       }
     },
     "deferred": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "id",
-          "reason"
-        ],
         "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1
-          },
+          "id": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 },
           "paths": {
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "oneOf": [
+                {},
+                {
+                  "type": "string",
+                  "$comment": "invalidSealedDeferredPath",
+                  "pattern": "^(?:/|[A-Za-z]:)|(?:^|/)\\.\\.(?:/|$)|[\\\\\\x00-\\x1f]|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?:^|[^\\ud800-\\udbff])[\\udc00-\\udfff]"
+                }
+              ]
             }
           },
           "surfaceIds": {
             "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
+            "items": { "type": "string", "minLength": 1 }
           }
-        }
+        },
+        "required": ["id", "reason"]
       }
     },
     "resolvedDeferred": {
-      "description": "Completed generic review tasks, with their saved IDs and completion reasons.",
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "reason": {
-            "type": "string",
-            "minLength": 1
-          }
+          "id": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
         },
-        "required": [
-          "id",
-          "reason"
-        ],
+        "required": ["id", "reason"],
         "additionalProperties": false
-      }
+      },
+      "description": "Completed generic review tasks, with their saved IDs and completion reasons."
     },
     "openQuestions": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": [
-          "question"
-        ],
         "properties": {
-          "question": {
-            "type": "string",
-            "minLength": 1
-          },
-          "followUpPrompt": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
+          "question": { "type": "string", "minLength": 1 },
+          "followUpPrompt": { "type": "string", "minLength": 1 }
+        },
+        "required": ["question"]
       }
     }
-  }
+  },
+  "required": [
+    "documentType",
+    "schemaVersion",
+    "scanId",
+    "mode",
+    "inventoryStrategy",
+    "includePaths",
+    "excludePaths",
+    "surfaces",
+    "explicitExclusions",
+    "deferred"
+  ]
 }

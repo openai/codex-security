@@ -9,14 +9,9 @@ import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
 import { codexSecurityCredentialHome } from "../src/runtime.js";
-import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION, BUNDLED_PLUGIN_VERSION } from "../src/version.js";
 import { throwing } from "./support/errors.js";
-import {
-  completedAt,
-  laterTurnEvents,
-  terminalScanEvents,
-} from "./support/terminal-rollout.js";
+import { writeJsonLines } from "./support/json.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/feedback.mjs", import.meta.url),
@@ -49,10 +44,32 @@ async function setup() {
       source: { subagent: { thread_spawn: { parent_thread_id: "thread-1" } } },
     },
   };
-  await writeFile(
-    join(home, "sessions", "rollout-root.jsonl"),
-    JSON.stringify(root),
-  );
+  await writeJsonLines(join(home, "sessions", "rollout-root.jsonl"), [
+    root,
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:01:59Z",
+      payload: { type: "task_started", turn_id: "scan-turn" },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:02:01Z",
+      payload: { type: "agent_message", message: "The scan is complete." },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:03:00Z",
+      payload: { type: "task_started", turn_id: "configured-followup" },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:03:01Z",
+      payload: {
+        type: "user_message",
+        message: "Configured follow-up prompt.",
+      },
+    },
+  ]);
   await writeFile(
     join(home, "sessions", "rollout-worker.jsonl"),
     JSON.stringify(worker),
@@ -83,6 +100,8 @@ async function setup() {
       includeLogs: true,
       scan: {
         scanId: "scan-1",
+        progress: { status: "complete" },
+        logCompletedAt: "2026-08-21T12:02:00Z",
         continuationThreadId: "thread-1",
         threadIds: ["thread-1"],
         executionThreadIds: ["thread-1"],
@@ -125,41 +144,9 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
       (session: { threadId: string }) => session.threadId,
     ),
   ).toEqual(["thread-1", "worker-1"]);
+  expect(attachments[0].content).toContain("The scan is complete.");
+  expect(attachments[0].content).not.toContain("Configured follow-up prompt.");
   expect(existsSync(attachments[0].path)).toBe(false);
-  context.expectClosed();
-});
-
-test("attaches the complete terminal scan turn without later conversation work", async () => {
-  const context = await setup();
-  const metadata = {
-    type: "session_meta",
-    payload: { id: "thread-1", timestamp: "2026-08-21T12:00:00Z" },
-  };
-  await writeFile(
-    join(context.home, "sessions", "rollout-root.jsonl"),
-    [metadata, ...terminalScanEvents, ...laterTurnEvents]
-      .map((event) => JSON.stringify(event))
-      .join("\n"),
-  );
-  const scan = {
-    ...context.options.scan,
-    executionThreadIds: [],
-    progress: { status: "complete", updatedAt: completedAt },
-  };
-  await sendFeedback({ ...context.options, scan }, context.startCodex);
-  const { attachments } = await context.transcript();
-  expect(attachments).toHaveLength(1);
-  const attached = JSON.parse(attachments[0].content);
-  expect(attached).toEqual(
-    await readSavedScanLogs(
-      scan,
-      [context.home, context.environment.CODEX_HOME],
-      { allowMissingRoot: true },
-    ),
-  );
-  expect(attached.events.map(({ event }: { event: unknown }) => event)).toEqual(
-    [metadata, ...terminalScanEvents],
-  );
   context.expectClosed();
 });
 

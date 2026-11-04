@@ -36,6 +36,7 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  readDeepScanParentCyberAccessProgram,
   prepareCliDeepScanSession,
 } = await importSource(
   path.join(
@@ -64,8 +65,6 @@ const unsupportedConfiguration = (error: Error) =>
   error.message.includes("with this Codex configuration");
 
 await testAllowedProfileAndRawArgv();
-await testPreflightStartsInWorkerCwd();
-await testProvidedEnvForwardedWithoutMutation();
 await testOpenAiApiKeyFallbackPreservesNativeAuthentication();
 await testSequentialPaginatedResponsesAcrossChunks();
 await testMalformedStreamFailsClosed();
@@ -87,6 +86,105 @@ await testMissingWorkerDirectoryRemainsRetryable();
 await testAbortKillsPreflightChild();
 await testAbortPreservesCallerReason();
 await testDirectScanSession();
+await testParentTurnCyberAccessProgram();
+
+async function testParentTurnCyberAccessProgram() {
+  const parentTurn = {
+    threadId: "fixture-parent-thread",
+    turnId: "fixture-current-turn",
+  };
+  const context = (turnId: string, program: unknown) => ({
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      ...(program === undefined ? {} : { cyber_access_program: program }),
+    },
+  });
+  const read = (fixture: PreflightFixture) =>
+    readDeepScanParentCyberAccessProgram({
+      codexPath: fixture.codexPath,
+      cwd: fixture.cwd,
+      configOverrides: rawOverrides,
+      parentTurn,
+      signal: new AbortController().signal,
+    });
+  for (const program of [
+    "standard",
+    "daybreak_blue",
+    "daybreak_red",
+    "future_program",
+    null,
+    undefined,
+  ]) {
+    await withFakeCodex(
+      {
+        parentRollout: [
+          context("fixture-older-turn", "daybreak_blue"),
+          context(parentTurn.turnId, program),
+          context("fixture-newer-turn", "daybreak_red"),
+        ],
+      },
+      async (fixture) => {
+        assert.equal(await read(fixture), program ?? undefined);
+        const calls = await readJsonLines(fixture.callsPath);
+        assert.deepEqual(
+          calls.map((call) => call.method),
+          ["initialize", "initialized", "thread/read"],
+        );
+        assert.deepEqual(calls[2].params, {
+          threadId: parentTurn.threadId,
+          includeTurns: false,
+        });
+      },
+    );
+  }
+  for (const scenario of [
+    { parentRollout: [context("fixture-other-turn", "daybreak_blue")] },
+    { parentPathUnavailable: true },
+    {
+      returnedParentThreadId: "fixture-other-thread",
+      parentRollout: [context(parentTurn.turnId, "daybreak_blue")],
+    },
+  ]) {
+    await withFakeCodex(scenario, async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    });
+  }
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32600,
+          message: `thread not loaded: ${parentTurn.threadId}`,
+        },
+      },
+    },
+    async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    },
+  );
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32000,
+          message: "Synthetic native read failure",
+        },
+      },
+      stderr: "Synthetic native stderr detail",
+    },
+    async (fixture) => {
+      await assert.rejects(read(fixture), (error: Error) => {
+        assert.match(error.message, /Synthetic native read failure/);
+        assert.match(error.message, /Synthetic native stderr detail/);
+        return true;
+      });
+    },
+  );
+  await withFakeCodex({}, async (fixture) => {
+    await assert.rejects(read(fixture), { code: "ENOENT" });
+  });
+}
 
 async function testDirectScanSession() {
   const permissionProfile = {
@@ -160,6 +258,13 @@ async function testDirectScanSession() {
 }
 
 async function testAllowedProfileAndRawArgv() {
+  const codexHome = "/fixture/canonical-codex-home";
+  const env = Object.freeze({
+    ...process.env,
+    CODEX_HOME: codexHome,
+    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
+  });
+
   await withFakeCodex(
     {
       configResult: configReadResult({
@@ -188,8 +293,19 @@ async function testAllowedProfileAndRawArgv() {
         },
       ],
     },
-    async ({ codexPath, cwd, argvPath, callsPath }) => {
+    async ({
+      codexPath,
+      cwd,
+      argvPath,
+      callsPath,
+      envPath,
+      cwdPath,
+      children,
+      terminatedPath,
+    }) => {
+      assert.notEqual(cwd, process.cwd());
       await preflightDeepScanWorkerPermissionProfile({
+        env,
         codexPath,
         cwd,
         configOverrides: [
@@ -223,31 +339,17 @@ async function testAllowedProfileAndRawArgv() {
       assert.deepEqual(calls[0].params.capabilities, { experimentalApi: true });
       assert.deepEqual(calls[2].params, { cwd, includeLayers: false });
       assert.deepEqual(calls[3].params, { cwd });
-    },
-    { longExecutable: true },
-  );
-}
-
-async function testProvidedEnvForwardedWithoutMutation() {
-  const codexHome = "/fixture/canonical-codex-home";
-  const env = Object.freeze({
-    ...process.env,
-    CODEX_HOME: codexHome,
-    DEEP_SCAN_PREFLIGHT_ENV_SENTINEL: "same-snapshot",
-  });
-
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({ codexPath, cwd, envPath }) => {
-      await preflight(codexPath, cwd, env);
+      assert.equal(
+        await realpath(await readJson(cwdPath)),
+        await realpath(cwd),
+      );
       assert.deepEqual(await readJson(envPath), {
         codexHome,
         sentinel: "same-snapshot",
       });
+      await assertPreflightStopped(children, terminatedPath);
     },
+    { longExecutable: true },
   );
 }
 
@@ -304,44 +406,6 @@ async function testOpenAiApiKeyFallbackPreservesNativeAuthentication() {
       },
     );
   }
-}
-
-async function testPreflightStartsInWorkerCwd() {
-  await withFakeCodex(
-    {
-      configResult: configReadResult(expectedProfile),
-      catalogResults: [catalogResult(true)],
-    },
-    async ({
-      codexPath,
-      cwd,
-      cwdPath,
-      callsPath,
-      terminatedPath,
-      children,
-    }) => {
-      assert.notEqual(cwd, process.cwd());
-      await preflight(codexPath, cwd);
-
-      const childCwd = await readJson(cwdPath);
-      assert.equal(await realpath(childCwd), await realpath(cwd));
-      const calls = await readJsonLines(callsPath);
-      assert.deepEqual(
-        calls.find((call) => call.method === "config/read").params,
-        {
-          cwd,
-          includeLayers: false,
-        },
-      );
-      assert.deepEqual(
-        calls.find((call) => call.method === "permissionProfile/list").params,
-        {
-          cwd,
-        },
-      );
-      await assertPreflightStopped(children, terminatedPath);
-    },
-  );
 }
 
 async function testSequentialPaginatedResponsesAcrossChunks() {
@@ -681,26 +745,50 @@ async function testUnexpectedTerminationRemainsRetryable() {
 }
 
 async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout"] as const) {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
     await withFakeCodex(
       { hangAt: "initialize" },
       async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
         const running = preflight(codexPath, cwd);
         await waitForFile(readyPath);
         assert.equal(children.length, 1);
-        children[0][stream]!.destroy(
-          new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-        );
-        await assert.rejects(
-          running,
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes(
-              "could not exchange app-server JSON-RPC over stdio",
-            ) &&
-            error.message.includes("SECRET_REPOSITORY_PATH"),
-        );
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
         await assertPreflightStopped(children, terminatedPath);
       },
     );
@@ -940,17 +1028,12 @@ async function assertPreflightStopped(
   }
 }
 
-function preflight(
-  codexPath: string,
-  cwd: string,
-  env?: Record<string, string>,
-) {
+function preflight(codexPath: string, cwd: string) {
   return preflightDeepScanWorkerPermissionProfile({
     codexPath,
     cwd,
     configOverrides: rawOverrides,
     expectedProfile,
-    ...(env === undefined ? {} : { env }),
     signal: new AbortController().signal,
   });
 }
@@ -1145,6 +1228,17 @@ function handle(message) {
       thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
       model: 'synthetic-model', reasoningEffort: 'high',
     });
+    return;
+  }
+  if (message.method === "thread/read") {
+    const path = scenario.callsPath + '.parent.jsonl';
+    if (scenario.parentRollout !== undefined) {
+      writeFileSync(path, scenario.parentRollout.map((item) => JSON.stringify(item)).join("\\n") + "\\n");
+    }
+    send(message.id, { thread: {
+      id: scenario.returnedParentThreadId ?? message.params.threadId,
+      path: scenario.parentPathUnavailable ? null : path,
+    } });
     return;
   }
   if (message.method === "thread/inject_items") {

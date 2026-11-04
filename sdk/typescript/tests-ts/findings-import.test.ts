@@ -21,19 +21,24 @@ const CSV_SOURCE =
 async function sourceDocument(): Promise<FindingsDocument> {
   return JSON.parse(
     await readFile(
-      join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+      join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
       "utf8",
     ),
   );
 }
 
-function exportCsv(findings: Finding[]): string {
+function occurrenceId(index: number): string {
+  return "occ_" + index.toString(16).padStart(24, "0");
+}
+
+function exportCsv(findings: Finding[], coverage = {}): string {
   return execFileSync(
     PYTHON,
     [
       "-c",
-      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), {}))",
+      "import json, sys; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import build_csv_projection; sys.stdout.buffer.write(build_csv_projection(json.load(sys.stdin.buffer), json.loads(sys.argv[2])))",
       join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(coverage),
     ],
     {
       cwd: join(PLUGIN_ROOT, "scripts"),
@@ -88,7 +93,7 @@ describe("findings import formats", () => {
     ).rejects.toThrow("duplicate occurrence_id");
   });
 
-  test("round-trips literal apostrophes and spreadsheet escapes through the exporter", async () => {
+  test("round-trips required text and spreadsheet escapes through the exporter", async () => {
     const {
       findings: [finding],
     } = await sourceDocument();
@@ -100,6 +105,9 @@ describe("findings import formats", () => {
       "''-x",
       "''literal",
       "ordinary λ",
+      "\uFEFF",
+      "\u0085\uFEFF\u001c",
+      "  Required text. \n",
       "=formula",
       "\u0085=formula",
       "\u001c=formula",
@@ -117,31 +125,29 @@ describe("findings import formats", () => {
       "－wide",
       "＠wide",
     ];
-    for (const value of values) {
-      const source = {
-        ...finding!,
-        title: value,
-        summary: value,
-        remediation: value,
-        locations: [
-          {
-            path: value.replace(/[\u0000-\u001F]/gu, "") + ".ts",
-            startLine: 1,
-          },
-        ],
-      };
-      const [imported] = await parseImportedFindings(
-        exportCsv([source]),
-        "csv",
-        PLUGIN_ROOT,
-      );
-      expect(imported).toMatchObject({
-        title: source.title,
-        summary: source.summary,
-        remediation: source.remediation,
-        locations: source.locations,
-      });
-    }
+    const rows = values.map((value, index) => ({
+      ...finding!,
+      occurrenceId: occurrenceId(index),
+      title: value,
+      summary: value,
+      remediation: value,
+      locations: [
+        { path: value.replace(/[\u0000-\u001F]/gu, "") + ".ts", startLine: 1 },
+      ],
+    }));
+    const imported = await parseImportedFindings(
+      exportCsv(rows),
+      "csv",
+      PLUGIN_ROOT,
+    );
+    expect(imported).toMatchObject(
+      rows.map(({ title, summary, remediation, locations }) => ({
+        title,
+        summary,
+        remediation,
+        locations,
+      })),
+    );
   });
 
   test("retains a literal apostrophe before a non-whitespace byte order mark", async () => {
@@ -153,6 +159,28 @@ describe("findings import formats", () => {
     );
 
     expect(imported!.title).toBe(title);
+  });
+
+  test("round-trips literal whitespace paths and FEFF candidate IDs through the exporter", async () => {
+    const {
+      findings: [finding],
+    } = await sourceDocument();
+    const rows = [" ", "\u00A0", "\u2028", "\u2029", "\uFEFF"].map(
+      (path, index) => ({
+        ...finding!,
+        occurrenceId: occurrenceId(index),
+        locations: [{ path, startLine: 1, endLine: 1 }],
+        extensions: { candidateId: "\uFEFF" },
+      }),
+    );
+    const imported = await parseImportedFindings(
+      exportCsv(rows, { mode: "deep_repository" }),
+      "csv",
+      PLUGIN_ROOT,
+    );
+    expect(imported).toMatchObject(
+      rows.map(({ locations, extensions }) => ({ locations, extensions })),
+    );
   });
 
   test("accepts full findings documents and findings-service payloads", async () => {

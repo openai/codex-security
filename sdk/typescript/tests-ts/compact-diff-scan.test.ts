@@ -1,3 +1,4 @@
+import { nodeCommand } from "./support/shell.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
 import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
@@ -9,6 +10,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { readReviewState } from "./support/review-state.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -21,16 +23,29 @@ function createRepository(): { root: string; repository: string } {
   const repository = join(root, "repository");
   mkdirSync(repository);
   git(repository, "init", "-q");
+  git(repository, "config", "--local", "core.autocrlf", "false");
   return { root, repository };
 }
 
-function python(script: string, ...args: string[]) {
+function pythonHelper(script: string, ...args: string[]) {
   const command =
     Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(command).not.toBeNull();
   return spawnSync(
     command!,
     ["-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+    { encoding: "utf8" },
+  );
+}
+
+function inventoryHelper(script: string, ...args: string[]) {
+  return spawnSync(
+    nodeCommand().command,
+    [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      ...(script === "generate-in-scope-files" ? [script] : []),
+      ...args,
+    ],
     { encoding: "utf8" },
   );
 }
@@ -47,7 +62,7 @@ function candidate(path: string): JsonObject {
 async function startMcp(root: string) {
   const { request, close } = await startMcpClient(
     {
-      command: process.execPath,
+      command: nodeCommand().command,
       args: [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
       env: {
         ...process.env,
@@ -93,8 +108,8 @@ describe("compact diff scan", () => {
     git(repository, "checkout", "--detach", base);
 
     const output = join(root, "rank-input.jsonl");
-    const result = python(
-      "generate_rank_input.py",
+    const result = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -138,8 +153,8 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -192,15 +207,11 @@ describe("compact diff scan", () => {
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
 
-    const executable = Bun.which("python3") ?? Bun.which("python");
-    expect(executable).not.toBeNull();
     const result = spawnSync(
-      executable!,
+      nodeCommand().command,
       [
-        "-B",
-        "-c",
-        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
         "--repo",
         repository,
         "--scope",
@@ -234,8 +245,8 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -256,8 +267,8 @@ describe("compact diff scan", () => {
     ]);
 
     const reviewOutput = join(root, "rank-input.jsonl");
-    const review = python(
-      "generate_rank_input.py",
+    const review = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -332,41 +343,6 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("streams maximum-size preflight checks through the MCP workbench", async () => {
-    const { root, repository } = createRepository();
-    writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
-    const client = await startMcp(root);
-    const owner = "preflight-stdin-owner";
-
-    try {
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        { mode: "standard", targetPath: repository, scope: "." },
-        owner,
-      );
-      const scanId = (started["scan"] as JsonObject)["scanId"] as string;
-      const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
-        capability: `windows_process_boundary_${index}`,
-        reason: "é".repeat(1_200),
-        severity: "warn",
-        status: "fail",
-      }));
-      expect(JSON.stringify(preflightChecks).length).toBeGreaterThan(
-        32 * 1_024,
-      );
-
-      await client.call(
-        "update_codex_security_scan_progress",
-        { scanId, phase: "preflight", preflightChecks },
-        owner,
-      );
-    } finally {
-      await client.close();
-    }
-  });
-
   test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
@@ -400,12 +376,18 @@ describe("compact diff scan", () => {
         userContext,
       );
 
-      const started = await client.call(
-        "start_codex_security_prompt_only_scan",
-        selection,
-        "user-context-stdin-owner",
-      );
-      const scan = started["scan"] as JsonObject;
+      const started = await client.request("tools/call", {
+        name: "start_codex_security_prompt_only_scan",
+        arguments: selection,
+        _meta: { "openai/threadId": "user-context-stdin-owner" },
+      });
+      expect(started["isError"], JSON.stringify(started)).not.toBe(true);
+      const instructions = (started["content"] as { text: string }[])[0]?.text;
+      expect(instructions).toContain("complete_codex_security_scan");
+      expect(instructions).not.toContain("get_codex_security_completed_scan");
+      const scan = (started["structuredContent"] as JsonObject)[
+        "scan"
+      ] as JsonObject;
       expect(scan["userContext"]).toBe(userContext);
       const updated = await client.call(
         "update_codex_security_scan_context",
@@ -591,7 +573,7 @@ describe("compact diff scan", () => {
               },
             },
           ],
-          coverage: {
+          reviewState: {
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -622,7 +604,7 @@ describe("compact diff scan", () => {
             },
           },
         ],
-        coverage: {
+        reviewState: {
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -636,7 +618,7 @@ describe("compact diff scan", () => {
         ).findings.map((draftFinding) => draftFinding["identity"]),
       ).toEqual([
         { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -694,7 +676,7 @@ describe("compact diff scan", () => {
           },
         ],
         threatModel,
-        coverage: {
+        reviewState: {
           surfaces: [
             {
               label: "Changed files",
@@ -745,9 +727,8 @@ describe("compact diff scan", () => {
       expect(target["snapshotDigest"]).toBe(
         `codex-security-snapshot/v1:sha256:${digest}`,
       );
-      expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
-        "diff",
-      );
+      expect(completed).not.toHaveProperty("coverage");
+      expect(completed["review"]).toEqual({ excludedPaths: [] });
       const completedIdentities = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       ).map((completedFinding) => completedFinding["identity"]);
@@ -763,20 +744,18 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a-2" },
       ]);
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
           "threatModel"
         ],
       ).toEqual(threatModel);
-      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
-        openQuestions,
-      );
+      const reviewState = await readReviewState(scanDir);
+      expect(reviewState).toMatchObject({ openQuestions });
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.threatModel).toEqual(threatModel);
-      expect(contract.coverage.openQuestions).toEqual(openQuestions);
-      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      expect(contract.review).toEqual({ excludedPaths: [] });
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
       const modelFacts =
         format === "Markdown"
@@ -797,9 +776,7 @@ describe("compact diff scan", () => {
       else
         for (const fact of modelFacts)
           expect(completedThreatModel).toContain(fact);
-      expect(report).toContain(openQuestions[0]!.question);
-      expect(report).toContain(openQuestions[0]!.followUpPrompt);
-      expect(report).toContain(coverageNote);
+      expect(reviewState.surfaces[0]?.notes).toBe(coverageNote);
 
       const terminalDir = join(root, "terminal-scan");
       mkdirSync(terminalDir, { mode: 0o700 });
@@ -809,16 +786,16 @@ describe("compact diff scan", () => {
       ) as JsonObject;
       const terminalScan = terminalManifest["scan"] as JsonObject;
       terminalScan["threatModel"] = { summary: markdownModel };
+      terminalScan["reviewState"] = reviewState;
       delete terminalScan["sealedAt"];
       delete terminalScan["artifacts"];
       for (const [name, document] of [
         ["scan-manifest.json", terminalManifest],
         ["findings.json", completed["findings"]],
-        ["coverage.json", completed["coverage"]],
       ] as const) {
         writeFileSync(join(terminalDir, name), JSON.stringify(document));
       }
-      const finalized = python(
+      const finalized = pythonHelper(
         "finalize_scan_contract.py",
         "--scan-dir",
         terminalDir,
@@ -826,7 +803,7 @@ describe("compact diff scan", () => {
         repository,
       );
       expect(finalized.status, finalized.stderr).toBe(0);
-      const validated = python(
+      const validated = pythonHelper(
         "validate_scan_contract.py",
         "--scan-dir",
         terminalDir,

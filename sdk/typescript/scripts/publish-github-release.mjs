@@ -147,10 +147,9 @@ export function publishGitHubRelease(env, workspace, run = runCommand) {
     notesArgs.push("-f", "configuration_file_path=.github/release.yml");
   if (previousTag) notesArgs.push("-f", `previous_tag_name=${previousTag}`);
   const generatedResult = run("gh", notesArgs);
-  const generated = JSON.parse(generatedResult.stdout);
+  const generated = JSON.parse(output(generatedResult));
   if (typeof generated.body !== "string")
     throw new Error("Generated GitHub release notes must be a string.");
-  output(generatedResult);
   const tagged = run(
     "git",
     ["show", `${sha}:.github/release-notes.md`],

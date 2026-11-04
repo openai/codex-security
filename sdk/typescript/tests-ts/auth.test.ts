@@ -132,14 +132,13 @@ describe("Codex authentication process boundary", () => {
     const root = await temporaryDirectory("codex-security-auth-epipe-");
     const script = join(root, "exit.mjs");
     await writeFile(script, "process.exit(1);\n");
-    await expect(
-      runCodexCommand(
-        { command: process.execPath },
-        [script],
-        process.env,
-        "x".repeat(16 * 1024 * 1024),
-      ),
-    ).resolves.toMatchObject({ success: false, exitCode: 1 });
+    const result = await runCodexCommand(
+      { command: process.execPath },
+      [script],
+      process.env,
+      "x".repeat(16 * 1024 * 1024),
+    );
+    expect(result).toMatchObject({ success: false, exitCode: 1 });
   });
 
   test("retains large noninteractive authentication output", async () => {
@@ -185,6 +184,41 @@ describe("Codex authentication process boundary", () => {
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(observeSucceeded).toHaveBeenCalled();
   });
+
+  test.each([
+    ["Open https://[2001:db8::1].", "https://[2001:db8::1]"],
+    [
+      "Open [https://auth.example.test/device]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::]]", "https://[2001:db8::]"],
+    [
+      "Open [https://auth.example.test/device.]",
+      "https://auth.example.test/device",
+    ],
+    ["Open [https://[2001:db8::3].]", "https://[2001:db8::3]"],
+    [
+      "Open [https://[2001:db8::4]/device?challenge=ABCD.]",
+      "https://[2001:db8::4]/device?challenge=ABCD",
+    ],
+    ["Open [https://[2001:db8::5]:8443]", "https://[2001:db8::5]:8443"],
+    ["Open [https://[::1]]", null],
+    ["Open [https://[::ffff:127.0.0.1]]", null],
+    ["Open http://[2001:db8::1]", null],
+  ] as const)(
+    "distinguishes IPv6 host brackets from surrounding punctuation: %s",
+    async (output, expected) => {
+      const handle = new CodexLoginHandle(
+        nodeCommand(),
+        ["-e", "console.error(process.argv[1])", output],
+        {},
+        () => {},
+      );
+
+      await expect(handle.wait()).resolves.toMatchObject({ success: true });
+      expect(handle.verificationUrl).toBe(expected);
+    },
+  );
 
   test.each(["sync", "async"])(
     "rejects wait when required login completion fails: %s",
@@ -255,6 +289,23 @@ describe("Codex authentication process boundary", () => {
       expect(handle.userCode).toBe("ABCD-EFGH");
     },
   );
+
+  test("reads login URLs from hyperlinks terminated with ST", async () => {
+    const url = "https://auth.example.test/device";
+    const st = "\u001b\\";
+    const link = `\u001b]8;;https://link.example.test/${st}${url}\u001b]8;;${st}`;
+    const output = `Open ${link}\nUser code: ABCD-EFGH\n`;
+    const handle = new CodexLoginHandle(
+      nodeCommand(),
+      ["-e", "process.stderr.write(process.argv[1])", output],
+      process.env,
+      () => {},
+    );
+
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+    expect(handle.verificationUrl).toBe(url);
+    expect(handle.userCode).toBe("ABCD-EFGH");
+  });
 
   test("retains large interactive output and login instructions", async () => {
     const root = await temporaryDirectory("codex-security-auth-output-");

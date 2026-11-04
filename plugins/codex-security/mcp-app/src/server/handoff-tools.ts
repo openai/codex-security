@@ -46,7 +46,7 @@ export function registerScanHandoffTools(
   for (const { name, title, description, inputSchema, command } of [
     {
       name: "mark_codex_security_scan_handoff_delivered",
-      title: "Record Delivered Codex Security Local Handoff",
+      title: "Record Delivered Codex Security Handoff",
       description:
         "App-only. Record that the launched scan instructions were delivered to Codex.",
       inputSchema: handoffClaimSchema,
@@ -54,7 +54,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "claim_codex_security_scan_handoff_delivery",
-      title: "Claim Codex Security Local Handoff Delivery",
+      title: "Claim Codex Security Handoff Delivery",
       description:
         "App-only. Durably claim scan handoff delivery before sending continuation instructions to Codex.",
       inputSchema: handoffTakeoverSchema,
@@ -62,7 +62,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "release_codex_security_scan_handoff_delivery",
-      title: "Release Codex Security Local Handoff Delivery",
+      title: "Release Codex Security Handoff Delivery",
       description:
         "App-only. Release a failed scan handoff delivery claim so the app can retry it.",
       inputSchema: handoffClaimSchema,
@@ -70,7 +70,7 @@ export function registerScanHandoffTools(
     },
     {
       name: "attach_codex_security_scan_continuation_thread",
-      title: "Attach Codex Security Local Scan Thread",
+      title: "Attach Codex Security Scan Thread",
       description:
         "App-only. Persist the normal local Codex thread created for a claimed scan handoff.",
       inputSchema: scanContinuationThreadSchema,

@@ -7,7 +7,9 @@
     "../../plugins/codex-security/native/*.mts",
     "../../examples/custom-validation/*.mts",
     "scripts/compare-test-reports.mts",
-    "scripts/run-ci-tests.mts"
+    "scripts/run-ci-tests.mts",
+    "scripts/run-mcp-test-shard.mts",
+    "scripts/update-test-timings.mts"
   ],
   "compilerOptions": {
     "allowJs": true,

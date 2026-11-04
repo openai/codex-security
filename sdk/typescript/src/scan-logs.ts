@@ -1,13 +1,11 @@
-import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import zlib from "node:zlib";
-import { sessionFiles, type ScanCostTracker } from "./cost.js";
 import { isRecord } from "./record.js";
+import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -16,6 +14,7 @@ import {
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
+import { compareTimestamps } from "./timestamps.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -25,6 +24,7 @@ interface ScanLogOptions {
   codexHome: string | readonly string[];
   scanDirectory?: string;
   completedAt?: string | null;
+  logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
 }
 
@@ -35,6 +35,7 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  logCompletedAt?: string | null;
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -49,6 +50,10 @@ export function readSavedScanLogs(
       `No session is associated with scan ${scan.scanId}.`,
     );
   }
+  const status = scan.progress?.status;
+  const terminal =
+    status === "complete" || status === "failed" || status === "canceled";
+  const logCompletedAt = terminal ? (scan.logCompletedAt ?? null) : null;
   return readScanLogs({
     scanId: scan.scanId,
     threadId: threadId ?? scan.threadIds?.[0],
@@ -57,108 +62,16 @@ export function readSavedScanLogs(
     codexHome,
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    // Legacy completion still bounds inferred workers, but cannot identify the
+    // final scan turn when sealed artifacts were completed before a resume.
     completedAt:
-      scan.progress?.status === "running"
+      status === "running"
         ? null
-        : scan.progress?.status === "complete" ||
-            scan.progress?.status === "failed" ||
-            scan.progress?.status === "canceled"
-          ? (scan.progress.updatedAt ?? "")
+        : terminal
+          ? (scan.progress?.updatedAt ?? "")
           : "",
+    logCompletedAt,
   });
-}
-
-interface ScanLogInvocation {
-  turns: () => Promise<{ threadId: string; turnId: string }[]>;
-  write?: Promise<void>;
-}
-
-const scanLogInvocations = new Map<string, Set<ScanLogInvocation>>();
-
-// Bound ownership to the streamed turn itself, then resolve native task IDs on
-// the existing incremental reader without blocking scan execution on log I/O.
-export async function* recordScanLogTurn<T extends { readonly type: string }>(
-  options: {
-    scanId: string;
-    threadId: () => string | null;
-    codexHome: string;
-    tracker: ScanCostTracker;
-    pendingWrites: Set<Promise<void>>;
-  },
-  run: () => Promise<{ events: AsyncGenerator<T> }>,
-  onError: (error: unknown) => void,
-): AsyncGenerator<T> {
-  const warn = (error: unknown) => {
-    try {
-      onError(error);
-    } catch {}
-  };
-  const startedAt = Date.now();
-  let endedAt: number | undefined;
-  const path = scanLogTurnsPath(options.codexHome, options.scanId);
-  const invocations =
-    scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
-  const invocation: ScanLogInvocation = {
-    turns: async () => {
-      const threadId = options.threadId();
-      if (threadId === null) return [];
-      return await options.tracker.logTurns(
-        threadId,
-        startedAt,
-        endedAt ?? Date.now(),
-      );
-    },
-  };
-  invocations.add(invocation);
-  scanLogInvocations.set(path, invocations);
-  const forget = () => {
-    invocations.delete(invocation);
-    if (invocations.size === 0) scanLogInvocations.delete(path);
-  };
-  try {
-    yield* (await run()).events;
-  } finally {
-    if (options.threadId() === null) {
-      forget();
-    } else {
-      // End the ownership window synchronously, then move session discovery and
-      // attribution persistence fully off the scan turn path. Client cleanup and
-      // log reads explicitly settle these optional writes when they need them.
-      endedAt = Date.now();
-      const write = invocation
-        .turns()
-        .then(async (turns) => {
-          if (turns.length === 0) return;
-          await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-          await appendFile(
-            path,
-            turns.map((turn) => JSON.stringify(turn) + "\n").join(""),
-            { mode: 0o600 },
-          );
-        })
-        .catch(warn)
-        .finally(() => {
-          forget();
-          options.pendingWrites.delete(write);
-        });
-      invocation.write = write;
-      options.pendingWrites.add(write);
-    }
-  }
-}
-
-export async function settleScanLogTurns(
-  pendingWrites: ReadonlySet<Promise<void>>,
-): Promise<void> {
-  await Promise.all(pendingWrites);
-}
-
-function scanLogTurnsPath(codexHome: string, scanId: string): string {
-  return join(
-    codexHome,
-    "scan-log-turns",
-    createHash("sha256").update(scanId).digest("hex") + ".jsonl",
-  );
 }
 
 // Codex can compress cold rollouts to `.jsonl.zst`. Node 22.13 and 22.14 lack
@@ -179,10 +92,12 @@ async function* scanSessions(codexHome: string, directory = "sessions") {
       const metadata = first["payload"];
       const threadId = metadata["id"];
       if (typeof threadId !== "string") break;
+      const timestamp = metadata["timestamp"];
       yield {
         threadId,
         parentThreadId: sessionParentThreadId(metadata),
-        startedAt: sessionStartedAt(metadata["timestamp"]),
+        timestamp: typeof timestamp === "string" ? timestamp : null,
+        startedAt: sessionStartedAt(timestamp),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
         path,
@@ -200,46 +115,12 @@ export async function findScanSession(codexHome: string, threadId: string) {
 }
 
 export async function readScanLogs(options: ScanLogOptions) {
+  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(
     typeof options.codexHome === "string"
       ? [options.codexHome]
       : options.codexHome,
   );
-
-  // Active attribution can discover a child rollout that did not exist when the
-  // log read began. Settle/inspect it first, then discover sessions so directly
-  // attributed children are present in the selected log map.
-  const ownedTurns = new Map<string, Set<string>>();
-  for (const home of homes) {
-    const path = scanLogTurnsPath(home, options.scanId);
-    const invocations =
-      scanLogInvocations.get(path) ?? new Set<ScanLogInvocation>();
-    await Promise.all([...invocations].map((invocation) => invocation.write));
-    const records: Record<string, unknown>[] = (
-      await Promise.all(
-        [...invocations].map((invocation) =>
-          invocation.turns().catch(() => []),
-        ),
-      )
-    ).flat();
-    try {
-      for await (const record of sessionEvents(path)) records.push(record);
-    } catch {
-      // Attribution is optional; native logs still use the completion boundary.
-    }
-    for (const record of records) {
-      if (
-        typeof record["threadId"] !== "string" ||
-        typeof record["turnId"] !== "string"
-      )
-        continue;
-      const turns = ownedTurns.get(record["threadId"]) ?? new Set<string>();
-      turns.add(record["turnId"]);
-      ownedTurns.set(record["threadId"], turns);
-    }
-  }
-
-  const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
@@ -256,32 +137,36 @@ export async function readScanLogs(options: ScanLogOptions) {
       `No saved session logs are available for scan ${options.scanId}.`,
     );
   }
+  let children: Map<string | undefined, SessionLog[]> | undefined;
+  const startsAfterCompletion = (timestamp: unknown) =>
+    typeof options.logCompletedAt === "string" &&
+    typeof timestamp === "string" &&
+    compareTimestamps(timestamp, options.logCompletedAt) >= 0;
 
-  const explicitlyIncluded = new Set([
+  const included = new Set([
     ...(options.threadId ? [options.threadId] : []),
     ...(options.threadIds ?? []),
     ...(options.executionThreadIds ?? []),
   ]);
-  const included = new Set([...explicitlyIncluded, ...ownedTurns.keys()]);
   // A Desktop owner can contain other work. Include its log without treating
-  // the whole conversation tree as part of this scan. Directly attributed
-  // threads are selected too, but do not widen descendant traversal.
-  const traversed = new Set(options.executionThreadIds ?? explicitlyIncluded);
-  const pending = [...traversed];
-  for (const parentId of pending) {
+  // the whole conversation tree as part of this scan.
+  const traversed = new Set(options.executionThreadIds ?? included);
+  for (const parentId of traversed) {
     const parent = logs.get(parentId)?.[0];
-    for (const [session] of logs.values()) {
+    // Parentless workers can only belong to the root, in discovery order.
+    children ??= Map.groupBy(
+      logs.values().map(([session]) => session),
+      (session) => session.parentThreadId ?? root?.threadId,
+    );
+    for (const session of children.get(parentId) ?? []) {
       if (
         !traversed.has(session.threadId) &&
-        (session.parentThreadId === parentId ||
-          (root !== undefined &&
-            parent === root &&
-            session.parentThreadId === null &&
-            belongsToScan(session, root, options)))
+        (session.parentThreadId === parentId
+          ? !startsAfterCompletion(session.timestamp)
+          : parent !== undefined && belongsToScan(session, parent, options))
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
-        pending.push(session.threadId);
       }
     }
   }
@@ -295,45 +180,25 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
-  const completedAt = Date.parse(options.completedAt ?? "");
   const events: Record<string, unknown>[] = [];
+  // Recorded completion can precede the scan turn's final response. Keep that
+  // turn's remaining events, then stop before a post-completion turn starts.
   for (const session of sessions) {
     let replaying = false;
-    let scanTurn = false;
     for await (const event of sessionEvents(session.path)) {
       const payload = event["payload"];
       if (event["type"] === "session_meta" && isRecord(payload)) {
         replaying = payload["id"] !== session.threadId;
       }
-      if (replaying) {
-        if (
-          event["type"] !== "event_msg" ||
-          !isRecord(payload) ||
-          payload["type"] !== "task_started" ||
-          !sessionOwnsTurn(session, payload)
-        ) {
-          continue;
-        }
-        replaying = false;
-      }
-      const timestamp =
-        typeof event["timestamp"] === "string"
-          ? Date.parse(event["timestamp"])
-          : NaN;
-      if (
+      const taskStarted =
         event["type"] === "event_msg" &&
         isRecord(payload) &&
-        payload["type"] === "task_started"
-      ) {
-        // Completion is recorded before the terminal tool result and reply.
-        scanTurn =
-          timestamp <= completedAt ||
-          (typeof payload["turn_id"] === "string" &&
-            ownedTurns.get(session.threadId)?.has(payload["turn_id"]) === true);
+        payload["type"] === "task_started";
+      if (replaying) {
+        if (!taskStarted || !sessionOwnsTurn(session, payload)) continue;
+        replaying = false;
       }
-      if (!scanTurn && timestamp > completedAt) {
-        continue;
-      }
+      if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
       events.push({ threadId: session.threadId, event });
     }
   }
@@ -365,12 +230,11 @@ function belongsToScan(
   ) {
     return false;
   }
-  if (completedAt !== undefined && completedAt !== null) {
-    const completed = Date.parse(completedAt);
-    if (!Number.isFinite(completed) || session.startedAt >= completed) {
-      return false;
-    }
-  }
+  const beforeCompletion =
+    typeof options.logCompletedAt === "string" && session.timestamp !== null
+      ? compareTimestamps(session.timestamp, options.logCompletedAt) < 0
+      : completedAt == null || session.startedAt < Date.parse(completedAt);
+  if (!beforeCompletion) return false;
 
   const roots = [scanDirectory];
   const name = basename(scanDirectory);
