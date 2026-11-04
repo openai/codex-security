@@ -438,6 +438,10 @@ show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
 
+When a cost limit is configured, `scan --dry-run` shows the resolved
+`maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
+against the limit and why in-flight requests can exceed it.
+
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
 
