@@ -18170,7 +18170,7 @@ process.exit(2);
     expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
     expect(createCodex.mock.lastCall?.[0]?.codexPathOverride).toBe(
       process.platform === "win32"
-        ? win32.toNamespacedPath(resolveCodexCommand({}).command)
+        ? win32.toNamespacedPath(fakeCommand.command.command)
         : undefined,
     );
     expect(
