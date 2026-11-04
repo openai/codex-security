@@ -230,26 +230,26 @@ async function nativeScanFactory() {
 function testDeepCompositionCases<
   T extends {
     instructionFile?: string;
-    ambientInstruction?: string;
     native?: "discovery" | "sealed";
-    queuedNativeKnowledge?: boolean;
-    provider?: JsonObject;
-    missingReplay?: string;
   },
 >(cases: T[]) {
-  return (name: string, run: (scenario: T) => Promise<void>) => {
+  return (
+    name: string,
+    run: (scenario: T, scanTimeout: number) => Promise<void>,
+  ) => {
+    const defaultTimeout = Number(
+      process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000",
+    );
     for (const scenario of cases) {
+      // Native scans and instruction recovery each drive multiple real workbench processes.
+      const timeout =
+        scenario.native !== undefined || scenario.instructionFile !== undefined
+          ? Math.max(120_000, defaultTimeout)
+          : undefined;
       test(
         name.replace("%j", JSON.stringify(scenario)),
-        () => run(scenario),
-        scenario.instructionFile !== undefined ||
-          scenario.ambientInstruction !== undefined ||
-          (scenario.native === "discovery" &&
-            (scenario.queuedNativeKnowledge === true ||
-              (scenario.provider !== undefined &&
-                scenario.missingReplay === undefined)))
-          ? 120_000
-          : undefined,
+        () => run(scenario, timeout ?? defaultTimeout),
+        timeout,
       );
     }
   };
@@ -383,23 +383,26 @@ testDeepCompositionCases([
     | "sealed child missing";
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
-  async ({
-    budget,
-    ownerOutcome,
-    ownerResume,
-    firstChildBudget,
-    partialCheckpoint,
-    completedCleanup,
-    requiredCost,
-    provider,
-    native,
-    queuedNativeKnowledge,
-    missingReplay,
-    instructionFile,
-    instructionPathForm,
-    instructionBoundary,
-    ambientInstruction,
-  }) => {
+  async (
+    {
+      budget,
+      ownerOutcome,
+      ownerResume,
+      firstChildBudget,
+      partialCheckpoint,
+      completedCleanup,
+      requiredCost,
+      provider,
+      native,
+      queuedNativeKnowledge,
+      missingReplay,
+      instructionFile,
+      instructionPathForm,
+      instructionBoundary,
+      ambientInstruction,
+    },
+    scanTimeout,
+  ) => {
     const hasInstructionScenario =
       instructionFile !== undefined || ambientInstruction !== undefined;
     const legacyInstructions =
@@ -1694,9 +1697,7 @@ process.exit(0);
             : {}),
           signal: AbortSignal.any([
             controller.signal,
-            AbortSignal.timeout(
-              Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
-            ),
+            AbortSignal.timeout(scanTimeout),
           ]),
         });
       };
