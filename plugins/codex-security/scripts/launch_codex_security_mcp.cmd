@@ -15,8 +15,12 @@ if errorlevel 1 (
 )
 
 :launch
+if defined CODEX_MCP_NODE_PATH if exist "%CODEX_MCP_NODE_PATH%" (
+  set "CODEX_SECURITY_MCP_NODE=%CODEX_MCP_NODE_PATH%"
+  goto run
+)
 rem WindowsApps can expose a Node path that exists but cannot be executed.
-rem Prefer relocated user-writable runtimes before probing packaged paths.
+rem Without an explicit override, prefer relocated user-writable runtimes.
 if defined LOCALAPPDATA for /d %%D in ("%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\*") do if exist "%%~fD\bin\node.exe" (
   set "CODEX_SECURITY_MCP_NODE=%%~fD\bin\node.exe"
   goto run
@@ -27,10 +31,6 @@ if defined XDG_CACHE_HOME if exist "%XDG_CACHE_HOME%\codex-runtimes\codex-primar
 )
 if defined USERPROFILE if exist "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe" (
   set "CODEX_SECURITY_MCP_NODE=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
-  goto run
-)
-if defined CODEX_MCP_NODE_PATH if exist "%CODEX_MCP_NODE_PATH%" (
-  set "CODEX_SECURITY_MCP_NODE=%CODEX_MCP_NODE_PATH%"
   goto run
 )
 if defined CODEX_BROWSER_USE_NODE_PATH if exist "%CODEX_BROWSER_USE_NODE_PATH%" (

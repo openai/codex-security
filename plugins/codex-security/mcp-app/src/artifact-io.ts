@@ -1,19 +1,8 @@
 import { canonicalDirectory } from "./artifact-context.js";
-import { isRecord } from "./record.js";
+import type { ZodType, ZodError } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
-
-export interface DeepReducerWorkerContext {
-  id: string;
-  resultPath: string;
-}
-
-export interface DeepReducerContext {
-  scanRoot: string;
-  claimedWorkers: DeepReducerWorkerContext[];
-  previousReducerResultPath?: string;
-}
 
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
@@ -21,9 +10,11 @@ export interface DeepReducerContext {
 export interface ArtifactContext {
   root: string;
   repoRoot: string;
-  layout: "scan" | "worker" | "reducer";
+  layout: "scan" | "worker";
   scanId?: string;
   scope?: string;
+  includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pluginRoot?: string;
   pythonCommand?: string;
   targetContract?: Readonly<Record<string, unknown>>;
@@ -31,23 +22,11 @@ export interface ArtifactContext {
   handoffClaimToken?: string;
   status?: string;
   mode?: string;
-  deepReducer?: DeepReducerContext;
 }
 
 export interface ArtifactPage {
   cursor?: string;
   limit?: number;
-}
-
-export interface ArtifactPageResult<Row> {
-  rows: Row[];
-  nextCursor?: string;
-}
-
-export interface ArtifactRowSchema<Row> {
-  safeParse(
-    value: unknown,
-  ): { success: true; data: Row } | { success: false; error?: unknown };
 }
 
 /**
@@ -61,8 +40,11 @@ export async function readArtifactText(
   const canonical = await artifactSourcePath(context, components, label);
   try {
     return await fs.readFile(canonical, "utf8");
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -81,12 +63,15 @@ export async function readArtifactTextWithMetadata(
     } finally {
       await handle.close();
     }
-  } catch {
-    throw new Error(label + ": the requested artifact cannot be read.");
+  } catch (error) {
+    throw new Error(
+      `${label}: the requested artifact cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
-async function artifactSourcePath(
+export async function artifactSourcePath(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
@@ -97,7 +82,7 @@ async function artifactSourcePath(
 
   for (const [index, component] of components.entries()) {
     current = join(current, component);
-    const metadata = await fs.lstat(current).catch(() => undefined);
+    const metadata = await inspectOptionalPath(current, label);
     if (!metadata) {
       throw new Error(label + ": the requested artifact is unavailable.");
     }
@@ -140,7 +125,7 @@ export async function readArtifactJsonl<Row>(
   context: ArtifactContext,
   components: readonly string[],
   label: string,
-  rowSchema: ArtifactRowSchema<Row>,
+  rowSchema: ZodType<Row>,
 ): Promise<Row[]> {
   const source = await readArtifactText(context, components, label);
   const rows: Row[] = [];
@@ -177,21 +162,14 @@ export function paginateArtifactRows<Row>(
   rows: readonly Row[],
   page: ArtifactPage,
   label: string,
-): ArtifactPageResult<Row> {
-  const cursor = page.cursor ?? "0";
-  if (!/^(?:0|[1-9][0-9]*)$/u.test(cursor)) {
-    throw new Error(label + ": cursor must be a non-negative integer string.");
-  }
-  const start = Number(cursor);
+) {
+  // The MCP tool schemas validate cursor syntax and limit bounds.
+  const start = Number(page.cursor ?? "0");
   if (!Number.isSafeInteger(start) || start > rows.length) {
     throw new Error(label + ": cursor is outside the available rows.");
   }
 
   const limit = page.limit ?? 200;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
-    throw new Error(label + ": limit must be an integer from 1 through 1000.");
-  }
-
   const end = Math.min(rows.length, start + limit);
   return {
     rows: rows.slice(start, end),
@@ -250,15 +228,26 @@ export async function replaceArtifactText(
   content: string,
 ): Promise<void> {
   const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
+  const handle = await fs.open(temporary, "wx", 0o600);
   try {
-    await fs.writeFile(temporary, content, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
+    await handle.writeFile(content, "utf8").then(
+      () => handle.close(),
+      async (writeError: NodeJS.ErrnoException) => {
+        try {
+          await handle.close();
+        } catch (closeError) {
+          throw Object.assign(
+            new AggregateError([writeError, closeError], writeError.message),
+            { code: writeError.code },
+          );
+        }
+        throw writeError;
+      },
+    );
     await fs.rename(temporary, path);
-  } finally {
+  } catch (error) {
     await fs.rm(temporary, { force: true });
+    throw error;
   }
 }
 
@@ -320,20 +309,19 @@ async function inspectOptionalPath(
     return await fs.lstat(path);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw new Error(label + ": artifact path cannot be inspected.");
+    throw new Error(
+      `${label}: artifact path cannot be inspected: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
-function formatRowSchemaError(error: unknown): string {
-  if (!isRecord(error) || !Array.isArray(error.issues)) return ".";
-  const issue: unknown = error.issues[0];
-  if (!isRecord(issue)) return ".";
-  const issuePath = Array.isArray(issue.path)
-    ? issue.path.map(String).join(".")
-    : "";
-  const message = typeof issue.message === "string" ? issue.message : "";
-  if (!issuePath && !message) return ".";
-  return ": " + (issuePath ? issuePath + ": " : "") + message;
+function formatRowSchemaError(error: ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return ".";
+  const issuePath = issue.path.map(String).join(".");
+  if (!issuePath && !issue.message) return ".";
+  return ": " + (issuePath ? issuePath + ": " : "") + issue.message;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

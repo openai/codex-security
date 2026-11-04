@@ -1,6 +1,8 @@
 import { Tiktoken } from "js-tiktoken/lite";
 import cl100kBase from "js-tiktoken/ranks/cl100k_base";
+import { errorMessage } from "../errors.js";
 import type { Finding } from "../models.js";
+import { VERSION } from "../version.js";
 import { FindingsError } from "./errors.js";
 import type { FindingEmbedding } from "./storage.js";
 
@@ -83,8 +85,10 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
   ): Promise<void> {
     let response: Response;
     try {
+      this.signal?.throwIfAborted();
       const apiKey =
         typeof this.apiKey === "function" ? await this.apiKey() : this.apiKey;
+      this.signal?.throwIfAborted();
       if (!apiKey) throw new Error("Missing embedding credentials");
       response = await this.request(this.url, {
         method: "POST",
@@ -92,6 +96,7 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          "User-Agent": `codex-security/${VERSION}`,
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,
@@ -100,11 +105,11 @@ export class OpenAiFindingEmbedder implements FindingEmbedder {
           input: chunks.map(({ tokens }) => tokens),
         }),
       });
-    } catch {
+    } catch (error) {
       this.signal?.throwIfAborted();
       throw new FindingsError(
         "embedding_failed",
-        "Could not reach the embedding provider.",
+        `Could not request finding embeddings: ${errorMessage(error)}`,
       );
     }
     if (!response.ok) {

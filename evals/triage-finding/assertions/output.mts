@@ -1,5 +1,14 @@
 import type { TriageResult } from "../types.ts";
 
+export function gradeFailures(failures: string[], successReason: string) {
+  const pass = failures.length === 0;
+  return {
+    pass,
+    score: pass ? 1 : 0,
+    reason: pass ? successReason : failures.join("; "),
+  };
+}
+
 export function outputText(output: unknown) {
   return typeof output === "string" ? output : JSON.stringify(output);
 }
@@ -65,26 +74,30 @@ export function parseExpected(
   return trim ? terms.flatMap((term) => term.trim() || []) : terms;
 }
 
+function parseTriageJson(candidate: string) {
+  try {
+    const result = JSON.parse(candidate) as TriageResult;
+    if (result?.schema_version === "triage-finding/v0") return result;
+  } catch {
+    // The output may contain other text or invalid fenced blocks.
+  }
+}
+
 export function extractTriageResult(
   output: unknown,
   failureMessage = "Could not find a parseable triage-finding/v0 JSON result",
 ) {
   const text = outputText(output);
-  const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(
-    (match) => match[1].trim(),
-  );
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  const candidates =
-    fencedBlocks.length > 0 ? fencedBlocks : [text.slice(start, end + 1)];
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as TriageResult;
-      if (parsed && parsed.schema_version === "triage-finding/v0") {
-        return parsed;
-      }
-    } catch {
-      // The response may contain more than one fenced block. Try the next one.
+  const plain = parseTriageJson(text);
+  if (plain) return plain;
+  let fenceStart = -1;
+  for (const match of text.matchAll(/^[\t ]*```([^\r\n]*)\r?$/gm)) {
+    if (fenceStart < 0) {
+      fenceStart = match.index + match[0].length;
+    } else if (/^[\t ]*$/.test(match[1])) {
+      const parsed = parseTriageJson(text.slice(fenceStart, match.index));
+      if (parsed) return parsed;
+      fenceStart = -1;
     }
   }
   throw new Error(failureMessage);

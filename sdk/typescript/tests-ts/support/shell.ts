@@ -83,7 +83,7 @@ export function nodeCommand() {
 }
 
 export async function readSubprocess(
-  child: Bun.Subprocess<"ignore", "pipe" | "ignore", "pipe">,
+  child: Bun.Subprocess<Bun.Spawn.Writable, "pipe" | "ignore", "pipe">,
 ) {
   const [status, stdout, stderr] = await Promise.all([
     child.exited,

@@ -23,7 +23,7 @@ afterEach(cleanup);
 async function input() {
   const directory = await temporaryDirectory();
   const contents = await readFile(
-    join(PLUGIN_ROOT, "examples", "completed-scan", "findings.json"),
+    join(PLUGIN_ROOT, "examples", "legacy-completed-scan", "findings.json"),
     "utf8",
   );
   await writeFile(join(directory, "findings.json"), contents);
@@ -35,7 +35,7 @@ async function input() {
 }
 
 const report: OwnerSuggestions = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   revision: "a".repeat(40),
   model: "synthetic-model",
   reasoningEffort: "high",
@@ -168,4 +168,44 @@ test("reports owner lookup errors without changing the diagnostic or leaving lis
   expect(stderr.text()).toBe("codex-security: Owner lookup failed.\n");
   expect(signals.listeners.get("SIGINT")?.size).toBe(0);
   expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});
+
+test("emits a primary CODEOWNERS identity using the existing command and report fields", async () => {
+  const { directory, document } = await input();
+  const deps = dependencies({ currentDirectory: directory });
+  const declared: OwnerSuggestions = {
+    ...report,
+    results: [
+      {
+        findingId: document.findings[0]!.findingId,
+        occurrenceId: null,
+        status: "identified",
+        owner: {
+          kind: "group",
+          provider: "github",
+          handle: "example/maintainers",
+        },
+        reason: "Declared owner of an affected file in CODEOWNERS.",
+        evidence: [
+          {
+            id: "e1",
+            kind: "codeowners",
+            path: ".github/CODEOWNERS",
+            commit: report.revision,
+            startLine: 1,
+            endLine: 1,
+            rule: "* @example/maintainers",
+            matchedPath: "handler.ts",
+          },
+        ],
+        limitations: [],
+      },
+    ],
+  };
+  deps.suggestOwners = async () => declared;
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(["suggest-owners", "findings.json", "--json"], deps),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual(declared);
 });

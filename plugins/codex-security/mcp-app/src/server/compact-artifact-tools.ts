@@ -1,5 +1,8 @@
 import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
+  McpServer,
+  ToolCallback,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodType } from "zod/v4";
 import type { JsonObject as JsonRecord } from "../types.js";
 import {
@@ -22,20 +25,9 @@ import {
 import {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} from "../artifact-validation-phase.js";
-import {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} from "../artifact-attack-path.js";
-import {
-  deepReducerInputsInputSchema,
-  deepReductionInputSchema,
-  recordCodexSecurityDeepReduction,
-} from "../artifact-deep-reducer.js";
-import {
-  deepReducerPageResponse,
-  getCodexSecurityDeepReducerInputsPage,
-} from "../artifact-deep-reducer-pages.js";
+} from "../artifact-candidate-ledger.js";
 import {
   completedScanInputSchema,
   getCodexSecurityCompletedScan,
@@ -67,14 +59,11 @@ const modelOnlyMeta = {
   ui: { visibility: ["model"] as const },
 };
 
-function signalFromRequestContext(
-  requestContext: unknown,
-): AbortSignal | undefined {
-  if (typeof requestContext !== "object" || requestContext === null)
-    return undefined;
-  const signal = Reflect.get(requestContext, "signal");
-  return signal instanceof AbortSignal ? signal : undefined;
-}
+const semanticFindingGuidance =
+  " Findings require severity:{level}, confidence:{level,rationale}, taxonomy:{category,cwe:[]}, locations:[{path,startLine,endLine?}], and provenance:{source}, alongside ruleId,title,summary,remediation. Use repository-relative paths. Each codeEvidence entry needs id,label,path,startLine,code,explanation. Omit host-owned findingId,occurrenceId,fingerprints and scope.includePaths/excludePaths.";
+
+const reviewStateGuidance =
+  " Coverage shape: {surfaces:[{label,disposition}],explicitExclusions:[{pattern,reason}],deferred:[{id?,reason}]}. Surface dispositions: reported,no_issue_found,rejected,not_applicable,needs_follow_up. Arrays may be empty. Exclusions and unresolved review questions do not prevent a terminal result. Omit host-owned reviewState documentType,schemaVersion,scanId,mode,inventoryStrategy,includePaths,excludePaths,receiptRefs. Omit resolvedDeferred from complete:false checkpoints; on a terminal draft use it only for finished generic tasks, and resolve candidates with a finding carrying the saved candidate ID in provenance.candidateId or a rejected/not_applicable surface carrying candidateId.";
 
 export function registerCompactArtifactTools(
   server: McpServer,
@@ -117,7 +106,7 @@ export function registerCompactArtifactTools(
     readOnly: false,
     handler: async (input, requestContext) => {
       return recordCodexSecurityDiscoveryCandidates(
-        { candidates: input.candidates },
+        input,
         await phaseScanContext(input, options, requestContext, "diff"),
       );
     },
@@ -131,10 +120,7 @@ export function registerCompactArtifactTools(
     readOnly: true,
     handler: async (input, requestContext) => {
       return listCodexSecurityCandidates(
-        {
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
+        input,
         await phaseScanContext(input, options, requestContext),
       );
     },
@@ -150,7 +136,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateValidations(
         await phaseScanContext(input, options, requestContext),
-        { validations: input.validations },
+        input,
       );
     },
   });
@@ -165,7 +151,7 @@ export function registerCompactArtifactTools(
     handler: async (input, requestContext) => {
       return recordCodexSecurityCandidateAttackPaths(
         await phaseScanContext(input, options, requestContext),
-        { attackPaths: input.attackPaths },
+        input,
       );
     },
   });
@@ -175,7 +161,9 @@ export function registerCompactArtifactTools(
     name: "record_codex_security_scan_draft",
     title: "Record Codex Security Scan Draft",
     description:
-      "Save the canonical threat model, findings and coverage as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings and partial coverage, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in coverage.deferred. On terminal Standard or diff drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
+      "Save the canonical threat model, findings and reviewState as an unsealed draft. Use complete:false as soon as a model is available, even with empty findings, then for progress checkpoints; use complete:true for the final result. The host derives threatmodel.md. Keep unvalidated candidates in reviewState.deferred. On terminal Standard or diff drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
     inputSchema: scanDraftInputSchema,
     readOnly: false,
     handler: async (input, requestContext) => {
@@ -183,7 +171,7 @@ export function registerCompactArtifactTools(
         await scanContext(input, options, true, requestContext),
         input,
         options.runWorkbench,
-        signalFromRequestContext(requestContext),
+        requestContext.signal,
       );
     },
   });
@@ -267,51 +255,17 @@ export function registerCompactWorkerArtifactTools(
   server: McpServer,
   context: ArtifactContext,
 ): void {
-  if (context.layout === "worker") {
-    registerCompactTool(server, {
-      name: "record_codex_security_scan_draft",
-      title: "Record Codex Security Scan Draft",
-      description:
-        "Save this Standard worker's semantic findings and coverage. Use complete:false for progress checkpoints, then complete:true for its final result; keep unvalidated candidates in coverage.deferred. On terminal drafts, close generic review tasks with coverage.resolvedDeferred:[{id,reason}], copying IDs from the returned coverage. Update linked surfaces by their saved IDs.",
-      inputSchema: scanDraftInputSchema,
-      readOnly: false,
-      handler: async (value) =>
-        recordCodexSecurityWorkerScanDraft(context, value),
-    });
-    return;
-  }
-
-  if (context.layout !== "reducer") {
-    throw new Error(
-      "The lightweight artifact server requires a bound discovery or reducer worker.",
-    );
-  }
-
-  server.registerTool(
-    "get_codex_security_deep_reducer_inputs",
-    {
-      title: "Get Codex Security Deep Reducer Inputs",
-      description:
-        "Read a byte-budgeted JSON fragment of the assigned findings and previous aggregate. " +
-        "Continue with nextCursor; concatenate json fragments before parsing. " +
-        "Use findingRef source:<sourceFindingId> or previous:N to read full retained provenance.",
-      inputSchema: deepReducerInputsInputSchema,
-      annotations: readingAnnotations,
-      _meta: modelOnlyMeta,
-    },
-    async (input) =>
-      deepReducerPageResponse(
-        await getCodexSecurityDeepReducerInputsPage(context, input),
-      ),
-  );
-
   registerCompactTool(server, {
-    name: "record_codex_security_deep_reduction",
-    title: "Record Codex Security Deep Reduction",
-    description: "Record the merged findings and context for this Deep scan.",
-    inputSchema: deepReductionInputSchema,
+    name: "record_codex_security_scan_draft",
+    title: "Record Codex Security Scan Draft",
+    description:
+      "Save this Standard worker's semantic findings and reviewState. Use complete:false for progress checkpoints or when source access or execution blocks the audit; record blockers and unvalidated candidates in reviewState.deferred. Use complete:true only after the source review finishes, including a review with no findings. On terminal drafts, close generic review tasks with reviewState.resolvedDeferred:[{id,reason}], copying IDs from the returned reviewState. Update linked surfaces by their saved IDs." +
+      semanticFindingGuidance +
+      reviewStateGuidance,
+    inputSchema: scanDraftInputSchema,
     readOnly: false,
-    handler: async (value) => recordCodexSecurityDeepReduction(context, value),
+    handler: async (value) =>
+      recordCodexSecurityWorkerScanDraft(context, value),
   });
 }
 
@@ -321,7 +275,10 @@ interface CompactToolRegistration<Input> {
   description: string;
   inputSchema: ZodType<Input>;
   readOnly: boolean;
-  handler: (value: Input, requestContext: unknown) => Promise<object>;
+  handler: (
+    value: Input,
+    requestContext: Parameters<ToolCallback<ZodType<Input>>>[1],
+  ) => Promise<object>;
 }
 
 function registerCompactTool<Input>(
@@ -341,9 +298,20 @@ function registerCompactTool<Input>(
     },
     async (input, requestContext) => {
       const value = await registration.handler(input, requestContext);
+      let structured = true;
+      const text = JSON.stringify(value, (key, item: unknown) => {
+        if (
+          !key.isWellFormed() ||
+          (typeof item === "string" && !item.isWellFormed())
+        )
+          structured = false;
+        return item;
+      });
+      // Codex's native JSON decoder rejects lone surrogates; the JSON text retains
+      // their exact escaped representation, including raw POSIX filename bytes.
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(value) }],
-        structuredContent: value as JsonRecord,
+        content: [{ type: "text" as const, text }],
+        ...(structured ? { structuredContent: value as JsonRecord } : {}),
       };
     },
   );

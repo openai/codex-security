@@ -39,6 +39,14 @@ export function policyGit(repository: string, ...args: string[]): void {
   ]);
 }
 
+export function policyGitDirectory(repository: string): string {
+  return execFileSync(
+    "git",
+    ["-C", repository, "rev-parse", "--absolute-git-dir"],
+    { encoding: "utf8" },
+  ).trim();
+}
+
 export async function addPolicySubmodule(
   repository: string,
   source: string,

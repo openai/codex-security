@@ -15,6 +15,7 @@ import reservedArtifactPaths from "../../scripts/reserved_artifact_paths.json";
 import { requireArtifactRoot, type ArtifactContext } from "./artifact-io.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import { handoffClaimTokenSchema } from "./server/handoff-tools.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 
 const locationShape = {
   scanId: z.string().uuid().optional(),
@@ -24,21 +25,17 @@ const locationShape = {
   path: z.string().min(1).optional(),
 };
 
-export const saveArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    content: z.string().optional(),
-    sourcePath: z.string().min(1).optional(),
-  })
-  .strict();
+export const saveArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  content: z.string().optional(),
+  sourcePath: z.string().min(1).optional(),
+});
 
-export const readArtifactInputSchema = z
-  .object({
-    ...locationShape,
-    path: z.string().min(1),
-    encoding: z.enum(["utf8", "base64"]).default("utf8"),
-  })
-  .strict();
+export const readArtifactInputSchema = z.strictObject({
+  ...locationShape,
+  path: z.string().min(1),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
 
 export type ArtifactLocation = z.infer<typeof saveArtifactInputSchema>;
 
@@ -50,11 +47,9 @@ export async function standaloneArtifactContext(
   scanRoot: string,
   storage: ArtifactLocation["storage"],
 ): Promise<ArtifactContext> {
-  const target = await runWorkbench([
-    "inspect-target",
-    "--target-path",
-    targetPath,
-  ]);
+  const target = await runWorkbench(
+    workbenchArgs("inspect-target", { targetPath }),
+  );
   if (typeof target.targetPath !== "string")
     throw new Error("Missing artifact target.");
   const repoRoot = await fs.realpath(target.targetPath);
@@ -67,9 +62,18 @@ export async function standaloneArtifactContext(
     // the persistent collection. storageContext prepares the temporary root.
     return { root: await resolveStoragePath(root), repoRoot, layout: "scan" };
   }
-  const existingRoot = await resolveStoragePath(scanRoot);
-  if (existingRoot === repoRoot || existingRoot.startsWith(repoRoot + sep)) {
-    throw new Error("Artifact storage must be outside the target repository.");
+  for (const storagePath of [scanRoot, root]) {
+    const existingRoot = await resolveStoragePath(storagePath);
+    const relativeRoot = relative(repoRoot, existingRoot);
+    if (
+      !isAbsolute(relativeRoot) &&
+      relativeRoot !== ".." &&
+      !relativeRoot.startsWith(".." + sep)
+    ) {
+      throw new Error(
+        "Artifact storage must be outside the target repository.",
+      );
+    }
   }
   if (create) await fs.mkdir(root, { recursive: true, mode: 0o700 });
   return {
@@ -215,27 +219,19 @@ export async function saveCodexSecurityArtifact(
   const destination = join(selected.root, ...parts);
   if (input.storage === "persistent" && context.scanId) {
     await runWorkbench(
-      [
-        "save-scan-artifact",
-        "--scan-id",
-        context.scanId,
-        "--artifact-path",
-        parts.join("/"),
-        ...(context.handoffClaimToken
-          ? ["--claim-token", context.handoffClaimToken]
-          : []),
-      ],
+      workbenchArgs("save-scan-artifact", {
+        scanId: context.scanId,
+        artifactPath: parts.join("/"),
+        claimToken: context.handoffClaimToken || undefined,
+      }),
       bytes,
     );
   } else {
     await runWorkbench(
-      [
-        "save-artifact",
-        "--artifact-root",
-        selected.root,
-        "--artifact-path",
-        parts.join("/"),
-      ],
+      workbenchArgs("save-artifact", {
+        artifactRoot: selected.root,
+        artifactPath: parts.join("/"),
+      }),
       bytes,
     );
   }
@@ -271,13 +267,12 @@ async function readArtifactBytes(
   parts: string[],
   runWorkbench: RunArtifactWorkbench,
 ): Promise<Buffer> {
-  const result = await runWorkbench([
-    "read-artifact",
-    "--artifact-root",
-    context.root,
-    "--artifact-path",
-    parts.join("/"),
-  ]);
+  const result = await runWorkbench(
+    workbenchArgs("read-artifact", {
+      artifactRoot: context.root,
+      artifactPath: parts.join("/"),
+    }),
+  );
   if (typeof result.content !== "string")
     throw new Error("Missing artifact content.");
   return Buffer.from(result.content, "base64");

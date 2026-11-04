@@ -34,14 +34,12 @@ function fixture(
   const paths = {
     scopes: join(root, "requested scopes.json"),
     manifest: join(root, "scan-manifest.json"),
-    coverage: join(root, "coverage.json"),
   };
   writeFileSync(paths.scopes, JSON.stringify(scopes));
   writeFileSync(
     paths.manifest,
     '{"scan":{"scope":{"includePaths":["old"],"excludePaths":[]}}}',
   );
-  writeFileSync(paths.coverage, '{"includePaths":["old"],"excludePaths":[]}');
   return { root, ...paths };
 }
 type Fixture = ReturnType<typeof fixture>;
@@ -51,14 +49,7 @@ function run(f: Fixture, args?: string[], env = process.env) {
     [
       helper,
       "bind-repo-scopes",
-      ...(args ?? [
-        "--scopes-file",
-        f.scopes,
-        "--manifest",
-        f.manifest,
-        "--coverage",
-        f.coverage,
-      ]),
+      ...(args ?? ["--scopes-file", f.scopes, "--manifest", f.manifest]),
     ],
     { cwd: f.root, env, encoding: "utf8" },
   );
@@ -86,10 +77,6 @@ test("binds exact requested scopes and retains unrelated contract fields", () =>
   expect(JSON.parse(readFileSync(f.manifest, "utf8"))).toEqual({
     scan: { scope: { includePaths: scopes, excludePaths: [] } },
   });
-  expect(JSON.parse(readFileSync(f.coverage, "utf8"))).toEqual({
-    includePaths: scopes,
-    excludePaths: [],
-  });
 });
 
 test("preserves unrelated JSON values and exact large integers", () => {
@@ -98,7 +85,6 @@ test("preserves unrelated JSON values and exact large integers", () => {
     f.manifest,
     '{"10":3,"2":2,"scan":{"scope":{}},"integer":9007199254740993,"negativeInteger":-9007199254740993,"values":[-0.0,1e20,1e-7],"nested":{"9":{},"1":[]}}',
   );
-  writeFileSync(f.coverage, '{"é":"😀","__proto__":true}');
   expect(run(f).status).toBe(0);
   const contents = readFileSync(f.manifest, "utf8");
   expect(contents).toContain('"integer": 9007199254740993');
@@ -107,11 +93,6 @@ test("preserves unrelated JSON values and exact large integers", () => {
   expect(manifest.scan.scope.includePaths).toEqual(["\udcff", "😀"]);
   expect(manifest.values).toEqual([0, 1e20, 1e-7]);
   expect(manifest.nested).toEqual({ "9": {}, "1": [] });
-  const coverage = JSON.parse(readFileSync(f.coverage, "utf8"));
-  expect(coverage["é"]).toBe("😀");
-  expect(Object.hasOwn(coverage, "__proto__")).toBe(true);
-  expect(coverage["__proto__"]).toBe(true);
-  expect(coverage.includePaths).toEqual(["\udcff", "😀"]);
 });
 
 for (const [label, contents, message] of [
@@ -138,16 +119,14 @@ for (const [label, contents, message] of [
   ["malformed JSON", "[", "Unable to read scopes file"],
   ["UTF-8 BOM", '\ufeff["src"]', "Unable to read scopes file"],
 ] as const) {
-  test(`rejects ${label} before changing either document`, () => {
+  test(`rejects ${label} before changing the manifest`, () => {
     const f = fixture();
-    const before = [readFileSync(f.manifest), readFileSync(f.coverage)];
+    const before = readFileSync(f.manifest);
     writeFileSync(f.scopes, contents);
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toBe(`${message}: ${f.scopes}${newline}`);
-    expect([readFileSync(f.manifest), readFileSync(f.coverage)]).toEqual(
-      before,
-    );
+    expect(readFileSync(f.manifest)).toEqual(before);
   });
 }
 
@@ -156,35 +135,23 @@ for (const [target, contents] of [
   ["manifest", "{}"],
   ["manifest", '{"scan":[]}'],
   ["manifest", '{"scan":{"scope":null}}'],
-  ["coverage", "null"],
-  ["coverage", "{"],
-  ["coverage", Buffer.from([0xff])],
+  ["manifest", "null"],
+  ["manifest", "{"],
+  ["manifest", Buffer.from([0xff])],
 ] as const) {
   const label = typeof contents === "string" ? contents : "UTF-8";
   test(`rejects invalid ${target} ${label} before writing`, () => {
     const f = fixture();
     writeFileSync(f[target], contents);
-    const before = [readFileSync(f.manifest), readFileSync(f.coverage)];
+    const before = readFileSync(f.manifest);
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toBe(
       `Unable to bind requested scopes into the scan contract${newline}`,
     );
-    expect([readFileSync(f.manifest), readFileSync(f.coverage)]).toEqual(
-      before,
-    );
+    expect(readFileSync(f.manifest)).toEqual(before);
   });
 }
-
-test("reads both aliased documents before the ordered writes", () => {
-  const f = fixture(["new"]);
-  f.coverage = f.manifest;
-  expect(run(f).status).toBe(0);
-  expect(JSON.parse(readFileSync(f.manifest, "utf8"))).toEqual({
-    scan: { scope: { includePaths: ["old"], excludePaths: [] } },
-    includePaths: ["new"],
-  });
-});
 
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "escapes terminal controls only in filesystem errors",
@@ -193,7 +160,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     const manifest = join(f.root, "manifest-\u001b[2J.json");
     renameSync(f.manifest, manifest);
     f.manifest = manifest;
-    const before = [readFileSync(f.manifest), readFileSync(f.coverage)];
+    const before = readFileSync(f.manifest);
     chmodSync(f.manifest, 0o444);
     try {
       const result = run(f);
@@ -201,9 +168,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(result.stdout).toBe("");
       expect(result.stderr).toContain("manifest-\\u001b[2J.json");
       expect(result.stderr).not.toContain("\u001b");
-      expect([readFileSync(f.manifest), readFileSync(f.coverage)]).toEqual(
-        before,
-      );
+      expect(readFileSync(f.manifest)).toEqual(before);
     } finally {
       chmodSync(f.manifest, 0o644);
     }
@@ -227,7 +192,6 @@ test("expands home and relative paths through the existing helper arguments", ()
     [
       "--scopes-file=~/requested scopes.json",
       "--manifest=./scan-manifest.json",
-      "--coverage=coverage.json",
     ],
     { ...process.env, HOME: f.root, USERPROFILE: f.root },
   );
@@ -245,11 +209,9 @@ test.skipIf(process.platform !== "linux")(
       ]);
     const scopes = raw("scopes", 0xff);
     const manifest = raw("manifest", 0xfe);
-    const coverage = raw("coverage", 0xfd);
     for (const [key, path] of [
       ["scopes", scopes],
       ["manifest", manifest],
-      ["coverage", coverage],
     ] as const) {
       renameSync(f[key], path);
       writeFileSync(join(f.root, key + "-\ufffd"), "replacement sentinel");
@@ -258,7 +220,7 @@ test.skipIf(process.platform !== "linux")(
       "/bin/sh",
       [
         "-c",
-        'exec "$1" --helper bind-repo-scopes --scopes-file "$2/scopes-$(printf \'\\377\')" --manifest "$2/manifest-$(printf \'\\376\')" --coverage "$2/coverage-$(printf \'\\375\')"',
+        'exec "$1" --helper bind-repo-scopes --scopes-file "$2/scopes-$(printf \'\\377\')" --manifest "$2/manifest-$(printf \'\\376\')"',
         "sh",
         join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
         f.root,
@@ -271,10 +233,7 @@ test.skipIf(process.platform !== "linux")(
     expect(
       JSON.parse(readFileSync(manifest, "utf8")).scan.scope.includePaths,
     ).toEqual(requested);
-    expect(JSON.parse(readFileSync(coverage, "utf8")).includePaths).toEqual(
-      requested,
-    );
-    for (const key of ["scopes", "manifest", "coverage"])
+    for (const key of ["scopes", "manifest"])
       expect(readFileSync(join(f.root, key + "-\ufffd"), "utf8")).toBe(
         "replacement sentinel",
       );
@@ -285,12 +244,13 @@ test.skipIf(process.platform === "win32")(
   "preserves output symlinks and file modes",
   () => {
     const f = fixture();
-    const target = join(f.root, "coverage-target.json");
-    writeFileSync(target, "{}", { mode: 0o640 });
-    rmSync(f.coverage);
-    symlinkSync(target, f.coverage);
+    const target = join(f.root, "manifest-target.json");
+    writeFileSync(target, readFileSync(f.manifest), { mode: 0o640 });
+    chmodSync(target, 0o640);
+    rmSync(f.manifest);
+    symlinkSync(target, f.manifest);
     expect(run(f).status).toBe(0);
-    expect(realpathSync(f.coverage)).toBe(target);
+    expect(realpathSync(f.manifest)).toBe(target);
     expect(statSync(target).mode & 0o777).toBe(0o640);
   },
 );
@@ -300,7 +260,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
     process.platform !== "win32" ||
       (location === "unc" && !hasWindowsLoopbackShare),
   )(
-    `documented PowerShell scope binding preserves ${location} literal input and artifact paths`,
+    `documented PowerShell scope generation and binding preserve ${location} literal paths`,
     async () => {
       const requested = ["caf\u00e9/\u96ea.py", "src", "src"];
       const f = fixture(requested);
@@ -320,14 +280,39 @@ for (const location of ["absolute", "relative", "unc"] as const)
       const launcher = windowsHelperFixture(f.root, {
         CODEX_SECURITY_TARGET_PATHS_FILE: argument(scopes),
       });
+      const repository = join(f.root, "repository %USERNAME% !EXPAND! café's");
+      mkdirSync(join(repository, "café"), { recursive: true });
+      mkdirSync(join(repository, "src"));
+      writeFileSync(join(repository, "café", "雪.py"), "source\n");
+      writeFileSync(join(repository, "src", "source.py"), "source\n");
       const scanDir = join(f.root, "scan %USERNAME% !EXPAND! \u96ea's");
       const expandedScanDir = scanDir.replace("%USERNAME%", "expanded-user");
       for (const directory of [scanDir, expandedScanDir]) mkdirSync(directory);
       const initial = {
         "scan-manifest.json": readFileSync(f.manifest),
-        "coverage.json": readFileSync(f.coverage),
       };
       for (const powershell of launcher.powershells) {
+        const generated = await launcher.run(
+          powershell,
+          "skills/security-scan/SKILL.md",
+          {
+            "<plugin_dir>": argument(launcher.plugin),
+            "<repo_root>": argument(repository),
+            "<scan_dir>": argument(scanDir),
+          },
+          undefined,
+          workingDirectory,
+          undefined,
+          1,
+        );
+        expect(generated.status, generated.diagnostics).toBe(0);
+        expect(
+          readFileSync(join(scanDir, "scoped-source-input.jsonl"), "utf8")
+            .trim()
+            .split(/\r?\n/u)
+            .map((line) => JSON.parse(line).path),
+          generated.diagnostics,
+        ).toEqual(["café/雪.py", "src/source.py"]);
         for (const [name, bytes] of Object.entries(initial)) {
           writeFileSync(join(scanDir, name), bytes);
           writeFileSync(join(expandedScanDir, name), bytes);
@@ -354,11 +339,6 @@ for (const location of ["absolute", "relative", "unc"] as const)
         expect(
           JSON.parse(readFileSync(join(scanDir, "scan-manifest.json"), "utf8"))
             .scan.scope.includePaths,
-          result.diagnostics,
-        ).toEqual(requested);
-        expect(
-          JSON.parse(readFileSync(join(scanDir, "coverage.json"), "utf8"))
-            .includePaths,
           result.diagnostics,
         ).toEqual(requested);
         expect(

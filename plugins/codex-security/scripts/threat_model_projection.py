@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+# Keep sibling helpers importable when Python starts in isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import report_projection as report
 
 _STRUCTURED_SECTIONS = (
     ("Assets", "assets"),
@@ -98,10 +101,12 @@ def _scope_lines(scope: Any, label: str, text: Callable[[Any, str], str]) -> lis
     included = scope.get("includePaths") if isinstance(scope, dict) else None
     if not isinstance(included, list) or not all(isinstance(path, str) for path in included):
         return [f"- {label}: not recorded"]
-    lines = [f"- {label}: {text(', '.join(included), 'none')}"]
+    included_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in included)
+    lines = [f"- {label}: {included_text or 'none'}"]
     excluded = scope.get("excludePaths")
     if isinstance(excluded, list) and excluded and all(isinstance(path, str) for path in excluded):
-        lines.append(f"- {label} exclusions: {text(', '.join(excluded), 'none')}")
+        excluded_text = ", ".join(report._path_text(path, ensure_ascii=True) for path in excluded)
+        lines.append(f"- {label} exclusions: {excluded_text or 'none'}")
     summary = scope.get("summary")
     if isinstance(summary, str) and summary:
         lines.append(f"- {label} description: {text(summary, 'not recorded')}")
@@ -113,12 +118,6 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     body = threat_model_body(model)
     if _markdown_content(model) is None:
         body = "# Threat Model\n\n" + body
-    script = Path(__file__).resolve().with_name("report_projection.py")
-    spec = importlib.util.spec_from_file_location("codex_security_report_projection", script)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"could not load report projection helper: {script}")
-    report = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(report)
     text = report._text
     provenance = provenance or {}
     footer = ["---", "", "## Saved Model Context", ""]
@@ -132,9 +131,7 @@ def render_threat_model(model: dict[str, Any], provenance: dict[str, Any] | None
     ):
         if provenance.get(key):
             footer.append(f"- {label}: {text(str(provenance[key]), 'not recorded')}")
-    footer.append(
-        f"- Model origin: {text(str(model.get('origin', 'not recorded')), 'not recorded')}"
-    )
+    footer.append(f"- Model origin: {text(model.get('origin'), 'not recorded')}")
     footer.extend(_scope_lines(model.get("scope"), "Model scope", text))
     scan_scope = provenance.get("scanScope")
     if isinstance(scan_scope, dict):

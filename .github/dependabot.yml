@@ -1,9 +1,11 @@
 version: 2
 updates:
   - package-ecosystem: npm
+    labels: [dependencies]
     directories:
       - /github-action
       - /sdk/typescript
+      - /sdk/mutation
       - /plugins/codex-security/mcp-app
       - /evals/triage-finding
     schedule:
@@ -31,6 +33,8 @@ updates:
       third-party:
         patterns:
           - "*"
+        exclude-patterns:
+          - promptfoo
         update-types:
           - minor
           - patch
@@ -39,6 +43,7 @@ updates:
       include: scope
 
   - package-ecosystem: pip
+    labels: [dependencies]
     directory: /plugins/codex-security
     schedule:
       interval: cron
@@ -52,7 +57,10 @@ updates:
       include: scope
 
   - package-ecosystem: github-actions
-    directory: /
+    labels: [dependencies]
+    directories:
+      - /
+      - "/.github/actions/*"
     schedule:
       interval: cron
       cronjob: "0 9 * * *"
@@ -64,6 +72,7 @@ updates:
       prefix: ci
 
   - package-ecosystem: docker
+    labels: [dependencies]
     directory: /
     schedule:
       interval: cron
@@ -75,6 +84,7 @@ updates:
       include: scope
 
   - package-ecosystem: cargo
+    labels: [dependencies]
     directory: /plugins/codex-security/native
     schedule:
       interval: cron
@@ -86,6 +96,7 @@ updates:
       include: scope
 
   - package-ecosystem: devcontainers
+    labels: [dependencies]
     directory: /
     schedule:
       interval: cron

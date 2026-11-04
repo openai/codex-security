@@ -1,0 +1,21 @@
+name: Clean merged PR caches
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  clean:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete caches for this PR's merge ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh cache delete --all --ref "refs/pull/$PR_NUMBER/merge" --succeed-on-no-caches --repo "$GITHUB_REPOSITORY"
