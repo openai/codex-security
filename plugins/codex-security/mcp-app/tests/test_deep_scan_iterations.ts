@@ -154,6 +154,7 @@ test("a duplicate stops the loop and every observation survives", async () => {
   const alias = {
     ...base,
     title: "A different description",
+    severity: { level: "critical" as const },
     provenance: { source: "local_plugin" },
   };
   const { terminal, draft, started } = await scanLoop([[base], [alias]], {
@@ -164,9 +165,14 @@ test("a duplicate stops the loop and every observation survives", async () => {
   assert.deepEqual(started, [0, 1]);
   assert.equal(terminal.terminalReason, "saturated");
   assert.equal(draft.findings.length, 1);
+  assert.deepEqual(draft.findings[0].severity, base.severity);
   assert.deepEqual(
     draft.findings[0].provenance.sourceFindings?.map((x) => x.finding.title),
     [base.title, alias.title],
+  );
+  assert.deepEqual(
+    draft.findings[0].provenance.sourceFindings?.map((x) => x.finding.severity),
+    [base.severity, alias.severity],
   );
 });
 
@@ -174,6 +180,7 @@ test("an exact repeat of a merged source saturates without another comparison", 
   const alias = {
     ...base,
     title: "Another description of the same sink",
+    severity: { level: "medium" as const },
     locations: [...base.locations, { path: "caller.py", startLine: 12 }],
   };
   const { terminal, draft } = await scanLoop([[base, alias], [alias]], {
@@ -182,9 +189,11 @@ test("an exact repeat of a merged source saturates without another comparison", 
     comparisons: [[[0, 1]]],
   });
   assert.equal(terminal.terminalReason, "saturated");
+  assert.equal(draft.findings.length, 1);
+  assert.deepEqual(draft.findings[0].severity, base.severity);
   assert.deepEqual(
-    draft.findings.map((f) => f.provenance.sourceFindings?.length),
-    [3],
+    draft.findings[0].provenance.sourceFindings?.map((x) => x.finding.severity),
+    [base.severity, alias.severity, alias.severity],
   );
 });
 
