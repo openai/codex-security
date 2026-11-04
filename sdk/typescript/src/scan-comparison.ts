@@ -41,7 +41,11 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  ConfigurationError,
+} from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
@@ -335,7 +339,20 @@ export async function matchScanFindingsInternal(
   try {
     for (;;) {
       options.signal?.throwIfAborted();
-      const turn = await thread.run(prompt, turnOptions);
+      const turn = await thread
+        .run(prompt, turnOptions)
+        .catch((error: unknown) => {
+          // Native thread clients expose failed turns as Error(message), without an HTTP status field.
+          if (
+            error instanceof Error &&
+            error.message.startsWith("unexpected status 401 Unauthorized:")
+          ) {
+            throw new AuthenticationRequiredError(error.message, {
+              cause: error,
+            });
+          }
+          throw error;
+        });
       let response: unknown;
       try {
         response = JSON.parse(turn.finalResponse);

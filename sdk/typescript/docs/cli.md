@@ -2147,8 +2147,10 @@ changes alone do not invalidate cached decisions.
 If a matching batch fails, `scans match --all` continues with later scans.
 A partial success reports `unmatchedBatches` in JSON. An ordinary rerun retries
 unsaved comparisons. When retrying a forced rebuild, keep `--force` so pairs
-with older cached decisions are compared again. A cancellation, storage failure, or invalid
-authentication or configuration stops the command.
+with older cached decisions are compared again. Cancellation, storage or
+configuration errors, and recognized authentication failures stop the command.
+For failed matcher turns, Codex supplies diagnostic text. The matcher recognizes
+the native `unexpected status 401 Unauthorized:` prefix.
 
 ```ts
 import { readFile } from "node:fs/promises";

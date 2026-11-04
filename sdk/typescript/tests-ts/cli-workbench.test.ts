@@ -3,13 +3,12 @@ import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock, spyOn } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
-import {
-  AuthenticationRequiredError,
-  DiffTarget,
-  type ScanOptions,
-} from "../src/index.js";
+import { DiffTarget, type ScanOptions } from "../src/index.js";
+import { createProfileCodex } from "../src/provider-profile.js";
+import { nodeCommand } from "./support/shell.js";
 import { main } from "../src/cli.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
@@ -1340,12 +1339,62 @@ describe("CLI workbench", () => {
       },
     );
 
+    test("stops on a native matcher 401 after preserving earlier batches", async () => {
+      await using temp = await scopedTemporaryDirectory(
+        "match-all-native-turn-",
+      );
+      const preload = join(temp.path, "turn.mjs");
+      await writeFile(
+        preload,
+        [
+          "for await (const _ of process.stdin) {}",
+          'console.log(JSON.stringify({ type: "turn.failed", error: { message: process.env.TURN_ERROR } }));',
+          "process.exit(0);",
+        ].join("\n"),
+      );
+      const { batches, saved, onWorkbench } = batchWorkbench([
+        "empty",
+        "retry",
+        "auth",
+        "later",
+      ]);
+      batches[0]!.afterFindings.length = 0;
+      batches[3]!.afterFindings.length = 0;
+      const unauthorized =
+        "unexpected status 401 Unauthorized: synthetic authentication failure, url: https://example.invalid/v1/responses";
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input, options) => {
+            const codex = await createProfileCodex(
+              {
+                codexPathOverride: nodeCommand().command,
+                env: {
+                  NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                  TURN_ERROR:
+                    input.after[0]?.occurrenceId === "retry"
+                      ? `unexpected status 503 Service Unavailable: ${unauthorized}`
+                      : unauthorized,
+                },
+              },
+              "synthetic",
+            );
+            return matchScanFindings(input, { ...options, codex });
+          },
+        }),
+      );
+      expect(code, stderr.text()).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text().match(/codex-security: warning:/gu)).toHaveLength(1);
+      expect(stderr.text()).toContain("unexpected status 503");
+      expect(stderr.text().trim().split("\n").at(-1)).toContain(unauthorized);
+    });
+
     test.each([
       ["save", new Error("Storage failed")],
-      [
-        "authentication",
-        new AuthenticationRequiredError("Missing native credentials"),
-      ],
       ["cancellation", new Error("Interrupted matcher")],
     ] as const)("stops on %s after a saved batch", async (failure, error) => {
       const { stdout, stderr, runCli } = createCliTest(main);
