@@ -47,6 +47,8 @@
 - protect HF\_TOKEN and defer the Hugging Face scan preset ([#277](https://github.com/openai/codex-security/pull/277))
 - restrict sockets and process tracing in Compose ([#160](https://github.com/openai/codex-security/pull/160))
 - simplify lifecycle and protocol test fixtures ([#2186](https://github.com/openai/codex-security/pull/2186))
+- align severity badges in finding tables ([#122](https://github.com/openai/codex-security/pull/122))
+- use trusted Git when installing hooks ([#92](https://github.com/openai/codex-security/pull/92))
 
 <!-- release-section: highlights:end -->
 
