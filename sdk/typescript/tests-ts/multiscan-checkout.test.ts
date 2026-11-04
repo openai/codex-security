@@ -474,7 +474,7 @@ describe("multiscan", () => {
     );
   });
 
-  test("retries failed scans and continues later tasks when checkout cleanup fails", async () => {
+  test("continues later tasks when a failed scan leaves its checkout occupied", async () => {
     const { paths, source } = await repositoryFixture("cleanup-retry", "retry");
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
     const checkout = join(paths.output, "checkouts", "retry");
@@ -503,8 +503,8 @@ describe("multiscan", () => {
     try {
       const summary = await runMultiscan(options(paths, client(run)));
 
-      expect(summary).toMatchObject({ total: 2, completed: 2, failed: 0 });
-      expect(run).toHaveBeenCalledTimes(3);
+      expect(summary).toMatchObject({ total: 2, completed: 1, failed: 1 });
+      expect(run).toHaveBeenCalledTimes(2);
       expect(await results(summary.resultsPath)).toMatchObject([
         {
           id: "retry",
@@ -513,7 +513,12 @@ describe("multiscan", () => {
           error:
             "ORIGINAL_SCAN_FAILURE; Multiscan checkout cleanup failed: EACCES: synthetic cleanup failure",
         },
-        { id: "retry", status: "completed", attempt: 2 },
+        {
+          id: "retry",
+          status: "failed",
+          attempt: 2,
+          error: expect.stringContaining("move the retained checkout"),
+        },
         { id: "next", status: "completed", attempt: 1 },
       ]);
     } finally {
@@ -746,12 +751,15 @@ describe("multiscan", () => {
     const identity = await lstat(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(recovered).toMatchObject({ completed: 0, failed: 1, skipped: 0 });
     const receipts = await results(recovered.resultsPath);
     expect(receipts).toHaveLength(2);
     expect(receipts[0]).toEqual(receipt);
-    expect(receipts[1]).toMatchObject({ attempt: 2, status: "completed" });
-    await access(join(receipts[1]!["outputDir"] as string, "report.md"));
+    expect(receipts[1]).toMatchObject({
+      attempt: 2,
+      status: "failed",
+      error: expect.stringContaining("move the retained checkout"),
+    });
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([
       "exclusive",
     ]);

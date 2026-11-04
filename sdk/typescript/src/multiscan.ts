@@ -103,6 +103,7 @@ interface MultiscanReceipt extends MultiscanTask {
   warnings?: string[];
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
+  checkoutOccupied?: true;
   cleanupPending?: "checkout" | "recovery-checkout";
 }
 
@@ -511,6 +512,7 @@ async function runCampaign(
         let exhaustedBudget = false;
         let requiresRecovery = false;
         let knowledgeBaseFailure = false;
+        let checkoutOccupied = false;
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
@@ -640,12 +642,15 @@ async function runCampaign(
                 await mkdir(normalCheckout, { mode: 0o700 });
                 checkout = normalCheckout;
               } catch (error) {
-                // A retained checkout belongs to the earlier attempt.
                 if ((error as NodeJS.ErrnoException).code !== "EEXIST")
                   throw error;
+                checkoutOccupied = true;
+                requiresRecovery = true;
+                throw new Error(
+                  `Bulk checkout is already occupied: ${normalCheckout}. Inspect and move the retained checkout before retrying.`,
+                );
               }
-            }
-            if (checkout === undefined) {
+            } else {
               const isolatedRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
               );
@@ -653,8 +658,7 @@ async function runCampaign(
                 join(isolatedRoot, task.id),
               );
               const isolatedCheckout = join(taskRoot, `attempt-${attempt}`);
-              if (options.recoverScan !== undefined)
-                await mkdir(scanDir, { mode: 0o700 });
+              await mkdir(scanDir, { mode: 0o700 });
               await mkdir(isolatedCheckout, { mode: 0o700 });
               checkout = isolatedCheckout;
             }
@@ -740,10 +744,12 @@ async function runCampaign(
             cost = error.cost;
             exhaustedBudget = true;
           }
-          requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
-          failure = requiresRecovery
-            ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts and checkout were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
-            : errorMessage(error);
+          if (error instanceof OutputDirectoryNotEmptyError) {
+            requiresRecovery = true;
+            failure = `Bulk attempt directory is not empty: ${scanDir}. Inspect the preserved artifacts and checkout before running the same bulk-scan command with --recover.`;
+          } else {
+            failure = errorMessage(error);
+          }
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
             cleanupFailure = await removeCheckout(checkout);
@@ -755,7 +761,11 @@ async function runCampaign(
         let reportedError =
           reportedErrors.length === 0 ? undefined : reportedErrors.join("; ");
         const status = failure !== undefined ? "failed" : "completed";
-        if (threatModelPath === undefined)
+        if (
+          threatModelPath === undefined &&
+          !requiresRecovery &&
+          (checkout !== undefined || attemptedResume)
+        )
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
             protectedRoot,
@@ -780,14 +790,10 @@ async function runCampaign(
           ...(recoveryCheckout !== undefined
             ? { cleanupPending: "recovery-checkout" }
             : failure === undefined && cleanupFailure !== undefined
-              ? {
-                  cleanupPending:
-                    checkout === join(checkoutRoot, task.id)
-                      ? "checkout"
-                      : "recovery-checkout",
-                }
+              ? { cleanupPending: "checkout" }
               : {}),
           ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
+          ...(checkoutOccupied ? { checkoutOccupied: true } : {}),
           ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
           policyFailed: attemptPolicyFailed,
         };
@@ -1272,6 +1278,8 @@ function parseReceipt(
       )) ||
     (value["knowledgeBaseFailure"] !== undefined &&
       value["knowledgeBaseFailure"] !== true) ||
+    (value["checkoutOccupied"] !== undefined &&
+      (value["checkoutOccupied"] !== true || value["status"] !== "failed")) ||
     (value["coverage"] !== undefined &&
       !["complete", "partial", "unknown"].includes(value["coverage"] as string))
   ) {
@@ -1305,8 +1313,11 @@ async function readReceipts(
     const previous = receipts.get(id);
     receipts.set(id, {
       maxAttempt: Math.max(previous?.maxAttempt ?? 0, receipt.attempt),
-      // Extraction failures never start or modify a scan; keep its last receipt.
-      scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
+      // Pre-scan failures reserve an attempt but leave the last scan recoverable.
+      scan:
+        receipt.knowledgeBaseFailure || receipt.checkoutOccupied
+          ? previous?.scan
+          : receipt,
     });
   }
   if (end < contents.length) {

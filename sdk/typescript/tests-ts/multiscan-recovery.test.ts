@@ -23,7 +23,7 @@ import { zipSync } from "fflate";
 import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
 import * as contract from "../src/contract.js";
-import { writeThreatModel } from "../src/artifact-export.js";
+import * as artifactExport from "../src/artifact-export.js";
 import { PYTHON } from "./support/security-policy.js";
 import type { ScanResult } from "../src/result.js";
 import { runMultiscan } from "../src/multiscan.js";
@@ -316,7 +316,9 @@ describe("multiscan", () => {
                 join(directory, "policy-draft.json"),
                 JSON.stringify(manifest),
               );
-              await writeThreatModel(directory, { pythonPath: PYTHON });
+              await artifactExport.writeThreatModel(directory, {
+                pythonPath: PYTHON,
+              });
               if (directory.includes("stale")) {
                 manifest.threatModel.content = "# Updated model\n";
                 await writeFile(
@@ -456,6 +458,7 @@ describe("multiscan", () => {
         error: expect.stringContaining("--recover"),
       });
       expect(receipts[0]!["knowledgeBaseFailure"]).toBeUndefined();
+      expect(receipts[0]!["checkoutOccupied"]).toBeUndefined();
       expect(await readFile(join(checkout, "source"), "utf8")).toBe(
         "keep checkout",
       );
@@ -1014,6 +1017,13 @@ describe("multiscan", () => {
       );
       await mkdir(checkout, { recursive: true });
       await writeFile(join(checkout, "source"), "keep checkout");
+      // The interrupted scan was registered at this checkout before the crash.
+      await recordFixtureRequest(
+        checkout,
+        { outputDir: dir, mode: "standard" },
+        { pythonPath: PYTHON },
+      );
+      await recordFixtureAuthority(dir);
       const recoverScan = mock(async (scanDir: string) => {
         expect(scanDir).toBe(dir);
         if (failure) throw new Error("Resume transport failed");
@@ -1618,10 +1628,6 @@ describe("multiscan", () => {
             "report.md",
           ].map((name) => readFile(join(scanDir, name))),
         );
-      const checkout = join(paths.output, "checkouts", "resume-integrity");
-      await mkdir(checkout);
-      const retained = join(checkout, "retained.txt");
-      await writeFile(retained, "User edits before retry.");
       const before = await savedArtifacts();
       expect(await runMultiscan(configured)).toMatchObject({
         completed: 1,
@@ -1630,7 +1636,6 @@ describe("multiscan", () => {
       });
       expect(run).toHaveBeenCalledTimes(2);
       expect(await savedArtifacts()).toEqual(before);
-      expect(await readFile(retained, "utf8")).toBe("User edits before retry.");
       expect(
         (await results(join(paths.output, "results.jsonl"))).at(-1),
       ).toMatchObject({
@@ -1651,6 +1656,95 @@ describe("multiscan", () => {
       expect(run).toHaveBeenCalledTimes(2);
     },
   );
+
+  test("recovers the saved attempt after an ordinary retry stops before starting", async () => {
+    const { paths } = await repositoryFixture("blocked-recovery");
+    const run = mock(completeRun).mockImplementationOnce(async (...args) => {
+      await completeRun(...args);
+      throw new Error("Transport stopped after saving the scan.");
+    });
+    const campaign = options(paths, client(run), { maxAttempts: 1 });
+    const { resultsPath } = await runMultiscan(campaign);
+    const [saved] = await results(resultsPath);
+    const scanDir = saved!["outputDir"] as string;
+    await mkdir(join(paths.output, "checkouts", "blocked-recovery"));
+    expect(await runMultiscan(campaign)).toMatchObject({ failed: 1 });
+    const [original, blocked] = await results(resultsPath);
+    expect(original).toMatchObject({ status: "failed", attempt: 1 });
+    expect(blocked).toMatchObject({
+      status: "failed",
+      attempt: 2,
+      checkoutOccupied: true,
+    });
+    await expect(lstat(blocked!["outputDir"] as string)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+
+    const recoverScan = mock(async (path: string) => ({
+      ...(await loadContract(path, { pluginRoot: PLUGIN_ROOT })),
+      cost: null,
+    }));
+    expect(await runMultiscan({ ...campaign, recoverScan })).toMatchObject({
+      completed: 1,
+      failed: 0,
+    });
+    expect(recoverScan).toHaveBeenCalledTimes(1);
+    expect(recoverScan).toHaveBeenCalledWith(scanDir, expect.any(Object));
+    expect(run).toHaveBeenCalledTimes(1);
+    expect((await results(resultsPath)).at(-1)).toMatchObject({
+      status: "completed",
+      attempt: 1,
+      outputDir: scanDir,
+    });
+  });
+
+  test("an occupied checkout blocks a fresh retry until its owner moves it", async () => {
+    const { paths } = await repositoryFixture("occupied-retry");
+    const run = mock(completeRun);
+    const campaign = options(paths, client(run));
+    const { resultsPath } = await runMultiscan(campaign);
+    const [original] = await results(resultsPath);
+    const findings = join(original!["outputDir"] as string, "findings.json");
+    await appendFile(findings, "\n");
+    const checkout = join(paths.output, "checkouts", "occupied-retry");
+    await mkdir(checkout);
+    await writeFile(join(checkout, "retained.txt"), "User edits before retry.");
+
+    const exported = spyOn(
+      artifactExport,
+      "readThreatModelPath",
+    ).mockImplementation(
+      throwing("Unexpected helper invocation for a blocked checkout."),
+    );
+    try {
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 0,
+        failed: 1,
+      });
+      expect(exported).not.toHaveBeenCalled();
+    } finally {
+      exported.mockRestore();
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(await results(resultsPath)).toMatchObject([
+      original,
+      {
+        status: "failed",
+        attempt: 2,
+        error: `Bulk checkout is already occupied: ${checkout}. Inspect and move the retained checkout before retrying.`,
+      },
+    ]);
+    const moved = join(paths.root, "retained-checkout");
+    await rename(checkout, moved);
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      failed: 0,
+    });
+    expect(await readFile(join(moved, "retained.txt"), "utf8")).toBe(
+      "User edits before retry.",
+    );
+    expect(run).toHaveBeenCalledTimes(2);
+  });
 
   test.each(["completed_with_incomplete_coverage", "failed"])(
     "validates artifacts before reusing a legacy %s receipt",
@@ -2312,14 +2406,6 @@ describe("multiscan", () => {
     const first = await runMultiscan(campaign);
     const [receipt] = await results(first.resultsPath);
     const outputDir = receipt!["outputDir"] as string;
-    if (receipt!["scope"] !== undefined)
-      git(
-        paths.root,
-        "clone",
-        "--quiet",
-        source.path,
-        join(paths.output, "checkouts", "sealed-resume"),
-      );
 
     if (corruption === "forged campaign target identity") {
       const foreignPaths = await fixture();
