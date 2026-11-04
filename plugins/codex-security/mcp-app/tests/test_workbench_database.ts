@@ -196,7 +196,7 @@ for (const previewVersion of [58, 59]) {
 }
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [57, 58, 59, 60], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [57], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
@@ -222,6 +222,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         migrations
           .filter(
             (item) =>
+              item.version <= 57 &&
               !missingVersions.includes(item.version) &&
               !(legacyCheckpoint && [54, 55, 56].includes(item.version)) &&
               !(
