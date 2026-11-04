@@ -3449,6 +3449,7 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "get-scan") {
+            expect(args).toContain("--progress-only");
             return {
               scan: {
                 progress: {
