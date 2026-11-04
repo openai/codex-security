@@ -5,36 +5,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { git } from "./git-fixture.js";
 import { bashCommand, writeSource } from "./support/shell.js";
-
-interface Step {
-  name?: string;
-  id?: string;
-  uses?: string;
-  run?: string;
-  if?: string;
-  with?: Record<string, unknown>;
-  "continue-on-error"?: boolean;
-}
-
-function workflow(name: string) {
-  return Bun.YAML.parse(
-    readFileSync(
-      new URL(`../../../.github/workflows/${name}.yml`, import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    on: { workflow_call?: { inputs: Record<string, { default?: unknown }> } };
-    jobs: Record<
-      string,
-      {
-        needs?: string | string[];
-        if?: string;
-        with?: Record<string, unknown>;
-        steps?: Step[];
-      }
-    >;
-  };
-}
+import { workflow } from "./support/workflow.js";
 
 const native = workflow("native-artifacts");
 const prepare = native.jobs["prepare"]!;
@@ -216,9 +187,9 @@ test.each([
 );
 
 test("source CI opts in to native artifact reuse", () => {
-  expect(native.on.workflow_call?.inputs["reuse-verified"]?.default).toBe(
-    false,
-  );
+  expect(native.on["workflow_call"]).toMatchObject({
+    inputs: { "reuse-verified": { default: false } },
+  });
   expect(workflow("node-ci").jobs["native"]?.with?.["reuse-verified"]).toBe(
     true,
   );

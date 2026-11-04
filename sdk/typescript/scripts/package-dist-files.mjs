@@ -32,6 +32,11 @@ const distModules = [
   "scanner-import",
   "inspector-findings",
   "continuum-findings",
+  "checkmarx-evidence",
+  "checkmarx-findings",
+  "checkmarx-one",
+  "checkmarx-repository",
+  "checkmarx-xml",
   "snyk-findings",
   "snyk-rest-findings",
   "snyk-rest-v1",
@@ -160,6 +165,7 @@ const distModules = [
   "saved-scan",
   "saved-scan-bootstrap",
   "scan-skill-paths",
+  "server/embedding-tokenizer",
   "server/embeddings",
   "server/errors",
   "server/sqlite-store",
@@ -175,8 +181,11 @@ const distModules = [
   "worker-progress",
 ];
 
-export const packageDistFiles = distModules.flatMap((module) =>
-  ["js", "js.map", "d.ts", "d.ts.map"].map(
-    (extension) => `package/dist/${module}.${extension}`,
+export const packageDistFiles = [
+  "package/dist/server/embedding-tokenizer.cdx.json",
+  ...distModules.flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
   ),
-);
+];

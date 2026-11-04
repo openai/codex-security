@@ -47,6 +47,12 @@ Use `--provider continuum` and `--source-repository-url` for an AWS Continuum fo
 
 Use `--provider blackduck` for a BOM-6 vulnerable-components export from one project version. Supply `--source-repository-url` after verifying the project version maps to that repository. Keep the same source key on replay and preview the destination before importing.
 
+## Checkmarx SAST
+
+Use `--provider checkmarx` for a Checkmarx One CLI JSON or self-managed CxSAST XML report. To retrieve a completed scan, follow the [Checkmarx collection instructions](references/checkmarx-import.md). Collection retrieves the full scan. If the user wants a subset, ask for a filtered vendor export. Before fetching CxSAST XML, verify the scan ID, project and owning team on the selected server.
+
+Preview the report for the verified repository and ref with `--dry-run --format json`. After confirmation, use the same report path and source key for the import and any retries.
+
 ## Veracode Static Analysis policy findings
 
 Use `--provider veracode` with all Findings API pages for one application’s STATIC policy findings. Verify that the application maps to the repository named by `--source-repository-url`. Keep the source key stable for that application and preview the import before writing.

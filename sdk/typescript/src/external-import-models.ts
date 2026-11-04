@@ -16,6 +16,7 @@ export type Provider =
   | "veracode"
   | "sonar"
   | "continuum"
+  | "checkmarx"
   | "trivy";
 export type SourceKey = string;
 export type ClientId = string;
