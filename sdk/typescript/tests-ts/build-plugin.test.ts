@@ -16,6 +16,7 @@ import { brotliDecompressSync } from "node:zlib";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -76,6 +77,15 @@ describe("bundled plugin build", () => {
       );
       expect(await readFile(join(PLUGIN_ROOT, path), "utf8")).toBe(source);
     }
+  });
+
+  test("ships the same default severity rubric in the plugin and SDK", async () => {
+    const path = "references/default-severity-rubric.md";
+    const source = await readFile(
+      new URL(`../../../plugins/codex-security/${path}`, import.meta.url),
+    );
+    expect(await readFile(join(PLUGIN_ROOT, path))).toEqual(source);
+    expect(Buffer.from(defaultSeverityRubric)).toEqual(source);
   });
 
   test("copies Python contracts and completed examples unchanged from source", async () => {

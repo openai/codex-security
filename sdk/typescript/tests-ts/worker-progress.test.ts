@@ -229,38 +229,48 @@ describe("worker progress events", () => {
       ),
     ).toEqual([liveProgress]);
     // A tilde fence is not closed by a backtick fence.
-    const liveDispatch = {
-      phase: "validation" as const,
-      planned: 2,
-      started: 2,
-    };
-    const text = [
-      "~~~text",
-      progressMarker,
-      "```",
-      progressMarker,
-      dispatchMarker,
-      "~~~",
-      liveMarker,
-      `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(liveDispatch)}`,
-    ].join("\n");
     expect(
       scanProgressUpdatesFromEvent(
-        commandEvent("read the scan workflow", text),
+        commandEvent(
+          "read the scan workflow",
+          [
+            "~~~text",
+            progressMarker,
+            "```",
+            progressMarker,
+            "~~~",
+            liveMarker,
+          ].join("\n"),
+        ),
       ),
     ).toEqual([liveProgress]);
-    const message = messageEvent(text);
-    expect(scanProgressUpdatesFromEvent(message)).toEqual([liveProgress]);
-    expect(workerStatusFromEvent(message)).toEqual({
-      kind: "dispatch",
-      ...liveDispatch,
-    });
     // Dispatch markers inside a fenced block are not live worker status.
     expect(
       workerStatusFromEvent(
         messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
       ),
     ).toBeNull();
+
+    const liveDispatch = {
+      phase: "validation",
+      planned: 2,
+      started: 2,
+    } as const;
+    const message = messageEvent(
+      [
+        "~~~text",
+        progressMarker,
+        dispatchMarker,
+        "~~~",
+        liveMarker,
+        `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(liveDispatch)}`,
+      ].join("\n"),
+    );
+    expect(scanProgressUpdatesFromEvent(message)).toEqual([liveProgress]);
+    expect(workerStatusFromEvent(message)).toEqual({
+      kind: "dispatch",
+      ...liveDispatch,
+    });
   });
 
   test("rejects malformed or overstated file progress", () => {

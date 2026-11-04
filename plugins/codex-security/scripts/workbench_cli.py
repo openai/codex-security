@@ -121,6 +121,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
     begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.add_argument("--service-tier")
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
@@ -154,18 +155,13 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
     upsert_deep_worker.add_argument("--coordinator-generation", type=positive_int)
 
-    claim_deep_dedup = add_command(
-        "claim-deep-scan-dedup", "--scan-id", "--worker-id", "--prompt-path", "--artifact-dir"
+    iteration = add_command(
+        "record-deep-scan-iteration", "--scan-id", "--worker-id", "--result-manifest-path"
     )
-    claim_deep_dedup.add_argument("--input-worker-id", action="append", required=True)
-    claim_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
-
-    commit_deep_dedup = add_command(
-        "commit-deep-scan-dedup", "--scan-id", "--worker-id", "--result-manifest-path"
-    )
-    commit_deep_dedup.add_argument("--candidate-ledger-path")
-    commit_deep_dedup.add_argument("--new-findings-count", type=non_negative_int, required=True)
-    commit_deep_dedup.add_argument("--coordinator-generation", type=positive_int)
+    iteration.add_argument("--input-worker-id", action="append", required=True)
+    iteration.add_argument("--no-new-streak", type=non_negative_int, required=True)
+    iteration.add_argument("--consecutive-errors", type=non_negative_int, required=True)
+    iteration.add_argument("--coordinator-generation", type=positive_int)
 
     finish_deep_scan = add_command("finish-deep-scan", "--scan-id")
     finish_deep_scan.add_argument(
@@ -383,6 +379,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
     set_finding_remediation.add_argument("--summary")
+    set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")
     set_finding_remediation.add_argument("--patch-digest")
     set_finding_remediation.add_argument("--base-revision")
@@ -399,7 +396,6 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
-    subparsers.add_parser("local-dedupe")
     args = parser.parse_args()
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")

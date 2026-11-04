@@ -22,6 +22,7 @@ import { importScan, type ImportScanOptions } from "../src/import-scan.js";
 import type { FindingsDocument } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import { runWorkbench } from "../src/runtime.js";
+import { VERSION } from "../src/version.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -367,6 +368,19 @@ test.each(["csv", "json"] as const)(
     });
     expect(stored!.target_path).not.toBe(process.cwd());
     expect(stored!.target_path).not.toBe(context.root);
+    const saved = await runWorkbench(context.workbenchOptions, [
+      "get-scan",
+      "--scan-id",
+      result.manifest.scan.id,
+    ]);
+    expect(saved["scan"]).toMatchObject({
+      lifecycle: {
+        mode: "import",
+        surface: "cli",
+        packageVersion: VERSION,
+        status: "completed",
+      },
+    });
     const recipe = await runWorkbench(context.workbenchOptions, [
       "get-scan-recipe",
       "--scan-id",
