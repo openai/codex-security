@@ -40,7 +40,9 @@ dependencies when a private repository uses an SSH target. The offline reader
 The collector writes v2 and preserves the original project and issue evidence.
 For open Snyk Code issues from an SCM integration, both versions import
 repository-relative paths from open coordinates. V2 also imports each
-coordinate's reported start line when available. For resolved issues, closed
+coordinate's reported start line when available. V2 keeps URI and SSH addresses
+in the original evidence and uses only repository file paths for code locations
+and package manifests. For resolved issues, closed
 coordinates, and projects monitored through the CLI or API, read the original
 location from `evidence.source_data.issue` in v1 or from the JSON text in
 `evidence.source_data.issueJson` in v2.
