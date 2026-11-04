@@ -1,74 +1,70 @@
 # Import GitHub Dependabot findings
 
-Import Dependabot alerts from one GitHub repository. An alert identifies a
-dependency occurrence in a manifest. Its advisory describes the vulnerability.
+Import native Dependabot alerts from one repository. Each alert identifies a
+dependency occurrence. Its advisory describes the vulnerability.
 
 ## Quick start
 
-Authenticate the GitHub CLI with a fine-grained token or GitHub App installation
-that has read access to Dependabot alerts for the repository. From the destination
-checkout root, replace `github.com` and `OWNER/REPO` in the export and source key.
-
-```bash
-out=$(mktemp -d) && (
-  set -eu
-  umask 077
-  gh api --hostname github.com --method GET --paginate \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    --jq 'if type == "array" then tojson else error("expected an alert page") end' \
-    'repos/OWNER/REPO/dependabot/alerts?per_page=100' > "$out/pages.tmp"
-  test -s "$out/pages.tmp"
-  mv "$out/pages.tmp" "$out/dependabot.jsonl"
-)
-```
-
-After the export succeeds, preview the saved file in the same shell.
-
-```bash
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-codex-security publish findings "$out/dependabot.jsonl" \
-  --to local --repository . --provider github \
-  --source-key github.com/OWNER/REPO/dependabot --dry-run --format json
-```
-
-The export contains one JSON array per line, including `[]` for an empty page.
-It follows every page and includes open, fixed, dismissed, and auto-dismissed
-alerts. The importer reads the saved file offline.
-
-## Import and verify
-
-Check the destination, ready records, and exclusions. The alert repository
-must match a configured network remote when one is available. For a checkout
-with only filesystem remotes or no remote, verify the export belongs to it.
-Rerun only the `publish findings` command without `--dry-run` to import the
-reviewed `$out/dependabot.jsonl` file. Then read the local evidence.
+[Enable external imports](README.md#preview-a-report). From the matching
+checkout, set a private report path outside the checkout. Choose a source key
+for this host, repository and alert family, or reuse your existing Dependabot key.
 
 ```sh
-codex-security findings imported . --format json
+report=/private/path/dependabot.jsonl
+source_key=github.com/OWNER/REPO/dependabot
 ```
 
-For Cloud, replace `--to local --repository .` with
-`--to cloud --repository CLOUD_REPOSITORY_ID` and preview again before confirming.
-To investigate a local alert, use the
-[`$resolve-dependency-alert` skill](../../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md)
-with the saved alert and checkout.
+**Saved report.** If you already have the complete REST alert objects,
+[preview the report](#preview-the-report).
 
-## Reference
+### Export repository alerts
 
-Reuse the source key for repeat exports from the same repository. The host,
-repository, and alert number identify an occurrence, so two alerts for one GHSA
-keep separate histories. Reimport updates included alerts and leaves omitted
-alerts in place.
+In Codex, replace the host, repository and private output path in this request.
 
-Each finding records the matched package, ecosystem, manifest path, vulnerable
-version range, first patched version when available, and advisory IDs. The
-native alert retains GitHub’s state and timestamps. An alert does not establish
-the installed version, an affected line, or a Codex assessment. The importer
-requires repository-relative manifest paths and rejects conflicts between
-alert identities, affected packages, or ranges.
+> Export the native Dependabot alerts for https://HOST/OWNER/REPO across all
+> states and classifications. Follow the scoped GitHub read procedure in the
+> Codex Security triage-finding skill. Save each page as one compact JSON
+> array per line in a private temporary file beside /private/path/dependabot.jsonl.
+> Rename it to that path once you've verified and saved every page.
 
-GitHub code scanning and published security advisories have separate import
-formats. See the [scanner import guide](schema-guide.md), the
-[Dependabot alerts endpoint](https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository),
-and [GitHub CLI pagination](https://cli.github.com/manual/gh_api).
+Keep every field, including `html_url`, `security_advisory` and
+`security_vulnerability`. Save an empty page as `[]`. Use the selected
+transport and identity, and ask before switching either.
+[Scoped GitHub read procedure](../../plugins/codex-security/skills/triage-finding/references/github-rest-intake.md#github-finding-retrieval)
+
+- **Connected app.** Confirm it returned unmodified REST alert objects and
+  enumerated every matching page.
+- **HTTPS.** Use a credential with Dependabot alerts read access. Request
+  `GET /repos/OWNER/REPO/dependabot/alerts?per_page=100` on the selected
+  host's API. Omit `state` and `classification` for all alerts the deployment
+  exposes. Note any unknown malware coverage. Reject redirects and rebuild
+  each page request on the same API origin and repository endpoint with the
+  requested filters. [Dependabot alerts endpoint](https://docs.github.com/en/rest/dependabot/alerts#list-dependabot-alerts-for-a-repository)
+
+### Preview the report
+
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider github --source-key "$source_key" --dry-run --format json
+```
+
+Check the alert numbers, packages and manifest paths. The repository must
+match a configured network remote when available. If the checkout has only
+filesystem remotes or no remote, verify the export belongs to it. Then
+[save locally or publish to Cloud and verify the result](README.md#save-or-publish-and-verify).
+
+## Identity and evidence
+
+The host, repository and alert number identify a dependency occurrence. Two
+alerts for the same GHSA keep separate histories. Repeat imports update the
+alerts you include and keep the ones you omit.
+
+Each finding records the matched package, ecosystem, manifest path, affected
+version range, advisory IDs and first patched version when available. The
+native alert retains GitHub's state and timestamps. The reader requires
+repository-relative manifest paths and rejects conflicting alert identities,
+packages or ranges.
+
+Use the saved alert and checkout to check the installed version and trace
+whether the vulnerable code is used. An alert alone supplies no affected line
+or Codex assessment. [Resolve a dependency alert](../../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md)

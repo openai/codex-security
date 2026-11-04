@@ -310,6 +310,37 @@ describe("scan target normalization", () => {
     },
   );
 
+  test("keeps repository and target paths distinct from their UTF-8 replacements", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repo-\uFFFD");
+    const file = "sibling-\uFFFD.ts";
+    await mkdir(repository);
+    await writeFile(join(repository, file), "");
+    await expect(
+      normalizeTarget(join(root, "repo-") + "\uD800", [file]),
+    ).rejects.toThrow("Repository path cannot be represented as UTF-8");
+    await expect(
+      normalizeTarget(repository, ["sibling-\uDC00.ts"]),
+    ).rejects.toThrow("Path target cannot be represented as UTF-8");
+    expect((await normalizeTarget(repository, [file])).paths).toEqual([file]);
+    if (process.platform === "linux") {
+      const raw = Buffer.concat([
+        Buffer.from(join(root, "repo-")),
+        Buffer.from([0xff]),
+      ]);
+      const alias = join(root, "selected");
+      await mkdir(raw);
+      try {
+        await symlink(raw, alias);
+        await expect(normalizeTarget(alias, [file])).rejects.toThrow(
+          "Repository path cannot be represented as UTF-8",
+        );
+      } finally {
+        await rm(raw, { recursive: true });
+      }
+    }
+  });
+
   test.skipIf(process.platform === "win32").each(["node", "bun"])(
     "identifies special file targets and their links in %s",
     async (runtime) => {
