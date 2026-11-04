@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import {
-  claimDedupInputs,
+  iterationInputs,
   coordinatorFixture,
   FakeExecutor,
   immediateClock,
@@ -20,7 +19,7 @@ try {
 }
 
 async function testResumeRepairsPreviouslyAcceptedEvidence(
-  completedReducer: boolean,
+  completedIteration: boolean,
 ) {
   const { fixture, store } = await coordinatorFixture({
     workers: 1,
@@ -40,19 +39,18 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     "succeeded",
   );
   for (const worker of [...store.workers.values()]) {
-    if (!completedReducer && worker.kind === "dedup") {
+    if (!completedIteration && worker.kind === "dedup") {
       store.workers.delete(worker.id);
       continue;
     }
     const saved = await readJson(worker.resultManifestPath!);
     for (const finding of saved.findings) delete finding.validation;
     await writeJson(worker.resultManifestPath!, saved);
-    if (!completedReducer && worker.kind === "discovery")
+    if (!completedIteration && worker.kind === "discovery")
       store.workers.set(worker.id, { ...worker, mergeState: "buffered" });
   }
-  if (!completedReducer) {
-    store.dedupClaims = [];
-    store.dedupCommits = [];
+  if (!completedIteration) {
+    store.iterations = [];
   }
   const resetForResume = () => {
     store.run = {
@@ -60,9 +58,9 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       status: "running",
       terminalReason: undefined,
       manifestPath: undefined,
-      noNewStreak: completedReducer ? 1 : 0,
+      noNewStreak: completedIteration ? 1 : 0,
       persistedWorkers: structuredClone([...store.workers.values()]),
-      persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
+      persistedDedupInputs: store.iterations.flatMap(iterationInputs),
     };
   };
   resetForResume();
@@ -72,30 +70,26 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   const acceptedBytes = await Promise.all(
     acceptedPaths.map((file) => readFile(file, "utf8")),
   );
-  const executor = new FakeExecutor();
-  const execute = executor.run.bind(executor);
-  executor.run = async (request) => {
-    assert.equal(request.kind, "dedup");
-    assert.match(
-      await readFile(request.promptPath, "utf8"),
-      /missing evidence/i,
-    );
-    const result = await execute(request);
-    if (executor.dedupCalls > 1) {
-      const output = path.join(request.artifactContext!.root, "result.json");
-      const draft = await readJson(output);
-      for (const finding of draft.findings)
-        finding.validation = {
-          method: "Static source inspection",
-          summary: "The existing source proof supports the reported sink.",
-          evidenceRefs: finding.codeEvidence.map(
-            (item: { id: string }) => item.id,
-          ),
-        };
-      await writeJson(output, draft);
-    }
-    return result;
-  };
+  let repairCalls = 0;
+  const executor = Object.assign(new FakeExecutor(), {
+    async repairFindingEvidence(prompt: string, cwd: string) {
+      assert.equal(cwd, fixture.run.targetPath);
+      assert.match(prompt, /missing evidence/i);
+      repairCalls++;
+      if (repairCalls === 1) return "{}";
+      const { finding } = JSON.parse(prompt.split("\n")[1]!);
+      return JSON.stringify({
+        codeEvidence: finding.codeEvidence,
+        rootCause: finding.rootCause.summary,
+        attackPath: finding.attackPath,
+        validation: {
+          method: "Static analysis",
+          summary: "The query reaches SQL execution.",
+          evidence: "The query argument is unparameterized.",
+        },
+      });
+    },
+  });
   const published: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
@@ -109,18 +103,14 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     0,
     "repair must honor the discovery cap",
   );
-  assert.equal(
-    executor.dedupCalls,
-    2,
-    "incomplete repair uses the normal retry",
-  );
+  assert.equal(repairCalls, 2, "incomplete repair uses the normal retry");
   assert.equal(store.run.dispatchedCount, 1);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(published.length, 1);
   assert.ok(published[0].findings[0].validation);
   assert.equal(
-    store.dedupClaims.at(-1)!.workerIds.length,
-    completedReducer ? 0 : 1,
+    store.iterations.at(-1)!.workerIds.length,
+    completedIteration ? 0 : 1,
   );
   assert.deepEqual(
     await Promise.all(acceptedPaths.map((file) => readFile(file, "utf8"))),
@@ -133,5 +123,5 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     run: store.run,
   });
   assert.equal(next?.status, "succeeded", next?.error);
-  assert.equal(restarted.discoveryCalls + restarted.dedupCalls, 0);
+  assert.equal(restarted.discoveryCalls, 0);
 }

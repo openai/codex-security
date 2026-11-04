@@ -143,50 +143,28 @@ async function run() {
   });
   let complete = true;
   try {
-    if (layout === "worker") {
-      const draft = {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [],
-        },
-      };
-      const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
-      if (marker && !existsSync(marker)) {
-        await writeFile(marker, "process completed without a final artifact");
-        complete = false;
-      } else {
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: false,
-        });
-        await server.call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: true,
-        });
-      }
+    assert.equal(layout, "worker");
+    const draft = {
+      scanId: env.CODEX_SECURITY_SCAN_ID,
+      findings: [],
+      reviewState: {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    const marker = process.env.PACKAGE_DEEP_EMPTY_ONCE;
+    if (marker && !existsSync(marker)) {
+      await writeFile(marker, "process completed without a final artifact");
+      complete = false;
     } else {
-      assert.equal(layout, "reducer");
-      let cursor;
-      let json = "";
-      do {
-        const page = await server.call(
-          "get_codex_security_deep_reducer_inputs",
-          {
-            maxBytes: 64_000,
-            ...(cursor === undefined ? {} : { cursor }),
-          },
-        );
-        json += page.json;
-        cursor = page.nextCursor;
-      } while (cursor !== undefined);
-      const inputs = JSON.parse(json);
-      assert.ok(inputs.discoveries.length > 0);
-      await server.call("record_codex_security_deep_reduction", {
-        scanId: env.CODEX_SECURITY_SCAN_ID,
-        findings: [],
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: false,
+      });
+      await server.call("record_codex_security_scan_draft", {
+        ...draft,
+        complete: true,
       });
     }
     await trace({

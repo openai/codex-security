@@ -1,9 +1,6 @@
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
-import {
-  completedFinding as finding,
-  finding as checkpointFinding,
-} from "./scan-draft-fixture.ts";
+import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -52,7 +49,7 @@ await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
-await testReducerCommitAndFinishAgainstRealWorkbench(true);
+
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
 await testPartialWorkerCoverageSurvivesParentCompletion();
 await testReceiptRepairSurvivesStoppedRecovery();
@@ -67,16 +64,17 @@ await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
 await testReplacementFailureDuringCancellation();
 await testCoordinatorCommitResponseRecovery();
-await testCoordinatorCommitResponseRecovery("commit-deep-scan-dedup");
+await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
 async function testCoordinatorCommitResponseRecovery(
-  exhaustOperation?: "commit-deep-scan-dedup" | "finish-deep-scan",
+  exhaustOperation?: "record-deep-scan-iteration" | "finish-deep-scan",
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-commit-response-",
   );
-  const exhaustCommitRetries = exhaustOperation === "commit-deep-scan-dedup";
+  const exhaustCommitRetries =
+    exhaustOperation === "record-deep-scan-iteration";
   const runWorkbench = createWorkbenchRunner(environment);
   const attempts = new Map<string, string[][]>();
   let failureWrites = 0;
@@ -91,7 +89,7 @@ async function testCoordinatorCommitResponseRecovery(
       );
     }
     if (
-      args[0] !== "commit-deep-scan-dedup" &&
+      args[0] !== "record-deep-scan-iteration" &&
       args[0] !== "finish-deep-scan" &&
       !(
         args[0] === "upsert-deep-scan-worker" &&
@@ -104,7 +102,7 @@ async function testCoordinatorCommitResponseRecovery(
     calls.push([...args]);
     attempts.set(args[0], calls);
     if (
-      args[0] === "commit-deep-scan-dedup" &&
+      args[0] === "record-deep-scan-iteration" &&
       (calls.length === 1 || exhaustCommitRetries)
     ) {
       throw Object.assign(
@@ -175,7 +173,7 @@ async function testCoordinatorCommitResponseRecovery(
     );
     assert.equal(failureWrites, exhaustCommitRetries ? 1 : 0);
     assert.equal(
-      attempts.get("commit-deep-scan-dedup")?.length,
+      attempts.get("record-deep-scan-iteration")?.length,
       exhaustCommitRetries ? 3 : 2,
     );
     assert.equal(attempts.get("upsert-deep-scan-worker")?.length, 2);
@@ -686,9 +684,7 @@ async function testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalS
   }
 }
 
-async function testReducerCommitAndFinishAgainstRealWorkbench(
-  replaceFailedReducer = false,
-) {
+async function testReducerCommitAndFinishAgainstRealWorkbench() {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-store-integration-",
   );
@@ -808,72 +804,19 @@ connection.rollback()`,
     const first = await createDiscovery(store, run, "first", "succeeded");
     const second = await createDiscovery(store, run, "second", "succeeded");
     const late = await createDiscovery(store, run, "late", "running");
-    if (replaceFailedReducer) {
-      const retired = await createWorkerFixture(
-        run,
-        "retired-reducer",
-        "dedup",
-      );
-      await store.claimDedup({
-        ...retired,
-        workerIds: [first.id, second.id],
-      });
-      await store.updateWorker({ ...retired, status: "running" });
-      await store.updateWorker({
-        ...retired,
-        status: "failed",
-        error: "Request blocked by cyberPolicy.",
-      });
-      const afterRetirement = await store.get(run.scanId, threadId);
-      assert.equal(afterRetirement.status, "running");
-      for (const workerId of [first.id, second.id]) {
-        assert.equal(
-          afterRetirement.persistedWorkers.find(
-            (worker: { id: string }) => worker.id === workerId,
-          )?.mergeState,
-          "buffered",
-          "a retired reducer must release every input for its replacement",
-        );
-      }
-    }
-    const empty = await createWorkerFixture(run, "empty-reducer", "dedup");
-    await assert.rejects(
-      store.claimDedup({ ...empty, workerIds: [] }),
-      /first Deep Scan dedup requires two/,
-      "an empty reduction requires a previously accepted aggregate",
-    );
     const reducer = await createWorkerFixture(run, "dedup-0001", "dedup");
     await writeJsonLine(reducer.resultPath, {
-      schemaVersion: 1,
-      consumedWorkerIds: [first.id, second.id],
-      merges: [],
+      scanId: run.scanId,
+      findings: [],
     });
-    await store.claimDedup({
-      ...reducer,
-      workerIds: [first.id, second.id],
-    });
-    await store.updateWorker({
-      ...reducer,
-      status: "running",
-      threadId: "fixture-reducer-thread",
-    });
-
     const canonical = await createCanonicalFixture(run.scanDir);
-    const stagedCandidateLedgerPath = path.join(
-      reducer.artifactDir,
-      "canonical",
-      "candidate_ledger.jsonl",
-    );
-    await writePrivateFile(
-      stagedCandidateLedgerPath,
-      '{"candidate_id":"replacement"}\n',
-    );
-    const afterCommit = await store.commitDedup({
+    const afterCommit = await store.recordIteration({
       id: reducer.id,
       scanId: run.scanId,
-      newFindings: 0,
-      resultManifestPath: reducer.resultPath,
-      candidateLedgerPath: stagedCandidateLedgerPath,
+      workerIds: [first.id, second.id],
+      resultPath: reducer.resultPath,
+      noNewStreak: 2,
+      consecutiveErrors: 0,
     });
     assert.equal(afterCommit.status, "running");
     assert.equal(afterCommit.terminalReason, undefined);
@@ -884,53 +827,6 @@ connection.rollback()`,
         .canonicalArtifacts,
       null,
     );
-    assert.equal(
-      await readFile(canonical.candidateLedgerPath, "utf8"),
-      '{"candidate_id":"replacement"}\n',
-    );
-    assert.equal(
-      await readFile(stagedCandidateLedgerPath, "utf8"),
-      '{"candidate_id":"replacement"}\n',
-    );
-
-    // An older accepted aggregate can be repaired without spending discovery
-    // budget or claiming the discoveries that already belong to that aggregate.
-    const priorBytes = await readFile(reducer.resultPath, "utf8");
-    const failedRepair = await createWorkerFixture(run, "dedup-0002", "dedup");
-    await store.claimDedup({ ...failedRepair, workerIds: [] });
-    await store.updateWorker({ ...failedRepair, status: "running" });
-    await store.updateWorker({
-      ...failedRepair,
-      status: "failed",
-      error: "Repair attempt did not complete.",
-    });
-    const repair = await createWorkerFixture(run, "dedup-0003", "dedup");
-    await writeFile(repair.resultPath, priorBytes);
-    await store.claimDedup({ ...repair, workerIds: [] });
-    await store.updateWorker({ ...repair, status: "running" });
-    const afterRepair = await store.commitDedup({
-      id: repair.id,
-      scanId: run.scanId,
-      newFindings: 0,
-      resultManifestPath: repair.resultPath,
-    });
-    assert.equal(afterRepair.dispatchedCount, afterCommit.dispatchedCount);
-    assert.equal(afterRepair.noNewStreak, afterCommit.noNewStreak);
-    assert.equal(await readFile(reducer.resultPath, "utf8"), priorBytes);
-    for (const workerId of [first.id, second.id])
-      assert.equal(
-        afterRepair.persistedWorkers.find(
-          (worker: { id: string }) => worker.id === workerId,
-        )?.mergeState,
-        "merged",
-      );
-    assert.equal(
-      afterRepair.persistedDedupInputs.some(
-        (input: { dedupWorkerId: string }) => input.dedupWorkerId === repair.id,
-      ),
-      false,
-    );
-
     const acceptedLate = await store.updateWorker({
       ...late,
       status: "succeeded",
@@ -1285,7 +1181,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
           "pending-review",
           "Worker did not finish reviewing this source.",
         ),
-        findings: [checkpointFinding(label, "fixture.py")],
+        findings: [finding(label, "fixture.py")],
       };
       if (label === "valid" || label === "second-valid") {
         if (label === "valid") {
@@ -1552,15 +1448,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
       beforeReplay,
     );
-    // Preserving unfinished worker evidence must not claim a successful audit.
-    await assert.rejects(
-      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
-      /repair the finding records.*codeEvidence/,
-    );
-    assert.equal(
-      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
-      beforeReplay,
-    );
+    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
     assert.deepEqual(
       (await readFixtureCoverage(run.scanDir)).surfaces,
       coverage.surfaces,
@@ -1569,6 +1457,8 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       (await readFixtureCoverage(run.scanDir)).deferred,
       coverage.deferred,
     );
+    const sealed = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(typeof sealed.scan.sealedAt, "string");
     assert.deepEqual(
       (await readJson(run.scanDir, "findings.json")).findings,
       recovered.findings,

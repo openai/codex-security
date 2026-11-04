@@ -40,26 +40,16 @@ await buildServer(serverPath, {
           loader: "ts",
           contents: `
           import assert from "node:assert/strict";
-          import { readFile, writeFile } from "node:fs/promises";
-          import { join } from "node:path";
           export class CodexSdkWorkerExecutor {
-            async run(request) {
-              assert.equal(request.kind, "dedup", "resume must not discover more findings");
-              assert.match(await readFile(request.promptPath, "utf8"), /missing evidence/i);
-              const source = request.artifactContext.deepReducer.previousReducerResultPath;
-              const draft = JSON.parse(await readFile(source, "utf8"));
-              for (const [index, finding] of draft.findings.entries()) {
-                if (!finding.provenance.sourceFindings?.length) {
-                  finding.provenance.sourceFindingIds = ["previous:" + index];
-                }
-                finding.validation = {
-                  method: "Static source inspection",
-                  summary: "The retained source demonstrates the reported query sink.",
-                  evidenceRefs: finding.codeEvidence.map(item => item.id),
-                };
-              }
-              await writeFile(join(request.artifactContext.root, "result.json"), JSON.stringify(draft));
-              return { threadId: "fixture-evidence-repair" };
+            async repairFindingEvidence(prompt) {
+              assert.match(prompt, /missing evidence/i);
+              const {finding} = JSON.parse(prompt.split("\\n")[1]);
+              return JSON.stringify({
+                codeEvidence: finding.codeEvidence,
+                rootCause: finding.rootCause.summary,
+                attackPath: finding.attackPath,
+                validation: {method: "Static source inspection", summary: "The query reaches SQL.", evidence: "The query is passed to connection.execute()."},
+              });
             }
           }
         `,
@@ -104,7 +94,7 @@ for (const { route, saturated, lateFailure } of [
     await writeFile(
       path.join(env.CODEX_HOME, "codex-security", "config.toml"),
       saturated
-        ? "[deep_scan]\nworkers = 2\nmax_discovery_runs = 4\nstop_after_no_new = 1\nstop_after_consecutive_errors = 1\n"
+        ? "[deep_scan]\nworkers = 1\nmax_discovery_runs = 4\nstop_after_no_new = 1\nstop_after_consecutive_errors = 1\n"
         : "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
     );
     const runWorkbench = async (args: string[], input?: string | Buffer) => {
@@ -125,56 +115,9 @@ for (const { route, saturated, lateFailure } of [
       scanId: run.scanId,
       threadId: owner,
     });
-    const releaseLateWorker = Promise.withResolvers<void>();
-    const lateSettled = Promise.withResolvers<void>();
-    const releaseSettlement = Promise.withResolvers<void>();
     const seedExecutor = new FakeExecutor({
       discoveryCandidateId: "accepted-finding",
-      ...(saturated
-        ? {
-            discoveryGates: { "discovery-0004": releaseLateWorker.promise },
-            discoveryCandidates: { "discovery-0004": "omitted-finding" },
-          }
-        : {}),
     });
-    if (saturated) {
-      const updateWorker = store.updateWorker.bind(store);
-      store.updateWorker = async (update) => {
-        const result = await updateWorker(update);
-        if (
-          update.kind === "discovery" &&
-          (update.status === "succeeded" ||
-            (lateFailure && update.status === "canceled")) &&
-          path.basename(path.dirname(update.promptPath)) === "discovery-0004"
-        ) {
-          lateSettled.resolve();
-          await releaseSettlement.promise;
-        }
-        return result;
-      };
-      const execute = seedExecutor.run.bind(seedExecutor);
-      let reducers = 0;
-      seedExecutor.run = async (request) => {
-        if (
-          lateFailure &&
-          request.kind === "discovery" &&
-          path.basename(path.dirname(request.promptPath)) === "discovery-0004"
-        ) {
-          await releaseLateWorker.promise;
-          throw new Error("fixture late transient discovery failure");
-        }
-        if (request.kind === "dedup" && ++reducers === 2) {
-          releaseLateWorker.resolve();
-          await lateSettled.promise;
-          request.signal.addEventListener(
-            "abort",
-            () => releaseSettlement.resolve(),
-            { once: true },
-          );
-        }
-        return execute(request);
-      };
-    }
     const coordinator = new DeepScanCoordinator({
       run: claim.run,
       store,
@@ -204,6 +147,26 @@ for (const { route, saturated, lateFailure } of [
       "succeeded",
       terminal.error ?? "seed coordinator failed",
     );
+    if (saturated) {
+      // The retired scheduler could select a report while a surplus discovery
+      // finished. Seed that historical row after running the current host.
+      await execFileAsync(python, [
+        "-c",
+        `
+import sqlite3, sys, uuid
+with sqlite3.connect(sys.argv[1]) as db:
+    db.row_factory = sqlite3.Row
+    worker = dict(db.execute("SELECT * FROM deep_scan_workers WHERE scan_id=? AND kind='discovery' LIMIT 1", (sys.argv[2],)).fetchone())
+    failed = sys.argv[3] == "true"
+    worker.update(id=str(uuid.uuid4()), status="failed" if failed else "succeeded", merge_state="none" if failed else "buffered", completion_sequence=None if failed else 3, result_manifest_path=None, error_message="surplus discovery failed" if failed else None)
+    db.execute("INSERT INTO deep_scan_workers (" + ",".join(worker) + ") VALUES (" + ",".join("?" for _ in worker) + ")", tuple(worker.values()))
+    db.execute("UPDATE deep_scan_runs SET discovery_runs_dispatched=3, completion_sequence=?, consecutive_errors=? WHERE scan_id=?", (2 if failed else 3, int(failed), sys.argv[2]))
+`,
+        path.join(env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        run.scanId,
+        String(lateFailure),
+      ]);
+    }
     const accepted = await store.get(run.scanId, owner);
     assert.ok(accepted.persistedWorkers);
     const omittedIds = accepted.persistedWorkers
