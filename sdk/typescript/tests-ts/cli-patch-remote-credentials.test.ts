@@ -80,3 +80,39 @@ test.each(["github.example.test", "gitlab.com"])(
     expect(model).not.toHaveBeenCalled();
   },
 );
+
+test.each([
+  "ext::fixture-helper",
+  "fixture-helper://example.test/project",
+  "HTTPS://example.test/project",
+])("rejects a helper transport in a secondary push URL: %s", async (helper) => {
+  const { directory, git } = await publicationRepository(fixtures);
+  git("config", "protocol.ext.allow", "always");
+  git(
+    "config",
+    "--add",
+    "remote.origin.pushurl",
+    "https://github.example.test/example/repository.git",
+  );
+  git("config", "--add", "remote.origin.pushurl", helper);
+  const model = mock(async () => 0);
+  const commands: string[] = [];
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", directory),
+      onCodex: model,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        commands.push(args.includes("ls-remote") ? "transport" : command);
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+    },
+    { localHosting: false },
+  );
+  expect(outcome.exitCode).toBe(2);
+  expect(outcome.stderr).toContain("remote helper");
+  expect(new Set(commands)).toEqual(new Set(["git"]));
+  expect(model).not.toHaveBeenCalled();
+});
