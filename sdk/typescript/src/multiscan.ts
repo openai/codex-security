@@ -63,6 +63,8 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
+class AttemptNumberExhaustedError extends Error {}
+
 type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
@@ -414,6 +416,13 @@ async function runCampaign(
       const knowledge = knowledgeByMode[task.mode];
       const history = receipts.get(task.id.toLowerCase());
       let maxAttempt = history?.maxAttempt ?? 0;
+      const nextAttempt = () => {
+        if (maxAttempt === Number.MAX_SAFE_INTEGER)
+          throw new AttemptNumberExhaustedError(
+            `No more attempt numbers are available for ${task.id}. Start a separate campaign in a new --output-dir.`,
+          );
+        return ++maxAttempt;
+      };
       let recoveryAttempt = history?.scan?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
       if (options.recoverScan !== undefined) {
@@ -429,7 +438,7 @@ async function runCampaign(
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         let attempt = maxAttempt;
-        if (options.recoverScan === undefined) attempt = ++maxAttempt;
+        if (options.recoverScan === undefined) attempt = nextAttempt();
         else if (retry === 0) attempt = recoveryAttempt;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
@@ -491,7 +500,7 @@ async function runCampaign(
           }
           const scanSettings = options.scanOptionsByMode?.[task.mode];
           if (result === undefined) {
-            if (options.recoverScan !== undefined) attempt = ++maxAttempt;
+            if (options.recoverScan !== undefined) attempt = nextAttempt();
             scanDir = join(artifactRoot, `attempt-${attempt}`);
             notifyProgress(options, {
               repository: task.id,
@@ -587,6 +596,7 @@ async function runCampaign(
           if (result.manifest.scan.status !== "completed")
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
+          if (error instanceof AttemptNumberExhaustedError) throw error;
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;

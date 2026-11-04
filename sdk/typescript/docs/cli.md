@@ -1267,10 +1267,11 @@ failed or interrupted attempt:
   revision, preserving old artifacts and checkouts.
 
 Each nonempty committed line in `results.jsonl` must be valid JSON with a string
-task ID and a positive integer attempt number. If a line fails these checks, the
-command reports its line number and preserves the ledger.
-Restore a complete ledger backup that includes every committed attempt, or start
-a separate campaign in a new `--output-dir`.
+task ID and a positive safe integer attempt number. If a line fails these checks,
+the command reports its line number and preserves the ledger. Restore a complete
+ledger backup that includes every committed attempt, or start a separate campaign
+in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
+a fresh attempt requires a new campaign.
 
 New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure

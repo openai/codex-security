@@ -561,6 +561,42 @@ describe("multiscan", () => {
     },
   );
 
+  test.each(["rerun", "recover receipt", "recover directory"])(
+    "preserves exhausted attempt numbers on %s",
+    async (mode) => {
+      const { paths } = await repositoryFixture("repo");
+      const setup = options(paths, client(rejecting("Initial failure")), {
+        maxAttempts: 1,
+      });
+      const { resultsPath: ledger } = await runMultiscan(setup);
+      const root = join(paths.output, "artifacts", "repo");
+      const last = join(root, `attempt-${Number.MAX_SAFE_INTEGER}`);
+      if (mode === "recover directory") {
+        await mkdir(last);
+      } else {
+        const [receipt] = await results(ledger);
+        await writeFile(
+          ledger,
+          JSON.stringify({
+            ...receipt,
+            attempt: Number.MAX_SAFE_INTEGER,
+            outputDir: last,
+          }) + "\n",
+        );
+      }
+      const saved = await readFile(ledger, "utf8");
+      const directories = await readdir(root);
+      const run = mock(completeRun);
+      const configured = options(paths, client(run), {
+        ...(mode === "rerun" ? {} : { recoverScan: async () => undefined }),
+      });
+      await expect(runMultiscan(configured)).rejects.toThrow("attempt numbers");
+      expect(run).not.toHaveBeenCalled();
+      expect(await readFile(ledger, "utf8")).toBe(saved);
+      expect(await readdir(root)).toEqual(directories);
+    },
+  );
+
   const interruptedUtf8Cases: [string, number, boolean][] = [
     ["é", 1, false],
     ["中", 1, false],
@@ -1842,11 +1878,12 @@ describe("multiscan", () => {
       const checkout = join(paths.output, "checkouts", "invalid-recovery");
       await mkdir(checkout, { recursive: true, mode: 0o700 });
       await writeFile(join(checkout, "retained.txt"), "Original checkout.");
+      const nextAttempt = newerAttempt ? Number.MAX_SAFE_INTEGER : 2;
       const nextOutput = join(
         paths.output,
         "artifacts",
         "invalid-recovery",
-        "attempt-2",
+        `attempt-${nextAttempt}`,
       );
       if (newerAttempt) await completedScan(nextOutput);
       const recoverScan = mock(async (path: string) => ({
@@ -1874,7 +1911,7 @@ describe("multiscan", () => {
       );
       expect((await results(summary.resultsPath)).at(-1)).toMatchObject({
         status: "completed",
-        attempt: 2,
+        attempt: nextAttempt,
       });
     },
   );
