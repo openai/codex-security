@@ -455,8 +455,7 @@ export async function runDeepScans(
           merged,
           pending,
           state.aggregate,
-          async (prompt, schema) =>
-            JSON.stringify(await input.merge(prompt, executionSignal, schema)),
+          (prompt, schema) => input.merge(prompt, executionSignal, schema),
           (error) => {
             executionSignal.throwIfAborted();
             if (

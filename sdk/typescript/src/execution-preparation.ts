@@ -17,6 +17,7 @@ import {
 } from "@openai/codex-sdk";
 import {
   EXTERNAL_CODEX_PROVIDERS,
+  MODEL_FILE_SETTINGS,
   deepMerge,
   hasCommandAuth,
   inlineToml,
@@ -654,12 +655,7 @@ export function resolveExecutionPaths(
   environment: ProcessEnvironment,
 ): JsonObject {
   const resolved = resolveCodexProfile(config);
-  for (const key of [
-    "model_instructions_file",
-    "experimental_compact_prompt_file",
-    "model_catalog_json",
-    "sqlite_home",
-  ]) {
+  for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const path = resolved[key];
     if (typeof path === "string")
       resolved[key] = resolve(workingDirectory, expandHome(path, environment));

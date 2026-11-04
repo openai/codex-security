@@ -380,7 +380,13 @@ test("model input excludes all coverage and retains complete source evidence onc
   expect({ previous, two }).toEqual(original);
 });
 
-test.each(["same", "survivor", "unavailable"] as const)(
+test.each([
+  "same",
+  "survivor",
+  "unavailable",
+  "conflicting reviews",
+  "conflicting sources",
+] as const)(
   "checks disputed source reports before accepting a proposed merge (%s)",
   async (outcome) => {
     const codeEvidence = [
@@ -412,7 +418,7 @@ test.each(["same", "survivor", "unavailable"] as const)(
           throw new Error("Synthetic comparison failure.");
         expect(prompt).toContain("Another caller");
         if (operation === "reviews")
-          return JSON.stringify({
+          return {
             reviews: [
               {
                 pair: 0,
@@ -421,9 +427,20 @@ test.each(["same", "survivor", "unavailable"] as const)(
                 leftEvidence: 0,
                 rightEvidence: 0,
               },
+              ...(outcome === "conflicting reviews"
+                ? [
+                    {
+                      pair: 0,
+                      decision: "keep",
+                      reason: "separate edit",
+                      leftEvidence: -1,
+                      rightEvidence: -1,
+                    },
+                  ]
+                : []),
             ],
-          });
-        return JSON.stringify({
+          };
+        return {
           sources: [
             {
               id: 0,
@@ -433,13 +450,26 @@ test.each(["same", "survivor", "unavailable"] as const)(
                 outcome === "survivor" ? ["the other caller"] : [],
               same: outcome !== "survivor",
             },
+            ...(outcome === "conflicting sources"
+              ? [
+                  {
+                    id: 0,
+                    fixA: "encode",
+                    fixB: "escape",
+                    survivingPaths: ["other caller"],
+                    same: false,
+                  },
+                ]
+              : []),
           ],
-        });
+        };
       },
       (error) => errors.push(error),
     );
     expect(calls).toEqual(
-      outcome === "unavailable" ? ["reviews"] : ["reviews", "sources"],
+      outcome === "unavailable" || outcome === "conflicting reviews"
+        ? ["reviews"]
+        : ["reviews", "sources"],
     );
     expect(result.aggregate.findings).toHaveLength(outcome === "same" ? 1 : 2);
     expect(

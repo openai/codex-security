@@ -620,6 +620,9 @@ for (const [instructionKey, scenario] of [
   ["experimental_compact_prompt_file", "running-instruction-repository-PATH"],
   ["experimental_compact_prompt_file", "target-repository-PATH"],
   ["experimental_compact_prompt_file", "explicit-external"],
+  ["model_catalog_json", "instruction-repository-PATH"],
+  ["model_catalog_json", "saved-instruction-repository-PATH"],
+  ["model_catalog_json", "explicit-external"],
 ] as const) {
   test(
     `public MCP ${instructionKey} executable boundary: ${scenario}`,

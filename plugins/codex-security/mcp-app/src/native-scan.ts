@@ -18,6 +18,7 @@ import {
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
 import {
+  MODEL_FILE_SETTINGS,
   inlineToml,
   mergedCodexConfig,
   scanModelConfiguration,
@@ -278,12 +279,12 @@ export async function prepareNativeScan(
         ...(await gitProtectionRoots(input.scan.targetPath, signal)),
         ...(
           await Promise.all(
-            [
-              executionPaths["model_instructions_file"],
-              executionPaths["experimental_compact_prompt_file"],
-            ].map((path) =>
-              typeof path === "string" ? gitProtectionRoots(path, signal) : [],
-            ),
+            MODEL_FILE_SETTINGS.map((key) => {
+              const path = executionPaths[key];
+              return typeof path === "string"
+                ? gitProtectionRoots(path, signal)
+                : [];
+            }),
           )
         ).flat(),
         ...(knowledgeBaseSnapshot?.protectedRoots ??
