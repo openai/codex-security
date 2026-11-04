@@ -1003,7 +1003,7 @@ service_tier = "ultrafast"
 db = sqlite3.connect(sys.argv[1])
 scan = (sys.argv[2],)
 parent = db.execute("SELECT model, reasoning_effort, instruction_digest FROM scans WHERE id = ?", scan).fetchone()
-workers = db.execute("SELECT id, instruction_digest FROM deep_scan_workers WHERE scan_id = ? AND kind IN ('discovery', 'dedup') AND started_at IS NOT NULL", scan)
+workers = db.execute("SELECT id, instruction_digest FROM deep_scan_workers WHERE scan_id = ? AND kind = 'discovery' AND started_at IS NOT NULL", scan)
 print(json.dumps([*parent, list(workers)]))`,
           path.join(stateDir, "workbench.sqlite3"),
           resumedScanId,
@@ -1085,7 +1085,14 @@ print(json.dumps([*parent, list(workers)]))`,
       const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
       const helperLaunches = await readLogLines(workbenchLaunchLogPath);
-      assert.equal(workerRows.length, 4);
+      assert.deepEqual(
+        new Set(workerRows.map(([id]: [string, string]) => id)),
+        new Set(
+          successfulDiscoveries.map(
+            (worker: PersistedDeepScanWorker) => worker.id,
+          ),
+        ),
+      );
       for (const [id, digest] of workerRows) {
         const firstRunning = helperLaunches.find(
           ({ workbenchArgs: args }) =>

@@ -551,11 +551,13 @@ async function testWorkerInstructionMeasurement() {
       kind: "discovery",
       status: "failed",
     });
-    await store.commitDedup({
+    await store.recordIteration({
       scanId,
-      id,
-      resultManifestPath: "/result",
-      newFindings: 0,
+      id: randomUUID(),
+      workerIds: [id],
+      resultPath: "/result",
+      noNewStreak: 1,
+      consecutiveErrors: 0,
     });
     await store.finish({
       scanId,
@@ -570,7 +572,7 @@ async function testWorkerInstructionMeasurement() {
       ["running", known],
       ["running", undefined],
       ["failed", undefined],
-      ["commit-deep-scan-dedup", undefined],
+      ["record-deep-scan-iteration", undefined],
       ["finish-deep-scan", undefined],
       ["fail-deep-scan", undefined],
     ]);
