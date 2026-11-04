@@ -1046,6 +1046,8 @@ def create_cli_scan(
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
+    identity_instance: str | None = None,
+    locations: list[dict[str, Any]] | None = None,
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
@@ -1107,9 +1109,13 @@ def create_cli_scan(
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
-    if not finding or extra_anchors:
+    if not finding or extra_anchors or identity_instance is not None or locations is not None:
         findings_path = scan_dir / "findings.json"
         findings = json.loads(findings_path.read_text())
+        if locations is not None:
+            findings["findings"][0]["locations"] = locations
+        if identity_instance is not None:
+            findings["findings"][0]["identity"]["instance"] = identity_instance
         if not finding:
             findings["findings"] = []
         else:
