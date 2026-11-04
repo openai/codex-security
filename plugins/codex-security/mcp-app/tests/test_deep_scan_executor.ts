@@ -1093,9 +1093,12 @@ async function testReportOnlyComparison() {
       "features.multi_agent_v2": false,
       web_search: "disabled",
     });
-    assert.ok(
-      invocation.argv.includes('mcp_servers."fixture.catalog".enabled=false'),
-    );
+    const overridden = nativeConfigOverrides(invocation.argv)
+      .map((arg) => parseToml(arg))
+      .find((config) => config.mcp_servers);
+    assert.deepEqual(JSON.parse(JSON.stringify(overridden?.mcp_servers)), {
+      "fixture.catalog": { enabled: false },
+    });
   });
 }
 

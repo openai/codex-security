@@ -210,25 +210,34 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...(this.modelSettings.serviceTier === undefined
           ? {}
           : { service_tier: this.modelSettings.serviceTier }),
-        mcp_servers: {
-          // A disabled server still needs a valid transport during native resolution.
-          "codex-security": { command: "node", enabled: false },
-          ...(discovery &&
-            this.compactArtifactServer(discovery, includePathsFile)),
-        },
         ...(discovery
-          ? workerSubagentConfig(
-              discovery.subagents,
-              runtimeSettings.config.features,
-            )
+          ? {
+              mcp_servers: {
+                // A disabled server still needs a valid transport during native resolution.
+                "codex-security": { command: "node", enabled: false },
+                ...this.compactArtifactServer(discovery, includePathsFile),
+              },
+              ...workerSubagentConfig(
+                discovery.subagents,
+                runtimeSettings.config.features,
+              ),
+            }
           : {
               web_search: "disabled",
               project_doc_max_bytes: 0,
+              tools: {
+                experimental_request_user_input: { enabled: false },
+                update_plan: { enabled: false },
+              },
               features: {
                 ...(isRecord(runtimeSettings.config.features) &&
                   runtimeSettings.config.features),
                 apps: false,
                 plugins: false,
+                view_image: false,
+                image_generation: false,
+                goals: false,
+                request_permissions_tool: false,
                 shell_tool: false,
                 unified_exec: false,
                 code_mode: false,
@@ -294,13 +303,16 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
         });
-      if (!discovery) {
-        for (const name of mcpServerNames) {
-          if (name !== "codex-security")
-            configOverrides.push(
-              `mcp_servers.${JSON.stringify(name)}.enabled=false`,
-            );
-        }
+      if (!discovery && mcpServerNames.length) {
+        // Native CLI dotted overrides split server names containing dots. A TOML
+        // table preserves each literal key and the transport in the native config.
+        configOverrides.push(
+          ...profileConfigOverrides({
+            mcp_servers: Object.fromEntries(
+              mcpServerNames.map((name) => [name, { enabled: false }]),
+            ),
+          }),
+        );
       }
       const prompt =
         request.kind === "compare"
