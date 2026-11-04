@@ -18,6 +18,8 @@ import {
   requireExternalImports,
 } from "./external-imports-feature.js";
 import {
+  externalImportDisposition,
+  NoPublishableFindingsError,
   cloneImportPreview,
   snapshotImportOptions,
   snapshotNormalizedFindings,
@@ -39,7 +41,10 @@ import {
   localFindingRepositories,
   semgrepSarifRepositories,
 } from "./external-findings-read.js";
-import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
+import {
+  guardianFindingSourceData,
+  guardianSelectionFormat,
+} from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
@@ -961,13 +966,10 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
-    const guardian =
-      evidence.source_data?.["format"] === guardianSelectionFormat;
+    const guardian = guardianFindingSourceData(finding);
     const url = evidence.details?.repository?.url;
     if (guardian) {
-      const source = addGuardianSource(
-        evidence.source_data!["sourceRepositoryUrl"],
-      );
+      const source = addGuardianSource(guardian["sourceRepositoryUrl"]);
       if (
         (guardianReport &&
           !semgrepReferenceMatches(guardianReport, source.url)) ||
@@ -1317,6 +1319,25 @@ export async function prepareLocalImport(
     preview,
     async import() {
       dependencies.signal?.throwIfAborted();
+      const disposition = externalImportDisposition(current);
+      if (disposition === "failed")
+        throw new NoPublishableFindingsError(cloneImportPreview(current));
+      const summary = {
+        repository,
+        read: current.read,
+        ...(current.report === undefined
+          ? {}
+          : snapshotNormalizedFindings({ report: current.report })),
+        ready: current.findings.length,
+        excluded: structuredClone(current.excluded),
+      };
+      if (disposition !== "ready") {
+        return {
+          ...summary,
+          findings: [],
+          counts: { created: 0, updated: 0, unchanged: 0 },
+        };
+      }
       const protectedRoot = [
         ...new Set([
           ...workbenchOptions.protectedRoot,
@@ -1351,13 +1372,7 @@ export async function prepareLocalImport(
         );
       }, dependencies.signal);
       return {
-        repository,
-        read: current.read,
-        ...(current.report === undefined
-          ? {}
-          : snapshotNormalizedFindings({ report: current.report })),
-        ready: current.findings.length,
-        excluded: structuredClone(current.excluded),
+        ...summary,
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };
