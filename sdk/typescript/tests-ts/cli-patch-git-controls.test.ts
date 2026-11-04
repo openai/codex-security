@@ -389,7 +389,10 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           ),
         ).toBe(true);
         expect(
-          controls!.readOnlyPaths.every(
+          [
+            ...controls!.readOnlyPaths,
+            ...controls!.modelOnlyReadOnlyPaths,
+          ].every(
             (path) =>
               path !== canonical && !path.startsWith(`${canonical}${sep}`),
           ),
@@ -628,6 +631,43 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       await controls!.validate();
     });
   }
+
+  test.each(["direct", "nested", "linked"])(
+    "a checkout cannot grant read access through a %s dormant external include",
+    async (kind) => {
+      const repository = await fixtures.create("patch-inactive-include-");
+      const home = await fixtures.create("patch-private-home-");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      const credentials = join(home, "auth.json");
+      await writeFile(credentials, '{"synthetic":"private"}', { mode: 0o600 });
+      let include = credentials;
+      if (kind === "linked") {
+        const alias = join(repository, "configured");
+        await symlink(
+          home,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        include = join(alias, "auth.json");
+      } else if (kind === "nested") {
+        include = join(repository, "future.config");
+        await writeFile(
+          include,
+          `[include]\n path = ${JSON.stringify(credentials)}\n`,
+        );
+      }
+      git("config", "includeIf.onbranch:future.path", include);
+      await expect(
+        capturePatchGitControls(
+          repository,
+          async (_root, checkout, args, options) =>
+            runGitRepositoryCommand("git", args, checkout, options),
+          true,
+        ),
+      ).rejects.toThrow("conditional include outside the selected Git roots");
+    },
+  );
 
   for (const active of [false, true]) {
     test.skipIf(process.platform === "win32")(
