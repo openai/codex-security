@@ -25,6 +25,8 @@ import type { ScaAssessment, ScaMatch, ScaResult } from "./sca-types.js";
 import type { DependencyScanProgress } from "./sca-progress.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
+  explicitlyCanceled,
+  hostedScanFailureStatus,
   ScanExecutionError,
   ScanExecutionResultSchema,
   type ScanExecutor,
@@ -367,12 +369,8 @@ interface PreparedSession {
   preflightConfig: JsonObject;
   sessionConfig: JsonObject;
   modelProvider: unknown;
-  externalProvider:
-    | (Omit<
-        (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS],
-        "env_key"
-      > & { env_key: string })
-    | null;
+  providerEnvKey?: string;
+  nativeProviderEnvironment?: Record<string, string>;
   apiKey: string | null;
   scanEnvironment: ProcessEnvironment;
   authentication: ScanAuthentication;
@@ -1768,10 +1766,14 @@ export class CodexSecurity {
       );
       const git = await inspectTrustedExecutable(
         "git",
-        selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          session.modelProvider,
+        withoutProviderKey(
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            session.modelProvider,
+            session.providerEnvKey,
+          ),
+          session.providerEnvKey,
         ),
         [
           (await gitMarkerRoot(inputs.repository, signal, "outermost")) ??
@@ -2794,11 +2796,11 @@ export class CodexSecurity {
     this.#requireOpen();
     if (options.mock) return await this.#runMock(repository, options);
     const costAbortController = new AbortController();
-    const signal = AbortSignal.any([
+    const callerSignal = AbortSignal.any([
       this.#abortController.signal,
-      costAbortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    const signal = AbortSignal.any([callerSignal, costAbortController.signal]);
     const budgetAbortController = new AbortController();
     const budgetSignal = AbortSignal.any([
       signal,
@@ -2968,11 +2970,14 @@ export class CodexSecurity {
       } = session;
       let git: InspectedExecutable = {
         executable: null,
-        environment: selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          modelProvider,
-          session.externalProvider?.env_key,
+        environment: withoutProviderKey(
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+            session.providerEnvKey,
+          ),
+          session.providerEnvKey,
         ),
       };
       for (const root of [
@@ -3034,14 +3039,13 @@ export class CodexSecurity {
             runtime.environment,
             options.auth,
             modelProvider,
-            session.externalProvider?.env_key,
+            session.providerEnvKey,
           ),
         ),
         ...(session.apiKey === null
           ? {}
           : {
-              [session.externalProvider?.env_key ?? "CODEX_API_KEY"]:
-                session.apiKey,
+              [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
@@ -3050,6 +3054,7 @@ export class CodexSecurity {
           modelProvider,
           scanDir,
           workerProviderEnvironment,
+          session.nativeProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -4421,6 +4426,7 @@ export class CodexSecurity {
                 {
                   surface: this.#surface,
                   singleTurn: options.maxCostUsd !== undefined,
+                  nativeProviderEnvironment: session.nativeProviderEnvironment,
                 },
               ),
             ...inferenceOptions,
@@ -4438,13 +4444,18 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
+      // Capture who stopped the scan before cleanup can fire another signal.
+      const callerCancellation =
+        callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
+          ? callerSignal
+          : undefined;
+      let failure =
+        signal.aborted && callerCancellation === undefined
+          ? signal.reason
+          : error;
       const snapshot = await costTracker?.stop().catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
-      let failure =
-        signal.reason instanceof ScanCostLimitExceededError
-          ? signal.reason
-          : error;
       if (
         failure instanceof ScanCostLimitExceededError &&
         snapshot?.cost &&
@@ -4461,8 +4472,7 @@ export class CodexSecurity {
         budgetRecovery !== null &&
         budgetRecovery.threadId !== null &&
         activeScan !== null &&
-        !this.#abortController.signal.aborted &&
-        options.signal?.aborted !== true
+        !callerSignal.aborted
       ) {
         try {
           const completion = await workbench(
@@ -4496,10 +4506,7 @@ export class CodexSecurity {
             scanDir,
             budgetRecovery.pluginRoot,
             budgetRecovery.expectation,
-            AbortSignal.any([
-              this.#abortController.signal,
-              ...(options.signal === undefined ? [] : [options.signal]),
-            ]),
+            callerSignal,
             true,
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
@@ -4577,20 +4584,18 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(failure)}`,
-              ...(snapshot?.cost
-                ? ["--cost-json", JSON.stringify(snapshot.cost)]
-                : []),
-            ],
+          await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            this.#dependencies.hostedScan
+              ? hostedScanFailureStatus(failure, callerCancellation) ===
+                  "canceled"
+              : explicitlyCanceled(callerCancellation),
+            failure,
+            snapshot?.cost,
           );
           activeScan = null;
-          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -4957,7 +4962,7 @@ export class CodexSecurity {
       runtimeHome,
       python,
       modelProvider,
-      externalProvider,
+      providerEnvKey,
       apiKey,
       sessionConfig,
     } = session;
@@ -4973,15 +4978,13 @@ export class CodexSecurity {
                 : runtime.environment,
               auth,
               modelProvider,
-              externalProvider?.env_key,
+              providerEnvKey,
             ),
           ),
         ),
         git,
       ),
-      ...(externalProvider === null
-        ? {}
-        : { [externalProvider.env_key]: apiKey! }),
+      ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
@@ -5026,10 +5029,9 @@ export class CodexSecurity {
         ? undefined
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment({
+      ...session.nativeProviderEnvironment,
       ...withoutOpenAiApiKeys(environment),
-      ...(externalProvider === null
-        ? {}
-        : { [externalProvider.env_key]: apiKey! }),
+      ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
     });
     if (
       process.platform === "win32" &&
@@ -5046,7 +5048,7 @@ export class CodexSecurity {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
-      ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(providerEnvKey !== undefined || apiKey === null ? {} : { apiKey }),
       configOverrides: [...configOverrides, requestContext.configOverride],
       env: sdkEnvironment,
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
@@ -5147,7 +5149,6 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig: preflightConfig,
         modelProvider: "host",
-        externalProvider: null,
         apiKey: null,
         scanEnvironment: environment,
         authentication: { method: "host", verified: false },
@@ -5170,27 +5171,23 @@ export class CodexSecurity {
       );
       const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider =
-        !commandAuth && isExternalModelProvider(modelProvider)
-          ? {
-              ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
-              env_key: scanProviderEnvKey(requestedConfig)!,
-            }
-          : null;
+      const providerEnvKey = commandAuth
+        ? undefined
+        : scanProviderEnvKey(requestedConfig);
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
         commandAuth,
         false,
-        externalProvider?.env_key,
+        providerEnvKey,
       );
       const apiKey =
         authentication.method === "api_key"
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
-              externalProvider?.env_key,
+              providerEnvKey,
             )
           : null;
       const scanEnvironment = selectedScanEnvironment(
@@ -5199,7 +5196,7 @@ export class CodexSecurity {
           : this.#dependencies.environment,
         options.auth,
         modelProvider,
-        externalProvider?.env_key,
+        providerEnvKey,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5297,7 +5294,7 @@ export class CodexSecurity {
       }
       await releaseCredentialHome?.();
       releaseCredentialHome = null;
-      if (externalProvider === null && apiKey !== null) {
+      if (providerEnvKey === undefined && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
       if (
@@ -5328,7 +5325,7 @@ export class CodexSecurity {
           runtime.codexHome,
           options.auth,
           modelProvider,
-          externalProvider?.env_key,
+          providerEnvKey,
         );
       if (
         options.safetyIdentifier !== undefined &&
@@ -5343,11 +5340,15 @@ export class CodexSecurity {
         );
       }
       notifyObserver(options, "onAuthentication")(authentication);
+      const helperEnvironment = withoutProviderKey(
+        scanEnvironment,
+        providerEnvKey,
+      );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: scanEnvironment,
+        environment: helperEnvironment,
         protectedRoot,
         signal,
       });
@@ -5360,9 +5361,23 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig,
         modelProvider,
-        externalProvider,
+        providerEnvKey,
+        nativeProviderEnvironment:
+          providerEnvKey !== undefined &&
+          apiKey !== null &&
+          !isExternalModelProvider(modelProvider)
+            ? {
+                ...declaredProviderEnvironment(providers, {
+                  ...(options.auth === "chatgpt"
+                    ? withoutOpenAiApiKeys(this.#dependencies.environment)
+                    : this.#dependencies.environment),
+                  ...withoutOpenAiApiKeys(runtime.environment),
+                }),
+                [providerEnvKey]: apiKey,
+              }
+            : undefined,
         apiKey,
-        scanEnvironment,
+        scanEnvironment: helperEnvironment,
         authentication,
         approvalPolicy,
         python,
@@ -5709,17 +5724,14 @@ export class CodexSecurity {
     } catch (error) {
       if (activeScan !== undefined) {
         try {
-          const failed = await workbench(
-            { ...activeScan.options, signal: undefined },
-            [
-              "fail-scan",
-              "--scan-id",
-              activeScan.id,
-              `--message=${errorMessage(error)}`,
-            ],
+          await stopRegisteredScan(
+            workbench,
+            activeScan,
+            options,
+            explicitlyCanceled(signal),
+            error,
           );
           activeScan = undefined;
-          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (this.#closed) this.#requireOpen();
@@ -5870,13 +5882,14 @@ export class CodexSecurity {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
     const modelProvider = scanModelProvider(requestedConfig);
+    const providerEnvKey = scanProviderEnvKey(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
       hasCommandAuth(requestedConfig)
         ? withoutOpenAiApiKeys(this.#dependencies.environment)
         : this.#dependencies.environment,
       auth,
       modelProvider,
-      scanProviderEnvKey(requestedConfig),
+      providerEnvKey,
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -5931,7 +5944,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
-        isExternalModelProvider(modelProvider) ||
+        providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
           : await initialCredentialsAvailable(
@@ -6811,32 +6824,31 @@ export function scanAuthentication(
       verified: false,
     };
   }
-  if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
+  const provider = isExternalModelProvider(modelProvider)
+    ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+    : undefined;
+  const selectedKey = providerEnvKey ?? provider?.env_key;
+  if (auth === "chatgpt" && provider === undefined) {
+    if (selectedKey !== undefined)
+      throw new ConfigurationError(
+        `ChatGPT authentication cannot use the ${modelProvider} provider's required ${selectedKey} environment key. Use '--auth api-key' or choose a provider configured for ChatGPT.`,
+      );
     return { method: "stored_credentials", verified: false };
   }
-  const key = environmentApiKeyEntry(
-    environment,
-    modelProvider,
-    providerEnvKey,
-  );
-  if (key === null && isExternalModelProvider(modelProvider)) {
-    const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+  const key = environmentApiKeyEntry(environment, modelProvider, selectedKey);
+  if (key === null && selectedKey !== undefined) {
     if (preflight && auth === "auto") {
       return {
         method: "api_key",
-        source: providerEnvKey ?? provider.env_key,
+        source: selectedKey,
         verified: false,
       };
     }
     throw new AuthenticationRequiredError(
-      `Set ${providerEnvKey ?? provider.env_key} to run a scan through ${provider.name}.`,
+      `Set ${selectedKey} to run a scan through ${provider?.name ?? modelProvider}.`,
     );
   }
-  if (
-    auth === "api-key" &&
-    key === null &&
-    !isExternalModelProvider(modelProvider)
-  ) {
+  if (auth === "api-key" && key === null) {
     throw new AuthenticationRequiredError(
       "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY. " +
         "Set a valid API key or use '--auth chatgpt'.",
@@ -6901,20 +6913,32 @@ export async function runtimeScanAuthentication(
   return authentication;
 }
 
+/** Local helpers do not authenticate model requests. */
+function withoutProviderKey(
+  environment: ProcessEnvironment,
+  key: string | undefined,
+): ProcessEnvironment {
+  if (key === undefined) return environment;
+  const child = { ...environment };
+  for (const name of Object.keys(child)) {
+    if (name.toUpperCase() === key.toUpperCase()) delete child[name];
+  }
+  forwardExternalImportSetting(environment, child);
+  return child;
+}
+
 /** @internal */
 export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
-  const selectedProviderKey =
-    standardProviderKey === null
-      ? null
-      : (providerEnvKey ?? standardProviderKey);
+  const selectedProviderKey = providerEnvKey ?? standardProviderKey;
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
@@ -6943,6 +6967,20 @@ export function selectedScanEnvironment(
       return true;
     }),
   );
+  if (
+    config !== undefined &&
+    providerEnvKey !== undefined &&
+    standardProviderKey === null &&
+    !hasCommandAuth(config)
+  ) {
+    Object.assign(
+      selected,
+      declaredProviderEnvironment(
+        resolveCodexProfile(config)["model_providers"],
+        auth === "chatgpt" ? withoutOpenAiApiKeys(environment) : environment,
+      ),
+    );
+  }
   forwardExternalImportSetting(environment, selected);
   return selected;
 }
@@ -6956,6 +6994,49 @@ function notifyScanLifecycle(
   const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
   if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
     notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+async function stopRegisteredScan(
+  workbench: typeof runWorkbench,
+  activeScan: { id: string; options: WorkbenchCommandOptions },
+  options: ScanOptions,
+  canceled: boolean,
+  error: unknown,
+  cost?: Readonly<ScanCost> | null,
+): Promise<void> {
+  const cleanupOptions = { ...activeScan.options, signal: undefined };
+  const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  if (canceled) {
+    try {
+      const stopped = await workbench(cleanupOptions, [
+        "cancel-scan",
+        "--scan-id",
+        activeScan.id,
+        ...costArgs,
+      ]);
+      // A workspace can already display a replacement when cancellation returns.
+      const results = stopped["results"];
+      if (isRecord(results) && results["scanId"] === activeScan.id)
+        notifyScanLifecycle(options, results, true);
+      else observeSettledScan(options, activeScan);
+      return;
+    } catch (cause) {
+      // Older external workbenches can only persist cost on a failed scan.
+      if (
+        !cost ||
+        !errorMessage(cause).includes("unrecognized arguments: --cost-json")
+      )
+        throw cause;
+    }
+  }
+  const failed = await workbench(cleanupOptions, [
+    "fail-scan",
+    "--scan-id",
+    activeScan.id,
+    `--message=${errorMessage(error)}`,
+    ...costArgs,
+  ]);
+  notifyScanLifecycle(options, failed["scan"], true);
 }
 
 function observeSettledScan(
@@ -7009,9 +7090,14 @@ function environmentApiKeyEntry(
   modelProvider?: unknown,
   providerEnvKey?: string,
 ): { source: string; value: string } | null {
-  const keys = isExternalModelProvider(modelProvider)
-    ? [providerEnvKey ?? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key]
-    : (["OPENAI_API_KEY", "CODEX_API_KEY"] as const);
+  if (providerEnvKey !== undefined && !isExternalModelProvider(modelProvider)) {
+    const value = environmentEntry(environment, providerEnvKey);
+    return value?.trim() ? { source: providerEnvKey, value } : null;
+  }
+  const keys =
+    providerEnvKey === undefined
+      ? ["OPENAI_API_KEY", "CODEX_API_KEY"]
+      : [providerEnvKey];
   for (const requested of keys) {
     const value = environmentValue(environment, requested)?.trim();
     if (value) return { source: requested, value };
@@ -7631,18 +7717,11 @@ async function requireCurrentDeepScanPlugin(
   }
 }
 
-function selectedWorkerRuntimeConfig(
-  config: JsonObject,
-  selectedProvider: unknown,
-  workingDirectory: string,
+function declaredProviderEnvironment(
+  providers: unknown,
   environment: ProcessEnvironment,
-): JsonObject {
-  const provider =
-    typeof selectedProvider === "string" ? selectedProvider : undefined;
-  const resolved = resolveCodexProfile(config);
-  resolveNestedConfigPaths(resolved, workingDirectory);
-  const providers = resolved["model_providers"];
-  const providerEnvironmentNames = isRecord(providers)
+): Record<string, string> {
+  const names = isRecord(providers)
     ? Object.values(providers)
         .flatMap((providerConfig) =>
           isRecord(providerConfig)
@@ -7656,8 +7735,8 @@ function selectedWorkerRuntimeConfig(
         )
         .filter((name): name is string => typeof name === "string")
     : [];
-  const providerEnvironment = Object.fromEntries(
-    providerEnvironmentNames.flatMap((name) => {
+  return Object.fromEntries(
+    names.flatMap((name) => {
       const key =
         process.platform === "win32"
           ? Object.keys(environment)
@@ -7668,6 +7747,23 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
+}
+
+function selectedWorkerRuntimeConfig(
+  config: JsonObject,
+  selectedProvider: unknown,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
+  nativeProviderEnvironment?: Record<string, string>,
+): JsonObject {
+  const provider =
+    typeof selectedProvider === "string" ? selectedProvider : undefined;
+  const resolved = resolveCodexProfile(config);
+  resolveNestedConfigPaths(resolved, workingDirectory);
+  const providers = resolved["model_providers"];
+  const providerEnvironment =
+    nativeProviderEnvironment ??
+    declaredProviderEnvironment(providers, environment);
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
@@ -7785,7 +7881,8 @@ function standaloneFindingForPrompt(finding: string | object): string {
   return jsonForPrompt(finding);
 }
 
-function definedEnvironment(
+/** @internal */
+export function definedEnvironment(
   environment: ProcessEnvironment,
 ): Record<string, string> {
   const child = Object.fromEntries(

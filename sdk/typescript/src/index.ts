@@ -364,6 +364,7 @@ export {
   normalizeVeracodeFindings,
   readVeracodeFindings,
 } from "./veracode-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
 export {
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
@@ -372,6 +373,7 @@ export {
   normalizeContinuumFindings,
   readContinuumFindings,
 } from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,
