@@ -2471,8 +2471,8 @@ export async function main(
         signal: options?.signal ?? patchPreparationSignal,
       };
       options.signal?.throwIfAborted();
-      // Git index reads can launch a repository's fsmonitor outside the patch sandbox.
-      if (command === "git" && argv[0] === "patch") {
+      if (command === "git") {
+        // Any Git index read can run a checkout-selected fsmonitor as the CLI user.
         const count = Number(
           options.environment?.["GIT_CONFIG_COUNT"] ??
             environmentEntry(
