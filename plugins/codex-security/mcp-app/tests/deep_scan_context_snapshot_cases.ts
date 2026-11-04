@@ -1,3 +1,7 @@
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+} from "./deep_scan_executor_fixture.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,22 +14,13 @@ import { importModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 import type { DeepScanWorkerRunner as Runner } from "../src/deep-scan/worker-runner.js";
 import type { createDeepScanArtifacts as Artifacts } from "../src/deep-scan/artifacts.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
 import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
 
-export async function testDeepScanContextSnapshots({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
-  parentSandbox: DeepWorkerParentSandbox;
-}) {
+export async function testDeepScanContextSnapshots() {
   const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
   const {
     WorkbenchDeepScanStore,
