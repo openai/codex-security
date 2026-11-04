@@ -27,16 +27,16 @@ const { deepMerge } = await importModule({
 });
 const chunks: Buffer[] = [];
 for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-await assertWorkerReplay(
+const launches = await assertWorkerReplay(
   process.argv[2]!,
   JSON.parse(Buffer.concat(chunks).toString()),
 );
-process.stdout.write(JSON.stringify({ launches: 4 }));
+process.stdout.write(JSON.stringify({ launches }));
 
 async function assertWorkerReplay(
   root: string,
   config: JsonObject,
-): Promise<void> {
+): Promise<number> {
   const home = join(root, "worker-home");
   await mkdir(home);
   await writeFile(join(home, "config.toml"), "");
@@ -96,53 +96,65 @@ async function assertWorkerReplay(
     const executor = new CodexSdkWorkerExecutor({
       parentSandbox: { filesystemDenies: [] },
     });
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "replayed-thread"]) {
-        const result = await executor.run({
-          kind,
-          promptPath: prompt,
-          workingDirectory: root,
-          subagents: 0,
-          resumeThreadId,
-          signal: new AbortController().signal,
-        });
-        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
-        const { argv } = JSON.parse(await readFile(marker, "utf8")) as {
-          argv: string[];
-        };
-        let selected: JsonObject = {};
-        for (let index = 0; index < argv.length; index++)
-          if (argv[index] === "-c" || argv[index] === "--config")
-            selected = deepMerge(selected, parse(argv[++index]!) as JsonObject);
-        for (const key of [
-          "analytics",
-          "shell_environment_policy",
-          "otel",
-          "skills",
-          "model_catalog_json",
-        ])
-          assert.deepEqual(selected[key], config[key]);
-        assert.deepEqual(
-          (selected["agents"] as JsonObject)["reviewer"],
-          (config["agents"] as JsonObject)["reviewer"],
-        );
-        assert.equal((selected["features"] as JsonObject)["view_image"], false);
-        assert.equal((selected["features"] as JsonObject)["shell_tool"], false);
-        assert.equal(selected["approval_policy"], "never");
-        assert.deepEqual(
-          (selected["permissions"] as JsonObject)[
-            "codex_security_deep_scan_worker"
-          ],
-          profile,
-        );
-        assert.equal(argv.includes("resume"), resumeThreadId !== undefined);
-        // Existing coordinators retain their launch snapshot when a source file changes.
-        await writeFile(
-          workerConfig,
-          "[worker_runtime.analytics]\nenabled=true\n",
-        );
-      }
+    let verifiedLaunches = 0;
+    async function checkLaunchSettings(resumed: boolean) {
+      const { argv } = JSON.parse(await readFile(marker, "utf8")) as {
+        argv: string[];
+      };
+      let selected: JsonObject = {};
+      for (let index = 0; index < argv.length; index++)
+        if (argv[index] === "-c" || argv[index] === "--config")
+          selected = deepMerge(selected, parse(argv[++index]!) as JsonObject);
+      for (const key of [
+        "analytics",
+        "shell_environment_policy",
+        "otel",
+        "skills",
+        "model_catalog_json",
+      ])
+        assert.deepEqual(selected[key], config[key]);
+      assert.deepEqual(
+        (selected["agents"] as JsonObject)["reviewer"],
+        (config["agents"] as JsonObject)["reviewer"],
+      );
+      assert.equal((selected["features"] as JsonObject)["view_image"], false);
+      assert.equal((selected["features"] as JsonObject)["shell_tool"], false);
+      assert.equal(selected["approval_policy"], "never");
+      assert.deepEqual(
+        (selected["permissions"] as JsonObject)[
+          "codex_security_deep_scan_worker"
+        ],
+        profile,
+      );
+      assert.equal(argv.includes("resume"), resumed);
+      verifiedLaunches++;
     }
+    for (const resumeThreadId of [undefined, "replayed-thread"]) {
+      const result = await executor.run({
+        kind: "discovery",
+        promptPath: prompt,
+        workingDirectory: root,
+        subagents: 0,
+        resumeThreadId,
+        signal: new AbortController().signal,
+      });
+      assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+      await checkLaunchSettings(resumeThreadId !== undefined);
+      // Later turns retain the settings from the first launch.
+      await writeFile(
+        workerConfig,
+        "[worker_runtime.analytics]\nenabled=true\n",
+      );
+    }
+    const comparison = await executor.compareFindings(
+      "Compare synthetic findings.",
+      root,
+      new AbortController().signal,
+      { type: "object", properties: { reviews: { type: "array" } } },
+    );
+    assert.deepEqual(JSON.parse(comparison), { reviews: [] });
+    await checkLaunchSettings(false);
+    return verifiedLaunches;
   } finally {
     childProcess.spawn = spawn;
     syncBuiltinESMExports();

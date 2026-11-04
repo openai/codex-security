@@ -60,7 +60,7 @@ alias expansion.
 
 For Daybreak on Codex 0.163.0 or later, set `codex.daybreak` to `true`; the toggle
 defaults off. This native setting is retained in scan recipes and passed to
-Deep Scan discovery and reducer workers, including resumes. An explicit
+Deep Scan discovery workers, including resumes. An explicit
 `scan.cyber_access_program` takes precedence for each turn. See
 [Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
 
