@@ -1,26 +1,9 @@
 import type { AssertionContext } from "../types.ts";
-import { extractTriageResult, parseExpected } from "./output.mts";
-
-function expectedScanbenchMapping(context: AssertionContext) {
-  const label = String(context.vars.expected_binary_label || "");
-  const mappings = [];
-
-  if (label === "positive") {
-    mappings.push({
-      expectedVerdict: "confirmed",
-      expectedBinaryLabel: "positive",
-      label: "positive scanbench label",
-    });
-  } else if (label === "negative") {
-    mappings.push({
-      expectedVerdict: "not_actionable",
-      expectedBinaryLabel: "negative",
-      label: "negative scanbench label",
-    });
-  }
-
-  return mappings;
-}
+import {
+  gradeFailures,
+  extractTriageResult,
+  parseExpected,
+} from "./output.mts";
 
 export default (output: unknown, context: AssertionContext) => {
   const result = extractTriageResult(
@@ -32,21 +15,24 @@ export default (output: unknown, context: AssertionContext) => {
   const expectedVerdicts = parseExpected(context.vars.expected_verdicts);
   const failures = [];
 
-  for (const mapping of expectedScanbenchMapping(context)) {
+  const binaryLabel = String(context.vars.expected_binary_label || "");
+  if (binaryLabel === "positive" || binaryLabel === "negative") {
+    const expectedVerdict =
+      binaryLabel === "positive" ? "confirmed" : "not_actionable";
     if (
       expectedVerdicts.length === 1 &&
-      expectedVerdicts[0] !== mapping.expectedVerdict
+      expectedVerdicts[0] !== expectedVerdict
     ) {
       failures.push(
-        `${mapping.label}: expected_verdicts must be ${mapping.expectedVerdict}, got ${expectedVerdicts[0]}`,
+        `${binaryLabel} scanbench label: expected_verdicts must be ${expectedVerdict}, got ${expectedVerdicts[0]}`,
       );
     }
     if (
       context.vars.expected_binary_label &&
-      context.vars.expected_binary_label !== mapping.expectedBinaryLabel
+      context.vars.expected_binary_label !== binaryLabel
     ) {
       failures.push(
-        `${mapping.label}: expected_binary_label must be ${mapping.expectedBinaryLabel}, got ${context.vars.expected_binary_label}`,
+        `${binaryLabel} scanbench label: expected_binary_label must be ${binaryLabel}, got ${context.vars.expected_binary_label}`,
       );
     }
   }
@@ -67,20 +53,16 @@ export default (output: unknown, context: AssertionContext) => {
   findings.forEach((finding, index) => {
     const label = expectedIds[index] || `index ${index}`;
 
-    if (finding.input_id !== expectedIds[index]) {
-      failures.push(
-        `${label}: expected input_id ${expectedIds[index]}, got ${finding.input_id}`,
-      );
-    }
-    if (finding.source_type !== expectedSourceTypes[index]) {
-      failures.push(
-        `${label}: expected source_type ${expectedSourceTypes[index]}, got ${finding.source_type}`,
-      );
-    }
-    if (finding.verdict !== expectedVerdicts[index]) {
-      failures.push(
-        `${label}: expected verdict ${expectedVerdicts[index]}, got ${finding.verdict}`,
-      );
+    for (const [field, expected] of [
+      ["input_id", expectedIds[index]],
+      ["source_type", expectedSourceTypes[index]],
+      ["verdict", expectedVerdicts[index]],
+    ] as const) {
+      if (finding[field] !== expected) {
+        failures.push(
+          `${label}: expected ${field} ${expected}, got ${finding[field]}`,
+        );
+      }
     }
 
     const rank = finding.exploitability_stack_rank?.rank;
@@ -146,12 +128,8 @@ export default (output: unknown, context: AssertionContext) => {
     });
   }
 
-  return {
-    pass: failures.length === 0,
-    score: failures.length === 0 ? 1 : 0,
-    reason:
-      failures.length === 0
-        ? "Triage I/O matched expected source types, order, and verdicts."
-        : failures.join("; "),
-  };
+  return gradeFailures(
+    failures,
+    "Triage I/O matched expected source types, order, and verdicts.",
+  );
 };

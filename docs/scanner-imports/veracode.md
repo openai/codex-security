@@ -1,18 +1,71 @@
-# Import Veracode Static Analysis policy findings
+# Import Veracode Static Analysis findings
 
-Use `--provider veracode` for the **Findings API** backlog of one Veracode
-application mapped to one source repository. This importer handles
-`scan_type=STATIC` in the application context. A Veracode application may
-aggregate multiple repositories or binary modules: do not bind that aggregate
-to a single checkout. Pipeline Scan JSON, sandboxes, SCA, DAST, policy pass/fail
-summaries and the findings converter's SARIF output are not this format.
+Import existing policy flaws from Findings API pages for one Veracode
+application. Use the application context and `scan_type=STATIC`.
 
-## Export unmodified Findings API pages
+## Quick start
 
-Set `VERACODE_APPLICATION_GUID` to the application you intend to import. Use a
-client with read access to that application and the Results API. This example
-uses HTTPie with the Veracode HMAC plugin and `jq`. Set `api` to the hostname
-for your region. Store the exported pages outside the checkout.
+[Enable external imports](README.md#preview-a-report). Verify that the
+application maps to a single Git repository and open its checkout.
+
+**Saved report.** Set `report` to the complete Findings API page or array of
+pages for your selection. Preserve each page's HAL links and pagination fields.
+
+```sh
+report=/private/path/policy-findings.json
+```
+
+**Export from Veracode.** With read access to the application and Results API,
+save and configure the [export script](#export-findings-api-pages). Capture
+the path it prints when the export succeeds.
+
+```sh
+report=$(bash "/private/path/export-veracode.sh")
+```
+
+**Preview the report.** Use the verified Git URL and a source key for your
+region, application and scan context. The URL must match a comparable local
+remote when available, or the selected Cloud repository.
+
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider veracode --source-repository-url https://github.com/example/project \
+  --source-key veracode/region/application-guid/static \
+  --dry-run --format json
+```
+
+In each finding's `evidence.source_data`, check `applicationUrl` and the
+native `row.issue_id`. Review any excluded flaws. Reuse this key for exports
+from the same application and context.
+[Save locally or publish to Cloud and verify the result](README.md#save-or-publish-and-verify).
+
+## Identity and evidence
+
+The API origin, application, context and native `issue_id` identify a policy
+flaw. Build number, source line, CWE and Pipeline flaw ID are separate fields.
+The original row keeps the numeric severity, CWE, description, status,
+mitigation and resolution. Veracode reports the static analysis path, line
+and module. Check the path against the checkout yourself. The import supplies
+no column or Git commit.
+
+A Veracode resolution records upstream status. Assess the fix separately.
+The workbench keeps flaws omitted from later exports.
+`veracode static scan <package>` runs a new Pipeline Scan with different
+flaw IDs. Sandbox, SCA, DAST, policy summaries, converted SARIF and
+multi-repository backlogs fall outside this import.
+[Veracode static scan](https://docs.veracode.com/r/veracode_static_scan)
+
+For SDK replay, use the `veracode` provider and keep each finding's original
+`source_finding_id` and `evidence.source_data`. The SDK uses them to check the
+application and repository.
+
+## Export Findings API pages
+
+Save this Bash script outside the checkout as `export-veracode.sh`. Export
+`VERACODE_APPLICATION_GUID` in your shell and set `api` in the script to the
+API origin for the application's region. The script uses HTTPie with the
+Veracode HMAC plugin and `jq`. Apply any Findings API filters in the request
+and keep the same selection on every page.
 
 ```bash
 set -eu
@@ -27,59 +80,20 @@ page=0
 while :; do
   http --ignore-stdin --check-status --body --timeout 20 --auth-type veracode_hmac GET \
     "$api/appsec/v2/applications/$guid/findings" \
-    scan_type==STATIC page=="$page" size==100 > "$out/page.tmp"
+    scan_type==STATIC page=="$page" size==100 > "$out/page.tmp" || exit "$?"
   pages=$(jq -er --arg app "$application" --argjson n "$page" '
     select(._links.application.href == $app and .page.number == $n) |
-    .page.total_pages | numbers' "$out/page.tmp")
-  cat "$out/page.tmp" >> "$out/pages.stream"
+    .page.total_pages | numbers' "$out/page.tmp") || exit "$?"
+  cat "$out/page.tmp" >> "$out/pages.stream" || exit "$?"
   page=$((page + 1))
   [ "$page" -lt "$pages" ] || break
 done
-jq -s '.' "$out/pages.stream" > "$out/policy-findings.json"
+jq -s '.' "$out/pages.stream" > "$out/report.tmp" &&
+  mv "$out/report.tmp" "$out/policy-findings.json" &&
+  printf '%s\n' "$out/policy-findings.json"
 ```
 
-Collect every page from the configured API host and keep each page intact.
-Apply any Findings API filters when downloading the pages and use the same
-selection throughout. The importer checks page counts, application scope and
-the selection reported in the HAL links. Its preview includes the returned
-rows with their original evidence, including any annotations. If the backlog
-changes during pagination, collect it again.
-
-## Preview and import
-
-```bash
-export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
-codex-security publish findings "$out/policy-findings.json" \
-  --to local --repository ./project --provider veracode \
-  --source-repository-url https://github.com/example/project \
-  --source-key veracode/region/application-guid/static \
-  --dry-run --format json
-```
-
-Review the destination, count and exclusions. Remove `--dry-run` to import.
-Use the same source key for later exports from the same application and
-context; an application GUID is not evidence of a Git URL. For Cloud use an
-authorized GitHub repository and a deployment that accepts provider `veracode`.
-
-Local import compares the source with the checkout’s Git remotes when
-comparable remotes are configured.
-
-If an interrupted Cloud upload reports `result.savedSubmission`, keep its
-checkpoint and use the same build, state directory, account and import settings.
-Preview the original export with `--dry-run --format json`. Check `accountId`
-and `destination`. When `resumed` is false, review the new upload before approving it.
-For `prepareNormalizedExternalPublication`, pass your original normalized
-`ExternalFindings` and check `preview.resumed` before calling `publish()`.
-Passing different normalized findings prepares a new upload. Save each finding
-with its original `source_finding_id` and `evidence.source_data` so the SDK can
-verify its application and repository when replayed with the Veracode provider.
-
-| Veracode evidence                              | What Codex Security tracks                                                                                                            |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| API origin, application/context and `issue_id` | A stable policy flaw occurrence. Build number, line, CWE and the separate Pipeline flaw ID are not its identity.                      |
-| Native severity, CWE and flaw description      | SAST evidence, preserving the original numeric severity, description and status in the raw record.                                    |
-| Static analysis path, line and module          | Reported evidence, not proof that a similarly named file exists in the checkout. No fabricated column or Git commit.                  |
-| Finding status, mitigation and resolution      | Upstream workflow history, not a Codex assessment. Replaying an update does not mark a fix verified; omissions do not delete records. |
-
-References: [Veracode Findings API](https://docs.veracode.com/r/c_findings_v2_intro),
-[vendor-supported policy and Pipeline conversion examples](https://github.com/veracode/veracode-pipeline-scan-results-to-sarif).
+Keep every page intact. The importer checks page counts, the application and
+the selection in the HAL links. If the backlog changes during pagination,
+collect the pages again.
+[Veracode Findings API](https://docs.veracode.com/r/c_findings_v2_intro) · [Policy and Pipeline conversion examples](https://github.com/veracode/veracode-pipeline-scan-results-to-sarif)
