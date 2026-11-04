@@ -107,15 +107,27 @@ export function missingPythonHelperMessage(
   return `${error instanceof Error ? error.message : String(error)}\n${MISSING_PYTHON_HELPER_MESSAGE}`;
 }
 
+export function pythonHelperEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => name.toUpperCase() !== "MINIMAX_API_KEY",
+    ),
+  );
+}
+
 /** Run an existing Python helper with in-memory input and preserve its output. */
 export function runPythonWithInput(
   python: string,
   args: string[],
   input: string | Buffer,
   label: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, ["-B", ...args], {
+      env: pythonHelperEnvironment(),
+      signal,
+      killSignal: "SIGKILL",
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -128,7 +140,16 @@ export function runPythonWithInput(
       .setEncoding("utf8")
       .on("data", (chunk: string) => errors.push(chunk));
     let inputError: Error | undefined;
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (signal?.aborted) {
+        // A killed helper can remain in a kernel filesystem call until its mount responds.
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+      }
+      reject(error);
+    });
     child.stdin.on("error", (error: Error) => {
       inputError = error;
     });

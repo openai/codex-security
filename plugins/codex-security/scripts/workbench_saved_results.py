@@ -70,6 +70,7 @@ from workbench.saved_sources import (
 from workbench.saved_sources import (
     _digest as _digest,
 )
+from workbench.storage import saved_deep_workers
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
@@ -142,11 +143,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-        workers = connection.execute(
-            "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-            "FROM deep_scan_workers WHERE scan_id = ?",
-            (scan["id"],),
-        ).fetchall()
+        workers = saved_deep_workers(connection, scan)
         paths = dict(_saved_result_paths(scan_dir, workers))
         frozen_sources = scan["retained_source_digests_json"]
 
@@ -285,11 +282,7 @@ def _recovery_source_digests(
             else:
                 include_parent = True
 
-    workers = connection.execute(
-        "SELECT id, kind, status, completed_at, artifact_dir, result_manifest_path "
-        "FROM deep_scan_workers WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchall()
+    workers = saved_deep_workers(connection, scan)
     previous_heads = checkpoint_heads
     if previous_heads is None:
         previous_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], frozen_sources or {})
@@ -441,10 +434,7 @@ def preserve_deep_deadline_draft(
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
-    workers = connection.execute(
-        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-        (scan["id"],),
-    ).fetchall()
+    workers = saved_deep_workers(connection, scan)
     if preserve_reduction:
         # Completed reviews already went through reduction. Only add evidence
         # from unfinished reviews; raw accepted drafts must not undo that result.
@@ -771,10 +761,7 @@ def preserve_scan_results_locked(
             scan_dir,
             scan_id,
             binding,
-            connection.execute(
-                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                (scan_id,),
-            ).fetchall(),
+            saved_deep_workers(connection, scan),
             warnings,
             stopped=True,
             scan_mode=scan["mode"],
@@ -1293,6 +1280,7 @@ def cancel_scan(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     thread_id = db.optional_text(args.thread_id, maximum=512)
+    cost_json = db.parse_scan_cost(getattr(args, "cost_json", None))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = db.now()
@@ -1312,10 +1300,11 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', canceled_at = ?, completed_at = ?, updated_at = ?,
+                cost_json = COALESCE(?, cost_json)
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, timestamp, scan["id"]),
+            (timestamp, timestamp, timestamp, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be canceled.")

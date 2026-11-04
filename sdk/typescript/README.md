@@ -4,8 +4,8 @@ Run Codex Security from TypeScript or the command line to find, validate, and fi
 security vulnerabilities in your code. The package includes the Codex runtime,
 security plugin, and TypeScript declarations. It uses ES modules.
 
-- Scan repositories, selected paths, or Git changes. Deep scans run parallel
-  discovery workers on repositories and selected paths.
+- Scan repositories, selected paths, or Git changes. Deep scans repeat Standard
+  scans of the selected scope and merge their findings after each batch.
 - Validate findings, generate patches, and verify existing fixes.
 - Draft security policies and retain threat models.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
@@ -392,9 +392,9 @@ const result = await security.run("/path/to/repository", {
 });
 ```
 
-`workers` controls concurrent discovery workers; `subagents` controls delegation
-within each worker. Time and run limits apply to discovery. After discovery
-stops, the scan combines and returns completed findings. See
+`workers` controls concurrent Standard scans and `subagents` controls delegation
+within each scan. Time and run limits apply to discovery. The coordinator merges
+completed findings before the next batch starts. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
 Deep discovery retains its enforced deadline, with a default and maximum of
 5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
@@ -411,6 +411,10 @@ await security.run(repository, {
   },
 });
 ```
+
+For `runComponentScans()`, subscribe to `onScanEvent` and select events with
+`type === "lifecycle"` to correlate each snapshot with its `componentId`. Deep
+component scans also emit `deep-progress` events with independent review counts.
 
 Group observations by `scanId`. A completed scan with
 `hasReportableFindings: false` finished with zero reportable findings.
@@ -703,6 +707,13 @@ with a saved list or detail response, or `normalizeContinuumFindings(input, sour
 with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
+For a saved Checkmarx One CLI JSON or CxSAST XML report, use
+`readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
+To prepare a local import, pass `provider: "checkmarx"` and the verified
+`sourceRepositoryUrl` to `prepareLocalExternalImport`. Keep each batch of normalized
+Checkmarx findings scoped to one scan and its repository.
+[Checkmarx SAST import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+
 Use `collectSelectedSemgrepGuardianFindings` with a connected Guardian MCP client to
 [capture selected Code or Supply Chain findings](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings) using the user's Guardian sign-in.
 Use `normalizeSelectedSemgrepPlatformFindings` for selected SAST findings from saved
@@ -722,6 +733,27 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+When a parsed selection has no publishable findings, preparation throws
+`NoPublishableFindingsError`. Inspect its `selection` for the read count,
+exclusions and scanner diagnostics. A clean empty report needs no upload;
+failed scans and excluded records need attention. Previously imported findings
+remain open.
+
+To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
+report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
+for an already parsed report. Supply the scanned directory relative to the checkout
+(`.` for the whole checkout) unless the report's remote target and Git metadata establish it.
+
+```ts
+import { readTrivyFindings } from "@openai/codex-security";
+
+const { findings, excluded, report } = await readTrivyFindings(
+  "trivy.json.gz",
+  "local",
+  ".",
+);
+```
+
 For CLI examples and supported input formats, see the
 [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
 
@@ -731,7 +763,9 @@ options)` accepts already normalized evidence, and
 `listLocalExternalFindings({ repository })` reads the stored records. Imports
 remain unassessed source evidence, separate from native scan findings. Repeated
 imports update the same repository/provider/source-key/source-ID record; omitted
-records remain stored, and unknown evidence fields are not inferred.
+records remain stored, and unknown evidence fields are not inferred. A local
+SDK import with only excluded records returns the exclusions and zero write
+counts. The CLI exits 2 for that result so automation can detect it.
 
 File imports forward repository references from the reader automatically. With
 `prepareNormalizedLocalImport()`, supply additional known references in the
