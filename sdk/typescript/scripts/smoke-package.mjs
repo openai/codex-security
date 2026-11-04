@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { Tiktoken } from "js-tiktoken/lite";
-import cl100kBase from "js-tiktoken/ranks/cl100k_base";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -439,17 +438,10 @@ try {
     { cwd: consumer },
   );
 
-  // Compare the installed encoder's exact request chunks with the upstream
-  // encoding from this test's build dependencies, including a split Unicode input.
   const { OpenAiFindingEmbedder } = await import(
     pathToFileURL(join(installedRoot, "dist/server/api.js")).href
   );
   const finding = { description: "🔒 café 中文 ".repeat(1800) };
-  const expected = new Tiktoken(cl100kBase).encode(
-    JSON.stringify(finding),
-    [],
-    [],
-  );
   const chunks = [];
   const embedder = new OpenAiFindingEmbedder(
     "synthetic",
@@ -466,12 +458,17 @@ try {
     },
   );
   await embedder.embed([finding]);
-  assert.ok(expected.length > 8192);
   assert.deepEqual(
     chunks.map((chunk) => chunk.length),
-    [8192, expected.length - 8192],
+    [8192, 813],
   );
-  assert.deepEqual(chunks.flat(), expected);
+  // Generated with js-tiktoken 1.0.21 using cl100k_base on JSON.stringify(finding).
+  // The installed-package job runs in a clean checkout with no SDK build dependencies.
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(chunks.flat())).digest("hex"),
+    "ed8b5af712556ad433415337fcc69ea7a564c89f892855eea729c6d5c49bcf04",
+    "Installed embedding token IDs differ from the upstream cl100k_base encoding.",
+  );
 
   await cp(
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
