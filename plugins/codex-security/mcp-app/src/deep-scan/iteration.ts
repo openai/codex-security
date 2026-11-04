@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   scanDraftInputSchema,
   type ScanDraftInput,
@@ -69,6 +70,10 @@ function report(finding: Finding, retained: boolean) {
     identity: finding.identity,
     title: finding.title,
     fix: finding.remediation,
+    validation: finding.validation,
+    attackPath: finding.attackPath,
+    rootCause: finding.rootCause,
+    codeEvidenceIds: finding.codeEvidence?.map(({ id }) => id),
     locations: (locations ?? finding.locations).map(
       ({ path, startLine, endLine, role }) =>
         [path, startLine, endLine, role] as const,
@@ -262,7 +267,7 @@ function differentWorkerSites(
 ) {
   const left = asRecord(a.identity)?.anchor;
   const right = asRecord(b.identity)?.anchor;
-  return Boolean(left && right && left !== right && a.ruleId !== b.ruleId);
+  return Boolean(left && right && left !== right);
 }
 
 // A source can identify a second missing control in a different file, such as
@@ -287,7 +292,7 @@ function sourcesNeedSeparateReports(a: Finding, b: Finding) {
     const source = left.finding as Finding;
     return b.provenance.sourceFindings?.some((right, j) => {
       const other = right.finding as Finding;
-      if (right.id.startsWith(worker) && differentWorkerSites(source, other))
+      if (distinctIdentity(source, other, right.id.startsWith(worker)))
         return true;
       return (
         hasAdditionalControl(source, other) ||
@@ -327,43 +332,83 @@ function distinctIdentity(
 
 function addLocations(finding: Finding, source: Finding) {
   for (const location of source.locations) {
-    if (
-      !finding.locations.some(
-        (l) =>
-          l.path === location.path &&
-          l.startLine === location.startLine &&
-          (l.endLine ?? l.startLine) ===
-            (location.endLine ?? location.startLine),
-      )
-    )
-      finding.locations.push(structuredClone(location));
+    const sameRange = finding.locations.filter(
+      (l) =>
+        l.path === location.path &&
+        l.startLine === location.startLine &&
+        (l.endLine ?? l.startLine) === (location.endLine ?? location.startLine),
+    );
+    if (sameRange.some((l) => !location.role || l.role === location.role))
+      continue;
+    const unclassified = sameRange.find((l) => !l.role);
+    if (unclassified) unclassified.role = location.role;
+    else finding.locations.push(structuredClone(location));
   }
 }
 
 // Keep the original repair groups as comparison inputs even after two reports
 // are published as one. A later batch must see the same reports after a resume.
-type RepairGroup = { order: number; sources: string[] };
+type RepairGroup = {
+  order: number;
+  sources: string[];
+  representative?: Finding;
+};
+
+function withoutSourceHistory(finding: Finding): Finding {
+  const {
+    sourceFindingIds,
+    sourceFindings,
+    deepScanRepairGroups,
+    ...provenance
+  } = finding.provenance;
+  return { ...finding, provenance };
+}
+
+// The previous reducer could synthesize an accepted finding. Most modern
+// groups can be rebuilt directly from their first source and citations.
+function savedRepresentative(finding: Finding) {
+  const members = finding.provenance.sourceFindings;
+  if (!members?.length) return;
+  const primary = structuredClone(members[0]!.finding) as Finding;
+  for (const member of members.slice(1))
+    addLocations(primary, member.finding as Finding);
+  const accepted = withoutSourceHistory(finding);
+  if (!isDeepStrictEqual(withoutSourceHistory(primary), accepted))
+    return accepted;
+}
+
 function restoreRepairGroups(findings: Finding[]) {
-  const groups: { finding: Finding; target: number }[] = [];
+  const groups: {
+    finding: Finding;
+    target: number;
+    representative?: Finding;
+    restoredWithoutGroups?: boolean;
+  }[] = [];
   for (const [id, visible] of findings.entries()) {
     const parts = visible.provenance.deepScanRepairGroups as
       RepairGroup[] | undefined;
     if (!parts) {
-      groups[id] = { finding: visible, target: id };
+      groups[id] = {
+        finding: visible,
+        target: id,
+        restoredWithoutGroups: true,
+      };
       continue;
     }
     const originals = new Map(
       visible.provenance.sourceFindings!.map((source) => [source.id, source]),
     );
-    for (const { order, sources } of parts) {
+    for (const { order, sources, representative } of parts) {
       const members = sources.map((id) => originals.get(id)!);
-      const finding = structuredClone(members[0]!.finding) as Finding;
+      const finding = structuredClone(
+        representative ?? members[0]!.finding,
+      ) as Finding;
       delete finding.provenance.deepScanRepairGroups;
       finding.provenance.sourceFindingIds = sources;
       finding.provenance.sourceFindings = members;
       for (const member of members.slice(1))
         addLocations(finding, member.finding as Finding);
-      groups[order] = { finding, target: parts[0]!.order };
+      groups[order] = { finding, target: parts[0]!.order, representative };
     }
   }
   return groups;
@@ -446,6 +491,8 @@ export async function mergeBatch(
           )
             return false;
           if (
+            hasAdditionalControl(source, prior.finding) ||
+            hasAdditionalControl(prior.finding, source) ||
             separateSinks(
               source,
               prior.finding,
@@ -475,8 +522,7 @@ export async function mergeBatch(
         retained.push(group);
       } else {
         addLocations(group.finding, source);
-        if (!copy && group.id < previous && !changed.has(group.target))
-          changed.set(group.target, workerIndex);
+        if (!copy && group.id < previous) changed.set(group.id, workerIndex);
       }
       const sourceId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
@@ -504,8 +550,13 @@ export async function mergeBatch(
     aggregate.threatModel ??= worker.result.threatModel;
   }
   // A later worker can add a separately fixable path to a previously merged group.
+  const lastChange = new Map<number, number>();
+  for (const [id, worker] of changed) {
+    const target = priorTargets[id]!;
+    lastChange.set(target, Math.max(lastChange.get(target) ?? -1, worker));
+  }
   for (const group of retained.slice(0, previous)) {
-    const worker = changed.get(group.target);
+    const worker = changed.get(group.id) ?? lastChange.get(group.target);
     if (worker === undefined || group.target === group.id) continue;
     group.target = group.id;
     group.worker = worker;
@@ -590,9 +641,13 @@ export async function mergeBatch(
           ...group.finding.provenance.sourceFindings!,
         );
       }
+      const representative = group.restoredWithoutGroups
+        ? savedRepresentative(group.finding)
+        : group.representative;
       (target.provenance.deepScanRepairGroups as RepairGroup[]).push({
         order,
         sources: group.finding.provenance.sourceFindingIds!,
+        ...(representative && { representative }),
       });
     }
     aggregate.findings = [...visible.values()];

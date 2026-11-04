@@ -862,6 +862,80 @@ test("a saved same-fix merge keeps both original comparison inputs on resume", a
     ),
     [1],
   );
+  // Both workers amend the prior visible group, but the second worker adds
+  // the independently fixable path to its secondary repair group.
+  const split = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(before))),
+  );
+  const splitCounts = await mergeBatch(
+    split,
+    [
+      worker("w3", [{ ...left, title: "Left clarification" }]),
+      worker("w4", [{ ...alias, title: "Alias with a separate repair" }]),
+    ],
+    "/tmp",
+    async (
+      _prompt: string,
+      schema: { properties: Record<string, unknown> },
+    ) => {
+      if ("reviews" in schema.properties)
+        return JSON.stringify({ reviews: [] });
+      return defects([
+        [0, 2],
+        [1, 3],
+      ]);
+    },
+    fail,
+  );
+  assert.deepEqual(splitCounts, [0, 1]);
+  const legacy = {
+    scanId: before.scanId,
+    findings: [
+      {
+        ...left,
+        title: "Accepted combined report",
+        summary: "The previous reducer combined the validated explanations.",
+        locations: [...left.locations, { path: "combined.py", startLine: 3 }],
+        provenance: {
+          ...left.provenance,
+          sourceFindingIds: ["old:0"],
+          sourceFindings: [{ id: "old:0", finding: left }],
+        },
+      },
+    ],
+  };
+  await mergeBatch(
+    legacy,
+    [worker("next", [alias])],
+    "/tmp",
+    async (_p: string, schema: { properties: Record<string, unknown> }) => {
+      if ("reviews" in schema.properties)
+        return JSON.stringify({ reviews: [samePair(0)] });
+      if ("sources" in schema.properties)
+        return JSON.stringify({
+          sources: [{ id: 0, same: true, survivingPaths: [] }],
+        });
+      return defects([[0, 1], [1]]);
+    },
+    fail,
+  );
+  const legacyRestored = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(legacy))),
+  );
+  await mergeBatch(
+    legacyRestored,
+    [worker("last", [unrelated])],
+    "/tmp",
+    async () => defects([[0], [1], [2]]),
+    fail,
+  );
+  assert.equal(legacyRestored.findings[0].title, "Accepted combined report");
+  assert.match(legacyRestored.findings[0].summary, /combined the validated/);
+  assert.ok(
+    legacyRestored.findings[0].locations.some(
+      ({ path }: { path: string }) => path === "combined.py",
+    ),
+  );
   const draft = scanUnionToDraft(restored);
   assert.deepEqual(draft.scope, {
     summary: "Review by w1",
@@ -1042,4 +1116,76 @@ test("a context-sized report does not prevent comparison of later observations",
     [1, 2],
   );
   assert.match(draft.scope?.limitations?.join(" ") ?? "", /context window/);
+});
+
+test("same-worker identities and independently cited controls survive an identical repair assignment", async () => {
+  const root = {
+    ...lookup,
+    identity: { anchor: "lookup.owner" },
+    taxonomy: { category: "authorization", cwe: ["CWE-862"] },
+  };
+  const second = {
+    ...root,
+    title: "Different instance",
+    identity: { anchor: "lookup.other" },
+  };
+  const authorization = {
+    ...root,
+    title: "Also missing the caller check",
+    taxonomy: { category: "authorization", cwe: ["CWE-862", "CWE-306"] },
+    locations: [
+      ...root.locations,
+      { path: "caller.py", startLine: 4, role: "control" },
+    ],
+  };
+  const { draft } = await scanLoop([[root, second, authorization]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [[[0, 1, 2]]],
+    sameFix: approvePairs,
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.title),
+    [root.title, second.title, authorization.title],
+  );
+});
+
+test("repair assignment includes validated attack paths and a shared range retains its root role", async () => {
+  const first = {
+    ...lookup,
+    locations: [{ path: "fixture.py", startLine: 4, role: "entrypoint" }],
+  };
+  const second = {
+    ...first,
+    title: "Alias",
+    locations: [{ ...first.locations[0], role: "root_control" }],
+    validation: { summary: "Verified dispatch." },
+    attackPath: { steps: ["Dispatch calls the helper."] },
+  };
+  const { draft } = await scanLoop([[first, second]], {
+    maxDiscoveryRuns: 1,
+    stopAfterNoNew: 1,
+    comparisons: [
+      (rows) => {
+        const record = rows[1] as unknown as typeof second;
+        assert.deepEqual(record.validation, second.validation);
+        assert.deepEqual(record.attackPath, second.attackPath);
+        return {
+          uncertain: [],
+          defects: [
+            {
+              operation: "repair",
+              failure: "fixture",
+              path: "fixture.py",
+              reports: rows.map(({ id }) => ({ id, evidence: 0 })),
+            },
+          ],
+        };
+      },
+    ],
+  });
+  assert.deepEqual(
+    draft.findings.map((f) => f.locations.map(({ role }) => role)),
+    [["entrypoint", "root_control"]],
+  );
 });
