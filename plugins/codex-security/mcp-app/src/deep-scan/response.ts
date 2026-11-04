@@ -137,6 +137,7 @@ export const runSchema = z
       parentComplete: z.boolean().optional(),
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
+      discoveryStarted: z.boolean().optional(),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,

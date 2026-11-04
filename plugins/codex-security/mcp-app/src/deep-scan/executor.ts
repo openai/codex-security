@@ -88,6 +88,7 @@ export interface WorkerRuntimeConfigSource {
 }
 
 export interface CodexSdkWorkerRuntimeSettings {
+  hasProviderEnvKey?: boolean;
   environment?: Record<string, string>;
   config?: Record<string, unknown>;
   preflightProviderOverrides?: string[];
@@ -382,7 +383,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               : []),
           ],
           expectedProfile: workerProfile,
-          allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+          allowOpenAiApiKeyFallback: Boolean(
+            openAiApiKey && !codexApiKey && !runtimeSettings.hasProviderEnvKey,
+          ),
         });
       const inheritedServers = new Set([
         ...mcpServerNames,
@@ -918,6 +921,23 @@ export async function workerRuntimeSettings(
       );
     }
     if (isRecord(nativeProfileConfig.model_providers)) {
+      const providerId = workerConfig.model_provider ?? selected.model_provider;
+      const provider =
+        typeof providerId === "string"
+          ? nativeProfileConfig.model_providers[providerId]
+          : undefined;
+      if (
+        isRecord(provider) &&
+        typeof provider.env_key === "string" &&
+        provider.auth == null
+      ) {
+        settings.hasProviderEnvKey =
+          environmentVariable(
+            settings.environment ?? {},
+            provider.env_key,
+            process.platform,
+          ) !== undefined;
+      }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,
       );

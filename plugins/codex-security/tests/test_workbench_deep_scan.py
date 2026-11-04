@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,6 +93,33 @@ def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> Dee
     target.mkdir()
     run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
+
+
+@pytest.mark.cross_platform
+def test_target_admission_reads_one_entry_without_looking_up_its_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
+    check_selected_targets = runpy.run_path(str(script))["check_selected_targets"]
+    events = []
+
+    def entries():
+        events.append("read")
+        # A filesystem can report DT_UNKNOWN. Any entry-type lookup here fails.
+        yield object()
+        pytest.fail("admission read a second directory entry")
+
+    @contextmanager
+    def scandir(path):
+        assert Path(path) == tmp_path
+        try:
+            yield entries()
+        finally:
+            events.append("closed")
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    check_selected_targets(tmp_path, ["."], [])
+    assert events == ["read", "closed"]
 
 
 def restore_v53_schema(state_dir: Path) -> None:
@@ -444,6 +473,7 @@ def test_legacy_generation_with_active_worker_observes_grace_then_adopts(tmp_pat
     assert adopted["deepScan"]["coordinatorGeneration"] == 2
     assert adopted["deepScan"]["workers"][0]["status"] == "canceled"
     assert adopted["deepScan"]["dispatchedCount"] == 0
+    assert adopted["deepScan"]["discoveryStarted"] is True
 
 
 def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
@@ -461,6 +491,35 @@ def test_expired_coordinator_preserves_incomplete_setup(tmp_path: Path) -> None:
     recovered = claim_deep_scan_coordinator(state_dir, codex_home, scan_id)["deepScan"]
     assert (recovered["phase"], recovered["coordinatorGeneration"]) == ("setup", 3)
     assert not inventory.exists()
+
+
+def test_observer_and_successor_see_discovery_progress_before_first_dispatch(
+    tmp_path: Path,
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    owner = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
+    assert owner["discoveryStarted"] is False
+
+    deep.command(
+        "update-progress",
+        "--phase",
+        "discovery",
+        "--coordinator-generation",
+        str(owner["coordinatorGeneration"]),
+    )
+    before = deep.read("thread-deep-scan")
+    observed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert observed["coordinatorDisposition"] == "observing"
+    assert observed["deepScan"]["updatedAt"] == before["updatedAt"]
+
+    expire_deep_scan_coordinator(deep.state_dir, deep.id)
+    adopted = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)
+    assert adopted["coordinatorDisposition"] == "adopted"
+    for run in (before, observed["deepScan"], adopted["deepScan"]):
+        assert run["phase"] == "setup"
+        assert run["discoveryStarted"] is True
+        assert run["dispatchedCount"] == 0
+        assert run["workers"] == []
 
 
 @pytest.mark.cross_platform
