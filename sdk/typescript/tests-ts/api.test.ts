@@ -3832,6 +3832,7 @@ if __name__ == "__main__":
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
       const warnings: string[] = [];
+      let savedFailure: string | undefined;
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -3840,6 +3841,7 @@ if __name__ == "__main__":
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
+          if (args[0] === "fail-scan") savedFailure = args[3];
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -3853,6 +3855,8 @@ if __name__ == "__main__":
       if (enforceCostLimit) {
         await expect(scan).rejects.toThrow("interrupted");
         expect(commands).toContain("fail-scan");
+        expect(savedFailure).toContain("sessions");
+        expect(commands).not.toContain("cancel-scan");
       } else {
         await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
         expect(warnings).toContainEqual(

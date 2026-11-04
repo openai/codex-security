@@ -8,6 +8,7 @@ import {
 import { isRecord } from "./record.js";
 import { VERSION } from "./version.js";
 import {
+  hostedScanFailureStatus,
   ScanExecutionError,
   type ScanExecutor,
   type ScanExecutionResult,
@@ -20,7 +21,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CodexSecurity, type CodexSecuritySurface } from "./api.js";
 import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
-import { ScanInterruptedError, errorMessage } from "./errors.js";
+import { errorMessage } from "./errors.js";
 import {
   abortable,
   normalizeRepository,
@@ -225,6 +226,7 @@ export async function runHostedScanInternal(
   let execution: ScanExecutionResult | undefined;
   let request: ScanExecutionRequest | undefined;
   let scanId: string | undefined;
+  let stoppedStatus: "canceled" | "failed" | undefined;
   let outputDirectory = resolve(input.outputDirectory);
   const base = () => ({
     version: 2 as const,
@@ -309,6 +311,10 @@ export async function runHostedScanInternal(
         scanId = scan.scanId;
         outputDirectory = scan.scanDir;
       },
+      onLifecycle(scan) {
+        if (scan.status === "canceled" || scan.status === "failed")
+          stoppedStatus = scan.status;
+      },
       onProgress(progress) {
         onEvent({ type: "progress", progress });
       },
@@ -372,16 +378,12 @@ export async function runHostedScanInternal(
     };
   } catch (error) {
     if (error instanceof ScanExecutionError) execution = error.result;
+    const status = hostedScanFailureStatus(error, options.signal, execution);
     return {
       ...base(),
+      // A late abort during cleanup cannot change an already committed failure.
       status:
-        execution?.status === "acceptance_unknown"
-          ? ("acceptance_unknown" as const)
-          : options.signal?.aborted ||
-              execution?.status === "canceled" ||
-              error instanceof ScanInterruptedError
-            ? ("canceled" as const)
-            : ("failed" as const),
+        status === "acceptance_unknown" ? status : (stoppedStatus ?? status),
       error: errorMessage(error),
       artifacts: [],
     };
