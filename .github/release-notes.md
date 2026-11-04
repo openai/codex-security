@@ -25,6 +25,8 @@
 - bump pytest from 9.1.1 to 9.2.0 in /plugins/codex-security ([#2280](https://github.com/openai/codex-security/pull/2280))
 - refresh the GitHub Action archive matchers ([#2290](https://github.com/openai/codex-security/pull/2290))
 - update the SDK mutation-test glob matcher ([#2288](https://github.com/openai/codex-security/pull/2288))
+- refresh triage eval transitive dependencies ([#2293](https://github.com/openai/codex-security/pull/2293))
+- trim Python schema format test dependencies ([#2297](https://github.com/openai/codex-security/pull/2297))
 
 <!-- release-section: highlights:end -->
 
