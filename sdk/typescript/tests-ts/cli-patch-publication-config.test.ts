@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
+  patchRiskAssessment,
   publicationRepository,
   runGitRepositoryCommand,
   runWorkflow,
@@ -235,3 +236,69 @@ test.each(["HOME", "XDG_CONFIG_HOME"])(
     expect(git("cat-file", "-p", "HEAD")).not.toContain("encoding ISO-8859-1");
   },
 );
+
+test("assessment and publication protect the outside caller after rebinding Git", async () => {
+  const { directory } = await publicationRepository(fixtures);
+  const caller = await fixtures.create("patch-rebinding-caller-");
+  const environment = {
+    GIT_DIR: join(directory, ".git"),
+    GIT_WORK_TREE: directory,
+  };
+  let patched = false;
+  const operations = [
+    "--absolute-git-dir",
+    "--show-toplevel",
+    "push",
+    "create",
+  ];
+  const calls: { operation: string; roots: string[] }[] = [];
+  const outcome = await runWorkflow(
+    [
+      "patch",
+      "Synthetic issue",
+      "--assess-patch-risk",
+      "--create-pr",
+      "--json",
+    ],
+    {
+      currentDirectory: caller,
+      environment,
+      onCodex: async (_args, output) => {
+        if (output?.appServer?.prompt.includes("immutable patch artifact")) {
+          output.stdout.write(patchRiskAssessment().report);
+        } else {
+          await writeFile(join(directory, "src", "finding-1.ts"), "fixed\n");
+          patched = true;
+          output?.stdout.write("Synthetic patch complete.");
+        }
+        return 0;
+      },
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (patched) {
+          const operation = operations.find((name) => args.includes(name));
+          if (operation)
+            calls.push({
+              operation,
+              roots: [cwd, ...(options?.protectedRoots ?? [])],
+            });
+        }
+        if (command !== "git")
+          return args[1] === "create"
+            ? "https://example.test/repository/pull/1"
+            : "[]";
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    },
+  );
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(new Set(calls.map(({ operation }) => operation))).toEqual(
+    new Set(operations),
+  );
+  for (const { operation, roots } of calls)
+    expect(roots, operation).toEqual(
+      expect.arrayContaining([caller, directory]),
+    );
+});
