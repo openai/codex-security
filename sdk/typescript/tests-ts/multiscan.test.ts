@@ -3157,6 +3157,8 @@ for (const nested of [false, true]) {
       source.path,
       checkout,
     );
+    const aliasFile = join(checkout, "alias", "app.ts");
+    const originalBytes = await readFile(aliasFile);
     await unlink(join(checkout, "alias"));
     await rm(join(checkout, "src"), { recursive: true });
     await writeFile(
@@ -3165,9 +3167,7 @@ for (const nested of [false, true]) {
     );
     await expectReused(campaign);
     expect(runs).toHaveBeenCalledTimes(1);
-    expect(await readFile(join(checkout, "alias", "app.ts"), "utf8")).toBe(
-      await readFile(join(source.path, "src", "app.ts"), "utf8"),
-    );
+    expect(await readFile(aliasFile)).toEqual(originalBytes);
     expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
       "Keep unrelated recovery bytes.\n",
     );
