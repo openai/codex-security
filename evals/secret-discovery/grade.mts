@@ -131,7 +131,9 @@ function matches(
       ) ||
         (explicitSecretCategory.test(category) &&
           /\bresponses?\b/i.test(category))) &&
-      !/hard ?cod|^(?:credential|secret|password|token)s? in source|cleartext storage/i.test(category) &&
+      !/hard ?cod|^(?:credential|secret|password|token)s? in source|cleartext storage/i.test(
+        category,
+      ) &&
       cwes.some((cwe) => expected.cwes.includes(cwe))
     );
   }
