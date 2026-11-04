@@ -313,50 +313,40 @@ the replacement can affect their guidance too.
 
 ### Checked-in credentials
 
-By default, Codex looks for exposed credentials in the source selected for a
-scan, including configuration, tests, and unused code. It uses the value and its
-surrounding code to distinguish likely credentials from placeholders and public
-identifiers. It assesses exposure offline. A finding can establish that a
-reader could obtain a key even when its current privileges and validity are
-unknown. Severity depends on who could read it and what access the evidence
-shows it grants.
+Codex looks for credentials in the selected source, including tests and unused
+code. It assesses exposure offline. Severity reflects who can read the value
+and what access the evidence supports. Live status stays unknown unless the
+issuer or credential owner provides evidence.
 
-**If another scanner handles known-format API keys and tokens**, add this
-reporting rule to the repository's root `SECURITY.md`:
+If another scanner handles known-format API keys and tokens, add this reporting
+rule to the repository’s root `SECURITY.md`:
 
-> Another scanner handles known-format API keys and tokens in this repository.
-> Skip standalone findings for those keys and tokens. Continue reporting
-> hardcoded passwords, custom credentials identified from their use, and bugs
-> that expose credentials, such as sending a server token to a browser.
+> Skip standalone findings for known-format API keys and tokens. Another
+> scanner covers those. Continue reporting hardcoded passwords, custom
+> credentials, and bugs that expose credentials, such as a server token sent
+> to a browser.
 
-Remove that rule to restore the default. To opt a component back in, put
-“Report standalone findings for known-format API keys and tokens in this
-component” in its own `SECURITY.md`. These rules guide the scan's reporting
-decisions. You can use them without connecting to the other scanner or
-importing its alerts.
+Remove the rule to restore the default. To opt a component back in, add “Report
+standalone findings for known-format API keys and tokens” to its `SECURITY.md`.
+These instructions guide what Codex reports without importing alerts.
 
-For one CLI run, put the desired reporting rule in a text file and pass it
-explicitly. In a selected project config, use `scan.instructions_file`. In the
-TypeScript SDK, use `scanPrompt` or `scanPromptFile`.
+To override the repository rule for one scan, put the desired instruction in a
+file and pass it to the CLI. Project configs use `scan.instructions_file`, and
+the TypeScript SDK accepts `scanPrompt` or `scanPromptFile`.
 
 ```bash
 codex-security scan . --scan-prompt-file credential-policy.md
 ```
 
-**If a scan finds a credential**, treat the old value as exposed. The code
-owner can remove the literal from source and load the replacement from the
-project's secret store. The credential owner should revoke it with the issuer
-or rotate it using the issuer's procedure. If a service depends on the
-credential, deploy the replacement, verify the service works, and confirm the
-old value is disabled. If you suspect active misuse, revoke it immediately.
-For a signing key, update the verifiers that trust the old key. Review the
-issuer's audit logs for the exposure window.
+When a scan finds a credential, share its type and location with the owner.
+Source snippets and diffs can contain the value.
 
-Check the affected locations at the patched revision to confirm source cleanup.
-Confirm retirement separately with the issuer or credential owner. Codex does
-not sign in with discovered credentials to check them. Share the finding's
-location and remediation steps with the owner. The source evidence or patch
-may contain the original value.
+- **If you own the code**, remove the literal and load the replacement from
+  the project’s secret store.
+- **If you own the credential**, revoke it immediately if you suspect misuse.
+  Otherwise, deploy a replacement, check that consumers still work,
+  then revoke the old value and confirm it is disabled. For a signing key,
+  update the verifiers that trust it. Review issuer logs for the exposure window.
 
 ### Generation options and saved files
 
@@ -2549,12 +2539,10 @@ validation, and `patch` still fixes and verifies findings. Both commands accept 
 or literal text and work in the current directory. Saved finding/occurrence IDs
 select their original repository for patching.
 
-For a credential exposure, a source patch can remove the checked-in value.
-If the code change succeeds and retirement is still unconfirmed, the patch
-report lists the changed files and reports the finding as `blocked`. Review
-the local diff. Saved-finding `--create-pr` publishes only verified fixes.
-Follow the [credential remediation steps](#checked-in-credentials) to handle
-the old credential with its issuer.
+For a checked-in credential, `patch` can leave a verified source change in
+your working tree and report `blocked` pending confirmation of revocation.
+Review the diff and follow the [credential owner steps](#checked-in-credentials).
+Saved-finding `--create-pr` stops when a finding is blocked.
 
 Basic patching also works in ordinary directories and Git worktrees before their
 first commit. Directory change tracking excludes `.git` and `.svn` metadata.
@@ -2784,9 +2772,10 @@ size. To verify another open occurrence from that scan, run
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
-For a checked-in credential, expect `inconclusive` when source cleanup is
-verified and the old credential's retirement is still unknown. Supply the
-issuer's status or the credential owner's confirmation when verifying again.
+For a checked-in credential, verified source cleanup with unknown retirement
+returns `inconclusive`. To verify again, put the original finding, source location,
+and issuer or owner confirmation in one file, omitting the credential value.
+Run `codex-security verify-fix finding.md` from the affected checkout.
 `--json` returns structured output. Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 With `--json` or `--format jsonl`, authentication and execution failures return

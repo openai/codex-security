@@ -162,6 +162,9 @@ export async function prepareEval(
     runtime,
     fixture,
     prompt,
+    reportingPolicy: externalTokenScanner
+      ? "external-token-scanner"
+      : "default",
     promptSha256: createHash("sha256").update(core).digest("hex"),
   };
 }
@@ -344,9 +347,7 @@ export async function runPreparedEval(
   if (!completed) throw new Error("Eval stream ended before turn.completed");
   const semanticResult = JSON.parse(finalResponse);
   const report = {
-    reportingPolicy: prepared.fixture.externalTokenScanner
-      ? "external-token-scanner"
-      : "default",
+    reportingPolicy: prepared.reportingPolicy,
     requestedModel: model ?? null,
     modelSelection: model
       ? "explicit"

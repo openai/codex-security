@@ -86,7 +86,7 @@ function matches(finding: Finding, expected: Expected) {
     .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .trim();
-  const runtimeLeak = expected.id === "runtime-disclosure";
+  const runtimeLeak = expected.category === "sensitive-data-exposure";
   const relevantCategory = runtimeLeak
     ? /disclos|expos|leak|access[- ]control|authenticat|authoriz/i.test(
         category,

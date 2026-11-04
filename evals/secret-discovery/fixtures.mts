@@ -111,6 +111,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
     const lines = files[path].split("\n");
     return {
       id,
+      category: "hardcoded-credentials",
       path,
       line: lines.findIndex((line) => line.includes(marker)) + 1,
       endLine: lines.findIndex((line) => line.includes(endMarker)) + 1,
@@ -123,7 +124,6 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
   };
   return {
     files,
-    externalTokenScanner,
     positives: [
       positive(
         "active-source",
@@ -159,13 +159,16 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
       ...(externalTokenScanner
         ? []
         : [positive("provider-token", "config/release.env", "GITLAB_TOKEN=")]),
-      positive(
-        "runtime-disclosure",
-        "src/status.py",
-        "return jsonify",
-        undefined,
-        ["CWE-200", "CWE-201", "CWE-306", "CWE-497", "CWE-522", "CWE-862"],
-      ),
+      {
+        ...positive(
+          "runtime-disclosure",
+          "src/status.py",
+          "return jsonify",
+          undefined,
+          ["CWE-200", "CWE-201", "CWE-306", "CWE-497", "CWE-522", "CWE-862"],
+        ),
+        category: "sensitive-data-exposure",
+      },
     ],
     negatives: [
       "src/runtime_config.py",

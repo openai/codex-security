@@ -29,7 +29,7 @@ Resolve inherited policy with `<plugin_dir>/scripts/launch_codex_security_mcp --
 
 Review embedded credentials and private keys in code, configuration, documentation, tests, examples, and inactive code. A source reader obtaining a credential with authority beyond reading the source is a disclosure path; the containing code need not execute or accept attacker input.
 
-Report supported exposures by default. When the applicable `SECURITY.md` or explicit scan instructions exclude standalone findings for known-format API keys or tokens, omit findings whose only issue is that such a credential appears in source. Record the exclusion and its scope once in the review state. Continue to assess hardcoded passwords identified by their use and distinct bugs, such as logging a request's authorization header. Explicit scan instructions can include or exclude standalone keys for this scan and take precedence over repository policy.
+Report supported exposures by default. If the applicable `SECURITY.md` excludes standalone findings for known-format API keys or tokens, skip those findings and record the exclusion in the review state. Continue to assess contextual credentials such as hardcoded passwords and distinct bugs such as leaking a token to a browser. Explicit scan instructions override the repository’s reporting preference.
 
 Establish purpose from format and usage. Distinguish credential material from public keys, certificates, identifiers, secret-store references, and demonstrable dummy values. An opaque string is not sufficient evidence, and a test filename is not sufficient counterevidence. State source access as a prerequisite without inventing public access, live validity, or privileges. Unknown validity or rotation limits confidence and impact claims. Never use discovered credentials or contact services to validate them. Retain the source location, credential type, relevant context, and uncertainty.
 
@@ -61,7 +61,7 @@ Audit the repository's architecture, entry points, and security boundaries indep
 
 Use these examples as starting points. Establish the reachable path, effective control, and consequence for each finding.
 
-Explicitly inspect embedded credentials and private keys, including configuration, documentation, tests, examples, and inactive code. Establish their purpose from context. Source-reader access to a credential with additional authority is sufficient to consider a disclosure; execution of its containing code is not required. Public material and demonstrable placeholders are not secrets. Unknown live validity limits confidence, not the evidence of exposure. Do not use the credential or contact a service.
+Look for embedded credentials and private keys across the assigned scope using the shared source-disclosure guidance.
 ```
 
 ## Focused Investigator Prompt
@@ -70,6 +70,4 @@ Explicitly inspect embedded credentials and private keys, including configuratio
 Investigate the assigned source-backed security questions. If evidence on the path points to a different broken control, follow that lead within the authorized scope and remaining budget, even if the original hypothesis has been ruled out. Record the disposition of the original question separately from any new finding. Check sibling operations and concrete implementations that share the suspected control, including differences in authorization or state transitions. Preserve independently vulnerable paths and continue beyond the first issue when assigned questions remain.
 
 Trace forward from attacker-controlled input or backward from a sensitive operation. Identify the exact object, value, or destination the operation uses and, for an interpreter, the grammar it applies. Compare that with what the guard checked. Follow decoding, redirects, object selection, or state transitions when they can change the result, and verify the check occurs before the first sensitive effect.
-
-Follow related evidence of embedded secrets using the source-disclosure standard: establish purpose and authority from context without testing credentials. Do not infer remote exposure, privileges, or missing controls that the source does not establish.
 ```

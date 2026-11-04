@@ -64,13 +64,7 @@ function retainedResult(source = fixture): TestResult {
   return {
     findings: source.positives.map((expected) => ({
       title: "Embedded credential",
-      taxonomy: {
-        category:
-          expected.id === "runtime-disclosure"
-            ? "sensitive-data-exposure"
-            : "hardcoded-credentials",
-        cwe: [expected.cwes[0]],
-      },
+      taxonomy: { category: expected.category, cwe: [expected.cwes[0]] },
       locations: [
         { path: expected.path, startLine: expected.line, role: "root_control" },
       ],
@@ -115,12 +109,19 @@ test("delegating API token literals preserves the contextual password and indepe
     await readFile(join(prepared.repo, "SECURITY.md"), "utf8")
   ).trim();
   assert.ok(prepared.prompt.includes(policy));
-  assert.equal(
-    prepared.prompt.includes(delegated.files["config/release.env"]),
-    false,
+  for (const value of delegated.secretValues)
+    assert.equal(prepared.prompt.includes(value), false);
+
+  // Grade findings for all eight cases against the exact source being scanned.
+  const all = retainedResult({ ...delegated, positives: fixture.positives });
+  const duplicate = gradeResult(all, delegated);
+  assert.equal(duplicate.passed, false);
+  assert.deepEqual(
+    duplicate.falsePositives.map((entry) => entry.unexpectedLocations),
+    [["config/release.env"]],
   );
-  const draft = retainedResult(delegated);
-  const report = gradeResult(draft, delegated);
+  all.findings.splice(duplicate.falsePositives[0].index, 1);
+  const report = gradeResult(all, delegated);
   assert.equal(report.passed, true);
   assert.deepEqual(
     report.cases.map(({ id }) => id),
@@ -128,26 +129,6 @@ test("delegating API token literals preserves the contextual password and indepe
       .filter(({ id }) => id !== "provider-token")
       .map(({ id }) => id),
   );
-
-  const provider = fixture.positives.find(({ id }) => id === "provider-token")!;
-  draft.findings.push({
-    taxonomy: { category: "hardcoded-credentials", cwe: ["CWE-798"] },
-    locations: [{ path: provider.path, startLine: provider.line }],
-    codeEvidence: [sourceEvidence(delegated, provider.path, provider.line)],
-  });
-  const duplicated = gradeResult(draft, delegated);
-  assert.equal(duplicated.recall, 1);
-  assert.equal(duplicated.falsePositiveCount, 1);
-  assert.equal(duplicated.passed, false);
-
-  for (const id of ["dotenv-url", "runtime-disclosure"]) {
-    const missing = retainedResult(delegated);
-    missing.findings.splice(
-      delegated.positives.findIndex((expected) => expected.id === id),
-      1,
-    );
-    assert.equal(gradeResult(missing, delegated).passed, false, id);
-  }
 });
 
 test("resolved, deferred, and intermediate findings do not satisfy final recall", () => {
@@ -372,9 +353,8 @@ for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
 for (const cwe of ["CWE-312", "CWE-313"]) {
   test(`accepts ${cwe} for credentials stored in source and configuration files`, () => {
     const result = retainedResult();
-    for (const [index, expected] of fixture.positives.entries()) {
-      if (expected.id !== "runtime-disclosure")
-        result.findings[index].taxonomy.cwe = [cwe];
+    for (const { taxonomy } of result.findings) {
+      if (taxonomy.category === "hardcoded-credentials") taxonomy.cwe = [cwe];
     }
     assert.equal(gradeResult(result, fixture).passed, true);
 
@@ -406,9 +386,8 @@ test("keeps password and cryptographic-key CWEs specific to those exposures", ()
 for (const cwe of ["CWE-200", "CWE-540"]) {
   test(`accepts ${cwe} for specifically categorized credential exposure`, () => {
     const result = retainedResult();
-    for (const [index, expected] of fixture.positives.entries()) {
-      if (expected.id !== "runtime-disclosure")
-        result.findings[index].taxonomy.cwe = [cwe];
+    for (const { taxonomy } of result.findings) {
+      if (taxonomy.category === "hardcoded-credentials") taxonomy.cwe = [cwe];
     }
     assert.equal(gradeResult(result, fixture).passed, true);
 

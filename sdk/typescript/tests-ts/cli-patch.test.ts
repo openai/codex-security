@@ -20,7 +20,11 @@ import {
   fakeResult,
   type OnCodex,
 } from "./cli-fixtures.js";
-import { temporaryDirectory } from "./support/temporary-directories.js";
+import { git as fixtureGit } from "./git-fixture.js";
+import {
+  scopedTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -1841,72 +1845,51 @@ describe("scan and patch workflow", () => {
   test.each(["scan", "patch"])(
     "%s keeps the source change and reports outstanding credential retirement",
     async (command) => {
-      const repository = await temporaryDirectory("credential-source-patch-");
+      await using temp = await scopedTemporaryDirectory(
+        "credential-source-patch-",
+      );
+      const repository = temp.path;
       const path = "deploy.env";
+      const file = join(repository, path);
       const result = resultWithFindings(["high"]);
       const patch = {
         occurrenceId: "occ_1",
         status: "blocked",
         files: [path],
         verification: "The deployment reads the token from its environment.",
-        reason:
-          "Source cleaned up. The owner must revoke the old registry token.",
+        reason: "The owner must revoke the old registry token.",
       };
-      try {
-        const git = repositoryGit(repository);
-        git("init", "--initial-branch=main");
-        await writeFile(join(repository, path), "TOKEN=synthetic-fixture\n");
-        git("add", path);
-        git(
-          "-c",
-          "user.name=Test",
-          "-c",
-          "user.email=test@example.com",
-          "commit",
-          "-m",
-          "Fixture",
-        );
-        const outcome = await runWorkflow(
-          command === "scan"
-            ? [
-                "scan",
-                repository,
-                "--patch",
-                "--fail-on-severity",
-                "high",
-                "--create-pr",
-                "--json",
-              ]
-            : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-          {
-            currentDirectory: repository,
-            result,
-            onWorkbench: () => savedScan(result, "scan-1", repository),
-            onRepositoryCommand: runGitRepositoryCommand,
-            onCodex: async (_args, output) => {
-              await writeFile(
-                join(repository, path),
-                "TOKEN=${REGISTRY_TOKEN}\n",
-              );
-              output?.stdout.write(JSON.stringify({ patches: [patch] }));
-              return 0;
-            },
-          },
-        );
-        expect(outcome.exitCode, outcome.stderr).toBe(1);
-        expect(outcome.stderr).toContain(patch.reason);
-        const response = JSON.parse(outcome.stdout);
-        expect(response.patches).toEqual([patch]);
-        expect(response.pullRequest).toBeUndefined();
-        if (command === "patch") {
-          expect(response).toMatchObject({ applied: true, files: [path] });
-          expect(response.error.message).toContain("in your working tree");
-        }
-        expect(git("diff", "--name-only")).toBe(path);
-        expect(git("branch", "--show-current")).toBe("main");
-      } finally {
-        await rm(repository, { recursive: true, force: true });
+      fixtureGit(repository, "init", "--initial-branch=main");
+      await writeFile(file, "TOKEN=synthetic-fixture\n");
+      fixtureGit(repository, "add", path);
+      fixtureGit(repository, "commit", "--no-gpg-sign", "-m", "Fixture");
+
+      const args =
+        command === "scan"
+          ? ["scan", "--patch", "--fail-on-severity", "high"]
+          : ["patch", "--scan", "scan-1"];
+      const outcome = await runWorkflow([...args, "--create-pr", "--json"], {
+        currentDirectory: repository,
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", repository),
+        onRepositoryCommand: runGitRepositoryCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(file, "TOKEN=${REGISTRY_TOKEN}\n");
+          output?.stdout.write(JSON.stringify({ patches: [patch] }));
+          return 0;
+        },
+      });
+      expect(outcome.exitCode, outcome.stderr).toBe(1);
+      expect(outcome.stderr).toContain(patch.reason);
+      const response = JSON.parse(outcome.stdout);
+      expect(response.patches).toEqual([patch]);
+      expect(response.pullRequest).toBeUndefined();
+      if (command === "patch") {
+        expect(response).toMatchObject({ applied: true, files: [path] });
+        expect(response.error.message).toContain("in your working tree");
       }
+      expect(fixtureGit(repository, "diff", "--name-only")).toBe(path);
+      expect(fixtureGit(repository, "branch", "--show-current")).toBe("main");
     },
   );
 

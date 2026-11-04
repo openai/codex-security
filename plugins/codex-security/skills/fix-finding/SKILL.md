@@ -32,11 +32,11 @@ Treat the finding as a data-flow and boundary problem, not merely the named inpu
 
 ### Credentials exposed in source
 
-Make the safe repository change even when the credential owner still has work to do. Trace the consuming code and use its established secret store or configuration mechanism. Use a synthetic credential in any local checks. Never use the exposed credential, contact its issuer, or rotate it yourself.
+Remove the literal using the consumer's established secret store or configuration mechanism. Use synthetic credentials for local checks. Never replay the exposed credential or contact its issuer.
 
-In the patch report, describe what changed in the checkout and what the owner must do at the issuer. Name the credential type, known issuer, and affected consumer without repeating the value. Give the owner the applicable steps to replace or revoke it, update dependent deployments, and confirm that the old credential is disabled. Cite an official management page or runbook when its location is known; otherwise name the responsible service or ask the owner to identify it. Removing a literal leaves historical copies usable if the original credential still works.
+Give the credential owner steps specific to the issuer and consumer. For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
 
-For example, if source shows a deployment reads a registry token, describe how to provision a scoped replacement, update that deployment's secret, check an ordinary image pull with the replacement, and revoke the old token in the registry. Report only the steps actually completed as evidence. If the code change is verified but retirement of the exposed credential is unconfirmed, keep the change and list its files and verification. Report the overall finding as `blocked`. In the reason, state both the source outcome and the outstanding owner action, including when the checkout was already cleaned up.
+If retirement is unconfirmed, keep any verified source change and report `blocked`. In the reason, say what was cleaned up, including any cleanup already present, and what the owner still needs to confirm.
 
 ## Implementation Workflow
 
@@ -63,7 +63,7 @@ Confirm review concerns against source or, in standard mode, focused execution b
 
 When a Codex Security workbench request includes a scan ID, occurrence ID, remediation request ID, action token, and expected version, follow only the requested remediation stage. The stage boundary changes when code may be written, but it does not weaken the validation requirements above.
 
-For a credential exposure, record successful Generate and Apply stages for the source change as usual. If Verify lacks evidence of retirement, record `failed` for that stage and explain the verified code change and the owner's outstanding revocation step in the summary.
+If credential retirement is unconfirmed at Verify, record `failed` and name the outstanding owner action in the summary.
 
 Before creating or entering any work copy, select Python and Git from a controlled empty directory outside all checkouts. Verify that each trusted tool's absolute invocation path, resolved parent directory, and resolved executable are outside the selected target, its enclosing checkout, and all capture and rehearsal workspaces. Use the host-selected Python (`CODEX_SECURITY_PYTHON_COMMAND` in SDK runs). If absent, use a trusted absolute `PYTHON`, a host-managed runtime, or a verified system interpreter. Invoke its quoted absolute path with `-I` to import helpers from the installed plugin's scripts directory. From the same directory call `workbench_target.trusted_git_executable(target)`, which honors `CODEX_SECURITY_GIT` or discovers Git when that variable is absent. Pin the verified absolute invocation path it returns in the helper process's `CODEX_SECURITY_GIT` environment and pass it to child helpers. Stop if either tool cannot be verified. For workbench Generate and Apply Git commands, pass `offline=True` and the real target to `workbench_target.git_command`, use `-C` for the working directory, and set `-c core.hooksPath=<empty private directory>`.
 
