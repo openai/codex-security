@@ -149,6 +149,7 @@ test("Snyk --schema describes the complete saved report", async () => {
   const { output } = JSON.parse(cli.stdout.text());
   expect(output.properties).toMatchObject({
     format: { const: "snyk-rest-issues/v2" },
+    apiVersion: { const: "2026-03-25" },
     complete: { const: true },
     projectJson: { type: "string" },
     targetJson: { type: "string" },
