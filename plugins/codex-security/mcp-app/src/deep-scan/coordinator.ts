@@ -906,13 +906,19 @@ export class DeepScanCoordinator {
           "output",
           "result.json",
         );
-        const bytes = await writeJsonAtomic(resultPath,
-          this.state.workflowVersion === "deep-security-scan/v2" ? result : persistedScanUnion(result));
+        const bytes = await writeJsonAtomic(
+          resultPath,
+          this.state.workflowVersion === "deep-security-scan/v2"
+            ? result
+            : persistedScanUnion(result),
+        );
         const saved = await this.options.store.recordIteration({
           id: randomUUID(),
           scanId,
           workerIds: batch.map((w) => w.id),
-          validatedResultSha256: createHash("sha256").update(bytes).digest("hex"),
+          validatedResultSha256: createHash("sha256")
+            .update(bytes)
+            .digest("hex"),
           resultPath,
           noNewStreak: streak,
           consecutiveErrors: errors,
@@ -1025,21 +1031,31 @@ export class DeepScanCoordinator {
         throw new Error("Deep Scan is missing its saved iteration result.");
       return { scanId: this.state.scanId, findings: [] };
     }
-    const checkpoint = this.state.persistedWorkers?.find((worker) => worker.kind === "dedup" && worker.resultManifestPath === resultPath);
-    const claim = this.state.persistedMergeClaims?.find((item) => item.previousWorkerId === checkpoint?.id && item.previousResultPath);
-    const path = checkpoint?.acceptedResultPath ?? claim?.previousResultPath ?? resultPath;
+    const checkpoint = this.state.persistedWorkers?.find(
+      (worker) =>
+        worker.kind === "dedup" && worker.resultManifestPath === resultPath,
+    );
+    const claim = this.state.persistedMergeClaims?.find(
+      (item) =>
+        item.previousWorkerId === checkpoint?.id && item.previousResultPath,
+    );
+    const path =
+      checkpoint?.acceptedResultPath ?? claim?.previousResultPath ?? resultPath;
     await requireRegularFile(path, this.artifacts.dedupRoot);
     const result = parseStoredScanDraft(
       await readJsonObject(path, {
         scanRoot: this.artifacts.scanDir,
-        sha256: checkpoint?.acceptedResultPath ? checkpoint.acceptedResultSha256 : claim?.previousResultSha256,
+        sha256: checkpoint?.acceptedResultPath
+          ? checkpoint.acceptedResultSha256
+          : claim?.previousResultSha256,
       }),
       "Saved Deep Scan iteration",
       this.state.scanId,
       parseScanUnion,
     );
-    if (!result.sourceCoverage) for (const worker of merged)
-      addScanCoverage(result, worker, this.artifacts.scanDir);
+    if (!result.sourceCoverage)
+      for (const worker of merged)
+        addScanCoverage(result, worker, this.artifacts.scanDir);
     return result;
   }
 
@@ -1119,10 +1135,19 @@ export class DeepScanCoordinator {
         },
       );
       recovered.push({
-        id: worker.id, artifactDir: worker.artifactDir, resultPath, result, attempt: worker.attempt,
+        id: worker.id,
+        artifactDir: worker.artifactDir,
+        resultPath,
+        result,
+        attempt: worker.attempt,
       });
     }
-    return recovered.sort((a,b) => Number(discoverySequence(a.artifactDir ?? dirname(a.resultPath)) - discoverySequence(b.artifactDir ?? dirname(b.resultPath))));
+    return recovered.sort((a, b) =>
+      Number(
+        discoverySequence(a.artifactDir ?? dirname(a.resultPath)) -
+          discoverySequence(b.artifactDir ?? dirname(b.resultPath)),
+      ),
+    );
   }
 
   private logProgress(count: number): void {

@@ -1842,7 +1842,10 @@ def record_deep_scan_iteration(
             (checkpoint_id,),
         ).fetchone()
         if existing is not None:
-            if existing["scan_id"] != scan_id or existing["result_manifest_path"] != args.result_manifest_path:
+            if (
+                existing["scan_id"] != scan_id
+                or existing["result_manifest_path"] != args.result_manifest_path
+            ):
                 raise SystemExit("Iteration already belongs to another result.")
             recorded_ids = [
                 row[0]
@@ -1866,7 +1869,10 @@ def record_deep_scan_iteration(
             (checkpoint_id, scan_id, result, str(Path(result).parent), result, now, now, now),
         )
         record_worker_attempt(
-            connection, scan, require_deep_scan_worker(connection, checkpoint_id), now,
+            connection,
+            scan,
+            require_deep_scan_worker(connection, checkpoint_id),
+            now,
             validated_result_sha256=getattr(args, "validated_input_sha256", None),
         )
         previous_path, previous_digest = (
@@ -1876,7 +1882,13 @@ def record_deep_scan_iteration(
             """INSERT INTO deep_scan_merge_claims
                (worker_id, scan_id, previous_worker_id, previous_result_path, previous_result_sha256)
                VALUES (?, ?, ?, ?, ?)""",
-            (checkpoint_id, scan_id, previous["id"] if previous else None, previous_path, previous_digest),
+            (
+                checkpoint_id,
+                scan_id,
+                previous["id"] if previous else None,
+                previous_path,
+                previous_digest,
+            ),
         )
         for index, worker_id in enumerate(input_ids):
             updated = connection.execute(

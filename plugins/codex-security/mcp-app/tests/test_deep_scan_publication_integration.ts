@@ -176,7 +176,11 @@ test("three Standard scans publish two distinct findings with their original evi
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 30_000);
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(
+    terminal?.status,
+    "succeeded",
+    terminal?.error ?? "Coordinator did not succeed",
+  );
   assert.equal(terminal.dispatchedCount, 3);
   assertSuccess(
     await call("complete_codex_security_scan", { scanId: run.scanId }),
@@ -398,9 +402,13 @@ for (const [
       "succeeded",
       terminal?.error ?? "Coordinator did not succeed",
     );
-    const accepted = persisted.persistedWorkers.find(worker => worker.resultManifestPath === results[1])?.acceptedResultPath;
+    const accepted = persisted.persistedWorkers.find(
+      (worker) => worker.resultManifestPath === results[1],
+    )?.acceptedResultPath;
     assert.ok(accepted);
-    assert.deepEqual(publications, [{ coordinatorGeneration: 2, resultPath: accepted }]);
+    assert.deepEqual(publications, [
+      { coordinatorGeneration: 2, resultPath: accepted },
+    ]);
 
     const beforeCompletion = await snapshot(run);
     const lateDraft = partial(run, "late-parent-checkpoint");
@@ -660,7 +668,7 @@ for (const claimed of [false, true]) {
         "record_codex_security_scan_draft",
         partial(run, "late-progress"),
       ),
-      /coordinator lease|terminal/,
+      /coordinator lease|terminal|committed selection/,
     );
     assert.deepEqual(await snapshot(run), interrupted);
     assertSuccess(
@@ -803,13 +811,21 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   }
   const instant = new Date().toISOString();
   let now = instant;
-  const runWorkbench = async (args: string[], input?: string | Buffer, selectFinalization = false): Promise<Record<string, unknown>> => {
+  const runWorkbench = async (
+    args: string[],
+    input?: string | Buffer,
+    selectFinalization = false,
+  ): Promise<Record<string, unknown>> => {
     const child = execFileAsync(
       python,
       [path.join(testsRoot, "clock_workbench.py"), workbenchPath, ...args],
       {
         cwd: pluginRoot,
-        env: { ...environment, TEST_WORKBENCH_NOW: now, TEST_SELECT_FINALIZATION: selectFinalization ? "1" : "0" },
+        env: {
+          ...environment,
+          TEST_WORKBENCH_NOW: now,
+          TEST_SELECT_FINALIZATION: selectFinalization ? "1" : "0",
+        },
         timeout: 30_000,
         maxBuffer: 4 * 1024 * 1024,
       },
@@ -1451,7 +1467,10 @@ for (const changed of ["draftPath", "checkpointPath"] as const) {
         await writeFile(paths[changed], JSON.stringify(document));
       },
     });
-    await assert.rejects(f.publish(runner.run), /staged Deep Scan publication changed before admission/);
+    await assert.rejects(
+      f.publish(runner.run),
+      /staged Deep Scan publication changed before admission/,
+    );
     assert.equal(runner.requests.length, 1);
     assert.equal(runner.writes(), 0);
     assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);

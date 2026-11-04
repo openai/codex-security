@@ -118,4 +118,3 @@ export function partitions(items) {
     ]),
   );
 }
-

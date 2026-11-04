@@ -248,36 +248,37 @@ export class DeepScanWorkerRunner {
         const resumePrompt = resumableThreadId
           ? (continuationPrompt ?? transientExecutionContinuation(attempt))
           : undefined;
-        const execute = () => this.options.executor.run({
-          kind: "discovery",
-          promptPath: executionPromptPath,
-          workingDirectory: input.artifactDir,
-          subagents: run.config.subagents,
-          signal,
-          onNonRetryableError: this.options.onNonRetryableError,
-          resumeThreadId: resumableThreadId,
-          continuationPrompt:
-            resumePrompt && run.severityRubric
-              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-              : resumePrompt,
-          artifactContext: { root: input.artifactDir, layout: "worker" },
-          onThreadStarted: async (threadId) => {
-            activeThreadId = threadId;
-            lastThreadId = threadId;
-            await this.options.store.updateWorker({
-              ...baseMutation,
-              threadId,
-            });
-            this.options.log({
-              event: "worker_thread_started",
-              scanId: run.scanId,
-              workerId: input.workerId,
-              kind: "discovery",
-              attempt,
-              threadId,
-            });
-          },
-        });
+        const execute = () =>
+          this.options.executor.run({
+            kind: "discovery",
+            promptPath: executionPromptPath,
+            workingDirectory: input.artifactDir,
+            subagents: run.config.subagents,
+            signal,
+            onNonRetryableError: this.options.onNonRetryableError,
+            resumeThreadId: resumableThreadId,
+            continuationPrompt:
+              resumePrompt && run.severityRubric
+                ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
+                : resumePrompt,
+            artifactContext: { root: input.artifactDir, layout: "worker" },
+            onThreadStarted: async (threadId) => {
+              activeThreadId = threadId;
+              lastThreadId = threadId;
+              await this.options.store.updateWorker({
+                ...baseMutation,
+                threadId,
+              });
+              this.options.log({
+                event: "worker_thread_started",
+                scanId: run.scanId,
+                workerId: input.workerId,
+                kind: "discovery",
+                attempt,
+                threadId,
+              });
+            },
+          });
         const accept = async (result: Awaited<ReturnType<typeof execute>>) => {
           validationStarted = true;
           let accepted: ScanDraftInput;
@@ -289,15 +290,15 @@ export class DeepScanWorkerRunner {
           validationCompleted = accepted?.complete !== false;
           return auditEvidence(accepted);
         };
-        const audit = await runAcceptedAudit({signal, execute, accept});
-          if (audit.status === "checkpoint") {
-            throw withWorkerDiagnostics(
-              new Error(
-                "Standard scan worker wrote only a checkpoint; its audit is not complete.",
-              ),
-              audit.execution.diagnostics,
-            );
-          }
+        const audit = await runAcceptedAudit({ signal, execute, accept });
+        if (audit.status === "checkpoint") {
+          throw withWorkerDiagnostics(
+            new Error(
+              "Standard scan worker wrote only a checkpoint; its audit is not complete.",
+            ),
+            audit.execution.diagnostics,
+          );
+        }
         const result = audit.execution;
         if (signal.aborted)
           return await this.cancelAttempt(input, attempt, activeThreadId);

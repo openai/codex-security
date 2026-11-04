@@ -75,7 +75,9 @@ async function testResponseLoss(responseLosses) {
       const receipt =
         key === "acceptance"
           ? result.deepScan.workerReceipt
-          : result.deepScan.workers.find(worker => worker.id === args[args.indexOf("--worker-id")+1]);
+          : result.deepScan.workers.find(
+              (worker) => worker.id === args[args.indexOf("--worker-id") + 1],
+            );
       if (!receipts.has(operation)) receipts.set(operation, receipt);
       else
         assert.deepEqual(
@@ -134,41 +136,45 @@ async function testResponseLoss(responseLosses) {
         async run(request) {
           executions++;
           await request.onThreadStarted?.(`fixture-session-${executions}`);
-          const draft = {scanId:run.scanId, findings:[], threatModel:{summary:"Synthetic fixture."}};
+          const draft = {
+            scanId: run.scanId,
+            findings: [],
+            threatModel: { summary: "Synthetic fixture." },
+          };
           const output = request.artifactContext.root;
-            const review = {
-              id: "review",
-              label: "Fixture",
-              disposition: "no_issue_found",
-              receiptRefs: [ref],
-            };
-            draft.reviewState = {
-              completeness: "complete",
-              surfaces: [review],
-              explicitExclusions: [],
-              deferred: [],
-            };
-            if (executions === 2) {
-              // The draft writer confirms the shared file before a worker-local shadow exists.
-              await recordCodexSecurityWorkerScanDraft(
-                {
-                  ...request.artifactContext,
-                  scanId: run.scanId,
-                  repoRoot: target,
-                },
-                draft,
-              );
-            } else {
-              review.provenance = { scanReceiptRefs: [ref] };
-              await writeFile(
-                path.join(output, "result.json"),
-                JSON.stringify(draft),
-              );
-            }
-            await mkdir(path.dirname(path.join(output, ref)), {
-              recursive: true,
-            });
-            await writeFile(path.join(output, ref), "worker evidence\n");
+          const review = {
+            id: "review",
+            label: "Fixture",
+            disposition: "no_issue_found",
+            receiptRefs: [ref],
+          };
+          draft.reviewState = {
+            completeness: "complete",
+            surfaces: [review],
+            explicitExclusions: [],
+            deferred: [],
+          };
+          if (executions === 2) {
+            // The draft writer confirms the shared file before a worker-local shadow exists.
+            await recordCodexSecurityWorkerScanDraft(
+              {
+                ...request.artifactContext,
+                scanId: run.scanId,
+                repoRoot: target,
+              },
+              draft,
+            );
+          } else {
+            review.provenance = { scanReceiptRefs: [ref] };
+            await writeFile(
+              path.join(output, "result.json"),
+              JSON.stringify(draft),
+            );
+          }
+          await mkdir(path.dirname(path.join(output, ref)), {
+            recursive: true,
+          });
+          await writeFile(path.join(output, ref), "worker evidence\n");
           return { threadId: `fixture-session-${executions}` };
         },
       },
@@ -199,33 +205,64 @@ async function testResponseLoss(responseLosses) {
     assert.equal(second.status, "succeeded", second.error?.message);
     // Acceptance receipts are operation-specific, so only the first discovery loses a response.
     await rm(path.join(discovery.worker.artifactDir, "result.json"));
-    const recover = async () => new DeepScanCoordinator({
-      run: await store.get(run.scanId, "fixture-owner"),
-      store, pluginRoot: plugin, executor: { run: async () => assert.fail("accepted recovery must not execute another model") }
-    });
+    const recover = async () =>
+      new DeepScanCoordinator({
+        run: await store.get(run.scanId, "fixture-owner"),
+        store,
+        pluginRoot: plugin,
+        executor: {
+          run: async () =>
+            assert.fail("accepted recovery must not execute another model"),
+        },
+      });
     const coordinator = await recover();
     const recovered = await coordinator.recoverAcceptedDiscoveries();
-    assert.deepEqual(recovered.map(worker => worker.resultPath), [discovery.worker.resultPath, second.worker.resultPath]);
-    const result = {scanId:run.scanId,findings:[]};
-    assert.deepEqual(await coordinator.mergeAcceptedBatch(result, recovered), [0,0]);
-    const refs = result.sourceCoverage.surfaces.map(surface => surface.receiptRefs[0]);
-    assert.deepEqual(await Promise.all(refs.map(ref => readFile(path.join(run.scanDir,ref),"utf8"))), ["worker evidence\n","shared evidence\n"]);
-    const output = path.join(artifacts.dedupRoot,"dedup-1","output");
-    await mkdir(output,{recursive:true});
-    const resultPath = path.join(output,"result.json");
+    assert.deepEqual(
+      recovered.map((worker) => worker.resultPath),
+      [discovery.worker.resultPath, second.worker.resultPath],
+    );
+    const result = { scanId: run.scanId, findings: [] };
+    assert.deepEqual(
+      await coordinator.mergeAcceptedBatch(result, recovered),
+      [0, 0],
+    );
+    const refs = result.sourceCoverage.surfaces.map(
+      (surface) => surface.receiptRefs[0],
+    );
+    assert.deepEqual(
+      await Promise.all(
+        refs.map((ref) => readFile(path.join(run.scanDir, ref), "utf8")),
+      ),
+      ["worker evidence\n", "shared evidence\n"],
+    );
+    const output = path.join(artifacts.dedupRoot, "dedup-1", "output");
+    await mkdir(output, { recursive: true });
+    const resultPath = path.join(output, "result.json");
     const bytes = JSON.stringify(result);
-    await writeFile(resultPath,bytes);
+    await writeFile(resultPath, bytes);
     const id = randomUUID();
-    const persisted = await store.recordIteration({id,scanId:run.scanId,resultPath,workerIds:recovered.map(worker => worker.id),noNewStreak:2,consecutiveErrors:0});
-    assert.equal(counts.get("merge"),2);
-    assert.equal(executions,2);
-    assert.deepEqual(persisted.persistedDedupInputs.map(input=>input.attempt),[1,1]);
-    const frozen = persisted.persistedWorkers.find(worker=>worker.id===id).acceptedResultPath;
-    assert.notEqual(frozen,resultPath);
+    const persisted = await store.recordIteration({
+      id,
+      scanId: run.scanId,
+      resultPath,
+      workerIds: recovered.map((worker) => worker.id),
+      noNewStreak: 2,
+      consecutiveErrors: 0,
+    });
+    assert.equal(counts.get("merge"), 2);
+    assert.equal(executions, 2);
+    assert.deepEqual(
+      persisted.persistedDedupInputs.map((input) => input.attempt),
+      [1, 1],
+    );
+    const frozen = persisted.persistedWorkers.find(
+      (worker) => worker.id === id,
+    ).acceptedResultPath;
+    assert.notEqual(frozen, resultPath);
     await rm(resultPath);
     const resumed = await recover();
-    assert.deepEqual(await resumed.restoreUnion(resultPath,recovered), result);
-    assert.equal(await readFile(frozen,"utf8"),bytes);
+    assert.deepEqual(await resumed.restoreUnion(resultPath, recovered), result);
+    assert.equal(await readFile(frozen, "utf8"), bytes);
     await writeFile(discovery.worker.resultPath, "\n", { flag: "a" });
     await assert.rejects(
       resumed.recoverAcceptedDiscoveries(),

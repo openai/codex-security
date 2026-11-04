@@ -432,157 +432,149 @@ export async function testReconstructedWorkers({
           "observer-codex",
         );
       }
-      for (const kind of ["discovery"] as const) {
-        const launches = await Promise.allSettled(
-          scans.map(async (scan) => {
-            const resumeThreadId = ["fresh", "reconstructed-fresh"].includes(
-              phase,
-            )
-              ? undefined
-              : `fixture-${scan.name}-resumed`;
-            const result = await scan.executor.run({
-              kind,
-              promptPath: scan.promptPath,
-              workingDirectory: scan.fixture.root,
-              subagents: scan.name === "first" ? 0 : 2,
-              resumeThreadId,
-              continuationPrompt:
-                "CAPTURE_SYNTHETIC_OPENAI_AUTH CAPTURE_SYNTHETIC_PROVIDER_AUTH NULL_USAGE continuation",
-              signal: new AbortController().signal,
-            });
-            assert.equal(
-              result.threadId,
-              resumeThreadId ?? "fixture-thread-id",
+      const launches = await Promise.allSettled(
+        scans.map(async (scan) => {
+          const resumeThreadId = ["fresh", "reconstructed-fresh"].includes(
+            phase,
+          )
+            ? undefined
+            : `fixture-${scan.name}-resumed`;
+          const result = await scan.executor.run({
+            kind: "discovery",
+            promptPath: scan.promptPath,
+            workingDirectory: scan.fixture.root,
+            subagents: scan.name === "first" ? 0 : 2,
+            resumeThreadId,
+            continuationPrompt:
+              "CAPTURE_SYNTHETIC_OPENAI_AUTH CAPTURE_SYNTHETIC_PROVIDER_AUTH NULL_USAGE continuation",
+            signal: new AbortController().signal,
+          });
+          assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+          const child = JSON.parse(
+            await readFile(scan.fixture.markerPath, "utf8"),
+          );
+          const preflight = JSON.parse(
+            await readFile(scan.fixture.preflightMarkerPath, "utf8"),
+          );
+          assert.equal(
+            await realpath(child.executable),
+            await realpath(scan.settings.codexOptions.codexPathOverride),
+          );
+          assert.equal(
+            child.codexCliPath,
+            scan.settings.codexOptions.codexPathOverride,
+          );
+          assert.equal(
+            child.codexHome,
+            scan.settings.codexOptions.env.CODEX_HOME,
+          );
+          assert.equal(preflight.codexHome, child.codexHome);
+          assert.equal(child.scanValue, `${scan.name}-${phase}`);
+          assert.equal(
+            child.configPath,
+            scan.runtimeEnvironment.CODEX_SECURITY_CONFIG_PATH,
+          );
+          assert.deepEqual(child.openaiAuthentication, {
+            CODEX_API_KEY: `synthetic-${scan.name}-${phase}`,
+          });
+          assert.deepEqual(
+            child.providerAuthentication,
+            Object.fromEntries(
+              scan.providerKeys.map((key) => [
+                key,
+                `synthetic-${scan.name}-${phase}-${key}`,
+              ]),
+            ),
+          );
+          assertFlagPair(child.argv, "--model", scan.settings.model);
+          assertFlagPair(
+            child.argv,
+            "--cyber-access-program",
+            scan.name === "first" ? "daybreak_blue" : "standard",
+          );
+          assertConfigOverrides(child.argv, {
+            "features.api_key_cyber_access_programs": scan.name === "first",
+            "features.api_key_model_discovery": scan.name !== "first",
+          });
+          for (const key of [
+            "model_provider",
+            "model_reasoning_summary",
+            "service_tier",
+          ]) {
+            const override = `${key}=${JSON.stringify(scan.config[key])}`;
+            assert.equal(child.argv.includes(override), true, override);
+            assert.equal(preflight.argv.includes(override), true, override);
+          }
+          assert.equal(
+            child.argv.includes('model_reasoning_effort="ultra"'),
+            true,
+          );
+          assert.equal(
+            preflight.argv.includes('model_reasoning_effort="ultra"'),
+            true,
+          );
+          assert.equal(
+            preflight.argv.includes(
+              `model=${JSON.stringify(scan.settings.model)}`,
+            ),
+            true,
+          );
+          const baseUrl = `openai_base_url=${JSON.stringify(scan.settings.codexOptions.baseUrl)}`;
+          assert.equal(child.argv.includes(baseUrl), true);
+          assert.equal(preflight.argv.includes(baseUrl), true);
+          for (const launch of [child, preflight]) {
+            const provider = launch.argv.filter((argument: string) =>
+              /^model_providers[.=]/u.test(argument),
             );
-            const child = JSON.parse(
-              await readFile(scan.fixture.markerPath, "utf8"),
-            );
-            const preflight = JSON.parse(
-              await readFile(scan.fixture.preflightMarkerPath, "utf8"),
-            );
-            assert.equal(
-              await realpath(child.executable),
-              await realpath(scan.settings.codexOptions.codexPathOverride),
-            );
-            assert.equal(
-              child.codexCliPath,
-              scan.settings.codexOptions.codexPathOverride,
-            );
-            assert.equal(
-              child.codexHome,
-              scan.settings.codexOptions.env.CODEX_HOME,
-            );
-            assert.equal(preflight.codexHome, child.codexHome);
-            assert.equal(child.scanValue, `${scan.name}-${phase}`);
-            assert.equal(
-              child.configPath,
-              scan.runtimeEnvironment.CODEX_SECURITY_CONFIG_PATH,
-            );
-            assert.deepEqual(child.openaiAuthentication, {
-              CODEX_API_KEY: `synthetic-${scan.name}-${phase}`,
-            });
-            assert.deepEqual(
-              child.providerAuthentication,
-              Object.fromEntries(
-                scan.providerKeys.map((key) => [
-                  key,
-                  `synthetic-${scan.name}-${phase}-${key}`,
-                ]),
-              ),
-            );
-            assertFlagPair(child.argv, "--model", scan.settings.model);
-            assertFlagPair(
-              child.argv,
-              "--cyber-access-program",
-              scan.name === "first" ? "daybreak_blue" : "standard",
-            );
-            assertConfigOverrides(child.argv, {
-              "features.api_key_cyber_access_programs": scan.name === "first",
-              "features.api_key_model_discovery": scan.name !== "first",
-            });
-            for (const key of [
-              "model_provider",
-              "model_reasoning_summary",
-              "service_tier",
-            ]) {
-              const override = `${key}=${JSON.stringify(scan.config[key])}`;
-              assert.equal(child.argv.includes(override), true, override);
-              assert.equal(preflight.argv.includes(override), true, override);
-            }
-            assert.equal(
-              child.argv.includes('model_reasoning_effort="ultra"'),
-              true,
-            );
-            assert.equal(
-              preflight.argv.includes('model_reasoning_effort="ultra"'),
-              true,
-            );
-            assert.equal(
-              preflight.argv.includes(
-                `model=${JSON.stringify(scan.settings.model)}`,
-              ),
-              true,
-            );
-            const baseUrl = `openai_base_url=${JSON.stringify(scan.settings.codexOptions.baseUrl)}`;
-            assert.equal(child.argv.includes(baseUrl), true);
-            assert.equal(preflight.argv.includes(baseUrl), true);
-            for (const launch of [child, preflight]) {
-              const provider = launch.argv.filter((argument: string) =>
-                /^model_providers[.=]/u.test(argument),
+            if (scan.expectedProvider) {
+              const providers = parseToml(provider.join("\n"))
+                .model_providers as Record<string, Record<string, unknown>>;
+              assert.deepEqual(
+                JSON.parse(JSON.stringify(providers)),
+                scan.expectedProvider,
               );
-              if (scan.expectedProvider) {
-                const providers = parseToml(provider.join("\n"))
-                  .model_providers as Record<string, Record<string, unknown>>;
-                assert.deepEqual(
-                  JSON.parse(JSON.stringify(providers)),
-                  scan.expectedProvider,
-                );
-              } else {
-                assert.deepEqual(
-                  provider,
-                  [],
-                  "restored external providers inherit the recorded native home",
-                );
-              }
-              assert.equal(
-                workerPermissionProfileOverride(launch.argv).includes(
-                  "glob_scan_max_depth",
-                ),
-                false,
-                "a resumed bounded cap must not truncate an original uncapped deny glob, in either order",
+            } else {
+              assert.deepEqual(
+                provider,
+                [],
+                "restored external providers inherit the recorded native home",
               );
             }
-            assertReadOnlyWorkerPolicy(child.argv);
-            assertWorkerSubagentPolicy(
-              child.argv,
-              scan.name === "first" ? 0 : 2,
-            );
             assert.equal(
-              (
-                parseToml(workerPermissionProfileOverride(child.argv))
-                  .permissions as Record<
-                  string,
-                  { filesystem: Record<string, unknown> }
-                >
-              ).codex_security_deep_scan_worker.filesystem["/repo/.env"],
-              "deny",
-            );
-            assert.equal(
-              child.argv.includes("resume"),
-              resumeThreadId !== undefined,
-            );
-            assert.equal(
-              child.stdin.includes("continuation"),
-              resumeThreadId !== undefined,
-            );
-          }),
-        );
-        for (const [index, launch] of launches.entries()) {
-          if (launch.status === "rejected") {
-            launchFailures.push(
-              `${scans[index].name}/${phase}/${kind}: ${launch.reason.message}`,
+              workerPermissionProfileOverride(launch.argv).includes(
+                "glob_scan_max_depth",
+              ),
+              false,
+              "a resumed bounded cap must not truncate an original uncapped deny glob, in either order",
             );
           }
+          assertReadOnlyWorkerPolicy(child.argv);
+          assertWorkerSubagentPolicy(child.argv, scan.name === "first" ? 0 : 2);
+          assert.equal(
+            (
+              parseToml(workerPermissionProfileOverride(child.argv))
+                .permissions as Record<
+                string,
+                { filesystem: Record<string, unknown> }
+              >
+            ).codex_security_deep_scan_worker.filesystem["/repo/.env"],
+            "deny",
+          );
+          assert.equal(
+            child.argv.includes("resume"),
+            resumeThreadId !== undefined,
+          );
+          assert.equal(
+            child.stdin.includes("continuation"),
+            resumeThreadId !== undefined,
+          );
+        }),
+      );
+      for (const [index, launch] of launches.entries()) {
+        if (launch.status === "rejected") {
+          launchFailures.push(
+            `${scans[index].name}/${phase}/discovery: ${launch.reason.message}`,
+          );
         }
       }
       if (phase === "fresh") {

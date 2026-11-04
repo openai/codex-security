@@ -31,7 +31,10 @@ for (const splitSeededReducers of [false, true]) {
         },
       );
       assert.equal(terminal.workflowVersion, "deep-security-scan/v2");
-      assert.match(terminal.finalizationInput.resultPath, /accepted-[a-f0-9]{64}\.json$/);
+      assert.match(
+        terminal.finalizationInput.resultPath,
+        /accepted-[a-f0-9]{64}\.json$/,
+      );
       const report = await readFile(path.join(scanDir, "report.md"), "utf8");
       for (const fix of [
         ...materialRemediations,

@@ -54,29 +54,27 @@ export async function testHome(
             CODEX_HOME: fixture.root,
           })),
         );
-        for (const kind of ["discovery"] as const) {
-          for (const resumeThreadId of [undefined, "fixture-home-resume"]) {
-            await executor.run({
-              promptPath,
-              workingDirectory,
-              kind,
-              resumeThreadId,
-              subagents: 0,
-              signal: new AbortController().signal,
-            });
-            const invocation = await readJson(fixture.markerPath);
-            assert.equal(
-              await realpath(invocation.codexHome),
-              await realpath(home),
-            );
-            assertConfigOverrides(invocation.argv, {
-              model_reasoning_summary: "none",
-            });
-            assert.equal(
-              invocation.argv.includes("resume"),
-              resumeThreadId !== undefined,
-            );
-          }
+        for (const resumeThreadId of [undefined, "fixture-home-resume"]) {
+          await executor.run({
+            promptPath,
+            workingDirectory,
+            kind: "discovery",
+            resumeThreadId,
+            subagents: 0,
+            signal: new AbortController().signal,
+          });
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(
+            await realpath(invocation.codexHome),
+            await realpath(home),
+          );
+          assertConfigOverrides(invocation.argv, {
+            model_reasoning_summary: "none",
+          });
+          assert.equal(
+            invocation.argv.includes("resume"),
+            resumeThreadId !== undefined,
+          );
         }
       }
     }
@@ -155,33 +153,31 @@ export async function testHome(
           CODEX_HOME: fixture.root,
         })),
       );
-      for (const kind of ["discovery"] as const) {
-        for (const resumeThreadId of [undefined, "fixture-history-resume"]) {
-          await executor.run({
-            promptPath,
-            workingDirectory,
-            kind,
-            resumeThreadId,
-            subagents: 0,
-            signal: new AbortController().signal,
-          });
-          const invocation = await readJson(fixture.markerPath);
-          assert.equal(
-            await realpath(invocation.codexHome),
-            await realpath(home),
-          );
-          assertConfigOverrides(invocation.argv, {
-            model: history.model,
-            model_provider: history.modelProvider,
-            model_reasoning_effort: history.reasoningEffort,
-            model_reasoning_summary: history.reasoningSummary,
-            service_tier: history.serviceTier,
-          });
-          assert.equal(
-            invocation.argv.includes("resume"),
-            resumeThreadId !== undefined,
-          );
-        }
+      for (const resumeThreadId of [undefined, "fixture-history-resume"]) {
+        await executor.run({
+          promptPath,
+          workingDirectory,
+          kind: "discovery",
+          resumeThreadId,
+          subagents: 0,
+          signal: new AbortController().signal,
+        });
+        const invocation = await readJson(fixture.markerPath);
+        assert.equal(
+          await realpath(invocation.codexHome),
+          await realpath(home),
+        );
+        assertConfigOverrides(invocation.argv, {
+          model: history.model,
+          model_provider: history.modelProvider,
+          model_reasoning_effort: history.reasoningEffort,
+          model_reasoning_summary: history.reasoningSummary,
+          service_tier: history.serviceTier,
+        });
+        assert.equal(
+          invocation.argv.includes("resume"),
+          resumeThreadId !== undefined,
+        );
       }
     }
   });

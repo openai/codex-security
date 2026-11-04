@@ -3291,7 +3291,9 @@ def main(
             "get-deep-scan": deep_scan.get_deep_scan,
             "upsert-deep-scan-worker": deep_scan.upsert_deep_scan_worker,
             "record-deep-scan-iteration": deep_scan.record_deep_scan_iteration,
-            "finish-deep-scan": partial(deep_scan.finish_deep_scan, select_finalization=select_finalization),
+            "finish-deep-scan": partial(
+                deep_scan.finish_deep_scan, select_finalization=select_finalization
+            ),
             "fail-deep-scan": deep_scan.fail_deep_scan,
             "record-deep-scan-publication-failure": deep_scan.record_deep_scan_publication_failure,
             "list-scans": scan_history.list_scans,

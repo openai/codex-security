@@ -118,7 +118,9 @@ def test_final_selection_follows_committed_reducer_chain(
         ]
         common += ["--kind", kind, "--attempt", "1"]
         if inputs is None:
-            deep.upsert_deep_scan_worker(workbench_db,args("upsert-deep-scan-worker",*common,"--status","running"))
+            deep.upsert_deep_scan_worker(
+                workbench_db, args("upsert-deep-scan-worker", *common, "--status", "running")
+            )
         result.write_text(
             json.dumps(
                 {
@@ -134,13 +136,41 @@ def test_final_selection_follows_committed_reducer_chain(
             )
         )
         if inputs is not None and status == "succeeded":
-            deep.record_deep_scan_iteration(workbench_db,args("record-deep-scan-iteration", "--scan-id",scan_id,"--worker-id",worker_id,"--result-manifest-path",result,"--no-new-streak","0","--consecutive-errors","0",*(arg for item in inputs for arg in ("--input-worker-id",item))))
+            deep.record_deep_scan_iteration(
+                workbench_db,
+                args(
+                    "record-deep-scan-iteration",
+                    "--scan-id",
+                    scan_id,
+                    "--worker-id",
+                    worker_id,
+                    "--result-manifest-path",
+                    result,
+                    "--no-new-streak",
+                    "0",
+                    "--consecutive-errors",
+                    "0",
+                    *(arg for item in inputs for arg in ("--input-worker-id", item)),
+                ),
+            )
         elif inputs is not None:
             # Archived workers could stop after claiming the previous result.
             with workbench_db:
-                previous = deep.final_deep_scan_reducer(workbench_db,scan_id)
-                workbench_db.execute("INSERT INTO deep_scan_workers (id, scan_id, kind, status, prompt_path, artifact_dir, created_at, updated_at) VALUES (?, ?, 'dedup', ?, ?, ?, ?, ?)",(worker_id,scan_id,status,str(prompt),str(directory),clock[0],clock[0]))
-                workbench_db.execute("INSERT INTO deep_scan_merge_claims (worker_id,scan_id,previous_worker_id,previous_result_path,previous_result_sha256) VALUES (?,?,?,?,?)",(worker_id,scan_id,previous["id"],previous["accepted_result_path"],previous["accepted_result_sha256"]))
+                previous = deep.final_deep_scan_reducer(workbench_db, scan_id)
+                workbench_db.execute(
+                    "INSERT INTO deep_scan_workers (id, scan_id, kind, status, prompt_path, artifact_dir, created_at, updated_at) VALUES (?, ?, 'dedup', ?, ?, ?, ?, ?)",
+                    (worker_id, scan_id, status, str(prompt), str(directory), clock[0], clock[0]),
+                )
+                workbench_db.execute(
+                    "INSERT INTO deep_scan_merge_claims (worker_id,scan_id,previous_worker_id,previous_result_path,previous_result_sha256) VALUES (?,?,?,?,?)",
+                    (
+                        worker_id,
+                        scan_id,
+                        previous["id"],
+                        previous["accepted_result_path"],
+                        previous["accepted_result_sha256"],
+                    ),
+                )
         elif status != "running":
             deep.upsert_deep_scan_worker(
                 workbench_db,

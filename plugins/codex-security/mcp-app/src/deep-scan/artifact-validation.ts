@@ -26,7 +26,6 @@ export type ScanUnion = Omit<ScanDraftInput, "reviewState"> & {
   sourceCoverage?: ScanDraftInput["reviewState"];
 };
 
-
 export function scanUnionToDraft(result: ScanUnion): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
   for (const finding of draft.findings)
@@ -53,11 +52,18 @@ export function parseScanUnion(input: unknown): ScanUnion {
   const { sourceCoverage, ...stored } = asRecord(input) ?? {};
   const { reviewState, ...result } = parseAcceptedDeepScanDraft({
     ...stored,
-    reviewState: sourceCoverage ?? { surfaces: [], explicitExclusions: [], deferred: [] },
+    reviewState: sourceCoverage ?? {
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
   });
   validateFindingSemantics(result.findings, true);
-  if (result.complete === false) throw new Error("Saved Deep Scan iteration is incomplete.");
-  return sourceCoverage === undefined ? result : { ...result, sourceCoverage: reviewState };
+  if (result.complete === false)
+    throw new Error("Saved Deep Scan iteration is incomplete.");
+  return sourceCoverage === undefined
+    ? result
+    : { ...result, sourceCoverage: reviewState };
 }
 
 interface DiscoveryAuditOptions extends Pick<
@@ -168,13 +174,15 @@ async function validateWriteupFiles(
   }
 }
 
-
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
-  const artifactPrefix = relative(scanDir, worker.artifactDir ?? dirname(worker.resultPath))
+  const artifactPrefix = relative(
+    scanDir,
+    worker.artifactDir ?? dirname(worker.resultPath),
+  )
     .split(sep)
     .join("/");
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;

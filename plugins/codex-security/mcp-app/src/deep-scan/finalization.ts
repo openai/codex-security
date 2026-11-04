@@ -1,7 +1,4 @@
-import {
-  scanUnionToDraft,
-  parseScanUnion,
-} from "./artifact-validation.js";
+import { scanUnionToDraft, parseScanUnion } from "./artifact-validation.js";
 import {
   createScanArtifactContext,
   type RunArtifactWorkbench,
@@ -52,7 +49,8 @@ export async function publishSelectedDeepScan(input: {
     signal,
   );
   await input.publish(draft, signal, {
-    coordinatorGeneration: run.coordinatorGeneration === 1 ? undefined : run.coordinatorGeneration,
+    coordinatorGeneration:
+      run.coordinatorGeneration === 1 ? undefined : run.coordinatorGeneration,
     resultPath:
       selection.resultPath === null
         ? null
@@ -164,7 +162,10 @@ export async function resumeSelectedDeepScan(input: {
       finish: (selection) =>
         store.finish({
           ...selection,
-          coordinatorGeneration: run.coordinatorGeneration === 1 ? undefined : run.coordinatorGeneration,
+          coordinatorGeneration:
+            run.coordinatorGeneration === 1
+              ? undefined
+              : run.coordinatorGeneration,
         }),
     });
   } catch (error) {

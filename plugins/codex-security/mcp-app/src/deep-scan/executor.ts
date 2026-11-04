@@ -311,30 +311,32 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               : {}),
             // A disabled server still needs a valid transport during native resolution.
             "codex-security": { command: "node", enabled: false },
-            ...(discovery && this.compactArtifactServer(discovery, includePathsFile)),
+            ...(discovery &&
+              this.compactArtifactServer(discovery, includePathsFile)),
           },
-        ...(discovery
-          ? workerSubagentConfig(
-              discovery.subagents,
-              workerConfig, runtimeSettings.features,
-            )
-          : {
-              web_search: "disabled",
-              project_doc_max_bytes: 0,
-              features: {
-                ...(isRecord(workerConfig.features) && workerConfig.features),
-                apps: false,
-                plugins: false,
-                shell_tool: false,
-                unified_exec: false,
-                code_mode: false,
-                code_mode_only: false,
-                js_repl: false,
-                multi_agent: false,
-                multi_agent_v2: false,
-                enable_fanout: false,
-              },
-            }),
+          ...(discovery
+            ? workerSubagentConfig(
+                discovery.subagents,
+                workerConfig,
+                runtimeSettings.features,
+              )
+            : {
+                web_search: "disabled",
+                project_doc_max_bytes: 0,
+                features: {
+                  ...(isRecord(workerConfig.features) && workerConfig.features),
+                  apps: false,
+                  plugins: false,
+                  shell_tool: false,
+                  unified_exec: false,
+                  code_mode: false,
+                  code_mode_only: false,
+                  js_repl: false,
+                  multi_agent: false,
+                  multi_agent_v2: false,
+                  enable_fanout: false,
+                },
+              }),
           approval_policy: "never",
           default_permissions: DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
           [`permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}`]:

@@ -1,4 +1,7 @@
-import { testSuccessfulDeepCoveragePreservesWorkerReviewStatus, testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus } from "./deep_scan_coverage_cases.ts";
+import {
+  testSuccessfulDeepCoveragePreservesWorkerReviewStatus,
+  testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
+} from "./deep_scan_coverage_cases.ts";
 import { testSharedReceiptSurvivesWorkerRetry } from "./deep_scan_receipt_cases.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
@@ -25,9 +28,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import {
-  testDeepScanLifecycle,
-} from "./deep_scan_lifecycle_cases.ts";
+import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
   WorkbenchDeepScanStore,

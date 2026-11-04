@@ -223,51 +223,42 @@ export async function testDurableWorkerRuntimeSnapshots({
             .map((owner) => rm(owner.originalRuntime, { recursive: true })),
         );
       }
-      for (const kind of ["discovery"] as const) {
-        await Promise.all(
-          owners.map(async (owner) => {
-            const executor = restored
-              ? new CodexSdkWorkerExecutor(
-                  restoredDeepScanWorkerSettings(
-                    JSON.parse(JSON.stringify(owner.saved)),
-                    owner.sandbox,
-                    () => owner.currentEnvironment,
-                  ),
-                )
-              : owner.fresh;
-            await executor.run(request(owner, kind, restored));
-            const child = await readJson(owner.markerPath);
-            const profile = parseToml(
-              workerPermissionProfileOverride(child.argv),
-            ).permissions as Record<string, unknown>;
-            assert.deepEqual(
-              JSON.parse(
-                JSON.stringify(profile.codex_security_deep_scan_worker),
-              ),
-              owner.expectedProfile,
-            );
-            assertConfigOverrides(child.argv, {
-              web_search: owner.workerConfig.web_search,
-              model_context_window: owner.workerConfig.model_context_window,
-              developer_instructions: owner.workerConfig.developer_instructions,
-              model_instructions_file:
-                owner.workerConfig.model_instructions_file,
-              "otel.exporter.otlp-http.headers.Authorization": `synthetic-${owner.name}-telemetry`,
-            });
-            assert.equal(
-              child.providerKey,
-              `synthetic-${owner.name}-${restored ? "new" : "old"}`,
-            );
-            assert.match(
-              await readFile(
-                owner.workerConfig.model_instructions_file,
-                "utf8",
-              ),
-              /Original/,
-            );
-          }),
-        );
-      }
+      await Promise.all(
+        owners.map(async (owner) => {
+          const executor = restored
+            ? new CodexSdkWorkerExecutor(
+                restoredDeepScanWorkerSettings(
+                  JSON.parse(JSON.stringify(owner.saved)),
+                  owner.sandbox,
+                  () => owner.currentEnvironment,
+                ),
+              )
+            : owner.fresh;
+          await executor.run(request(owner, "discovery", restored));
+          const child = await readJson(owner.markerPath);
+          const profile = parseToml(workerPermissionProfileOverride(child.argv))
+            .permissions as Record<string, unknown>;
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(profile.codex_security_deep_scan_worker)),
+            owner.expectedProfile,
+          );
+          assertConfigOverrides(child.argv, {
+            web_search: owner.workerConfig.web_search,
+            model_context_window: owner.workerConfig.model_context_window,
+            developer_instructions: owner.workerConfig.developer_instructions,
+            model_instructions_file: owner.workerConfig.model_instructions_file,
+            "otel.exporter.otlp-http.headers.Authorization": `synthetic-${owner.name}-telemetry`,
+          });
+          assert.equal(
+            child.providerKey,
+            `synthetic-${owner.name}-${restored ? "new" : "old"}`,
+          );
+          assert.match(
+            await readFile(owner.workerConfig.model_instructions_file, "utf8"),
+            /Original/,
+          );
+        }),
+      );
     }
     const referenced = owners[2]!;
     await writeFile(

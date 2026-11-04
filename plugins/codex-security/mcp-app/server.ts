@@ -1069,170 +1069,176 @@ export function createCodexSecurityServer(): McpServer {
         }
       };
       let registeredScanId: string | undefined;
-      const preparing = deepScanStartLock
-        .run(async () => {
-          // A joining observer does not need a usable current home. A new run,
-          // however, must save its original settings before creation can commit.
-          const begun = await beginDeepScanWithCapturedSettings(
-            () =>
-              captureDeepScanExecutionSettings(
-                modelSettings,
-                parentSandbox,
-                process.env,
-                { threadId, startedAt: new Date().toISOString() },
-              ),
-            async (executionSettings) =>
-              deepScanStore.begin({
-                executionSettings,
-                scanId,
-                targetPath,
-                scope: hasTarget ? (scope ?? ".") : undefined,
-                userContext: normalizedUserContext,
-                handoffClaimToken,
-                threadId,
-                ...modelSettings,
-                projectConfigPath,
-                scanRoot: await scanRoot(),
-              }),
-          );
-          registeredScanId = begun.scanId;
-          if (handoffClaimToken) {
-            authenticatedArtifactClaims.set(begun.scanId, {
-              claimToken: handoffClaimToken,
+      const preparing = deepScanStartLock.run(async () => {
+        // A joining observer does not need a usable current home. A new run,
+        // however, must save its original settings before creation can commit.
+        const begun = await beginDeepScanWithCapturedSettings(
+          () =>
+            captureDeepScanExecutionSettings(
+              modelSettings,
+              parentSandbox,
+              process.env,
+              { threadId, startedAt: new Date().toISOString() },
+            ),
+          async (executionSettings) =>
+            deepScanStore.begin({
+              executionSettings,
+              scanId,
+              targetPath,
+              scope: hasTarget ? (scope ?? ".") : undefined,
+              userContext: normalizedUserContext,
+              handoffClaimToken,
               threadId,
-            });
-          }
-          const immediate = deepScanTerminalResult(begun);
-          const recoverableSelection =
-            begun.status === "succeeded" &&
-            begun.finalizationInput &&
-            !begun.sdkOwnsCompletion &&
-            begun.ownerThreadId === threadId;
-          if (immediate && !recoverableSelection) {
-            const coordinator = deepScanCoordinators.get(begun.scanId);
-            return {
-              begun,
-              immediate,
-              completion: {
-                result:
-                  (coordinator && deepScanCompletions.get(coordinator)) ??
-                  observeDeepScan(begun),
-              },
-            };
-          }
-          const completion: {
-            result?: Promise<ReturnType<typeof deepScanTerminalResult>>;
-          } = {};
-          let published: Awaited<ReturnType<typeof completeDeepScan>>;
-          const onStart = (coordinator: DeepScanCoordinator) => {
-            completion.result = deepScanCompletions.get(coordinator);
-            if (!completion.result) {
-              // The same hook runs when a remote observer adopts an expired lease.
-              // Completion belongs to the coordinator, not an abortable RPC waiter.
-              completion.result = coordinator.settled().then(
-                (run) => published ?? observeDeepScan(run),
-                (error) =>
-                  toolErrorResult(deepScanInvocationFailureMessage(error)),
-              );
-              deepScanCompletions.set(coordinator, completion.result);
-            }
-          };
-          const started = await startDeepScanEngine({
-            run: begun,
-            registry: deepScanCoordinators,
-            store: deepScanStore,
-            runWorkbench,
-            ...modelSettings,
-            parentSandbox,
-            parentTurn: codexParentTurnFromExtra(extra),
-            pythonCommand: await resolvePythonCommand(),
-            pluginRoot: PLUGIN_ROOT,
-            log: logDeepScanEvent,
-            handoffClaimToken,
+              ...modelSettings,
+              projectConfigPath,
+              scanRoot: await scanRoot(),
+            }),
+        );
+        registeredScanId = begun.scanId;
+        if (handoffClaimToken) {
+          authenticatedArtifactClaims.set(begun.scanId, {
+            claimToken: handoffClaimToken,
             threadId,
-            onStart,
-            onFinalized: async (run, signal) => {
-              // Keep the selected generation's lease through publication, even after its caller disconnects.
-              published = await completeDeepScan(run, signal);
-              if (published && "isError" in published && !signal.aborted) {
-                await deepScanStore
-                  .releaseCoordinator(run.scanId)
-                  .catch((error) => {
-                    logDeepScanEvent({
-                      event: "coordinator_release_failed",
-                      scanId: run.scanId,
-                      reason: failureDiagnostic(error),
-                    });
-                  });
-              }
-            },
           });
-          if (
-            !completion.result &&
-            started.coordinator instanceof DeepScanCoordinator
-          ) {
-            onStart(started.coordinator);
+        }
+        const immediate = deepScanTerminalResult(begun);
+        const recoverableSelection =
+          begun.status === "succeeded" &&
+          begun.finalizationInput &&
+          !begun.sdkOwnsCompletion &&
+          begun.ownerThreadId === threadId;
+        if (immediate && !recoverableSelection) {
+          const coordinator = deepScanCoordinators.get(begun.scanId);
+          return {
+            begun,
+            immediate,
+            completion: {
+              result:
+                (coordinator && deepScanCompletions.get(coordinator)) ??
+                observeDeepScan(begun),
+            },
+          };
+        }
+        const completion: {
+          result?: Promise<ReturnType<typeof deepScanTerminalResult>>;
+        } = {};
+        let published: Awaited<ReturnType<typeof completeDeepScan>>;
+        const onStart = (coordinator: DeepScanCoordinator) => {
+          completion.result = deepScanCompletions.get(coordinator);
+          if (!completion.result) {
+            // The same hook runs when a remote observer adopts an expired lease.
+            // Completion belongs to the coordinator, not an abortable RPC waiter.
+            completion.result = coordinator.settled().then(
+              (run) => published ?? observeDeepScan(run),
+              (error) =>
+                toolErrorResult(deepScanInvocationFailureMessage(error)),
+            );
+            deepScanCompletions.set(coordinator, completion.result);
           }
-          return { begun, ...started, completion };
+        };
+        const started = await startDeepScanEngine({
+          run: begun,
+          registry: deepScanCoordinators,
+          store: deepScanStore,
+          runWorkbench,
+          ...modelSettings,
+          parentSandbox,
+          parentTurn: codexParentTurnFromExtra(extra),
+          pythonCommand: await resolvePythonCommand(),
+          pluginRoot: PLUGIN_ROOT,
+          log: logDeepScanEvent,
+          handoffClaimToken,
+          threadId,
+          onStart,
+          onFinalized: async (run, signal) => {
+            // Keep the selected generation's lease through publication, even after its caller disconnects.
+            published = await completeDeepScan(run, signal);
+            if (published && "isError" in published && !signal.aborted) {
+              await deepScanStore
+                .releaseCoordinator(run.scanId)
+                .catch((error) => {
+                  logDeepScanEvent({
+                    event: "coordinator_release_failed",
+                    scanId: run.scanId,
+                    reason: failureDiagnostic(error),
+                  });
+                });
+            }
+          },
         });
+        if (
+          !completion.result &&
+          started.coordinator instanceof DeepScanCoordinator
+        ) {
+          onStart(started.coordinator);
+        }
+        return { begun, ...started, completion };
+      });
       let preparation: Awaited<typeof preparing> | undefined;
       let result;
       try {
         preparation = await preparing;
-        const {begun} = preparation;
-      if (preparation.immediate) {
-        result = (await preparation.completion.result) ?? preparation.immediate;
-      } else {
-        const { coordinator, joined } = preparation;
-        if (joined) {
-          logDeepScanEvent({
-            event: "coordinator_joined",
-            scanId: begun.scanId,
-          });
+        const { begun } = preparation;
+        if (preparation.immediate) {
+          result =
+            (await preparation.completion.result) ?? preparation.immediate;
+        } else {
+          const { coordinator, joined } = preparation;
+          if (joined) {
+            logDeepScanEvent({
+              event: "coordinator_joined",
+              scanId: begun.scanId,
+            });
+          }
+          const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+          // An observer without a local coordinator must leave publication to the lease holder.
+          result = preparation.completion.result
+            ? await preparation.completion.result
+            : await observeDeepScan(terminal);
         }
-        const terminal = await coordinator.wait(abortSignalFromExtra(extra));
-        // An observer without a local coordinator must leave publication to the lease holder.
-        result = preparation.completion.result
-          ? await preparation.completion.result
-          : await observeDeepScan(terminal);
-      }
-      if (!result) {
-        result = toolErrorResult(
-          deepScanInvocationFailureMessage(
-            new Error(
-              `Deep Scan ${begun.scanId} ended without a terminal result.`,
+        if (!result) {
+          result = toolErrorResult(
+            deepScanInvocationFailureMessage(
+              new Error(
+                `Deep Scan ${begun.scanId} ended without a terminal result.`,
+              ),
             ),
-          ),
-        );
-      }
-      // A canceled waiter or a transport size error never delivers the scan ID.
-      const transport = server.server.transport;
-      if (
-        !handoffClaimToken &&
-        "structuredContent" in result &&
-        "completion" in result.structuredContent &&
-        transport instanceof CodexSecurityStdioTransport
-      ) {
-        transport.afterResultSent(extra.requestId, extra.signal, () =>
-          deepScanStartLock.run(async () => {
-            try {
-              await runWorkbench(
-                workbenchArgs("acknowledge-deep-scan-result", {
+          );
+        }
+        // A canceled waiter or a transport size error never delivers the scan ID.
+        const transport = server.server.transport;
+        if (
+          !handoffClaimToken &&
+          "structuredContent" in result &&
+          "completion" in result.structuredContent &&
+          transport instanceof CodexSecurityStdioTransport
+        ) {
+          transport.afterResultSent(extra.requestId, extra.signal, () =>
+            deepScanStartLock.run(async () => {
+              try {
+                await runWorkbench(
+                  workbenchArgs("acknowledge-deep-scan-result", {
+                    scanId: begun.scanId,
+                  }),
+                );
+              } catch (error) {
+                logDeepScanEvent({
+                  event: "target_result_acknowledgment_failed",
                   scanId: begun.scanId,
-                }),
-              );
-            } catch (error) {
-              logDeepScanEvent({
-                event: "target_result_acknowledgment_failed",
-                scanId: begun.scanId,
-                reason: failureDiagnostic(error),
-              });
-            }
-          }),
-        );
-      }
+                  reason: failureDiagnostic(error),
+                });
+              }
+            }),
+          );
+        }
       } catch (error) {
-        result = toolErrorResult(preparation ? (error instanceof Error ? error.message : String(error)) : deepScanInvocationFailureMessage(error));
+        result = toolErrorResult(
+          preparation
+            ? error instanceof Error
+              ? error.message
+              : String(error)
+            : deepScanInvocationFailureMessage(error),
+        );
       }
       return withScanTarget(result, registeredScanId);
     },

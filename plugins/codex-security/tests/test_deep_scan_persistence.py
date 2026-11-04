@@ -182,14 +182,21 @@ def test_merge_replay_returns_original_operation_after_later_work(tmp_path: Path
     second_claim = second_commit["mergeClaims"][-1]
     assert second_claim["previousWorkerId"] == reducer["id"]
     assert second_claim["previousResultPath"] == frozen
-    assert (
-        second_claim["previousResultSha256"] == reducer["acceptedResultSha256"]
-    )
+    assert second_claim["previousResultSha256"] == reducer["acceptedResultSha256"]
     replay = run_workbench(
         state,
-        "record-deep-scan-iteration", "--scan-id", scan_id, "--worker-id", reducer["id"],
-        "--result-manifest-path", reducer["resultManifestPath"], "--no-new-streak", "99", "--consecutive-errors","0",
-        *(arg for item in inputs for arg in ("--input-worker-id",item)),
+        "record-deep-scan-iteration",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        reducer["id"],
+        "--result-manifest-path",
+        reducer["resultManifestPath"],
+        "--no-new-streak",
+        "99",
+        "--consecutive-errors",
+        "0",
+        *(arg for item in inputs for arg in ("--input-worker-id", item)),
         environment={"CODEX_HOME": str(home)},
     )["deepScan"]
     assert replay["mergeClaims"] == second_commit["mergeClaims"]
@@ -284,7 +291,9 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
         assert measured["modelUsage"] == [{"model": "gpt-5.6-sol", **_counts(55, 0, 0)}]
 
 
-def test_iteration_replay_preserves_original_inputs_after_concurrent_discovery(tmp_path: Path) -> None:
+def test_iteration_replay_preserves_original_inputs_after_concurrent_discovery(
+    tmp_path: Path,
+) -> None:
     state, home, target = tmp_path / "state", tmp_path / "codex", tmp_path / "target"
     target.mkdir()
     run = begin_target_scan(state, home, target, tmp_path / "scans")["deepScan"]
@@ -292,8 +301,20 @@ def test_iteration_replay_preserves_original_inputs_after_concurrent_discovery(t
     scan_id, scan_dir = run["scanId"], Path(run["scanDir"])
     inputs = [deep.dispatch_discovery_worker(name=f"discovery-{index}")[0] for index in range(2)]
     _, _, result = worker_paths(scan_dir, "dedup-1")
-    result.write_text(json.dumps({"scanId":scan_id,"findings":[]}))
-    args = ["record-deep-scan-iteration", "--scan-id", scan_id, "--worker-id", str(uuid.uuid4()), "--result-manifest-path", str(result), "--no-new-streak","2","--consecutive-errors","0"]
+    result.write_text(json.dumps({"scanId": scan_id, "findings": []}))
+    args = [
+        "record-deep-scan-iteration",
+        "--scan-id",
+        scan_id,
+        "--worker-id",
+        str(uuid.uuid4()),
+        "--result-manifest-path",
+        str(result),
+        "--no-new-streak",
+        "2",
+        "--consecutive-errors",
+        "0",
+    ]
     for worker in inputs:
         args.extend(["--input-worker-id", worker])
     claimed = run_workbench(state, *args, environment={"CODEX_HOME": str(home)})

@@ -236,14 +236,12 @@ export async function testCompletedWorkerSettlesWithoutWaitingForProcessExit(
   fixtures: WorkerFixtures,
 ) {
   await completedWorkerSettlesWithoutWaitingForProcessExit(fixtures);
-  for (const kind of ["discovery"] as const) {
-    for (const resumed of [false, true]) {
-      await completedWorkerSettlesWithoutWaitingForProcessExit(
-        fixtures,
-        kind,
-        resumed,
-      );
-    }
+  for (const resumed of [false, true]) {
+    await completedWorkerSettlesWithoutWaitingForProcessExit(
+      fixtures,
+      "discovery",
+      resumed,
+    );
   }
 }
 

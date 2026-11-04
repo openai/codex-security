@@ -124,9 +124,34 @@ export async function publishCoverageFixture(
   // Both reports describe the same extraction operation and provide its source.
   const compare = async (prompt, schema) => {
     const input = JSON.parse(prompt.split("\n").at(-1));
-    if (schema.properties.sources) return JSON.stringify({ sources: input.map(({id}) => ({id, same:true,survivingPaths:[]})) });
-    if (schema.properties.reviews) return JSON.stringify({reviews:input.pairs.map(({id}) => ({pair:id,decision:"same",leftEvidence:0,rightEvidence:0}))});
-    return JSON.stringify({defects:[{operation:"extract",failure:"unconfined destination",path:"source.py",reports:input.map(({id})=>({id,evidence:0}))}],uncertain:[]});
+    if (schema.properties.sources)
+      return JSON.stringify({
+        sources: input.map(({ id }) => ({
+          id,
+          same: true,
+          survivingPaths: [],
+        })),
+      });
+    if (schema.properties.reviews)
+      return JSON.stringify({
+        reviews: input.pairs.map(({ id }) => ({
+          pair: id,
+          decision: "same",
+          leftEvidence: 0,
+          rightEvidence: 0,
+        })),
+      });
+    return JSON.stringify({
+      defects: [
+        {
+          operation: "extract",
+          failure: "unconfined destination",
+          path: "source.py",
+          reports: input.map(({ id }) => ({ id, evidence: 0 })),
+        },
+      ],
+      uncertain: [],
+    });
   };
   const writeDiscovery = async (artifactDir, index) => {
     const status = statuses[index];
@@ -195,7 +220,16 @@ export async function publishCoverageFixture(
               },
               taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
               locations: [{ path: "source.py", startLine: 1, endLine: 1 }],
-              codeEvidence: [{ id: "extract", label: "Extraction", explanation: "Unconfined destination", path: "source.py", startLine: 1, code: "archive.extract(member, destination)" }],
+              codeEvidence: [
+                {
+                  id: "extract",
+                  label: "Extraction",
+                  explanation: "Unconfined destination",
+                  path: "source.py",
+                  startLine: 1,
+                  code: "archive.extract(member, destination)",
+                },
+              ],
               remediation: materialRemediations[index],
               remediationTests: [materialRemediationTests[index]],
               provenance: { source: "local_plugin" },
@@ -282,23 +316,51 @@ export async function publishCoverageFixture(
       await mkdir(artifactDir, { recursive: true });
       const id = randomUUID();
       const state = await store.get(run.scanId, threadId);
-      const accepted = await Promise.all(batch.map(async (worker) => {
-        const stored = state.persistedWorkers.find(({id}) => id === worker.id);
-        const resultPath = stored.acceptedResultPath ?? worker.resultPath;
-        const result = await validateDiscoveryArtifacts(createDeepScanArtifacts(run.scanDir), resultPath, run.scanId, { accepted:true, artifactDir:worker.artifactDir, resultSha256:stored.acceptedResultSha256 });
-        return {...worker, result, resultPath};
-      }));
-      for (const count of await mergeBatch(aggregate, accepted, run.scanDir, compare, (error) => { throw error; })) noNewStreak = count ? 0 : noNewStreak + 1;
+      const accepted = await Promise.all(
+        batch.map(async (worker) => {
+          const stored = state.persistedWorkers.find(
+            ({ id }) => id === worker.id,
+          );
+          const resultPath = stored.acceptedResultPath ?? worker.resultPath;
+          const result = await validateDiscoveryArtifacts(
+            createDeepScanArtifacts(run.scanDir),
+            resultPath,
+            run.scanId,
+            {
+              accepted: true,
+              artifactDir: worker.artifactDir,
+              resultSha256: stored.acceptedResultSha256,
+            },
+          );
+          return { ...worker, result, resultPath };
+        }),
+      );
+      for (const count of await mergeBatch(
+        aggregate,
+        accepted,
+        run.scanDir,
+        compare,
+        (error) => {
+          throw error;
+        },
+      ))
+        noNewStreak = count ? 0 : noNewStreak + 1;
       const { sourceCoverage, ...legacy } = aggregate;
       const resultManifestPath = path.join(artifactDir, "result.json");
       const bytes = JSON.stringify(selectedRecovery ? aggregate : legacy);
       await writeFile(resultManifestPath, bytes);
       rawSources.set(resultManifestPath, bytes);
       const committed = await store.recordIteration({
-        id, scanId:run.scanId, workerIds:batch.map(({id}) => id),
-        resultPath:resultManifestPath, noNewStreak, consecutiveErrors:0,
+        id,
+        scanId: run.scanId,
+        workerIds: batch.map(({ id }) => id),
+        resultPath: resultManifestPath,
+        noNewStreak,
+        consecutiveErrors: 0,
       });
-      lastReducerReference = committed.persistedWorkers.find((worker) => worker.id === id).acceptedResultPath;
+      lastReducerReference = committed.persistedWorkers.find(
+        (worker) => worker.id === id,
+      ).acceptedResultPath;
       lastReducerId = id;
     }
     if (legacyAttempts) {
