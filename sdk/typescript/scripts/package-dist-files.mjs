@@ -95,6 +95,7 @@ const distModules = [
   "errors",
   "feedback",
   "finding-catalogue",
+  "finding-prompt",
   "findings-import",
   "git-remote",
   "local-git-metadata",
