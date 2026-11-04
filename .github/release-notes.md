@@ -51,6 +51,7 @@
 - use trusted Git when installing hooks ([#92](https://github.com/openai/codex-security/pull/92))
 - bump @linear/sdk from 99.0.0 to 100.0.0 in /sdk/typescript ([#2336](https://github.com/openai/codex-security/pull/2336))
 - ship only the embedding tokenizer and its encoding ([#2333](https://github.com/openai/codex-security/pull/2333))
+- preserve distinct findings and bound duplicate comparisons ([#2313](https://github.com/openai/codex-security/pull/2313))
 
 <!-- release-section: highlights:end -->
 
