@@ -3046,17 +3046,20 @@ if __name__ == "__main__":
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       let revision = "deadbeef";
       let completed = false;
-      const warningSeen = Promise.withResolvers<void>();
       const details: unknown[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         repositoryRevision: async () => revision,
+        runWorkbench: async (_options, args, input) => {
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan") revision = "changed";
+          return result;
+        },
         createCodex: () => ({
           startThread: () => ({
             id: null,
             async runStreamed() {
-              revision = "changed";
-              await warningSeen.promise;
+              expect(details).toEqual([undefined]);
               expect(completed).toBe(false);
               await copyCompletedScan(root);
               return { events: completedEvents() };
@@ -3070,7 +3073,6 @@ if __name__ == "__main__":
             if (!message.startsWith("Repository HEAD changed")) return;
             expect(completed).toBe(false);
             details.push(detail);
-            warningSeen.resolve();
             if (observerFails) throw new Error("Synthetic observer failure");
           },
           onObserverError: () => {

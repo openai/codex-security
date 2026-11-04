@@ -168,7 +168,6 @@ describe("scan and patch workflow", () => {
       for (const directory of [repository, codexHome, scanDir])
         await mkdir(directory, { mode: 0o700 });
       let revision = "deadbeef";
-      const warned = Promise.withResolvers<void>();
       const completionWarning =
         "Repository HEAD changed while the scan was running; results were saved for the original revision.";
       const client = TestClient.withDependencies({
@@ -186,14 +185,15 @@ describe("scan and patch workflow", () => {
                 warnings: revision === "deadbeef" ? [] : [completionWarning],
               },
             };
-          return mockWorkbench(args, input);
+          const result = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan") revision = "changed";
+          return result;
         },
         createCodex: () => ({
           startThread: () => ({
             id: null,
             async runStreamed() {
-              revision = "changed";
-              await warned.promise;
+              expect(earlyDetails).toEqual([undefined]);
               if (restored) revision = "deadbeef";
               await copyCompletedScan(root);
               return { events: completedEvents() };
@@ -232,7 +232,6 @@ describe("scan and patch workflow", () => {
                         message !== completionWarning
                       ) {
                         earlyDetails.push(details);
-                        warned.resolve();
                       }
                     },
                   });

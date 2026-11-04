@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { startHeadDriftMonitor } from "../src/target-drift.js";
 import { repositoryRevision } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -8,6 +8,32 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures("target-drift-");
 afterEach(cleanup);
 
 describe("head drift monitor", () => {
+  test("polls again after registration until HEAD changes", async () => {
+    jest.useFakeTimers();
+    let reads = 0;
+    let warnings = 0;
+    const monitor = startHeadDriftMonitor({
+      expectedRevision: "before",
+      readRevision: async () => (++reads === 1 ? "before" : "after"),
+      signal: new AbortController().signal,
+      onDrift: () => {
+        warnings++;
+      },
+    });
+    try {
+      await monitor.ready;
+      expect(warnings).toBe(0);
+      jest.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      expect(warnings).toBe(1);
+      jest.advanceTimersByTime(5_000);
+      expect(reads).toBe(2);
+    } finally {
+      monitor.stop();
+      jest.useRealTimers();
+    }
+  });
+
   test.each(["stop", "abort"] as const)(
     "%s cancels an in-flight revision read",
     async (operation) => {
