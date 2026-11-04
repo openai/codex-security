@@ -599,7 +599,8 @@ def _read_rollout_usage(
     warnings = result.warnings
     previous = _empty_token_usage()
     previous_cache_writes_reported = True
-    prefix_missing_cache: set[str] | None = None
+    prefix_unclassified = 0
+    prefix_missing_cache: set[str] = set()
     ambiguous_legacy_cache = False
     boundary_reached = False
     legacy_usage = _empty_token_usage()
@@ -691,7 +692,8 @@ def _read_rollout_usage(
                             warnings.add("token_breakdown_unavailable")
                         else:
                             previous = baseline
-                            prefix_missing_cache = _unclassified_prefix(missing_cache, baseline)
+                            prefix_unclassified = _uncached_input(baseline)
+                            prefix_missing_cache = missing_cache
                 if not boundary_reached:
                     continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
@@ -834,7 +836,7 @@ def _read_rollout_usage(
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
             if reset:
-                prefix_missing_cache = None
+                prefix_unclassified = 0
             missing_cache = _missing_cache_fields(payload)
             cache_writes_reported = "cacheWriteInputTokens" not in missing_cache
             baseline = _retain_cache_baseline(previous, snapshot, missing_cache)
@@ -866,7 +868,8 @@ def _read_rollout_usage(
             if isinstance(current_turn_id, str):
                 measured_turns.add(current_turn_id)
             if timestamp < started_at:
-                prefix_missing_cache = _unclassified_prefix(missing_cache, baseline)
+                prefix_unclassified = _uncached_input(baseline)
+                prefix_missing_cache = missing_cache
                 continue
             if completed_turn_id is not None and current_turn_id == completed_turn_id:
                 completed_turn_measured = True
@@ -875,25 +878,26 @@ def _read_rollout_usage(
             if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
             cache_write_capacity = (
-                legacy_usage["inputTokens"]
-                + delta["inputTokens"]
-                - legacy_usage["cachedInputTokens"]
-                - legacy_usage["cacheWriteInputTokens"]
+                _uncached_input(legacy_usage) + delta["inputTokens"]
                 if refines_classification
                 else delta["inputTokens"]
             )
             # Late cumulative cache details can classify an earlier legacy turn.
             completed_capacity = (
-                completed_legacy_usage["inputTokens"]
-                - completed_legacy_usage["cachedInputTokens"]
-                - completed_legacy_usage["cacheWriteInputTokens"]
+                _uncached_input(completed_legacy_usage)
                 if refines_classification and response_usage is None
                 else 0
             )
             if (
-                prefix_missing_cache is not None
+                prefix_unclassified > 0
                 and refines_classification
-                and any(delta[key] > 0 for key in prefix_missing_cache)
+                and (
+                    any(delta[key] > 0 for key in prefix_missing_cache)
+                    # Even explicit counters can revise earlier input when the
+                    # newly classified tokens exceed all in-scan capacity.
+                    or delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
+                    > cache_write_capacity + completed_capacity
+                )
             ):
                 # The newly classified tokens could have occurred before this scan.
                 ambiguous_legacy_cache = True
@@ -995,10 +999,8 @@ def _missing_cache_fields(payload: Mapping[str, Any]) -> set[str]:
     return missing
 
 
-def _unclassified_prefix(missing: set[str], baseline: dict[str, int]) -> set[str] | None:
-    if baseline["inputTokens"] == baseline["cachedInputTokens"] + baseline["cacheWriteInputTokens"]:
-        return None
-    return missing or None
+def _uncached_input(usage: dict[str, int]) -> int:
+    return usage["inputTokens"] - usage["cachedInputTokens"] - usage["cacheWriteInputTokens"]
 
 
 def _retain_cache_baseline(
