@@ -560,6 +560,19 @@ describe("patch change tracking", () => {
         );
         nestedGit("config", "core.worktree", nested);
       }
+      if (scope === "root" && change === "edit") {
+        // Expanded submodule entries can match a diff driver in the parent.
+        await writeFile(
+          join(directory, ".gitattributes"),
+          "nested/*.ts diff=synthetic\n",
+        );
+        git(
+          "config",
+          `diff.synthetic.${mode === "saved" ? "textconv" : "command"}`,
+          "printf 'converted\\n'",
+        );
+        git("add", ".gitattributes");
+      }
       git("add", "nested");
       git("commit", "-m", "Synthetic gitlink");
       await writeFile(join(nested, "app.ts"), "original\nuser change\n");
