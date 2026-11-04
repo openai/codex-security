@@ -98,7 +98,8 @@ def collect_scan_usage(
     if validation_thread_id:
         roots.append(validation_thread_id)
         parent_ids.add(validation_thread_id)
-    worker_directories = _scan_worker_directories(connection, scan)
+    warnings: set[str] = set()
+    worker_directories = _scan_worker_directories(connection, scan, warnings)
     if not roots and not worker_directories:
         return _unavailable_usage("scan_thread_unavailable")
 
@@ -112,7 +113,6 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
-    warnings: set[str] = set()
     try:
         sessions, missing_thread_ids = _discover_rollout_sessions(
             state_database,
@@ -274,7 +274,9 @@ def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row
     )
 
 
-def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, bool]:
+def _scan_worker_directories(
+    connection: sqlite3.Connection, scan: sqlite3.Row, warnings: set[str]
+) -> dict[str, bool]:
     if scan["mode"] != "deep":
         return {}
     artifacts = Path(scan["scan_dir"]) / "artifacts"
@@ -289,7 +291,11 @@ def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) 
             if row["sdk_thread_id"] and row["attempt"] == 1:
                 continue  # The first attempt already has an exact thread identity.
             # An attempt that started without a saved ID must be found by its assigned cwd.
-            directories[row["artifact_dir"]] = bool(row["started_at"] and not row["sdk_thread_id"])
+            missing_thread = bool(row["started_at"] and not row["sdk_thread_id"])
+            directories[row["artifact_dir"]] = missing_thread
+            if missing_thread and row["attempt"] > 1:
+                # Retries share a cwd. A rollout from an older attempt cannot prove the new one.
+                warnings.add("worker_thread_unavailable")
         else:
             directories[str(artifacts)] = False
     return directories

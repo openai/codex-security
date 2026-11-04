@@ -1671,6 +1671,49 @@ def test_budget_keeps_measured_totals_when_a_started_worker_has_no_thread(tmp_pa
     assert "worker_thread_unavailable" in usage["warnings"]
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_budget_distinguishes_fresh_retry_from_resumed_worker(tmp_path: Path, resume: bool) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    worker = str(uuid.uuid4())
+    artifact = fixture.scan_dir / "artifacts" / "worker"
+    artifact.mkdir(parents=True)
+    prompt = artifact / "prompt.md"
+    prompt.write_text("Review the fixture.", encoding="utf-8")
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 0)])
+    earlier = _rollout(tmp_path, "earlier", [_token_event(counted, 100, 0)])
+    _state_graph(fixture.environment, {"scan-parent": parent, "earlier": earlier}, [])
+    with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
+        db.execute(
+            "UPDATE threads SET cwd = ?, created_at = ? WHERE id = 'earlier'",
+            (str(artifact), int(counted.timestamp())),
+        )
+
+    def running(attempt: str, *thread: str) -> None:
+        upsert_deep_worker(
+            fixture.state_dir,
+            fixture.scan_id,
+            worker,
+            "discovery",
+            "running",
+            str(prompt),
+            str(artifact),
+            "--attempt",
+            attempt,
+            *thread,
+            environment=fixture.environment,
+        )
+
+    running("1", "--sdk-thread-id", "earlier")
+    running("2", *(["--sdk-thread-id", "earlier"] if resume else []))
+    # Repeat an update without the optional ID, as the worker runner does after an error.
+    running("2")
+    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+    assert usage["coverage"] == ("complete" if resume else "partial")
+    assert usage["totalTokens"] == 110
+    assert ("worker_thread_unavailable" in usage.get("warnings", [])) == (not resume)
+
+
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("truncated", [False, True])
 @pytest.mark.parametrize("indexed_archive", [False, True])
