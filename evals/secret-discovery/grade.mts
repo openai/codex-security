@@ -25,17 +25,23 @@ export interface Result {
 }
 
 const explicitSecretTerms =
-  /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
-const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?(?:exposure|disclosure)s?`;
+  /secrets?|credentials?|passwords?|tokens?|(?:api|private) ?keys?|hard ?cod(?:e[ds]?|ing)?/i;
+const secretTerms = `${explicitSecretTerms.source}|sensitive ?(?:data|information) ?(?:exposure|disclosure)s?`;
 const explicitSecretCategory = new RegExp(
   String.raw`\b(?:${explicitSecretTerms.source})\b`,
   "i",
 );
 const secretCategory = new RegExp(String.raw`\b(?:${secretTerms})\b`, "i");
-const responseCategory =
-  /^(?:sensitive information in response|insertion of sensitive information into sent data)$/i;
-const negatedSecretCategory = new RegExp(
-  String.raw`^(?:(?:not(?:[-_\s]*a)?|non|no|without)[-_\s]*(?:${secretTerms})\b|(?:${secretTerms})[-_\s]*free\b)`,
+const runtimeCategoryCwes = new Map([
+  ["sensitive information in response", "CWE-201"],
+  ["insertion of sensitive information into sent data", "CWE-201"],
+  ["insufficiently protected credentials", "CWE-522"],
+]);
+const disclosureTerms =
+  /(?:(?:sensitive )?(?:data|information) )?(?:(?:disclos|expos)(?:ures?|ed)|leak(?:s|ed|age)?)/;
+const negatableTerms = `${secretTerms}|${disclosureTerms.source}`;
+const negatedCategory = new RegExp(
+  String.raw`^(?:(?:not(?: ?an?)?|non|no|without|den(?:y|ied)) ?(?:${negatableTerms})\b|(?:${negatableTerms}) ?free\b)`,
   "i",
 );
 const supportingLocation = (location: SourceLocation) =>
@@ -89,27 +95,24 @@ function matches(
   cwes = finding.taxonomy?.cwe ?? [],
 ) {
   const category = (finding.taxonomy?.category ?? "")
-    .replaceAll("_", " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .trim();
+    .replace(/[-_\s]+/g, " ")
+    .trim()
+    .toLowerCase();
   const runtimeLeak = expected.category === "sensitive-data-exposure";
   const relevantCategory = runtimeLeak
-    ? /disclos|expos|leak|access[- ]control|authenticat|authoriz/i.test(
-        category,
-      )
+    ? /disclos|expos|leak|access control|authenticat|authoriz/.test(category)
     : secretCategory.test(category);
   return (
-    !negatedSecretCategory.test(category) &&
+    !negatedCategory.test(category) &&
     cwes.some((value) => {
       const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
       if (expected.cwes.includes(cwe)) {
         return (
           relevantCategory ||
-          (runtimeLeak &&
-            cwe === "CWE-201" &&
-            responseCategory.test(category.replaceAll("-", " "))) ||
+          (runtimeLeak && runtimeCategoryCwes.get(category) === cwe) ||
           (cwe === "CWE-321" &&
-            /^(?:embedded[- ]+)?cryptographic[- ]+keys?$/i.test(category))
+            /^(?:embedded )?cryptographic keys?$/.test(category))
         );
       }
       return (

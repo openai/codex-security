@@ -266,6 +266,36 @@ test("response-specific categories identify the runtime leak with CWE-201", () =
   assert.equal(gradeResult(result, fixture).cases[0].found, false);
 });
 
+test("runtime taxonomy distinguishes denied leaks from missing protections", () => {
+  const result = retainedResult();
+  const index = fixture.positives.findIndex(
+    (expected) => expected.id === "runtime-disclosure",
+  );
+  for (const [category, cwe, found] of [
+    ["not a data leak", "CWE-200", false],
+    ["not an exposure", "CWE-200", false],
+    ["not exposed", "CWE-200", false],
+    ["non_disclosure", "CWE-200", false],
+    ["deny information disclosure", "CWE-200", false],
+    ["no sensitive data leakage", "CWE-200", false],
+    ["data-leak-free", "CWE-200", false],
+    ["information disclosure with no secret in source", "CWE-200", true],
+    ["missing authentication", "CWE-306", true],
+    ["no authentication", "CWE-306", true],
+    ["insufficient access control", "CWE-862", true],
+    ["Insufficiently Protected Credentials", "CWE-522", true],
+    ["insufficientlyProtectedCredentials", "CWE-522", true],
+    ["Insufficiently Protected Credentials", "CWE-200", false],
+    ["hardcoded credentials", "CWE-522", false],
+    ["credential management", "CWE-522", false],
+  ] as const) {
+    result.findings[index].taxonomy = { category, cwe: [cwe] };
+    const report = gradeResult(result, fixture);
+    assert.equal(report.cases[index].found, found, `${category} (${cwe})`);
+    assert.equal(report.passed, found, `${category} (${cwe})`);
+  }
+});
+
 for (const category of [
   "password-in-configuration",
   "token-exposure",
