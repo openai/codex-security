@@ -79,6 +79,7 @@ export const runSchema = z
       sdkOwnsCompletion: z.boolean().optional(),
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
+      discoveryStarted: z.boolean().optional(),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,
@@ -93,6 +94,7 @@ export const runSchema = z
         .optional(),
       scanDir: requiredString,
       dispatchedCount: nonNegativeInteger,
+      completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,
       consecutiveErrors: nonNegativeInteger
         .nullish()
