@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import hostedContract from "../schemas/hosted-scan-v2.fixture.json" with { type: "json" };
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -36,9 +37,9 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
+import { workbenchCommand } from "./support/workbench-command.js";
 import { pythonExecutable } from "./support/python.js";
 import { git } from "./git-fixture.js";
-import { workbenchCommand } from "./support/workbench-command.js";
 import {
   createApiTestFixtures,
   removeTemporaryDirectory,
@@ -47,6 +48,7 @@ import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
 
+const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
@@ -157,13 +159,17 @@ async function fixture(
   };
 }
 
-function hostedWorkbench(input: HostedScanInput, args: string[]) {
+async function savedHostedScan(
+  input: HostedScanInput,
+  scanId: string,
+  command: "get-scan" | "recover-scan-results" = "get-scan",
+) {
   const workbench = workbenchCommand(pythonExecutable()!, () => ({
     PATH: process.env["PATH"],
     SYSTEMROOT: process.env["SYSTEMROOT"],
     CODEX_SECURITY_STATE_DIR: input.stateDirectory,
   }));
-  return workbench(args);
+  return (await workbench([command, "--scan-id", scanId]))["scan"];
 }
 
 async function writeDraft(
@@ -369,6 +375,7 @@ test.each(sealedScopes)(
     const executor = draftExecutor((request) => {
       expect(request.scope.paths).toEqual(normalized);
       expect(request.identity).toEqual(input.identity);
+      expect(request.runtime.environment["CODEX_SECURITY_SURFACE"]).toBe("sdk");
       expect(request).toMatchObject({
         model: input.model,
         reasoningEffort: input.reasoningEffort,
@@ -562,7 +569,10 @@ test.each(["missing", "file"] as const)(
         signal: controller.signal,
       });
       if (timing === "during") queueMicrotask(() => controller.abort(reason));
-      await expect(pending).rejects.toBe(reason);
+      await expect(pending).resolves.toMatchObject({
+        status: "canceled",
+        error: expect.stringContaining(reason.message),
+      });
     }
     for (const options of [{}, { signal: new AbortController().signal }]) {
       await expect(
@@ -763,18 +773,67 @@ test("hosted receipts hash MCP checkpoints as written", async () => {
 
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
+  input.severityRubric = severityRubric;
   const result = await runHostedScan(input, {
     executor: draftExecutor(() => {
       git(input.repository, "commit", "--allow-empty", "-qm", "changed");
     }),
   });
   expect(result.status).toBe("failed");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.artifacts).toEqual([]);
 });
 
 test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
+
+test.each(["valid", "tampered"] as const)(
+  "scan --host receives an immediate cancellation with a %s rubric",
+  async (rubric) => {
+    const params = await fixture();
+    params.severityRubric =
+      rubric === "valid"
+        ? severityRubric
+        : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
+    const input = new PassThrough();
+    const output = capture();
+    const run = main(["scan", "--host"], output.stream, capture().stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    try {
+      send(input, { id: "run", method: "run", params });
+      send(input, { method: "cancel", params: { id: "run" } });
+      expect(await run).toBe(rubric === "valid" ? 1 : 2);
+      const messages = parseJsonLines(output.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ jsonrpc: "2.0", id: "run" });
+      if (rubric === "tampered") {
+        expect(messages[0].error).toMatchObject({
+          code: -32602,
+          message: expect.stringContaining("SHA-256"),
+        });
+      } else {
+        expect(messages[0].result).toMatchObject({
+          status: "canceled",
+          identity: params.identity,
+          repository: params.repository,
+          revision: params.revision,
+          scope: params.scope,
+          severityRubric,
+          outputDirectory: params.outputDirectory,
+          provenance: { buildId: params.identity.buildId },
+          artifacts: [],
+        });
+        expect(messages[0].result).not.toHaveProperty("scanId");
+        expect(messages[0].result).not.toHaveProperty("execution");
+      }
+    } finally {
+      input.destroy();
+    }
+  },
+);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -811,6 +870,7 @@ test.each([false, true])(
     if (!cancel) {
       input.reasoningEffort = "synthetic-future-effort";
       input.ownerSuggestions = true;
+      input.severityRubric = severityRubric;
     }
     const child = spawn(
       process.execPath,
@@ -842,6 +902,18 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(
+            message.params.runtime.environment.CODEX_SECURITY_SURFACE,
+          ).toBe("cli");
+          if (cancel) {
+            expect(message.params).not.toHaveProperty("severityRubric");
+            expect(message.params.prompt).not.toContain('"severityRubric"');
+          } else {
+            expect(message.params.severityRubric).toEqual(severityRubric);
+            expect(message.params.prompt).toContain(
+              JSON.stringify({ severityRubric: message.params.severityRubric }),
+            );
+          }
           requestId = message.params.requestId;
           for (const event of [
             progressEvent,
@@ -894,7 +966,10 @@ test.each([false, true])(
           execution: { sessionId: "fake-host", usage },
         },
       });
-      if (!cancel) {
+      if (cancel) {
+        expect(response.result).not.toHaveProperty("severityRubric");
+      } else {
+        expect(response.result.severityRubric).toEqual(severityRubric);
         expect(response.result).not.toHaveProperty("ownerSuggestionsError");
         expect(response.result.artifacts).toContainEqual(
           expect.objectContaining({ path: "owner-suggestions.json" }),
@@ -980,18 +1055,22 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   const input = await fixture();
   delete input.scope;
   const events: string[] = [];
-  const result = await runHostedScan(input, {
-    executor: draftExecutor((request, options) => {
-      expect(request.scope.paths).toEqual(["."]);
-      options.onEvent?.(progressEvent);
-      options.onEvent?.(activityEvent);
-    }),
-    onEvent(event) {
+  const executor = draftExecutor((request, options) => {
+    expect(request.scope.paths).toEqual(["."]);
+    options.onEvent?.(progressEvent);
+    options.onEvent?.(activityEvent);
+  });
+  class Options {
+    get executor() {
+      return executor;
+    }
+    onEvent(event: ScanExecutionEvent) {
       events.push(event.type);
       if (event.type === "progress")
         throw new Error("Optional progress failed");
-    },
-  });
+    }
+  }
+  const result = await runHostedScan(input, new Options());
   expect(result.status, JSON.stringify(result)).toBe("completed");
   expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
@@ -999,57 +1078,47 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
 });
 
 test.each([
-  ["failed", undefined, false, "failed"],
-  ["failed", "remote-session", false, "failed"],
-  ["canceled", "remote-session", false, "canceled"],
-  ["acceptance_unknown", "remote-session", false, "acceptance_unknown"],
-  ["failed", "remote-session", true, "canceled"],
-  ["canceled", "remote-session", true, "canceled"],
-  ["acceptance_unknown", "remote-session", true, "acceptance_unknown"],
+  ["failed", undefined, false],
+  ["failed", "remote-session", false],
+  ["canceled", "remote-session", false],
+  ["acceptance_unknown", "remote-session", false],
+  ["failed", "remote-session", true],
+  ["acceptance_unknown", "remote-session", true],
 ] as const)(
-  "standalone SDK retains %s host receipt with session %p and caller abort %p, returning %s",
-  async (status, sessionId, callerAborts, terminalStatus) => {
+  "standalone SDK retains %s host identity %p and usage (caller abort: %p)",
+  async (status, sessionId, callerAborts) => {
     const input = await fixture();
     const controller = new AbortController();
     const usage = {
       authoritative_snapshot: { input_tokens: 123, output_tokens: 7 },
     };
     let execution: ScanExecutionResult | undefined;
-    const run = mock<ScanExecutor["run"]>(async (request, options) => {
-      if (callerAborts) {
-        controller.abort();
-        expect(options.signal.aborted).toBe(true);
-        await Promise.resolve();
-      }
-      execution = receipt(request, {
-        status,
-        sessionId,
-        usage,
-        error: {
-          code: -32010,
-          message: "Recorded remote outcome",
-          data: { remoteTurnId: "turn-1" },
-        },
-      });
-      return execution;
-    });
     const terminal = await runHostedScan(input, {
-      executor: { run },
-      ...(callerAborts ? { signal: controller.signal } : {}),
+      signal: controller.signal,
+      executor: {
+        async run(request) {
+          if (callerAborts) controller.abort();
+          execution = receipt(request, {
+            status,
+            sessionId,
+            usage,
+            error: {
+              code: -32010,
+              message: "Recorded remote outcome",
+              data: { remoteTurnId: "turn-1" },
+            },
+          });
+          return execution;
+        },
+      },
     });
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(terminal.status).toBe(terminalStatus);
+    expect(terminal.status).toBe(
+      callerAborts && status === "failed" ? "canceled" : status,
+    );
     expect(terminal.execution).toEqual(execution);
     expect(terminal.artifacts).toEqual([]);
-    const canceled = status === "canceled";
-    const saved = await hostedWorkbench(input, [
-      "get-scan",
-      "--scan-id",
-      terminal.scanId!,
-    ]);
-    expect(saved["scan"]).toMatchObject({
-      progress: { status: canceled ? "canceled" : "failed" },
-      canceledAt: canceled ? expect.any(String) : null,
+    expect(await savedHostedScan(input, terminal.scanId!)).toMatchObject({
+      progress: { status: status === "canceled" ? "canceled" : "failed" },
       failureMessage: "Recorded remote outcome",
     });
   },
@@ -1240,60 +1309,103 @@ test("cancellation after registration retains scan identity before executor disp
   expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
-  const history = await hostedWorkbench(input, [
-    "list-scans",
-    "--repository",
-    input.repository,
-  ]);
-  expect(history["scans"]).toMatchObject([
-    {
-      scanId: result.scanId,
-      scanDir: result.outputDirectory,
-      progress: { status: "canceled" },
-    },
-  ]);
+  expect(await savedHostedScan(input, result.scanId!)).toMatchObject({
+    scanId: result.scanId,
+    scanDir: result.outputDirectory,
+    progress: { status: "canceled" },
+  });
 });
 
-test("invalid host input records a registered scan as failed when pre-dispatch cleanup completes", async () => {
+test("an awaited SDK scan saves the protocol fault that interrupted it", async () => {
   const params = await fixture();
   const input = new PassThrough();
-  const run = spyOn(hostedScan, "runHostedScan");
+  const output = capture();
+  const executor = noExecution();
+  let scan: ReturnType<typeof runHostedScan>;
   try {
-    const output = capture();
-    const finished = runHostedScanProtocol(input, {
-      write(chunk) {
-        output.stream.write(chunk);
-        const frame = JSON.parse(chunk.toString());
-        const progress = frame.params?.event?.progress;
-        if (progress?.phase === "preflight" && progress.filesTotal > 0)
-          input.write("invalid JSON\n");
-        return true;
+    const protocol = runHostProtocol(input, output.stream, {
+      label: "Scan",
+      requestMethod: "execution.run",
+      run(_params, _execute, signal) {
+        scan = runHostedScan(params, {
+          signal,
+          executor,
+          onEvent(event) {
+            if (
+              event.type === "progress" &&
+              event.progress.phase === "preflight" &&
+              event.progress.filesTotal > 0
+            )
+              input.write("invalid JSON\n");
+          },
+        });
+        return scan;
       },
     });
     send(input, { id: "run", method: "run", params });
-    expect(await finished).toBe(2);
-    const messages = parseJsonLines(output.text());
-    expect(messages.at(-1)?.error).toMatchObject({
+    expect(await protocol).toBe(2);
+    expect(parseJsonLines(output.text()).at(-1)?.error).toMatchObject({
       code: -32700,
       message: "Invalid JSON.",
     });
-    expect(messages.some((frame) => frame.method === "execution.run")).toBe(
-      false,
-    );
-    // The protocol can report the input error before the scan finishes its cleanup.
-    await run.mock.results[0]!.value;
-    const history = await hostedWorkbench(params, [
-      "list-scans",
-      "--repository",
-      params.repository,
-    ]);
-    expect(history["scans"]).toMatchObject([
-      { scanDir: params.outputDirectory, progress: { status: "failed" } },
-    ]);
+    const result = await scan!;
+    expect(executor.run).not.toHaveBeenCalled();
+    expect(await savedHostedScan(params, result.scanId!)).toMatchObject({
+      failureMessage: "Invalid JSON.",
+      progress: { status: "failed" },
+    });
   } finally {
-    run.mockRestore();
     input.destroy();
   }
+});
+
+test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
+  const input = await fixture();
+  const controller = new AbortController();
+  input.severityRubric = { ...severityRubric };
+  const pending = runHostedScan(input, {
+    signal: controller.signal,
+    executor: {
+      async run(request, options) {
+        expect(request.severityRubric).toEqual(severityRubric);
+        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
+        controller.abort();
+        expect(options.signal.aborted).toBe(true);
+        await Promise.resolve();
+        return receipt(request, {
+          status: "canceled",
+          sessionId: "canceled-session",
+          usage: { input_tokens: 42 },
+        });
+      },
+    },
+  });
+  input.severityRubric.markdown = "Edited by caller.";
+  const result = await pending;
+  expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(severityRubric);
+  expect(result.execution).toMatchObject({
+    status: "canceled",
+    sessionId: "canceled-session",
+    usage: { input_tokens: 42 },
+  });
+});
+
+test("a completed hosted draft remains recoverable after interrupted local finalization", async () => {
+  const input = await fixture();
+  const controller = new AbortController();
+  const result = await runHostedScan(input, {
+    signal: controller.signal,
+    executor: draftExecutor(() => controller.abort()),
+  });
+  expect(result).toMatchObject({
+    status: "canceled",
+    execution: { status: "completed" },
+    artifacts: [],
+  });
+  expect(
+    await savedHostedScan(input, result.scanId!, "recover-scan-results"),
+  ).toMatchObject({ scanId: result.scanId, progress: { status: "failed" } });
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {
@@ -1339,6 +1451,50 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   expect(requests[0]).not.toBe(requests[1]);
 });
 
+test("a host retry can resupply the saved rubric in a fresh attempt", async () => {
+  const input = await fixture();
+  const saved = join(dirname(input.repository), "host-rubric.json");
+  await writeJson(saved, severityRubric);
+  const requestIds = new Set<string>();
+  for (const [attemptId, status] of [
+    ["first", "canceled"],
+    ["retry", "completed"],
+  ] as const) {
+    const identity = { ...input.identity, attemptId };
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        return receipt(request, { status });
+      }),
+    };
+    const result = await runHostedScan(
+      {
+        ...input,
+        identity,
+        outputDirectory: join(input.outputDirectory, attemptId),
+        stateDirectory: join(input.stateDirectory, attemptId),
+        severityRubric: await readJson<typeof severityRubric>(saved),
+      },
+      { executor },
+    );
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const [request] = executor.run.mock.calls[0]!;
+    expect(request.identity).toEqual(identity);
+    expect(request.severityRubric).toEqual(severityRubric);
+    expect(request.prompt).toContain(
+      JSON.stringify({ severityRubric: request.severityRubric }),
+    );
+    expect(result).toMatchObject({
+      identity,
+      status,
+      severityRubric,
+      execution: { requestId: request.requestId, status },
+    });
+    requestIds.add(request.requestId);
+  }
+  expect(requestIds.size).toBe(2);
+});
+
 test.each(["cancel", "disconnect", "signal"])(
   "blocked execution request terminates on %s",
   async (action) => {
@@ -1346,7 +1502,7 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const run = spyOn(hostedScan, "runHostedScan");
+    const run = spyOn(hostedScan, "runHostedScanInternal");
     try {
       const finished = runHostedScanProtocol(input, output, controller.signal);
       send(input, { id: "run", method: "run", params });
@@ -1399,10 +1555,11 @@ test.each(["result", "error"])(
 );
 
 test("the exported contract fixture matches v2 and rejects explicit empty scope", async () => {
-  const fixture = await readJson<any>(
-    join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
-  );
-  expect(HostedScanInputSchema.parse(fixture.run.params).scope).toEqual({
+  const fixture = hostedContract;
+  const input = HostedScanInputSchema.parse(fixture.run.params);
+  expect(input.severityRubric).toEqual(severityRubric);
+  expect(fixture.execution.params.severityRubric).toEqual(severityRubric);
+  expect(input.scope).toEqual({
     paths: ["service-a", "service-b"],
   });
   expect(
@@ -1421,6 +1578,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     status: "completed",
     identity: fixture.run.params.identity,
     scope: fixture.run.params.scope,
+    severityRubric,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });

@@ -27,6 +27,7 @@ from workbench_test_support import (
     run_workbench,
     scan_command,
     set_triage,
+    source_plugin_version,
     stable_target_id,
     write_completed_contract,
 )
@@ -189,6 +190,7 @@ def create_cli_scan(
     cost: dict[str, Any] | None = None,
     target: dict[str, Any] | None = None,
     target_revision: str | None = None,
+    surface: str = "cli",
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
     scan_dir.mkdir(mode=0o700, parents=True)
@@ -204,12 +206,15 @@ def create_cli_scan(
         str(scan_dir),
         "--repository",
         str(repository),
-        "--recipe-json",
-        json.dumps(recipe),
+        "--registration-json-stdin",
     ]
     if parent_scan_id is not None:
         arguments.extend(("--parent-scan-id", parent_scan_id))
-    launched = run_workbench(state_dir, *arguments)
+    launched = run_workbench(
+        state_dir,
+        *arguments,
+        input_text=json.dumps({"recipe": recipe, "surface": surface, "packageVersion": "1.2.3"}),
+    )
     if not complete:
         return launched
     if mode == "deep":
@@ -379,13 +384,14 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
     (repository / "src").mkdir(parents=True)
     (repository / "tests").mkdir()
     root = tmp_path / "results"
-    first = create_cli_scan(state_dir, root, repository)
+    first = create_cli_scan(state_dir, root, repository, surface="sdk")
     rerun = create_cli_scan(
         state_dir,
         root,
         repository,
         parent_scan_id=first["scanId"],
         paths=["src", "tests"],
+        finding=False,
     )
     failed = create_cli_scan(state_dir, root, repository, complete=False)
     fail_scan(state_dir, failed["scanId"], "interrupted")
@@ -400,6 +406,12 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
         assert connection.execute(
             "SELECT parent_scan_id FROM scans WHERE id = ?", (rerun["scanId"],)
         ).fetchone() == (first["scanId"],)
+        snapshots = {
+            scan_id: json.loads(snapshot)
+            for scan_id, snapshot in connection.execute(
+                "SELECT scan_id, snapshot FROM scan_lifecycles"
+            )
+        }
     assert scan_command(state_dir, "get-scan-recipe", first["scanId"])["recipe"]["config"] == {
         "model": "gpt-5.6-sol",
         "model_reasoning_effort": "high",
@@ -416,6 +428,37 @@ def test_cli_scan_lifecycle_persists_recipes_lineage_and_filtered_history(tmp_pa
         rerun["scanId"],
         failed["scanId"],
     }
+    by_id = {row["scanId"]: row for row in history["scans"]}
+    for launch, surface, status, has_findings in (
+        (first, "sdk", "completed", True),
+        (rerun, "cli", "completed", False),
+        (failed, "cli", "failed", None),
+    ):
+        row = by_id[launch["scanId"]]
+        assert launch["lifecycle"] == {
+            "scanId": launch["scanId"],
+            "startedAt": row["startedAt"],
+            "mode": "standard",
+            "status": "running",
+            "finishedAt": None,
+            "hasReportableFindings": None,
+            "surface": surface,
+            "packageVersion": "1.2.3",
+            "pluginVersion": source_plugin_version(),
+            "mock": False,
+        }
+        assert row["completedAt"]
+        assert row["lifecycle"] == {
+            **launch["lifecycle"],
+            "status": status,
+            "finishedAt": row["completedAt"],
+            "hasReportableFindings": has_findings,
+        }
+        snapshot = snapshots[launch["scanId"]]
+        assert snapshot == row["lifecycle"]
+        assert snapshot["hasReportableFindings"] is has_findings
+        assert snapshot["mock"] is False
+    assert detail["scan"]["lifecycle"] == by_id[rerun["scanId"]]["lifecycle"]
     assert any(scan["progress"]["status"] == "failed" for scan in history["scans"])
     assert all(scan["recipeAvailable"] for scan in history["scans"])
     assert len(run_workbench(state_dir, "list-scans", "--repository", str(other))["scans"]) == 1
@@ -687,6 +730,11 @@ def test_stopped_cli_scan_history_persists_measured_cost(tmp_path: Path, cancele
     assert stopped["scan"]["cost"] == cost
     assert stopped["scan"]["progress"]["status"] == ("canceled" if canceled else "failed")
     assert stopped["scan"]["failureMessage"] == message
+    replayed = fail_scan(
+        state_dir, scan["scanId"], "Late stop.", *([] if canceled else ["--canceled"])
+    )
+    assert replayed["scan"]["lifecycle"] == stopped["scan"]["lifecycle"]
+    assert replayed["scan"]["failureMessage"] == message
     assert run_workbench(state_dir, "list-scans")["scans"][0]["cost"] == cost
     assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 

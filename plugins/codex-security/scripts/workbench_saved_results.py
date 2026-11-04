@@ -1264,6 +1264,9 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             error_message="Scan failure is owned by another continuation.",
         )
         message = db.optional_text(args.message)
+        canceled_at = timestamp if canceled else None
+        if canceled and cost_json is None:
+            cost_json = scan["cost_json"]
         updated = connection.execute(
             """
             UPDATE scans
@@ -1271,14 +1274,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 cost_json = ?, canceled_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (
-                message,
-                timestamp,
-                timestamp,
-                scan["cost_json"] if canceled and cost_json is None else cost_json,
-                timestamp if canceled else None,
-                scan["id"],
-            ),
+            (message, timestamp, timestamp, cost_json, canceled_at, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -1314,7 +1310,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
-            return db.workspace_state(connection, scan["workspace_id"])
+            return {
+                **db.workspace_state(connection, scan["workspace_id"]),
+                "canceledScanId": scan["id"],
+            }
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
         updated = connection.execute(
@@ -1335,7 +1334,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
     preserve_stopped_results_after_transition(db, connection, scan["id"])
-    return db.workspace_state(connection, scan["workspace_id"])
+    return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
 
 
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:

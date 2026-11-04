@@ -22,7 +22,7 @@ export function resultTitle(result: ScanResults, inputs: Inputs): string {
   if (inputs.failOnSeverity === 'none') return 'Scan completed. Findings are reported without failing the job.';
   return 'Scan completed. No findings meet the failure threshold.';
 }
-export function resultSummary(result: ScanResults, inputs: Inputs, target: Target): string {
+export function resultSummary(result: ScanResults, inputs: Inputs, target: Target, artifactUrl?: string): string {
   const esc = (value: string, limit = 4000) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(' · ') : 'unavailable';
   const usage = result.usage;
@@ -33,6 +33,7 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     : result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} · **Findings policy:** ${result.policyStatus} · **Report:** ${result.reportStatus}`,
+    ...(artifactUrl ? [`**Reports:** <a href="${html(artifactUrl)}">${esc(inputs.artifactName)}</a> · Retention: up to ${inputs.retentionDays} days.`] : []),
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(', '))}</code>` : ''} · **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
@@ -48,7 +49,8 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
   }
-  if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
+  const additional = result.findings.length - 30;
+  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`);
   parts.push('Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
   // GitHub check output is byte bounded. Truncate at UTF-8 boundaries.
   return Buffer.from(parts.join('\n\n')).subarray(0, 58_000).toString('utf8').replace(/\uFFFD$/, '');

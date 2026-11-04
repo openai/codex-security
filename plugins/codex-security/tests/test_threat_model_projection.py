@@ -3,8 +3,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -17,8 +15,15 @@ FINALIZER = fixtures.FINALIZER
 
 
 class ThreatModelProjectionTest(ScanFixtureTestCase):
+    run_finalizer = fixtures.FinalizeScanContractTest.run_finalizer
     setUp = fixtures.FinalizeScanContractTest.setUp
+    write_sealed_scan = fixtures.FinalizeScanContractTest.write_sealed_scan
     write_scan = fixtures.FinalizeScanContractTest.write_scan
+
+    def assert_saved_model_error(self, source: Path, message: str) -> None:
+        for read_model in (FINALIZER.describe_threat_model, FINALIZER.build_threat_model_export):
+            with self.assertRaisesRegex(FINALIZER.ContractError, message):
+                read_model(source)
 
     def test_saves_and_exports_markdown_threat_model_without_changing_authored_body(self) -> None:
         body = "# Service Model\n\n| Asset | Owner |\n| --- | --- |\n| Queue | Service |\n\n```text\nA -> B\n```\n"
@@ -29,8 +34,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             "scope": {"includePaths": ["."], "excludePaths": ["vendor/"]},
         }
         self.manifest["scan"]["threatModel"] = model
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         document = (self.scan_dir / "threatmodel.md").read_bytes()
         self.assertTrue(document.startswith(body.encode()))
         self.assertIn(b"Model origin: provided", document)
@@ -125,8 +129,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             with self.subTest(extensions=extensions):
                 model = {"summary": "Existing structured model.", **extensions}
                 self.manifest["scan"]["threatModel"] = model
-                self.write_scan()
-                FINALIZER.finalize_scan(self.scan_dir)
+                self.write_sealed_scan()
                 self.assertEqual(self.read_json("scan-manifest.json")["scan"]["threatModel"], model)
                 document = FINALIZER.build_threat_model_export(self.scan_dir)
                 self.assertIn(b"Existing structured model.", document)
@@ -143,8 +146,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             "content": "# Full model\n\nSource-backed detail.\n",
             "summary": "A shorter summary.",
         }
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         document = FINALIZER.build_threat_model_export(self.scan_dir)
         self.assertTrue(document.startswith(b"# Full model\n\nSource-backed detail.\n"))
         self.assertNotIn(b"A shorter summary.", document)
@@ -170,8 +172,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                     **metadata,
                 }
                 self.manifest["scan"]["threatModel"] = model
-                self.write_scan()
-                FINALIZER.finalize_scan(self.scan_dir)
+                self.write_sealed_scan()
                 sealed = (self.scan_dir / "scan-manifest.json").read_bytes()
                 document = FINALIZER.build_threat_model_export(self.scan_dir)
                 self.assertTrue(document.startswith(body.encode()))
@@ -219,18 +220,12 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         self.assertFalse((self.scan_dir / "threatmodel.md").exists())
 
     def test_missing_threat_model_does_not_create_placeholder(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         self.assertFalse((self.scan_dir / "threatmodel.md").exists())
         with unittest.mock.patch.object(
             FINALIZER, "_read_sealed_scan", wraps=FINALIZER._read_sealed_scan
         ) as read_sealed:
-            for read_model in (
-                FINALIZER.describe_threat_model,
-                FINALIZER.build_threat_model_export,
-            ):
-                with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
-                    read_model(self.scan_dir)
+            self.assert_saved_model_error(self.scan_dir, "No saved threat model")
             read_sealed.assert_not_called()
 
         manifest = self.read_json("scan-manifest.json")
@@ -249,8 +244,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             "summary": " \n\t",
             "assets": ["Stored records"],
         }
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         FINALIZER.finalize_scan(self.scan_dir)
         for document in (
             (self.scan_dir / "report.md").read_text(),
@@ -274,10 +268,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         )
         FINALIZER.finalize_scan(self.scan_dir)
         self.assertFalse((self.scan_dir / "threatmodel.md").exists())
-        with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
-            FINALIZER.describe_threat_model(self.scan_dir)
-        with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
-            FINALIZER.build_threat_model_export(self.scan_dir)
+        self.assert_saved_model_error(self.scan_dir, "No saved threat model")
         (self.scan_dir / "scan-manifest.json").unlink()
         self.assertIn(
             b"A separate policy model.", FINALIZER.build_threat_model_export(self.scan_dir)
@@ -309,12 +300,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         )
         legacy = self.scan_dir / "threatmodel.md"
         legacy.write_text("# Earlier model\n")
-        for read_model in (
-            FINALIZER.describe_threat_model,
-            FINALIZER.build_threat_model_export,
-        ):
-            with self.assertRaisesRegex(FINALIZER.ContractError, r"scan-manifest\.json"):
-                read_model(self.scan_dir)
+        self.assert_saved_model_error(self.scan_dir, r"scan-manifest\.json")
         self.assertTrue(manifest.is_symlink())
         self.assertEqual(legacy.read_text(), "# Earlier model\n")
         manifest.unlink()
@@ -351,16 +337,14 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
 
     def test_threat_model_export_validates_existing_scan_seal(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Queue ownership and boundaries."}
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         (self.scan_dir / "findings.json").write_text("{}")
         with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
             FINALIZER.build_threat_model_export(self.scan_dir)
 
     def test_projection_preserves_existing_sealed_threat_model(self) -> None:
         self.manifest["scan"]["threatModel"] = {"summary": "Canonical queue boundaries."}
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         original = b"# Historical model\n\nRetained sealed evidence.\n"
         document = self.scan_dir / "threatmodel.md"
         document.write_bytes(original)
@@ -373,18 +357,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
 
         FINALIZER.finalize_scan(self.scan_dir)
         self.assertEqual(document.read_bytes(), original)
-        written = subprocess.run(
-            [
-                sys.executable,
-                str(Path(FINALIZER.__file__)),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--write-threat-model",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        written = self.run_finalizer("--write-threat-model")
         self.assertEqual(written.returncode, 0, written.stderr)
         self.assertEqual(document.read_bytes(), original)
         self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), sealed_manifest)
@@ -555,14 +528,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                     path.write_text(original)
                     legacy = source / "threatmodel.md"
                     legacy.write_bytes(body.encode())
-                    for read_model in (
-                        FINALIZER.describe_threat_model,
-                        FINALIZER.build_threat_model_export,
-                    ):
-                        with self.assertRaisesRegex(
-                            FINALIZER.ContractError, "threatModel: expected an object"
-                        ):
-                            read_model(source)
+                    self.assert_saved_model_error(source, "threatModel: expected an object")
                     self.assertEqual(path.read_text(), original)
                     self.assertEqual(legacy.read_text(), body)
                     current = manifest["scan"] if filename == "scan-manifest.json" else manifest
@@ -585,50 +551,23 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             },
         }
         self.write_json("policy-draft.json", manifest)
-        script = Path(FINALIZER.__file__)
-        saved = subprocess.run(
-            [sys.executable, str(script), "--scan-dir", str(self.scan_dir), "--write-threat-model"],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        saved = self.run_finalizer("--write-threat-model")
         self.assertEqual(saved.returncode, 0, saved.stderr)
         self.assertIn("provisional", (self.scan_dir / "threatmodel.md").read_text())
         manifest["status"] = "completed"
         self.write_json("policy-draft.json", manifest)
-        exported = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-artifact",
-                "threat-model",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        exported = self.run_finalizer("--export-artifact", "threat-model")
         self.assertEqual(exported.returncode, 0, exported.stderr)
         self.assertTrue(exported.stdout.startswith(manifest["threatModel"]["content"]))
         self.assertNotIn("provisional", exported.stdout)
         self.assertIn("Source: policy", exported.stdout)
         destination = self.scan_dir / "exports" / "threatmodel.md"
-        exported_with_metadata = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--scan-dir",
-                str(self.scan_dir),
-                "--export-artifact",
-                "threat-model",
-                "--export-output",
-                str(destination),
-                "--export-metadata",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
+        exported_with_metadata = self.run_finalizer(
+            "--export-artifact",
+            "threat-model",
+            "--export-output",
+            str(destination),
+            "--export-metadata",
         )
         self.assertEqual(exported_with_metadata.returncode, 0, exported_with_metadata.stderr)
         metadata = json.loads(exported_with_metadata.stdout)
@@ -639,8 +578,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
 
     def test_legacy_document_preserves_available_result_context(self) -> None:
         body = "# Existing model\n\nReview the recorded service boundaries.\n"
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         legacy_path = self.scan_dir / "artifacts" / "01_context" / "threat_model.md"
         legacy_path.parent.mkdir(parents=True)
         legacy_path.write_bytes(body.encode())
@@ -666,9 +604,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         self.assertEqual(description["path"], str(legacy_path))
         self.assertEqual(FINALIZER.build_threat_model_export(self.scan_dir), body.encode())
         legacy_path.write_text(body + "\nChanged since sealing.\n")
-        for read_model in (FINALIZER.describe_threat_model, FINALIZER.build_threat_model_export):
-            with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
-                read_model(self.scan_dir)
+        self.assert_saved_model_error(self.scan_dir, "sealed artifact changed")
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory).resolve()
@@ -690,8 +626,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             self.assertEqual(FINALIZER.build_threat_model_export(source), body.encode())
 
     def test_sealed_scan_does_not_expose_unrecorded_legacy_models(self) -> None:
-        self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        self.write_sealed_scan()
         manifest_bytes = (self.scan_dir / "scan-manifest.json").read_bytes()
         body = b"# Unrecorded model\n"
         for filename in (
@@ -704,12 +639,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                 path = self.scan_dir / filename
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(body)
-                for read_model in (
-                    FINALIZER.describe_threat_model,
-                    FINALIZER.build_threat_model_export,
-                ):
-                    with self.assertRaisesRegex(FINALIZER.ContractError, "No saved threat model"):
-                        read_model(self.scan_dir)
+                self.assert_saved_model_error(self.scan_dir, "No saved threat model")
                 self.assertEqual(path.read_bytes(), body)
                 path.unlink()
         self.assertEqual((self.scan_dir / "scan-manifest.json").read_bytes(), manifest_bytes)
