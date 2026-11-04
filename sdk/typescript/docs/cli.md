@@ -2360,8 +2360,9 @@ this repository and contains only the generated commands. Rerun `install-hook`
 with `--fail-on-severity` set to its original threshold. It recognizes the legacy
 `npx` hook and supported earlier templates with matching absolute Node and CLI
 paths. If it refuses to overwrite the verified hook, back it up, remove it and
-reinstall with the same threshold. Restore the backup if installation fails. The installer
-respects `core.hooksPath`.
+reinstall with the same threshold. Restore the backup if installation fails.
+The installer uses host Git for the selected repository and respects
+`core.hooksPath`.
 
 ## Import SonarQube Cloud issues
 
