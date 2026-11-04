@@ -10,6 +10,7 @@ import { hash, randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -18,6 +19,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+function assertScanTarget(meta: unknown, scanId: string) {
+  assert.deepEqual(meta, {
+    "codex/telemetry": { span: { target_id: scanId } },
+  });
+}
 
 const continuationOptions = [
   {
@@ -105,6 +112,7 @@ assert.deepEqual(
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
@@ -430,6 +438,10 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
         _meta: { "openai/threadId": `fixture-path-launch-${index}` },
       });
       assertNoError(launched);
+      assertScanTarget(
+        launched.result._meta,
+        launched.result.structuredContent.scan.scanId,
+      );
       assert.equal(
         launched.result.structuredContent.scan.targetPath,
         canonicalTarget,
@@ -498,6 +510,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: { targetPath: target },
     });
     assert.equal(withoutOwner.result.isError, true);
+    assert.equal(withoutOwner.result._meta, undefined);
     assert.match(
       withoutOwner.result.content[0].text,
       /owning Codex thread context/,
@@ -518,7 +531,6 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       },
     });
     assertNoError(started);
-    assert.equal(started.result._meta, undefined);
     const result = started.result.structuredContent;
     assert.equal(result.startDisposition, "created");
     assert.match(result.scanId, /^[0-9a-f-]{36}$/);
@@ -547,6 +559,12 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
     for (const response of [started, joined]) {
+      assertScanTarget(response.result._meta, result.scanId);
+      assert.deepEqual(
+        response.result.structuredContent.scan.lifecycle,
+        result.scan.lifecycle,
+      );
+      assert.equal(result.scan.lifecycle.status, "running");
       assert.match(
         response.result.content[0].text,
         /references\/scan-runtime\.md/,
@@ -650,6 +668,11 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
         },
       });
       assertNoError(completed);
+      assertScanTarget(completed.result._meta, scan.scanId);
+      assert.equal(
+        completed.result.structuredContent.scan.lifecycle.status,
+        "completed",
+      );
       assert.equal(
         completed.result.structuredContent.scan.progress.status,
         "complete",
@@ -825,6 +848,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       .map((item: { text: string }) => item.text)
       .join(" ");
     assert.equal(canceledWithPublicationFailure.result.isError, true);
+    assertScanTarget(canceledWithPublicationFailure.result._meta, scan.scanId);
     assert.equal(
       canceledWithPublicationFailure.result.structuredContent,
       undefined,
@@ -1904,6 +1928,7 @@ try {
     .map((item: { text: string }) => item.text)
     .join(" ");
   assert.equal(missingPersistedDeepScan.result.isError, true);
+  assert.equal(missingPersistedDeepScan.result._meta, undefined);
   assert.equal(missingPersistedDeepScan.result.structuredContent, undefined);
   assert.match(missingPersistedDeepScanText, /Codex Security scan not found/);
   assert.match(
@@ -2287,6 +2312,7 @@ try {
     false,
   );
   const scanId = startedWorkspace.results.scanId;
+  assertScanTarget(started.result._meta, scanId);
   assert.equal(startedWorkspace.results.progress.phase, "preflight");
   assert.equal(startedWorkspace.results.progress.status, "running");
   assert.equal(startedWorkspace.results.handoffStatus, "pending");
@@ -2570,9 +2596,10 @@ try {
   );
   const refreshed = await testServer.callTool(10, {
     name: "get_codex_security_scan",
-    arguments: { scanId },
+    arguments: { scanId: scanId.toUpperCase() },
   });
   assertNoError(refreshed);
+  assertScanTarget(refreshed.result._meta, scanId);
   const results = refreshed.result.structuredContent.scan;
   assert.equal(results.findings.length, 2);
   assert.equal(results.findingCount, 2);
@@ -2692,7 +2719,11 @@ try {
     rejectedPendingClose.result.content[0].text,
     /pending remediation operation/,
   );
-  const remediationPatchPath = " remediation.patch";
+  const manifestPath = path.join(initializedScanDir, "scan-manifest.json");
+  const sealedManifest = await readFile(manifestPath);
+  const filesBeforeGeneration = await readdir(initializedScanDir, {
+    recursive: true,
+  });
   const remediationPatch = `diff --git a/src/a.py b/src/a.py
 --- a/src/a.py
 +++ b/src/a.py
@@ -2700,14 +2731,6 @@ try {
 -vulnerable
 +fixed
 `;
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath),
-    remediationPatch,
-  );
-  await writeFile(
-    path.join(initializedScanDir, remediationPatchPath.trim()),
-    "different patch contents\n",
-  );
   const generatedPatch = await testServer.callTool(62, {
     name: "set_codex_security_finding_remediation",
     arguments: {
@@ -2716,27 +2739,34 @@ try {
       requestId: remediationRequestId,
       expectedVersion: 1,
       state: "generated",
-      patchPath: remediationPatchPath,
-      patchDigest: `sha256:${hash("sha256", remediationPatch)}`,
+      patch: remediationPatch,
       summary: "Contain archive extraction under the output root.",
     },
   });
   assertNoError(generatedPatch);
+  const generatedFinding =
+    generatedPatch.result.structuredContent.scan.findings[0];
+  const remediation = generatedFinding.remediationState;
+  const savedPatchPath = path.join(initializedScanDir, remediation.patchPath);
+  assert.equal(remediation.state, "generated");
+  assert.equal(remediation.patch, remediationPatch);
   assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .state,
-    "generated",
+    remediation.patchDigest,
+    `sha256:${hash("sha256", remediationPatch)}`,
   );
+  assert.ok(
+    !filesBeforeGeneration.includes(path.normalize(remediation.patchPath)),
+  );
+  assert.deepEqual(
+    await readFile(savedPatchPath),
+    Buffer.from(remediationPatch),
+  );
+  assert.deepEqual(await readFile(manifestPath), sealedManifest);
   assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .patch,
-    remediationPatch,
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    "vulnerable\n",
   );
-  assert.equal(
-    generatedPatch.result.structuredContent.scan.findings[0].remediationState
-      .patchPath,
-    remediationPatchPath,
-  );
+  assert.equal(generatedFinding.triage.status, "open");
 
   const applyActionToken = randomUUID();
   const requestedApply = await testServer.callTool(65, {
@@ -2773,16 +2803,10 @@ try {
     markedApplyDelivered.result.structuredContent.scan.findings[0]
       .remediationState.actionDeliveredAt,
   );
-  execFileSync(
-    "git",
-    [
-      "apply",
-      "--no-index",
-      path.join(initializedScanDir, remediationPatchPath),
-    ],
-    {
-      cwd: target,
-    },
+  execFileSync("git", ["apply", "--no-index", savedPatchPath], { cwd: target });
+  assert.match(
+    await readFile(path.join(target, "src/a.py"), "utf8"),
+    /^fixed\r?\n$/,
   );
 
   const appliedPatch = await testServer.callTool(66, {
@@ -2794,9 +2818,7 @@ try {
       occurrenceId,
       requestId: remediationRequestId,
       state: "applied",
-      patchPath:
-        generatedPatch.result.structuredContent.scan.findings[0]
-          .remediationState.patchPath,
+      patchPath: remediation.patchPath,
     },
   });
   assertNoError(appliedPatch);
@@ -2880,6 +2902,55 @@ try {
       .verificationSummary,
     "Focused remediation checks passed.",
   );
+
+  const latin1Source = path.join(target, "src/info.py");
+  await writeFile(latin1Source, "café\n", "latin1");
+  const latin1Patch = Buffer.from(
+    "--- a/src/info.py\n+++ b/src/info.py\n@@ -1 +1 @@\n-café\n+résolu\n",
+    "latin1",
+  );
+  const latin1Request = {
+    occurrenceId: results.findings[1].occurrenceId,
+    actionToken: randomUUID(),
+    requestId: randomUUID(),
+  };
+  assertNoError(
+    await testServer.callTool(174, {
+      name: "request_codex_security_finding_remediation",
+      arguments: latin1Request,
+    }),
+  );
+  const latin1Generation = {
+    ...latin1Request,
+    expectedVersion: 1,
+    state: "generated",
+  };
+  const malformedPatch = await testServer.callTool(175, {
+    name: "set_codex_security_finding_remediation",
+    arguments: { ...latin1Generation, patch: "bad\ud800" },
+  });
+  assert.equal(malformedPatch.result.isError, true);
+  assert.match(
+    malformedPatch.result.content[0].text,
+    /unpaired Unicode surrogate.*base64/,
+  );
+  const generatedLatin1 = await testServer.callTool(176, {
+    name: "set_codex_security_finding_remediation",
+    arguments: {
+      ...latin1Generation,
+      patch: { encoding: "base64", content: latin1Patch.toString("base64") },
+    },
+  });
+  assertNoError(generatedLatin1);
+  const { patchDigest, patchPath } =
+    generatedLatin1.result.structuredContent.scan.findings[1].remediationState;
+  const latin1PatchPath = path.join(initializedScanDir, patchPath);
+  assert.equal(patchDigest, `sha256:${hash("sha256", latin1Patch)}`);
+  assert.deepEqual(await readFile(latin1PatchPath), latin1Patch);
+  execFileSync("git", ["apply", "--no-index", latin1PatchPath], {
+    cwd: target,
+  });
+  assert.match(await readFile(latin1Source, "latin1"), /^résolu\r?\n$/);
 
   const findingsPage = await testServer.callTool(67, {
     name: "list_codex_security_findings",
@@ -3017,13 +3088,15 @@ try {
     arguments: { scanId: canceledScanId },
   });
   assertNoError(canceledFromNativeRoute);
+  assertScanTarget(canceledFromNativeRoute.result._meta, canceledScanId);
 
   const canceled = await testServer.callTool(172, {
     name: "cancel_codex_security_scan",
-    arguments: { scanId: canceledScanId },
+    arguments: { scanId: canceledScanId.toUpperCase() },
     _meta: { "openai/threadId": "fixture-thread" },
   });
   assertNoError(canceled);
+  assertScanTarget(canceled.result._meta, canceledScanId);
   assert.equal(
     canceled.result.structuredContent.workspace.results.progress.status,
     "canceled",
@@ -3050,6 +3123,16 @@ try {
   assertNoError(fallbackStarted);
   const fallbackScanId =
     fallbackStarted.result.structuredContent.workspace.results.scanId;
+  const oldCancellation = await testServer.callTool(2211, {
+    name: "cancel_codex_security_scan_from_app",
+    arguments: { scanId: canceledScanId },
+  });
+  assertNoError(oldCancellation);
+  assert.equal(
+    oldCancellation.result.structuredContent.workspace.results.scanId,
+    fallbackScanId,
+  );
+  assertScanTarget(oldCancellation.result._meta, canceledScanId);
   const fallbackClaimToken = `recovery_${randomUUID()}`;
   const fallbackClaimed = await testServer.callTool(2012, {
     name: "claim_codex_security_scan_handoff_delivery",
@@ -3377,6 +3460,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedFailure);
+  assertScanTarget(rotatedFailure.result._meta, fallbackScanId);
   assert.equal(
     rotatedFailure.result.structuredContent.scan.failureMessage,
     failureMessage,

@@ -53,15 +53,25 @@ function docxBody(body: string): Uint8Array {
 }
 
 function pdf(text: string): Uint8Array {
-  const escaped = text.replace(/[\\()]/gu, "\\$&");
-  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  return pdfContent(`(${text.replace(/[\\()]/gu, "\\$&")}) Tj`);
+}
+
+function pdfContent(operators: string, form?: string): Uint8Array {
+  const stream = `BT /F1 12 Tf 72 720 Td ${operators} ET`;
+  const font = "/Font << /F1 4 0 R >>";
+  const forms = form ? " /XObject << /Word 6 0 R >>" : "";
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << ${font}${forms} >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
+  if (form) {
+    objects.push(
+      `<< /Type /XObject /Subtype /Form /BBox [0 0 300 100] /Resources << ${font} >> /Length ${Buffer.byteLength(form)} >>\nstream\n${form}\nendstream`,
+    );
+  }
   let output = "%PDF-1.4\n";
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
@@ -474,7 +484,10 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(
       join(root, "architecture.pdf"),
-      pdf("Payment service boundary"),
+      pdfContent(
+        "(Policy ) Tj /F1 14 Tf (guide) Tj /F1 12 Tf 0 -14 Td (Require) Tj ET q 1 0 0 1 117.348 706 cm /Word Do Q BT",
+        "BT /F1 12 Tf (authentication) Tj ET",
+      ),
     );
     await writeFile(
       join(root, "threat-model.docx"),
@@ -497,11 +510,23 @@ describe("scan knowledge bases", () => {
       docx("User", "Permission", "<w:tab/>"),
     );
     await writeFile(
+      join(root, "non-breaking-hyphen.docx"),
+      docx("X", "Frame-Options", "<w:noBreakHyphen/>"),
+    );
+    await writeFile(
       join(root, "tracked-change.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
           '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
           "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "tracked-move.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Rotate keys. </w:t></w:r>' +
+          '<w:moveFrom w:id="2" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveFrom></w:p>' +
+          '<w:p><w:moveTo w:id="3" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveTo></w:p>',
       ),
     );
     await writeFile(
@@ -517,13 +542,15 @@ describe("scan knowledge bases", () => {
     temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
-    expect(documents).toContain("Payment service boundary");
+    expect(documents).toContain("Policy guide\nRequire authentication");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
   });
 
@@ -651,7 +678,8 @@ describe("scan knowledge bases", () => {
         "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Rule 12700.</w:t></w:r></w:p></w:txbxContent></wps:txbx>" +
         '<sizeRelH xmlns="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><pctWidth>75000</pctWidth></sizeRelH>' +
         '</d:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml">' +
-        '<div xmlns:d="http://www.w3.org/1999/xhtml">Rule <d:b>12700.</d:b></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        '<div xmlns:d="urn:example:format">Rule <d:align>12700.</d:align></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        "<w:drawing><d:anchor><d:positionH><d:posOffset>25400</d:posOffset></d:positionH></d:anchor></w:drawing>" +
         "<w:t> After.</w:t></w:r></w:p>",
       "Before Rule 12700.\nRule 12700. After.\n",
     ],
@@ -843,6 +871,24 @@ describe("scan knowledge bases", () => {
 
     expect(await extractedDocuments(knowledgeBase.path)).toEqual([
       "Access policy.\n",
+    ]);
+  });
+
+  test("skips macOS metadata files copied next to documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
+    await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    const appleDouble = Buffer.alloc(82);
+    appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
+    await writeFile(join(root, "._guide.md"), appleDouble);
+    await writeFile(join(root, "._policy.pdf"), appleDouble);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "Access policy.",
+      "Rotate admin keys monthly.",
     ]);
   });
 
