@@ -1,9 +1,24 @@
+import {
+  normalizeSemgrepPlatformFindings,
+  isSemgrepPlatformFormat,
+  semgrepPlatformLegacyFormat,
+  semgrepPlatformFormat,
+} from "./semgrep-platform-findings.js";
+import { isRecord } from "./record.js";
+import {
+  guardianSelectionFormat,
+  normalizeGuardianSelection,
+} from "./semgrep-guardian-findings.js";
+import { parseHostedScannerJson } from "./hosted-scanner-http.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 import {
   messageText,
   parseNativeJsonResult,
@@ -16,23 +31,25 @@ import {
 import {
   array,
   hasSarifExternalPropertyReferences,
-  indexSarifRules,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunResults,
   stableId,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 export interface SemgrepImportOptions {
+  /** Independent source references from the SDK reader. */
+  sourceRepositories?: readonly ExternalSourceRepository[];
   /** Source repository declared by the caller; never inferred from the destination. */
   sourceRepositoryUrl: string;
 }
 
-function sourceRepository(options: SemgrepImportOptions): string {
+function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
@@ -105,6 +122,16 @@ function sarifArtifactUri(
   return base === "%SRCROOT%" ? uri : decodeURIComponent(uri);
 }
 
+function primarySarifLocation(result: Record<string, unknown>) {
+  const locations = array(result["locations"] ?? [], "Semgrep locations");
+  if (locations.length !== 1)
+    throw new Error("Expected Semgrep's single primary result location.");
+  const location = record(locations[0], "Location");
+  const physical = record(location["physicalLocation"], "Physical location");
+  const artifact = record(physical["artifactLocation"], "Artifact location");
+  return { physical, artifact };
+}
+
 function sarifIdentity(
   value: unknown,
   runContext: Record<string, unknown>,
@@ -116,17 +143,8 @@ function sarifIdentity(
     ],
   );
   if (supplied) return stableId("semgrep", [supplied]);
-  const locations = array(result["locations"] ?? [], "Semgrep locations");
-  if (locations.length !== 1)
-    throw new Error("Expected Semgrep's single primary result location.");
-  const physical = record(
-    record(locations[0], "Location")["physicalLocation"],
-    "Physical location",
-  );
-  const uri = sarifArtifactUri(
-    record(physical["artifactLocation"], "Artifact location"),
-    runContext,
-  );
+  const { physical, artifact } = primarySarifLocation(result);
+  const uri = sarifArtifactUri(artifact, runContext);
   if (uri === null)
     throw new Error(
       "Cannot derive a Semgrep CE identity from an indexed or unresolved base-relative artifact URI.",
@@ -146,12 +164,29 @@ function sarifIdentity(
 
 export function normalizeSemgrepFindings(
   input: unknown,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
+  if (document["format"] === guardianSelectionFormat) {
+    if (target !== "local")
+      throw new Error("Import Guardian selections into the local workbench.");
+    return normalizeGuardianSelection(document, options.sourceRepositoryUrl);
+  }
+  if (isSemgrepPlatformFormat(document["format"])) {
+    return normalizeSemgrepPlatformFindings(
+      document,
+      options?.sourceRepositoryUrl,
+      target,
+      options?.sourceRepositories,
+    );
+  }
   if (document["version"] === "2.1.0" && document["runs"] !== undefined)
-    return normalizeSemgrepSarif(document, options, target);
+    return normalizeSemgrepSarif(
+      document,
+      { ...options, sourceRepositoryUrl: options?.sourceRepositoryUrl ?? "" },
+      target,
+    );
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
   if (array(document["errors"] ?? [], "Semgrep errors").length)
@@ -172,6 +207,10 @@ export function normalizeSemgrepFindings(
     jsonIdentity,
     target,
   );
+}
+
+export function isSemgrepSarifDriver(name: string): boolean {
+  return ["semgrep", "semgrep oss", "semgrep pro"].includes(name.toLowerCase());
 }
 
 export function normalizeSemgrepSarif(
@@ -202,11 +241,7 @@ export function normalizeSemgrepSarif(
     }
     const tool = record(run["tool"], "SARIF tool");
     const driver = record(tool["driver"], "SARIF driver");
-    if (
-      !["semgrep", "semgrep oss", "semgrep pro"].includes(
-        requiredText(driver["name"], "SARIF producer").toLowerCase(),
-      )
-    )
+    if (!isSemgrepSarifDriver(requiredText(driver["name"], "SARIF producer")))
       throw new Error("Expected a Semgrep SARIF producer.");
     if (
       hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
@@ -227,27 +262,11 @@ export function normalizeSemgrepSarif(
       )
         throw new Error("Semgrep SARIF contains scan error notifications.");
     }
-    const rules = array(driver["rules"] ?? [], "Semgrep rules").map((r) =>
-      record(r, "Semgrep rule"),
-    );
-    const rulesById = indexSarifRules(rules);
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Semgrep results").map((result) => ({
-      result,
-      rulesById,
-      hasRules: rules.length > 0,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
-    }));
+    return sarifRunResults(document, run, tool, driver, "Semgrep");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, hasRules, ...context }) => {
+    ({ result: value, context }) => {
       const result = record(value, "Semgrep result");
       const properties = record(
         result["properties"] ?? {},
@@ -261,39 +280,14 @@ export function normalizeSemgrepSarif(
           "This adapter supports Semgrep SAST; Supply Chain reports need separate qualification.",
         );
       const ruleId = requiredText(result["ruleId"], "Semgrep ruleId");
-      const selectedRule = rulesById.get(ruleId);
-      if (selectedRule === null || (hasRules && selectedRule === undefined))
+      const selectedRule = context.rulesById.get(ruleId) ?? undefined;
+      if (context.rulesById.size > 0 && !selectedRule)
         throw new Error(
           "Semgrep result must reference exactly one rule in its run.",
         );
       const rule = selectedRule?.rule;
-      const ruleIndex = selectedRule?.index;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Semgrep ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const ref = record(result["rule"], "Semgrep rule reference");
-        if (
-          ref["toolComponent"] !== undefined ||
-          (ref["id"] !== undefined && ref["id"] !== ruleId) ||
-          (ref["index"] !== undefined && ref["index"] !== ruleIndex) ||
-          (ref["guid"] !== undefined && ref["guid"] !== rule?.["guid"])
-        )
-          throw new Error("Inconsistent or external Semgrep rule reference.");
-      }
-      const locations = array(result["locations"] ?? [], "Semgrep locations");
-      if (locations.length !== 1)
-        throw new Error("Expected Semgrep's single primary result location.");
-      const physical = record(
-        record(locations[0], "Location")["physicalLocation"],
-        "Physical location",
-      );
-      const artifact = record(
-        physical["artifactLocation"],
-        "Artifact location",
-      );
+      validateSarifRuleReference(result, ruleId, selectedRule, "Semgrep");
+      const { physical, artifact } = primarySarifLocation(result);
       const rawPath = sarifArtifactUri(artifact, context.runContext);
       const region = record(physical["region"], "Semgrep region");
       const line = position(region["startLine"], "Start line");
@@ -355,32 +349,45 @@ export function normalizeSemgrepSarif(
                 ? "suppressed"
                 : null,
           },
-          source_data: structuredClone({
-            ...context,
-            runContext: sarifRunContextForResult(
-              context.runContext,
-              result,
-              rule,
-              context.driverContext,
-              context.toolContext,
-              context.documentContext,
-            ),
-            ...(rule ? { rule } : {}),
-            result,
-          }),
+          source_data: context.sourceData(result, rule),
         },
         target,
       );
     },
-    ({ result, runContext }) => sarifIdentity(result, runContext),
+    ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
   );
 }
 
+/** @internal Read the original file before resolving repository provenance. */
+export async function readSemgrepReport(path: string): Promise<unknown> {
+  return readScannerJson(path, (json) => {
+    // Pick a parser before allocating the findings array. Verify the root:
+    // the member can be nested in a native report or escaped in a Platform one.
+    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v[12]"/u.test(
+      json,
+    )
+      ? parseHostedScannerJson
+      : JSON.parse;
+    const parsed: unknown = parser(json);
+    const requiredParser =
+      isRecord(parsed) &&
+      (parsed["format"] === semgrepPlatformLegacyFormat ||
+        parsed["format"] === semgrepPlatformFormat)
+        ? parseHostedScannerJson
+        : JSON.parse;
+    return parser === requiredParser ? parsed : requiredParser(json);
+  });
+}
+
 export async function readSemgrepFindings(
   path: string,
-  options: SemgrepImportOptions,
+  options: Partial<SemgrepImportOptions> = {},
   target: ExternalImportTarget = "cloud",
 ): Promise<ExternalFindings> {
-  return normalizeSemgrepFindings(await readScannerJson(path), options, target);
+  return normalizeSemgrepFindings(
+    await readSemgrepReport(path),
+    options,
+    target,
+  );
 }

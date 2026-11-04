@@ -1,6 +1,13 @@
 # Independent baseline audit
 
-Audit the repository's architecture, entry points, and security boundaries independently. Follow attacker-controlled input through effective controls to sensitive operations; investigate relevant vulnerability classes rather than relying on keyword matches. Include authentication, authorization, parsing, execution, data exposure, and resource or memory safety where the implementation exposes those boundaries.
+Audit the repository's architecture, entry points, and security boundaries independently. Follow attacker-controlled input through effective controls to sensitive operations. Use the surfaces you encounter to choose which vulnerability classes to investigate.
+
+- At object reads and state changes, check authentication, ownership, tenant isolation, and authorization differences between sibling operations.
+- At query builders, renderers, and interpreters, check SQL or NoSQL injection, XSS, template or command injection, and unsafe deserialization.
+- At file and network boundaries, check traversal, unsafe uploads, open redirects, SSRF, and sensitive data exposure.
+- Check XML parsers for external entity resolution, HTTP intermediaries for request smuggling, object merges for prototype pollution, and attacker-controlled sizes or lifetimes for resource exhaustion or memory-safety errors.
+
+Use these examples as starting points. Establish the reachable path, effective control, and consequence for each finding.
 
 Explicitly inspect embedded credentials and private keys, including configuration, documentation, tests, examples, and inactive code. Establish their purpose from context. Source-reader access to a credential with additional authority is sufficient to consider a disclosure; execution of its containing code is not required. Public material and demonstrable placeholders are not secrets. Unknown live validity limits confidence, not the evidence of exposure. Do not use the credential or contact a service.
 

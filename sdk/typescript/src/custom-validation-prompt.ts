@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { JsonObject } from "./config.js";
+import { resolveCodexProfile, type JsonObject } from "./config.js";
 import { IncompleteScanError } from "./errors.js";
 import { PLUGIN_NAME } from "./runtime.js";
 
@@ -9,8 +9,10 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md": [
-    "226e229a4459fdf0508606323a85f770f175f2c76b8c3336ec27a2ad4fb54ed6",
+    "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
+    "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
+    "848eb40d42b0bf9cf21748b9927d031b0461a4443f63e3954139f9801f41c3f6",
   ],
   "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
@@ -51,8 +53,11 @@ function step(text: string, number: number): string {
   return text.match(new RegExp(`^${number}\\. (.+)$`, "m"))![1]!;
 }
 
-async function legacyDiscoveryPrompt(pluginRoot: string, core: string) {
-  const skill = await source(pluginRoot, "skills/security-scan/SKILL.md");
+async function legacyDiscoveryPrompt(pluginRoot: string) {
+  const [skill, core] = await Promise.all([
+    source(pluginRoot, "skills/security-scan/SKILL.md"),
+    source(pluginRoot, "references/core-scan.md"),
+  ]);
   const discovery = core
     .replace(
       /^7\. .+$/m,
@@ -84,17 +89,17 @@ async function legacyDiscoveryPrompt(pluginRoot: string, core: string) {
 export async function customDiscoveryPrompt(
   pluginRoot: string,
   skillName: string,
+  standardHandoff: boolean,
 ): Promise<string> {
   let workflow: string;
   if (skillName === "security-scan") {
-    const core = await source(pluginRoot, "references/core-scan.md");
-    workflow = core.includes("## Baseline Auditor Prompt")
-      ? await legacyDiscoveryPrompt(pluginRoot, core)
-      : [
+    workflow = standardHandoff
+      ? [
           "Use <plugin_dir>/references/core-scan.md for source discovery. This caller supplies the validation handoff: the SDK runs independent final validation in a separate turn. Check source evidence and counterevidence now, but do not run the default validation pass.",
           "Keep any supplied investigation time allowance unchanged. Only for an explicit time request with no existing allowance, render <plugin_dir>/references/investigation-time-budget.md once before source review.",
           HANDOFF,
-        ].join("\n\n");
+        ].join("\n\n")
+      : await legacyDiscoveryPrompt(pluginRoot);
   } else if (skillName === "security-diff-scan") {
     const skill = await source(
       pluginRoot,
@@ -119,6 +124,7 @@ export async function customValidationConfig(
   config: JsonObject,
   pluginRoot: string,
 ): Promise<JsonObject> {
+  config = resolveCodexProfile(config);
   const manifest = JSON.parse(
     await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
   );

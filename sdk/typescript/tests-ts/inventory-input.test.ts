@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -671,6 +673,97 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
   });
 }
 
+test("make-repo-scope-input reports the count for its registered inventory", () => {
+  const f = fixture();
+  f.write("source");
+  const args = f.scopeArgs("source");
+  const scanDir = join(f.root, "scan");
+  mkdirSync(scanDir);
+  const output = join(scanDir, "scoped-source-input.jsonl");
+  const receipt = join(scanDir, "scoped-source-input.receipt.json");
+  const otherScopes = join(f.root, "alternate.json");
+  copyFileSync(args[1]!, otherScopes);
+  const scanId = randomUUID();
+  const env = {
+    ...f.toolEnvironment,
+    CODEX_SECURITY_SCAN_DIR: scanDir,
+    CODEX_SECURITY_SCAN_ID: scanId,
+    CODEX_SECURITY_REPOSITORY: f.repo + sep + ".",
+    CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+  };
+  const run = (overrides: NodeJS.ProcessEnv = {}, out = output) => {
+    const result = f.run("make-repo-scope-input", [...args, "--out", out], {
+      ...env,
+      ...overrides,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trimEnd()).toBe(`Wrote 1 scoped paths to ${out}`);
+  };
+  for (const mismatch of [
+    { CODEX_SECURITY_SCAN_ID: "" },
+    { CODEX_SECURITY_REPOSITORY: f.root },
+    { CODEX_SECURITY_TARGET_PATHS_FILE: otherScopes },
+    { CODEX_SECURITY_SCAN_DIR: f.root },
+  ]) {
+    run(mismatch);
+    expect(existsSync(receipt)).toBe(false);
+  }
+  run({}, f.out);
+  expect(existsSync(receipt)).toBe(false);
+
+  const existing = statSync(output, { bigint: true });
+  run();
+  const inventory = readFileSync(output);
+  const written = statSync(output, { bigint: true });
+  expect(written.ino).toBe(existing.ino);
+  expect(written.mode).toBe(existing.mode);
+  if (process.platform !== "win32") {
+    expect(statSync(receipt).mode & 0o777).toBe(0o600);
+  }
+  expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual({
+    scanId,
+    repository: f.repo,
+    count: 1,
+  });
+  rmSync(receipt);
+  mkdirSync(receipt);
+  run();
+  expect(readFileSync(output)).toEqual(inventory);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "registered scope inventory preserves read-only output and reports the write failure",
+  () => {
+    const f = fixture();
+    f.write("source");
+    const args = f.scopeArgs("source");
+    const output = join(f.root, "scoped-source-input.jsonl");
+    writeFileSync(output, "existing inventory");
+    chmodSync(output, 0o444);
+    try {
+      const result = f.run(
+        "make-repo-scope-input",
+        [...args, "--out", output],
+        {
+          ...f.toolEnvironment,
+          CODEX_SECURITY_SCAN_DIR: f.root,
+          CODEX_SECURITY_SCAN_ID: randomUUID(),
+          CODEX_SECURITY_REPOSITORY: f.repo,
+          CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(readFileSync(output, "utf8")).toBe("existing inventory");
+      expect(existsSync(join(f.root, "scoped-source-input.receipt.json"))).toBe(
+        false,
+      );
+    } finally {
+      chmodSync(output, 0o600);
+    }
+  },
+);
+
 test("make-repo-scope-input retains explicit and ignored tracked files without widening directory scope", () => {
   const f = fixture();
   f.write("src/source.py");
@@ -961,8 +1054,13 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       const f = fixture();
       const contents = binary ? Buffer.from("\0selected\n") : "selected\n";
       f.write("inside/source.py", contents);
+      f.write("inside/changed.py", Buffer.from("\0binary"));
+      f.write("src/nested/changed.py", "original\n");
       f.write("safe.py", "before\n");
       const base = f.commit();
+      f.write("src/nested/changed.py", "modified\n");
+      f.commit();
+      git(f.repo, "update-index", "--skip-worktree", "src/nested/changed.py");
       f.write("src/nested/source.py", "staged\n");
       git(f.repo, "add", "src/nested/source.py");
       f.write("safe.py", "after\n");
@@ -971,6 +1069,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
       if (location !== "inside") {
         mkdirSync(destination);
         writeFileSync(join(destination, "source.py"), contents);
+        writeFileSync(join(destination, "changed.py"), Buffer.from("\0binary"));
       }
       rmSync(join(f.repo, "src", "nested"), { recursive: true });
       symlinkSync(destination, join(f.repo, "src", "nested"), "junction");
@@ -985,7 +1084,9 @@ for (const location of ["outside", "repository-extra", "inside"]) {
           "--diff-mode",
           "local-patch",
         ]),
-      ).toBe(`safe.py\n${retained ? "src/nested/source.py\n" : ""}`);
+      ).toBe(
+        `safe.py\nsrc/nested/changed.py\n${retained ? "src/nested/source.py\n" : ""}`,
+      );
       expect(
         f.rows("make-diff-rank-input", [
           "--base",
@@ -995,6 +1096,7 @@ for (const location of ["outside", "repository-extra", "inside"]) {
         ]),
       ).toEqual([
         { path: "safe.py", area: "diff", preview: "after" },
+        { path: "src/nested/changed.py", area: "diff", preview: "" },
         ...(location !== "inside" || !binary
           ? [
               {

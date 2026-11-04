@@ -21,13 +21,12 @@ from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import state_dir
 from workbench_feedback import get_scan_feedback
-from workbench_source_scopes import safe_source_path
 from workbench_target import (
     directory_content_digest,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text
+from workbench_validation import optional_text, read_json_object
 
 
 def safe_segment(value: str) -> str:
@@ -41,25 +40,14 @@ def compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def starting_policy(mode: str, target: Path, scopes: list[str]) -> dict[str, list[str]]:
-    """Identify policy files for the starting scopes. The scanner reads them in its sandbox."""
-    if mode != "standard":
-        return {}
-    directories: set[Path] = set()
-    for scope in scopes:
-        path = safe_source_path(target, scope)
-        if path is None:
-            raise SystemExit(f"Scan scope must stay inside the scanned target: {scope}")
-        directory = (path if path.is_dir() else path.parent).relative_to(target)
-        directories.update((directory, *directory.parents))
-    policies = []
-    for directory in sorted(directories):
-        policy = directory / "SECURITY.md"
-        if (target / policy).is_file():
-            if safe_source_path(target, policy.as_posix()) is None:
-                raise SystemExit(f"SECURITY.md must stay inside the scanned target: {policy}")
-            policies.append(policy.as_posix())
-    return {"securityPolicyPaths": policies}
+def loaded_plugin_version() -> str:
+    manifest = read_json_object(
+        Path(__file__).resolve().parents[1] / ".codex-plugin" / "plugin.json"
+    )
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
+    return version
 
 
 def scan_target_identity(
@@ -255,16 +243,25 @@ def insert_running_scan(
     source_scopes: dict[str, Any],
     target_root: Path,
     target_summary: str | None,
-    scope_file_count: int,
+    scope_file_count: int | None,
     timestamp: str,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
+    surface: str | None = "plugin",
+    package_version: str | None = None,
+    launch_kind: str = "scan",
+    hosted: bool = False,
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
     user_context = optional_text(workspace["user_context"])
+    try:
+        plugin_version = loaded_plugin_version()
+    except SystemExit:
+        # Missing version attribution must not prevent scan registration.
+        plugin_version = None
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -279,9 +276,10 @@ def insert_running_scan(
             target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
+            launch_surface, launch_package_version, launch_plugin_version, launch_kind
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', ?, ?, ?, ?, ?)
+            'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -300,12 +298,19 @@ def insert_running_scan(
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
             "threat_model"
-            if workspace["default_mode"] == "standard" and handoff_status == "delivered"
+            if not hosted
+            and launch_kind == "scan"
+            and workspace["default_mode"] == "standard"
+            and handoff_status == "delivered"
             else "preflight",
             handoff_status,
             timestamp,
             timestamp,
             timestamp,
+            surface,
+            package_version,
+            plugin_version,
+            launch_kind,
         ),
     )
     connection.execute(

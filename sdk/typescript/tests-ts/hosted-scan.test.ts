@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import hostedContract from "../schemas/hosted-scan-v2.fixture.json" with { type: "json" };
 import {
   normalizeHostedScope,
   normalizeHostedPaths,
@@ -48,6 +49,7 @@ import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
 
+const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
 afterEach(cleanup);
 
@@ -361,6 +363,7 @@ test.each(sealedScopes)(
     const executor = draftExecutor((request) => {
       expect(request.scope.paths).toEqual(normalized);
       expect(request.identity).toEqual(input.identity);
+      expect(request.runtime.environment["CODEX_SECURITY_SURFACE"]).toBe("sdk");
       expect(request).toMatchObject({
         model: input.model,
         reasoningEffort: input.reasoningEffort,
@@ -554,7 +557,10 @@ test.each(["missing", "file"] as const)(
         signal: controller.signal,
       });
       if (timing === "during") queueMicrotask(() => controller.abort(reason));
-      await expect(pending).rejects.toBe(reason);
+      await expect(pending).resolves.toMatchObject({
+        status: "canceled",
+        error: expect.stringContaining(reason.message),
+      });
     }
     for (const options of [{}, { signal: new AbortController().signal }]) {
       await expect(
@@ -755,18 +761,67 @@ test("hosted receipts hash MCP checkpoints as written", async () => {
 
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
+  input.severityRubric = severityRubric;
   const result = await runHostedScan(input, {
     executor: draftExecutor(() => {
       git(input.repository, "commit", "--allow-empty", "-qm", "changed");
     }),
   });
   expect(result.status).toBe("failed");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.artifacts).toEqual([]);
 });
 
 test("malformed run input returns one protocol error", async () => {
   expect((await protocolError({ version: 2 })).code).toBe(-32602);
 });
+
+test.each(["valid", "tampered"] as const)(
+  "scan --host receives an immediate cancellation with a %s rubric",
+  async (rubric) => {
+    const params = await fixture();
+    params.severityRubric =
+      rubric === "valid"
+        ? severityRubric
+        : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
+    const input = new PassThrough();
+    const output = capture();
+    const run = main(["scan", "--host"], output.stream, capture().stream, {
+      ...dependencies(),
+      recordsInput: input,
+    });
+    try {
+      send(input, { id: "run", method: "run", params });
+      send(input, { method: "cancel", params: { id: "run" } });
+      expect(await run).toBe(rubric === "valid" ? 1 : 2);
+      const messages = parseJsonLines(output.text());
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ jsonrpc: "2.0", id: "run" });
+      if (rubric === "tampered") {
+        expect(messages[0].error).toMatchObject({
+          code: -32602,
+          message: expect.stringContaining("SHA-256"),
+        });
+      } else {
+        expect(messages[0].result).toMatchObject({
+          status: "canceled",
+          identity: params.identity,
+          repository: params.repository,
+          revision: params.revision,
+          scope: params.scope,
+          severityRubric,
+          outputDirectory: params.outputDirectory,
+          provenance: { buildId: params.identity.buildId },
+          artifacts: [],
+        });
+        expect(messages[0].result).not.toHaveProperty("scanId");
+        expect(messages[0].result).not.toHaveProperty("execution");
+      }
+    } finally {
+      input.destroy();
+    }
+  },
+);
 
 test.each([
   { path: "missing", reason: "scope_missing" },
@@ -803,6 +858,7 @@ test.each([false, true])(
     if (!cancel) {
       input.reasoningEffort = "synthetic-future-effort";
       input.ownerSuggestions = true;
+      input.severityRubric = severityRubric;
     }
     const child = spawn(
       process.execPath,
@@ -834,6 +890,18 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(
+            message.params.runtime.environment.CODEX_SECURITY_SURFACE,
+          ).toBe("cli");
+          if (cancel) {
+            expect(message.params).not.toHaveProperty("severityRubric");
+            expect(message.params.prompt).not.toContain('"severityRubric"');
+          } else {
+            expect(message.params.severityRubric).toEqual(severityRubric);
+            expect(message.params.prompt).toContain(
+              JSON.stringify({ severityRubric: message.params.severityRubric }),
+            );
+          }
           requestId = message.params.requestId;
           for (const event of [
             progressEvent,
@@ -886,7 +954,10 @@ test.each([false, true])(
           execution: { sessionId: "fake-host", usage },
         },
       });
-      if (!cancel) {
+      if (cancel) {
+        expect(response.result).not.toHaveProperty("severityRubric");
+      } else {
+        expect(response.result.severityRubric).toEqual(severityRubric);
         expect(response.result).not.toHaveProperty("ownerSuggestionsError");
         expect(response.result.artifacts).toContainEqual(
           expect.objectContaining({ path: "owner-suggestions.json" }),
@@ -972,18 +1043,22 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   const input = await fixture();
   delete input.scope;
   const events: string[] = [];
-  const result = await runHostedScan(input, {
-    executor: draftExecutor((request, options) => {
-      expect(request.scope.paths).toEqual(["."]);
-      options.onEvent?.(progressEvent);
-      options.onEvent?.(activityEvent);
-    }),
-    onEvent(event) {
+  const executor = draftExecutor((request, options) => {
+    expect(request.scope.paths).toEqual(["."]);
+    options.onEvent?.(progressEvent);
+    options.onEvent?.(activityEvent);
+  });
+  class Options {
+    get executor() {
+      return executor;
+    }
+    onEvent(event: ScanExecutionEvent) {
       events.push(event.type);
       if (event.type === "progress")
         throw new Error("Optional progress failed");
-    },
-  });
+    }
+  }
+  const result = await runHostedScan(input, new Options());
   expect(result.status, JSON.stringify(result)).toBe("completed");
   expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
@@ -1191,6 +1266,21 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
+async function hostedHistory(input: HostedScanInput) {
+  return runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+}
+
 test("cancellation after registration retains scan identity before executor dispatch", async () => {
   const input = await fixture();
   const controller = new AbortController();
@@ -1211,23 +1301,12 @@ test("cancellation after registration retains scan identity before executor disp
   expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
-  const history = await runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-      },
-    },
-    ["list-scans", "--repository", input.repository],
-  );
+  const history = await hostedHistory(input);
   expect(history["scans"]).toMatchObject([
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "failed", phase: "preflight" },
     },
   ]);
 });
@@ -1235,10 +1314,13 @@ test("cancellation after registration retains scan identity before executor disp
 test("SDK cancellation waits for the executor receipt without losing known session/usage", async () => {
   const input = await fixture();
   const controller = new AbortController();
-  const result = await runHostedScan(input, {
+  input.severityRubric = { ...severityRubric };
+  const pending = runHostedScan(input, {
     signal: controller.signal,
     executor: {
       async run(request, options) {
+        expect(request.severityRubric).toEqual(severityRubric);
+        Reflect.set(request.severityRubric!, "markdown", "Edited by executor.");
         controller.abort();
         expect(options.signal.aborted).toBe(true);
         await Promise.resolve();
@@ -1250,12 +1332,22 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
       },
     },
   });
+  input.severityRubric.markdown = "Edited by caller.";
+  const result = await pending;
   expect(result.status).toBe("canceled");
+  expect(result.severityRubric).toEqual(severityRubric);
   expect(result.execution).toMatchObject({
     status: "canceled",
     sessionId: "canceled-session",
     usage: { input_tokens: 42 },
   });
+  const history = await hostedHistory(input);
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      progress: { status: "failed", phase: "threat_model" },
+    },
+  ]);
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {
@@ -1301,6 +1393,50 @@ test("same Cloud attempt does not create CLI cross-invocation replay decisions",
   expect(requests[0]).not.toBe(requests[1]);
 });
 
+test("a host retry can resupply the saved rubric in a fresh attempt", async () => {
+  const input = await fixture();
+  const saved = join(dirname(input.repository), "host-rubric.json");
+  await writeJson(saved, severityRubric);
+  const requestIds = new Set<string>();
+  for (const [attemptId, status] of [
+    ["first", "canceled"],
+    ["retry", "completed"],
+  ] as const) {
+    const identity = { ...input.identity, attemptId };
+    const executor = {
+      run: mock<ScanExecutor["run"]>(async (request) => {
+        if (status === "completed") await writeDraft(request);
+        return receipt(request, { status });
+      }),
+    };
+    const result = await runHostedScan(
+      {
+        ...input,
+        identity,
+        outputDirectory: join(input.outputDirectory, attemptId),
+        stateDirectory: join(input.stateDirectory, attemptId),
+        severityRubric: await readJson<typeof severityRubric>(saved),
+      },
+      { executor },
+    );
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    const [request] = executor.run.mock.calls[0]!;
+    expect(request.identity).toEqual(identity);
+    expect(request.severityRubric).toEqual(severityRubric);
+    expect(request.prompt).toContain(
+      JSON.stringify({ severityRubric: request.severityRubric }),
+    );
+    expect(result).toMatchObject({
+      identity,
+      status,
+      severityRubric,
+      execution: { requestId: request.requestId, status },
+    });
+    requestIds.add(request.requestId);
+  }
+  expect(requestIds.size).toBe(2);
+});
+
 test.each(["cancel", "disconnect", "signal"])(
   "blocked execution request terminates on %s",
   async (action) => {
@@ -1308,7 +1444,7 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const run = spyOn(hostedScan, "runHostedScan");
+    const run = spyOn(hostedScan, "runHostedScanInternal");
     try {
       const finished = runHostedScanProtocol(input, output, controller.signal);
       send(input, { id: "run", method: "run", params });
@@ -1361,10 +1497,11 @@ test.each(["result", "error"])(
 );
 
 test("the exported contract fixture matches v2 and rejects explicit empty scope", async () => {
-  const fixture = await readJson<any>(
-    join(import.meta.dirname, "../schemas/hosted-scan-v2.fixture.json"),
-  );
-  expect(HostedScanInputSchema.parse(fixture.run.params).scope).toEqual({
+  const fixture = hostedContract;
+  const input = HostedScanInputSchema.parse(fixture.run.params);
+  expect(input.severityRubric).toEqual(severityRubric);
+  expect(fixture.execution.params.severityRubric).toEqual(severityRubric);
+  expect(input.scope).toEqual({
     paths: ["service-a", "service-b"],
   });
   expect(
@@ -1383,6 +1520,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
     status: "completed",
     identity: fixture.run.params.identity,
     scope: fixture.run.params.scope,
+    severityRubric,
     scanId: fixture.execution.params.scanId,
     execution: ScanExecutionResultSchema.parse(fixture.response.result),
   });

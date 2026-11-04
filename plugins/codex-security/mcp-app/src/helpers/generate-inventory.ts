@@ -6,18 +6,13 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, parse, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
-import { stringifyJson } from "./json";
-import {
-  compare,
-  print,
-  reportCommandError,
-  ArgumentError,
-} from "./rank-worklists";
+import { compareCodePoints, stringifyJson } from "./json";
+import { print, reportCommandError, ArgumentError } from "./rank-worklists";
 import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
@@ -29,6 +24,7 @@ import {
   lstat,
   regular,
   rejectStreams,
+  sameFile,
   stat,
   sourceMetadata,
   walk,
@@ -238,6 +234,37 @@ function replaceInventory(output: string, rows: Buffer[]): void {
   }
 }
 
+function reportScopedInventoryCount(
+  repo: string,
+  scopesFile: string,
+  output: string,
+  count: number,
+): void {
+  if (basename(output) !== "scoped-source-input.jsonl") return;
+  try {
+    const scanDir = environmentValue("CODEX_SECURITY_SCAN_DIR");
+    const scanId = environmentValue("CODEX_SECURITY_SCAN_ID");
+    const repository = environmentValue("CODEX_SECURITY_REPOSITORY");
+    const targetPaths = environmentValue("CODEX_SECURITY_TARGET_PATHS_FILE");
+    if (
+      !scanId ||
+      !scanDir ||
+      !repository ||
+      !targetPaths ||
+      !sameFile(repo, repository) ||
+      !sameFile(scopesFile, targetPaths) ||
+      !sameFile(dirname(output), scanDir)
+    )
+      return;
+
+    replaceInventory(append(scanDir, "scoped-source-input.receipt.json"), [
+      Buffer.from(JSON.stringify({ scanId, repository: repo, count }) + "\n"),
+    ]);
+  } catch {
+    // The inventory is ready even if the mount cannot publish its progress count.
+  }
+}
+
 export async function generateInventory(
   command: InventoryCommand,
   options: InventoryOptions,
@@ -432,7 +459,7 @@ export async function generateInventory(
     return { count: unique.length, output };
   }
   const rows = [...rankRows.values()]
-    .sort((left, right) => compare(left.path, right.path))
+    .sort((left, right) => compareCodePoints(left.path, right.path))
     .map((row) =>
       Buffer.from(
         stringifyJson(row, 0).replace(
@@ -457,6 +484,13 @@ export async function generateInventory(
   } else {
     mkdir(dirname(output));
     writeFile(output, rows);
+    if (command === "make-repo-scope-input")
+      reportScopedInventoryCount(
+        repo,
+        expandHome(options.scopesFile!, home),
+        output,
+        rows.length,
+      );
   }
   return { count: rows.length, output };
 }

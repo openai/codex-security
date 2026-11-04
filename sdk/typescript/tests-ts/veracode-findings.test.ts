@@ -291,11 +291,22 @@ test("accepts a scoped native empty page but rejects errors, summaries, Pipeline
 test("enforces exact and minimum native severity selections", () => {
   const page = veracodePolicyPage();
   const self = page._links.self.href;
-  for (const filter of ["severity=4", "severity_gte=4", "severity_gte=0"]) {
+  for (const filter of [
+    "severity=4",
+    "severity_gte=4",
+    "severity_gte=0",
+    "severity=4&severity_gte=4",
+  ]) {
     page._links.self.href = self + "&" + filter;
     expect(normalize(page).findings).toHaveLength(1);
   }
-  for (const filter of ["severity=3", "severity_gte=5", "severity=6"]) {
+  for (const filter of [
+    "severity=3",
+    "severity_gte=5",
+    "severity=6",
+    "severity=0&severity_gte=0",
+    "severity=4&severity_gte=5",
+  ]) {
     page._links.self.href = self + "&" + filter;
     expect(() => normalize(page)).toThrow(/severity/);
   }

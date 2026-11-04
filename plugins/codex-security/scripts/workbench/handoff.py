@@ -210,8 +210,9 @@ def mark_handoff_delivered(
                     (timestamp, scan["id"]),
                 )
         began_review = (
-            args.begin_standard_review
+            args.return_context
             and thread_id is not None
+            and args.occurrence_id is None
             and scan["mode"] == "standard"
             and scan["status"] == "running"
             and scan["canceled_at"] is None
@@ -227,7 +228,9 @@ def mark_handoff_delivered(
                    phase_progress_unit = NULL, updated_at = ? WHERE scan_id = ?""",
                 (timestamp, scan_id),
             )
-    workspace = wb.workspace_state(connection, scan["workspace_id"])
+    if not args.return_context:
+        return wb.workspace_state(connection, scan["workspace_id"])
+    context = wb.get_scan(connection, scan_id, args.occurrence_id)
     if began_review:
-        workspace["beganStandardReview"] = True
-    return workspace
+        context["beganStandardReview"] = True
+    return context
