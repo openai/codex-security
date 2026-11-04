@@ -1105,6 +1105,7 @@ test.each([
   "Safety policy: request refused by upstream with 401",
   "Safety policy: request refused by upstream with 502",
   "Safety policy: request refused by upstream with 504",
+  "Safety policy: request refused because the upstream returned HTTP 503",
   "Safety policy: request refused. Service unavailable.",
   "Safety policy: this request is refused.\nService unavailable.",
   "Safety policy: request refused due to upstream service unavailability.",

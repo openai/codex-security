@@ -108,7 +108,11 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
-import type { DeepScanProgress } from "./scan-progress.js";
+import type { DeepScanDiagnostic } from "./deep-scan.js";
+import {
+  formatDeepScanReviews,
+  type DeepScanProgress,
+} from "./scan-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -235,6 +239,7 @@ import {
 } from "./github-advisories.js";
 import {
   collectSnykIssues,
+  snykRestApiVersion,
   SNYK_REST_ISSUES_FORMAT,
 } from "./snyk-rest-findings.js";
 import type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
@@ -299,6 +304,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
   unionFindingGroups,
@@ -339,6 +345,7 @@ import {
   type PolicySecurity,
 } from "./security-policy-cli.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import type { PatchSelection } from "./patch-tui.js";
 import {
   scanPhaseLabel as scanPhase,
@@ -352,6 +359,7 @@ import {
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
   normalizeRepository,
+  trustedGitCommand,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
@@ -1287,6 +1295,7 @@ interface PatchRiskAssessment extends PatchRiskReport {
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
+    onDeepScanDiagnostic?: (event: DeepScanDiagnostic) => void,
   ): Pick<CodexSecurity, "run" | "preflight" | "validate" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
@@ -1396,8 +1405,11 @@ export const runRepositoryCommand: CliDependencies["runRepositoryCommand"] =
   };
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) =>
-    new CodexSecurity(config, undefined, { surface: "cli" }),
+  createSecurity: (config, onDeepScanDiagnostic) =>
+    new CodexSecurity(config, undefined, {
+      surface: "cli",
+      onDeepScanDiagnostic,
+    }),
   environment: process.env,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
@@ -1652,7 +1664,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          providerEnvKey,
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -4274,7 +4285,7 @@ export async function main(
       output: z
         .object({
           format: z.literal(SNYK_REST_ISSUES_FORMAT),
-          apiVersion: z.string(),
+          apiVersion: z.literal(snykRestApiVersion),
           apiOrigin: z.string(),
           organizationId: z.string(),
           projectId: z.string(),
@@ -4752,11 +4763,10 @@ export async function main(
                     config,
                     scanCodexHome(dependencies.environment),
                   );
-                  if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider(effectiveConfig),
+                      config: effectiveConfig,
                       command: "policy",
                       signal,
                     },
@@ -5106,20 +5116,31 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
+          const cwd = dependencies.currentDirectory();
+          const repository = resolveCliPath(cwd, args.repository ?? ".");
+          const environment = dependencies.environment;
+          const git = await trustedGitCommand(
+            repository,
+            true,
+            environment,
+            await commandGitProtectionRoots(
+              repository,
+              environment,
+              undefined,
+              cwd,
+            ),
+          );
           const hook = execFileSync(
-            "git",
+            git.executable,
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
-                args.repository ?? ".",
-              ),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
               "hooks/pre-commit",
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", env: git.environment },
           ).trim();
           const command = [
             realpathSync(process.execPath),
@@ -8113,6 +8134,7 @@ async function matchAllScans(
     const input: ScanComparisonInput = {
       before,
       after: afterFindings,
+      ...selectedComparisonContext(beforeScans),
       ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
     };
     const matching =
@@ -9762,9 +9784,19 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
-  // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
-  const adviceDetail = connectionAdviceDetail(detail);
-  const classificationDetail = adviceDetail.replace(
+  // Exclude paths and parser locations from advice, but keep the original diagnostic for display.
+  const diagnosticDetail = connectionAdviceDetail(detail)
+    .replace(/[^\s"'()<>,]*[/\\][^\s"'()<>,]*/gu, (token) =>
+      /^HTTP\/\d+(?:\.\d+)?$/iu.test(token) ? token : "…",
+    )
+    .replace(/\binvalid[ _-]token\b/giu, (code) =>
+      /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
+        detail,
+      )
+        ? ""
+        : code,
+    );
+  const classificationDetail = diagnosticDetail.replace(
     /(?<![\w./\\-])(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?(?:code|status)|(?:(?:http\.)?response\.)?status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|\b(?:401|403|429)\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
   );
@@ -9772,17 +9804,19 @@ export function skillCommandFailure(
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
-    /\bauthorizationrequired\b/iu.test(adviceDetail)
+    /\bauthorizationrequired\b/iu.test(classificationDetail)
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
-    /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(
+      classificationDetail,
+    ) ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
       /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?!\.?[\w/\\-])/iu.test(
-        adviceDetail,
+        classificationDetail,
       )) ||
     /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?!\.?[\w/\\-])/iu.test(
-      adviceDetail,
+      classificationDetail,
     ) ||
     (classification === "forbidden" &&
       /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
@@ -9793,13 +9827,13 @@ export function skillCommandFailure(
   } else if (
     classification === "rate_limited" ||
     /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
-      adviceDetail,
+      classificationDetail,
     )
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(
-      adviceDetail,
+    /\b(?:models?[ _.-]cache|supports_reasoning_summaries)\b/iu.test(
+      classificationDetail,
     )
   ) {
     advice =
@@ -9809,7 +9843,7 @@ export function skillCommandFailure(
     classification === "timeout" ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
       /\b(?:ECONNABORTED|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-        adviceDetail,
+        classificationDetail,
       ))
   ) {
     advice =
@@ -9855,24 +9889,25 @@ function diagnosticValue(value: unknown): string {
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
-    provider: unknown;
+    config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanAuthMode | undefined> {
-  const { auth, provider, signal } = options;
+  const { auth, config, signal } = options;
   if (
     errorOutput.isTTY !== true ||
-    isExternalModelProvider(provider) ||
+    hasCommandAuth(config) ||
+    scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
   const authentication = scanAuthentication(
     dependencies.environment,
     auth,
-    provider,
+    scanModelProvider(config),
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -10135,7 +10170,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              config: effectiveConfiguration,
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -10231,9 +10266,7 @@ async function executeScan(
         );
       }
       if (deepProgress !== null) {
-        details.push(
-          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
-        );
+        details.push(formatDeepScanReviews(deepProgress));
       } else if (fileProgress !== null) {
         details.push(formatScanProgressCount(fileProgress, "status"));
       }
@@ -10265,7 +10298,12 @@ async function executeScan(
         progress.startTimer("Preparing scan");
       }
     }
-    security = dependencies.createSecurity(config);
+    security = dependencies.createSecurity(
+      config,
+      verbose && arguments_.mode === "deep"
+        ? (fields) => diagnostic("deep_scan.coordinator", fields)
+        : undefined,
+    );
     if (arguments_.mock) {
       errorOutput.write(
         "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
@@ -10544,7 +10582,7 @@ async function executeScan(
           update.consolidating === true ||
           (deepConsolidating && update.active === 0);
         phase = deepConsolidating ? "consolidating results" : "discovery";
-        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        const message = `Scan phase: ${phase} | ${formatDeepScanReviews(update)}`;
         if (dashboard !== null) {
           dashboard.setStage(phase);
           dashboard.note(message);
@@ -10896,6 +10934,12 @@ async function executeScan(
       data: {
         dryRun: true,
         ...effectivePreflight,
+        ...(effectivePreflight.maxCostUsd === undefined
+          ? {}
+          : {
+              costLimitNote:
+                "The limit uses reported token usage at short-context API prices. In-flight requests can push the estimate above the limit. Actual charges and ChatGPT allowance depend on your account.",
+            }),
         ...(arguments_.projectConfig === undefined
           ? {}
           : {
@@ -11593,6 +11637,12 @@ function componentScanEventLine(
     const progress = event.value;
     const count = formatScanProgressCount(progress, "status");
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | ${count}\n`;
+  }
+  if (event.type === "deep-progress") {
+    const phase = event.value.consolidating
+      ? "consolidating results"
+      : "discovery";
+    return `codex-security: ${componentName} ${phase} | ${formatDeepScanReviews(event.value)}\n`;
   }
   if (event.type === "usage") {
     const tokens = formatTokenUsage(event.value);

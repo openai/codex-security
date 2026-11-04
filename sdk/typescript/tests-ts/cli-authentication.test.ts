@@ -1,5 +1,6 @@
 import { readJsonLines } from "./support/json.js";
 import { runProviderSkill } from "./support/cli-provider-authentication.js";
+import { TestClient } from "./support/api-client.js";
 import { resolving } from "./support/promises.js";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -1154,6 +1155,45 @@ describe("CLI authentication", () => {
       expect(stderr.text()).not.toContain("env -u");
       expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     }
+  });
+
+  test("scan rejects an explicit ChatGPT login with a required native provider key", async () => {
+    const home = await createCredentialHome();
+    await writeFile(join(home, "review.config.toml"), GATEWAY_CONFIGURATION);
+    const environment = {
+      CODEX_HOME: home,
+      GATEWAY_API_KEY: "synthetic-provider-secret",
+      OPENAI_API_KEY: "synthetic-unrelated-secret",
+    };
+    const { runCli, stdout, stderr } = createCliTest(main);
+    const deps = dependencies({
+      environment,
+      currentDirectory: stateDirectory,
+    });
+    deps.createSecurity = (config) => new TestClient(config, { environment });
+    expect(
+      await runCli(
+        [
+          "scan",
+          ".",
+          "--dry-run",
+          "--auth",
+          "chatgpt",
+          "--codex",
+          'profile="review"',
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "ChatGPT authentication cannot use the gateway provider's required GATEWAY_API_KEY",
+    );
+    expect(stdout.text() + stderr.text()).not.toContain(
+      "synthetic-provider-secret",
+    );
+    expect(stdout.text() + stderr.text()).not.toContain(
+      "synthetic-unrelated-secret",
+    );
   });
 
   test("keeps selected dry-run authentication metadata safe and machine readable", async () => {

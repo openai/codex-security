@@ -149,6 +149,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     upsert_deep_worker.add_argument("--attempt", type=non_negative_int)
     upsert_deep_worker.add_argument("--sdk-thread-id")
     upsert_deep_worker.add_argument("--error-message")
+    upsert_deep_worker.add_argument("--terminal-failure", action="store_true")
     upsert_deep_worker.add_argument(
         "--replaceable-failure-kind",
         choices=("policy_refusal", "transient_error", "invalid_discovery_artifacts"),
@@ -186,7 +187,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     publication_failure.add_argument("--coordinator-generation", type=positive_int)
 
     get_scan = add_command("get-scan", "--scan-id")
-    get_scan.add_argument("--occurrence-id")
+    detail = get_scan.add_mutually_exclusive_group()
+    detail.add_argument("--occurrence-id")
+    detail.add_argument("--progress-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
@@ -308,6 +311,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     cancel_scan = add_command("cancel-scan", "--scan-id")
     cancel_scan.add_argument("--thread-id")
+    cancel_scan.add_argument("--cost-json")
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
     fail_scan.add_argument("--claim-token")

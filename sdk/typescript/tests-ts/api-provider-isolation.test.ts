@@ -1,7 +1,14 @@
 import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import {
+  OPENROUTER_CODEX_PROVIDER,
+  resolveCodexProfile,
+  type JsonObject,
+} from "../src/config.js";
+import { main } from "../src/cli.js";
+import { dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
@@ -11,7 +18,7 @@ import { createInterface } from "node:readline";
 import { executablePathForSpawn, resolveCodexCommand } from "../src/runtime.js";
 import { copyCredentialTestPlugin, PLUGIN_ROOT } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
-import { TestClient } from "./support/api-client.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -80,6 +87,10 @@ async function nativeRequest(
   }
 }
 
+async function readProviderProfile(home: string, name: string) {
+  return parseToml(await readFile(join(home, `${name}.config.toml`), "utf8"));
+}
+
 async function effectiveProvider(
   environment: Record<string, string>,
   cwd: string,
@@ -87,11 +98,9 @@ async function effectiveProvider(
   nativeProfile?: string,
 ) {
   if (nativeProfile !== undefined) {
-    const config = parseToml(
-      await readFile(
-        join(environment["CODEX_HOME"]!, `${nativeProfile}.config.toml`),
-        "utf8",
-      ),
+    const config = await readProviderProfile(
+      environment["CODEX_HOME"]!,
+      nativeProfile,
     );
     const result = await nativeRequest(environment, cwd, [], "thread/start", {
       cwd,
@@ -273,6 +282,8 @@ test.each([
     await mkdir(sourceHome, { mode: 0o700 });
     await mkdir(sharedHome, { recursive: true, mode: 0o700 });
 
+    const providerId =
+      selection === "file custom only" ? "synthetic.gateway" : "openrouter";
     const ready = [
       Promise.withResolvers<void>(),
       Promise.withResolvers<void>(),
@@ -377,9 +388,9 @@ test.each([
             join(sourceHome, `review-${index}.config.toml`),
             stringifyToml({
               model: "gpt-5.6-terra",
-              model_provider: "openrouter",
+              model_provider: providerId,
               model_providers: {
-                openrouter: provider,
+                [providerId]: provider,
                 "required.gateway": {
                   name: "Managed selection",
                   wire_api: "responses",
@@ -576,7 +587,7 @@ test.each([
                     shellPolicy,
                   );
                   expect(settings.config["agents"]).toEqual(resolvedAgents);
-                  expect(settings.config["model_provider"]).toBe("openrouter");
+                  expect(settings.config["model_provider"]).toBe(providerId);
                   expect(settings.nativeProfile).toBeDefined();
                   expect(settings.nativeProfile).toBe(options.nativeProfile);
                   expect(
@@ -594,7 +605,7 @@ test.each([
                   );
                   const actual = (
                     nativeConfig["model_providers"] as JsonObject
-                  )["openrouter"] as JsonObject;
+                  )[providerId] as JsonObject;
                   expect(actual).toMatchObject(provider);
                   expect(actual["http_headers"] ?? {}).toEqual(
                     provider.http_headers ?? {},
@@ -627,7 +638,7 @@ test.each([
             await client.preflight(repository, { mode: "deep" }),
           ).toMatchObject({
             model: "gpt-5.6-terra",
-            modelProvider: "openrouter",
+            modelProvider: providerId,
           });
         }
       }
@@ -661,6 +672,12 @@ test.each([
 );
 
 const fileProviderKeyCases = [
+  ["gateway", "custom only", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "account-named primary", "OPENAI_API_KEY"],
+  ["gateway", "declared external header", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "declared Codex account header", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -672,6 +689,12 @@ const fileProviderKeyCases = [
   ["openrouter", "custom Codex key", "CODEX_API_KEY"],
   ["openrouter", "other external key", "FIREWORKS_API_KEY"],
 ] as const;
+
+const gatewayHeaders = new Map<string, string>([
+  ["declared external header", "FIREWORKS_API_KEY"],
+  ["declared Codex account header", "CODEX_API_KEY"],
+  ["declared OpenAI account header", "OPENAI_API_KEY"],
+]);
 
 test.each(["openrouter", "fireworks"] as const)(
   "native file profile accepts the %s custom environment key",
@@ -719,14 +742,24 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
       const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const gatewayHeader = gatewayHeaders.get(_selection);
+      const headerKey =
+        gatewayHeader ??
+        (_selection === "canonical header" ? canonicalKey : undefined);
       const headerEnvironment =
-        _selection === "canonical header" ||
-        _selection === "missing custom primary"
-          ? { [canonicalKey]: " synthetic-header-key " }
+        headerKey || _selection === "missing custom primary"
+          ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
           : {};
-      const inheritedEnvironment = {
+      const inactiveKey = gatewayHeader
+        ? "CHEAPER_INFERENCE_API_KEY"
+        : "INACTIVE_GATEWAY_TOKEN";
+      const inactiveEnvironment = gatewayHeader
+        ? { [inactiveKey]: "synthetic-inactive-key" }
+        : {};
+      const inheritedEnvironment: Record<string, string> = {
         ...(_selection === "custom Codex key" ||
-        _selection === "other external key"
+        _selection === "other external key" ||
+        gatewayHeader
           ? Object.fromEntries(
               [
                 "OPENAI_API_KEY",
@@ -739,12 +772,17 @@ for (const mode of ["standard", "deep"] as const) {
             )
           : {}),
         ...headerEnvironment,
+        ...inactiveEnvironment,
         ...(_selection === "missing custom primary"
-          ? {}
+          ? {
+              OPENAI_API_KEY: "synthetic-unrelated-account",
+              INACTIVE_GATEWAY_TOKEN: "synthetic-unrelated-provider",
+            }
           : { [providerKey]: "synthetic-file-key" }),
       };
       const workerEnvironment = {
         ...headerEnvironment,
+        ...inactiveEnvironment,
         [providerKey]: "synthetic-file-key",
       };
       const provider = {
@@ -752,14 +790,20 @@ for (const mode of ["standard", "deep"] as const) {
         wire_api: "responses",
         base_url: "https://provider.example.test/v1",
         env_key: providerKey,
-        ...(_selection === "canonical header"
-          ? { env_http_headers: { "X-Synthetic-Token": canonicalKey } }
+        ...(gatewayHeader === "OPENAI_API_KEY"
+          ? { requires_openai_auth: true }
+          : {}),
+        ...(headerKey
+          ? { env_http_headers: { "X-Synthetic-Token": headerKey } }
           : {}),
       };
       const original = stringifyToml({
         model: "synthetic-model",
         model_provider: providerId,
-        model_providers: { [providerId]: provider },
+        model_providers: {
+          [providerId]: provider,
+          inactive: { ...provider, env_key: inactiveKey },
+        },
         features: { shell_tool: false, unified_exec: false },
       });
       await writeFile(join(sourceHome, "review.config.toml"), original);
@@ -775,6 +819,16 @@ for (const mode of ["standard", "deep"] as const) {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scan,
           repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "register-cli-scan") {
+              expect(options.environment).not.toHaveProperty(providerKey);
+              if (gatewayHeader) {
+                expect(options.environment).not.toHaveProperty(gatewayHeader);
+                expect(options.environment).not.toHaveProperty(inactiveKey);
+              }
+            }
+            return mockWorkbench(args, input);
+          },
           createCodex: (options) => {
             launched = true;
             return {
@@ -789,9 +843,13 @@ for (const mode of ["standard", "deep"] as const) {
                     "CODEX_API_KEY",
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
+                    "CHEAPER_INFERENCE_API_KEY",
                   ]) {
                     expect(environment[name]).toBe(
-                      name === providerKey || name === canonicalKey
+                      name === providerKey ||
+                        name === canonicalKey ||
+                        name === headerKey ||
+                        name === inactiveKey
                         ? inheritedEnvironment[name]
                         : undefined,
                     );
@@ -844,6 +902,7 @@ for (const mode of ["standard", "deep"] as const) {
                   ]) {
                     expect(text).not.toContain("synthetic-file-key");
                     expect(text).not.toContain("synthetic-header-key");
+                    expect(text).not.toContain("synthetic-inactive-key");
                   }
                   throw new Error("synthetic file provider child checked");
                 },
@@ -860,6 +919,21 @@ for (const mode of ["standard", "deep"] as const) {
           verified: false,
         });
         expect(preflight.modelProvider).toBe(providerId);
+        if (
+          providerId === "gateway" &&
+          (_selection === "custom only" ||
+            _selection === "account-named primary")
+        ) {
+          const request = { mode, auth: "chatgpt" as const };
+          const guidance = `ChatGPT authentication cannot use the gateway provider's required ${providerKey}`;
+          await expect(client.preflight(repository, request)).rejects.toThrow(
+            guidance,
+          );
+          await expect(client.run(repository, request)).rejects.toThrow(
+            guidance,
+          );
+          expect(launched).toBe(false);
+        }
         if (_selection === "missing custom primary") {
           await expect(
             client.preflight(repository, { mode, auth: "api-key" }),
@@ -1045,51 +1119,85 @@ test("standard scans do not require Deep Scan plugin capabilities", async () => 
   }
 });
 
-test.each(["root", "profile"])(
-  "current Deep workers inherit the %s endpoint",
-  async (selection) => {
+test.each([
+  ["root", "openai"],
+  ["profile", "openai"],
+  ["root", "openrouter"],
+  ["profile", "openrouter"],
+] as const)(
+  "Deep workers, rerun and resume inherit the %s %s endpoint",
+  async (selection, provider) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scan = join(root, "scan");
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
     const endpoint = "https://endpoint.example.test/v1";
+    const routing: JsonObject =
+      provider === "openai"
+        ? {
+            openai_base_url: endpoint,
+            chatgpt_base_url: "https://account.example.test",
+          }
+        : {
+            model_provider: provider,
+            model_providers: {
+              [provider]: {
+                ...OPENROUTER_CODEX_PROVIDER,
+                base_url: endpoint,
+                query_params: { version: "preview" },
+              },
+            },
+          };
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-openai-key",
+      OPENROUTER_API_KEY: "synthetic-openrouter-key",
+    };
+    let recipe: JsonObject;
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides:
           selection === "root"
-            ? { openai_base_url: endpoint }
+            ? routing
             : {
+                openai_base_url: "https://unused.example.test/v1",
                 profile: "selected",
-                profiles: {
-                  selected: {
-                    model_provider: "openai",
-                    openai_base_url: endpoint,
-                  },
-                },
+                profiles: { selected: routing },
               },
       },
       {
-        environment: {
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-openai-key",
+        environment,
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan")
+            recipe = JSON.parse(input!).recipe;
+          return mockWorkbench(args, input);
         },
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scan,
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
-            expect(options.config?.["openai_base_url"]).toBe(endpoint);
             const worker = parseToml(
               await readFile(
                 options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
                 "utf8",
               ),
             );
-            expect(
-              (worker["worker_runtime"] as JsonObject)["openai_base_url"],
-            ).toBe(endpoint);
+            const runtime = worker["worker_runtime"] as JsonObject;
+            const profile = runtime["native_profile"];
+            const providerConfig =
+              typeof profile === "string"
+                ? await readProviderProfile(
+                    options.env!["CODEX_HOME"]!,
+                    profile,
+                  )
+                : {};
+            expect({ ...options.config, ...providerConfig }).toMatchObject(
+              routing,
+            );
+            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
             throw new Error("synthetic endpoint inherited");
           })(),
       },
@@ -1098,6 +1206,24 @@ test.each(["root", "profile"])(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic endpoint inherited",
       );
+      expect(JSON.stringify(recipe!)).not.toContain(endpoint);
+      for (const command of ["rerun", "resume"]) {
+        const { runCli, stderr } = createCliTest(main);
+        const status = await runCli(
+          ["scans", command, "saved", "--json"],
+          dependencies({
+            currentDirectory: repository,
+            environment,
+            onWorkbench: () => ({ scanId: "saved", scanDir: scan, recipe }),
+            onConfig: ({ codexOverrides }) => {
+              expect(resolveCodexProfile(codexOverrides!)).toMatchObject(
+                routing,
+              );
+            },
+          }),
+        );
+        expect(status, stderr.text()).toBe(0);
+      }
     } finally {
       await client.close();
     }
@@ -1196,6 +1322,7 @@ test.each([
               env_key: providerKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
+                ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
                 "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
               },
             },
@@ -1225,16 +1352,14 @@ test.each([
           startThread: () => ({
             id: null,
             async runStreamed() {
-              expect(options.apiKey).toBe(
-                external ? undefined : "synthetic-account-key",
-              );
+              expect(options.apiKey).toBeUndefined();
+              expect(options.env!["OPENAI_API_KEY"]).toBeUndefined();
+              const selectedKey = external
+                ? "synthetic-custom-key"
+                : providerEnvironment[providerKey];
+              expect(options.env![providerKey]).toBe(selectedKey);
               const status = await nativeRequest(
-                {
-                  ...options.env!,
-                  ...(options.apiKey === undefined
-                    ? {}
-                    : { CODEX_API_KEY: options.apiKey }),
-                },
+                options.env!,
                 repository,
                 [],
                 // Tool enumeration starts the real MCP child without a model turn.
@@ -1259,12 +1384,7 @@ test.each([
                   ...(process.platform === "win32"
                     ? { [headerKey]: " synthetic-child-header " }
                     : {}),
-                  ...(external
-                    ? { [providerKey]: "synthetic-custom-key" }
-                    : {}),
-                  ...(providerKey === "CODEX_API_KEY"
-                    ? { CODEX_API_KEY: "synthetic-account-key" }
-                    : {}),
+                  [providerKey]: selectedKey,
                 },
               });
               for (const text of [
