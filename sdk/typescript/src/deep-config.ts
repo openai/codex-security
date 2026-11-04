@@ -1,5 +1,5 @@
 import { isRecord } from "./record.js";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
@@ -19,6 +19,7 @@ export type DeepScanSources = Record<
 export interface ResolvedDeepScanConfig {
   settings: Required<DeepScanOptions>;
   sources: DeepScanSources;
+  legacyConfigPaths?: string[];
 }
 
 export function deepScanOptions(
@@ -90,12 +91,13 @@ export async function resolveDeepScanConfig(
   signal?: AbortSignal,
 ): Promise<ResolvedDeepScanConfig> {
   const explicit = deepScanOptions({ ...options, mode: "deep" });
-  let document: TomlTable = {};
   // Complete saved settings do not depend on today's ambient configuration.
-  if (!DEEP_SCAN_SETTINGS.every(([name]) => explicit[name] !== undefined)) {
-    document = await readDeepScanDocument(source, signal);
-  }
-  const existing = document["deep_scan"];
+  const legacy = DEEP_SCAN_SETTINGS.every(
+    ([name]) => explicit[name] !== undefined,
+  )
+    ? undefined
+    : await readDeepScanDocument(source, signal);
+  const existing = legacy?.document["deep_scan"];
   if (
     existing !== undefined &&
     (!isRecord(existing) ||
@@ -139,22 +141,29 @@ export async function resolveDeepScanConfig(
   return {
     settings,
     sources,
+    ...(legacy && { legacyConfigPaths: [source, legacy.destination] }),
   };
 }
 
 async function readDeepScanDocument(
   source: string,
   signal?: AbortSignal,
-): Promise<TomlTable> {
+): Promise<{ document: TomlTable; destination: string } | undefined> {
+  let destination: string | undefined;
   try {
-    return parseToml(await readFile(source, { encoding: "utf8", signal }));
+    destination = await realpath(source);
+    const contents = await readFile(destination, { encoding: "utf8", signal });
+    return { document: parseToml(contents), destination };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new CodexSecurityError(
-        `Cannot read Codex Security configuration at ${source}.`,
-        { cause: error },
-      );
-    }
-    return {};
+    // A missing optional config is fine until its destination has been selected.
+    if (
+      destination === undefined &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    )
+      return undefined;
+    throw new CodexSecurityError(
+      `Cannot read Codex Security configuration at ${source}.`,
+      { cause: error },
+    );
   }
 }

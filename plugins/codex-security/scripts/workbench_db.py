@@ -2624,6 +2624,13 @@ def scan_context(
     }
     if setup := workspace.get("deepScanConfig"):
         context["deepScanSettings"] = setup["settings"]
+        if setup.get("legacyConfigPath"):
+            # Older setups may have stored only the workbench-relative selection.
+            context["legacyConfigPaths"] = [
+                str(Path(setup[key]).absolute())
+                for key in ("legacyConfigPath", "legacyConfigResolvedPath")
+                if key in setup
+            ]
         if "projectConfigPaths" in setup:
             context["projectConfigPaths"] = setup["projectConfigPaths"]
         elif setup.get("projectConfigPath"):

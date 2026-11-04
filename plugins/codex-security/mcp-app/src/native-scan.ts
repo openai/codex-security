@@ -68,6 +68,7 @@ export interface NativeScanSemanticInputs {
   knowledgeBasePaths?: string[];
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   deepScanSettings: Required<DeepScanOptions>;
+  legacyConfigPaths?: string[];
   config: JsonObject;
   modelSettings: ReturnType<typeof scanModelConfiguration>;
   modelInputSettingsMatch: boolean;
@@ -78,6 +79,7 @@ export interface NativeScanInput {
   scan: ScanResults;
   recipe?: SavedScanRecipe;
   savedDeepScanSettings?: DeepScanOptions;
+  legacyConfigPaths?: string[];
   projectConfigPaths?: string[];
   semanticInputs?: NativeScanSemanticInputs;
   threadId: string;
@@ -215,13 +217,12 @@ export async function readNativeScanSemanticInputs(
   const knowledgeBaseSnapshot = knowledgeBasePaths
     ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
     : undefined;
-  const deepScanSettings = (
+  const { settings: deepScanSettings, legacyConfigPaths } =
     await resolveDeepScanConfig(
       savedDeepScanSettings,
       nativeDeepScanConfigPath(environment),
       signal,
-    )
-  ).settings;
+    );
   const config = await nativeScanConfiguration(
     environment,
     modelSettings,
@@ -236,6 +237,7 @@ export async function readNativeScanSemanticInputs(
     knowledgeBasePaths,
     knowledgeBaseSnapshot,
     deepScanSettings,
+    legacyConfigPaths,
     config,
     modelInputSettingsMatch: [
       "developer_instructions",
@@ -437,6 +439,7 @@ export async function prepareNativeScan(
   const deep = await resolveDeepScanConfig(
     options,
     nativeDeepScanConfigPath(configurationEnvironment),
+    signal,
   );
   // The SDK still validates the seal, owner and claim before publication.
   const config = publicationOnly
@@ -479,7 +482,11 @@ export async function prepareNativeScan(
         selectedProjectConfigPath(path, input.scan.targetPath),
       ),
     ];
-    const protectedFiles = new Set<string>();
+    const protectedFiles = new Set([
+      ...(input.legacyConfigPaths ?? []),
+      ...(semanticInputs?.legacyConfigPaths ?? []),
+      ...(deep.legacyConfigPaths ?? []),
+    ]);
     for (const file of files) {
       if (typeof file !== "string" || protectedFiles.has(file)) continue;
       protectedFiles.add(file);

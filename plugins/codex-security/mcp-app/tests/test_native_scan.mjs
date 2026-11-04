@@ -864,6 +864,12 @@ test("native preparation excludes scan output and selected source directories fr
   const external = join(root, "external");
   const project = join(root, "project");
   const projectFile = join(project, "scan.json");
+  const legacyOrigin = join(root, "legacy-origin");
+  const legacyRoot = join(root, "legacy-settings");
+  const legacyDocs = join(legacyRoot, "docs");
+  const legacyLink = join(legacyOrigin, "linked-settings");
+  const legacyFile = join(legacyLink, "config.toml");
+  const legacyDestination = join(legacyDocs, "config.toml");
   const name = process.platform === "win32" ? "codex.exe" : "codex";
   const restoreEnvironment = captureEnvironment([
     "CODEX_HOME",
@@ -881,6 +887,8 @@ test("native preparation excludes scan output and selected source directories fr
       repository,
       documents,
       knowledgeOrigin,
+      legacyOrigin,
+      legacyDocs,
       project,
       external,
     ]) {
@@ -893,6 +901,14 @@ test("native preparation excludes scan output and selected source directories fr
       knowledgeLink,
       process.platform === "win32" ? "junction" : "dir",
     );
+    await mkdir(join(legacyOrigin, ".git"));
+    await mkdir(join(legacyRoot, ".git"));
+    await symlink(
+      legacyDocs,
+      legacyLink,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeFile(legacyDestination, "[deep_scan]\nworkers = 2\n");
     await writeFile(projectFile, "{}");
     await writeFile(
       join(documents, "architecture.md"),
@@ -904,6 +920,8 @@ test("native preparation excludes scan output and selected source directories fr
       scanDir,
       knowledgeRoot,
       knowledgeOrigin,
+      legacyOrigin,
+      legacyRoot,
       project,
     ];
     for (const directory of [...protectedDirectories, external]) {
@@ -914,16 +932,23 @@ test("native preparation excludes scan output and selected source directories fr
     delete process.env.CODEX_API_KEY;
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
-    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const saved of [false, true]) {
-      if (saved) delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
-      else process.env.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgeFile;
+    process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = legacyFile;
+    process.env.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgeFile;
+    const semanticInputs = await readNativeScanSemanticInputs();
+    for (const source of ["current", "snapshot", "saved"]) {
+      if (source === "snapshot") {
+        delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+        delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        await rm(legacyLink);
+      }
       const request = {
         ...input(),
         scan: { ...input().scan, targetPath: repository, scanDir },
         projectConfigPaths: [projectFile],
-        ...(saved
+        ...(source === "snapshot" ? { semanticInputs } : {}),
+        ...(source === "saved"
           ? {
+              legacyConfigPaths: [legacyFile, legacyDestination],
               recipe: {
                 auth: "api-key",
                 knowledgeBasePaths: snapshot.sources,

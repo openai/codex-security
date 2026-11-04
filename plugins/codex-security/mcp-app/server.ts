@@ -1116,6 +1116,9 @@ export function createCodexSecurityServer(): McpServer {
           {
             scan,
             semanticInputs,
+            legacyConfigPaths: Array.isArray(begun.legacyConfigPaths)
+              ? begun.legacyConfigPaths
+              : undefined,
             projectConfigPaths: Array.isArray(begun.projectConfigPaths)
               ? begun.projectConfigPaths
               : undefined,

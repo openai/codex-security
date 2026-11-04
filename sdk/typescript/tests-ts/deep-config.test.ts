@@ -20,6 +20,7 @@ test("resolves all six defaults without creating an ambient file", async () => {
   const input = await fixture();
   const result = await resolveDeepScanConfig({}, input.source);
   expect(result.settings).toEqual(DEFAULT_DEEP_SCAN_SETTINGS);
+  expect(result.legacyConfigPaths).toBeUndefined();
   expect(new Set(Object.values(result.sources))).toEqual(new Set(["default"]));
   await expect(readFile(input.source)).rejects.toMatchObject({
     code: "ENOENT",
@@ -165,6 +166,7 @@ test("complete saved settings do not read a changed or invalid legacy file", asy
   };
   const result = await resolveDeepScanConfig(saved, input.source);
   expect(result.settings).toEqual(saved);
+  expect(result.legacyConfigPaths).toBeUndefined();
   expect(new Set(Object.values(result.sources))).toEqual(new Set(["override"]));
   expect(await readFile(input.source, "utf8")).toBe("not valid TOML [");
 });
