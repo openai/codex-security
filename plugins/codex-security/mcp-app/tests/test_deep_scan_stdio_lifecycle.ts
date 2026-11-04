@@ -1007,18 +1007,19 @@ service_tier = "ultrafast"
         /Do not call complete_codex_security_scan again/,
       );
       const completion = resumed.result.structuredContent.completion;
-      const saved = await runWorkbench(environment, [
+      const sealed = await runWorkbench(environment, [
         "get-scan",
         "--scan-id",
         resumedScanId,
       ]);
-      assert.ok(saved.scan.usage);
+      const { accountRateLimits: _limits, ...usage } = sealed.scan.usage;
+      assert.equal(usage.coverage, "unavailable");
+      assert.ok(usage.warnings.length);
       assert.deepEqual(completion, {
         scan: {
           progress: { status: "complete" },
           reportAvailable: true,
-          usage: saved.scan.usage,
-          ...(saved.scan.cost && { cost: saved.scan.cost }),
+          usage,
         },
       });
       assert.deepEqual(resumed.result.structuredContent, {
@@ -1219,7 +1220,6 @@ service_tier = "ultrafast"
         (await readLogLines(startLogPath)).length,
         workerCountBeforeRetry,
       );
-
       const deadlineConfig = path.join(fixtureRoot, "deadline.yaml");
       await writeFile(deadlineConfig, "scan: {max_time_minutes: 0.000001}\n");
       const expired = await restartedServer.request(

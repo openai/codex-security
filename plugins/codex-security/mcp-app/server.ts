@@ -944,7 +944,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin repeated Standard security scans and return their deduplicated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
+        "Run or rejoin independent Standard security scans and return their deduplicated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The coordinator finalizes the parent even if this caller detaches. For an SDK-registered scan it returns the aggregate to the SDK for finalization. Follow the returned instructions for the authoritative scanId, scanDir, and manifestPath.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -1029,14 +1029,18 @@ export function createCodexSecurityServer(): McpServer {
               progress: { status: string };
               reportAvailable: boolean;
               usage?: JsonObject;
-              cost?: JsonObject;
+              cost?: { model: string; estimatedUsd: number };
             };
+          // Rate-limit snapshots can grow independently of the measured scan totals.
+          const { accountRateLimits: _limits, ...scanUsage } = usage ?? {};
           return deepScanTerminalResult(run, {
             scan: {
               progress: { status: progress.status },
               reportAvailable,
-              ...(usage && { usage }),
-              ...(cost && { cost }),
+              ...(usage && { usage: scanUsage }),
+              ...(cost && {
+                cost: { model: cost.model, estimatedUsd: cost.estimatedUsd },
+              }),
             },
           });
         } catch (error) {
