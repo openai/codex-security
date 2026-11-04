@@ -3675,6 +3675,7 @@ async function testWorkerTerminalEvents() {
     const policyMessage =
       "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
     const wrappedQuota = `Error running remote compact task: ${quotaMessage}`;
+    const terminalMessages = [quotaMessage, wrappedQuota, policyMessage];
     const disconnect =
       "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
@@ -3718,9 +3719,7 @@ async function testWorkerTerminalEvents() {
           onNonRetryableError,
         });
         if (event?.type === "turn.failed") {
-          const permanent = [quotaMessage, wrappedQuota, policyMessage].includes(
-            event.error.message,
-          );
+          const permanent = terminalMessages.includes(event.error.message);
           await assert.rejects(execution, {
             name: permanent ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
