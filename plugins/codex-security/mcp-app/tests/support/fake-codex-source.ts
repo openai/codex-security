@@ -42,7 +42,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
         }
         result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
-        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile }, mcp_servers: { 'fixture.catalog': { command: 'node' } } }, origins: {}, layers: null };
+        result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile }, mcp_servers: { 'fixture.catalog': { command: 'node' }, 'codex-security': { url: 'https://fixture.invalid/mcp' } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
         result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
       } else if (message.method === 'account/read') {

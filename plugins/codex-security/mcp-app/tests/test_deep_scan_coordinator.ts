@@ -2301,11 +2301,13 @@ async function testPersistedErrorLimitStopsBeforeRescheduling() {
   }
 }
 
-async function testRestartRestoresDispatchOrderAfterMixedResults() {
+async function testRestartRestoresDispatchOrderAfterMixedResults(
+  limit: number,
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     maxDiscoveryRuns: 2,
-    stopAfterConsecutiveErrors: 1,
+    stopAfterConsecutiveErrors: limit,
   });
   const workers = path.join(
     fixture.run.scanDir,
@@ -2345,10 +2347,82 @@ async function testRestartRestoresDispatchOrderAfterMixedResults() {
   const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
   });
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(terminal.consecutiveErrors, 0);
+  assert.equal(
+    terminal?.status,
+    limit === 1 ? "failed" : "succeeded",
+    terminal?.error,
+  );
+  assert.equal(store.iterations[0].consecutiveErrors, limit === 1 ? 1 : 0);
   assert.deepEqual(store.iterations[0].workerIds, [second.id]);
   assert.equal(executor.discoveryCalls, 0);
+}
+
+async function testComparisonStopCondition(mode: "quota" | "deadline") {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    stopAfterNoNew: 3,
+    maxDiscoveryRuns: 6,
+  });
+  const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const deadline = Promise.withResolvers<void>();
+  let comparisons = 0;
+  const terminal = await runCoordinator(
+    fixture,
+    store,
+    {
+      async run(request) {
+        const result = await worker.run(request);
+        const resultPath = path.join(
+          request.artifactContext!.root,
+          "result.json",
+        );
+        const draft = await readJson(resultPath);
+        draft.findings[0].title = (
+          await promptContext(request.promptPath)
+        ).workerLabel;
+        await writeJson(resultPath, draft);
+        return result;
+      },
+      async compareFindings(_prompt, _cwd, signal) {
+        comparisons++;
+        if (mode === "quota")
+          throw new DeepScanNonRetryableError(
+            "Quota exceeded. Check your plan and billing details.",
+          );
+        await deadline.promise;
+        signal.throwIfAborted();
+        return JSON.stringify({
+          uncertain: [],
+          defects: [
+            {
+              path: "fixture.py",
+              operation: "query",
+              failure: "check",
+              reports: [0, 1].map((id) => ({ id, evidence: 0 })),
+            },
+          ],
+        });
+      },
+    },
+    {
+      ...(mode === "deadline" && { discoveryTimeoutMs: 500 }),
+      log: (event) => {
+        if (event.event === "discovery_deadline_reached") deadline.resolve();
+      },
+    },
+  );
+  assert.equal(comparisons, 1);
+  assert.equal(worker.discoveryCalls, 2);
+  assert.equal(store.iterations.length, 1);
+  assert.equal(store.iterations[0].workerIds.length, 2);
+  assert.equal(
+    terminal?.status,
+    mode === "quota" ? "failed" : "succeeded",
+    terminal?.error,
+  );
+  const checkpoint = await readJson(store.iterations[0].resultPath);
+  assert.equal(checkpoint.findings.length, mode === "quota" ? 2 : 1);
+  if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
 }
 
 async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
@@ -2708,6 +2782,7 @@ test(testWorkerScopedCandidateSourceAggregation);
 test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
+registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
 test(testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
@@ -2770,4 +2845,4 @@ registerCases(testResumedManifestPreservesCompletedReducer, [
   [false, true, ["api", "background jobs"]],
 ]);
 test(testPersistedErrorLimitStopsBeforeRescheduling);
-test(testRestartRestoresDispatchOrderAfterMixedResults);
+registerCases(testRestartRestoresDispatchOrderAfterMixedResults, [[1], [2]]);
