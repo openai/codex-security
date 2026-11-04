@@ -326,6 +326,52 @@ for (const registerOnly of [false, true]) {
   }
 }
 
+test("a receipt cannot apply another scan mode's failure policy", async () => {
+  const value = await fixture();
+  value.options.scanOptionsByMode = { deep: { failureSeverity: "high" } };
+  expect(await runMultiscan(value.options)).toMatchObject({
+    policyFailed: false,
+  });
+  const ledger = join(value.options.outputDir, "results.jsonl");
+  const receipt = JSON.parse(await readFile(ledger, "utf8"));
+  await writeFile(
+    ledger,
+    JSON.stringify({ ...receipt, policyFailed: true }) + "\n",
+  );
+
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+    policyFailed: false,
+  });
+});
+
+test.each([false, true])(
+  "a receipt naming another scan cannot authorize reuse (recover=%s)",
+  async (recover) => {
+    const value = await fixture();
+    await runMultiscan(value.options);
+    const ledger = join(value.options.outputDir, "results.jsonl");
+    const receipt = JSON.parse(await readFile(ledger, "utf8"));
+    await writeFile(
+      ledger,
+      JSON.stringify({ ...receipt, scanId: "different-scan" }) + "\n",
+    );
+    if (recover)
+      value.options.recoverScan = async () => {
+        throw new Error(
+          "The contradictory receipt must not authorize recovery.",
+        );
+      };
+
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(value.runs()).toBe(2);
+  },
+);
+
 test("registered campaign reuses equivalent staged knowledge sources", async () => {
   const value = await fixture();
   const knowledge = join(value.root, "knowledge");

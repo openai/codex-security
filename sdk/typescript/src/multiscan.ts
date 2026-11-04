@@ -489,27 +489,6 @@ async function runCampaign(
         },
       );
       if (resumed !== undefined) {
-        if (receipt.status === "completed") {
-          try {
-            if (receipt.cleanupPending === "checkout") {
-              await rm(join(output, "checkouts", task.id), {
-                recursive: true,
-                force: true,
-              });
-            } else if (receipt.cleanupPending === "recovery-checkout") {
-              const recoveryRoot = join(output, "recovery-checkouts");
-              await lstat(recoveryRoot);
-              await ensureOutputDirectory(recoveryRoot);
-              const taskRoot = join(recoveryRoot, task.id);
-              await lstat(taskRoot);
-              await ensureOutputDirectory(taskRoot);
-              await rm(join(taskRoot, `attempt-${receipt.attempt}`), {
-                recursive: true,
-                force: true,
-              });
-            }
-          } catch {}
-        }
         if (receipt.status !== "failed" && receipt.warnings?.length) {
           warnings.push({ repository: task.id, warnings: receipt.warnings });
           for (const warning of receipt.warnings) {
@@ -524,11 +503,10 @@ async function runCampaign(
         const failureSeverity =
           options.scanOptionsByMode?.[task.mode]?.failureSeverity;
         policyFailed ||=
-          failureSeverity !== undefined
-            ? resumed.findings.some((finding) =>
-                meetsSeverity(finding, failureSeverity),
-              )
-            : receipt.policyFailed === true;
+          failureSeverity !== undefined &&
+          resumed.findings.some((finding) =>
+            meetsSeverity(finding, failureSeverity),
+          );
         completed += 1;
         continue;
       }
@@ -641,8 +619,13 @@ async function runCampaign(
                 environment,
                 options.signal,
               );
+              const recordedId =
+                history?.scan?.attempt === attempt
+                  ? history.scan.scanId
+                  : undefined;
               if (
                 typeof authority?.recipe["scanRequestDigest"] === "string" &&
+                (recordedId === undefined || recordedId === authority.id) &&
                 requestDigests.includes(authority.recipe["scanRequestDigest"])
               ) {
                 const normalCheckout = join(checkoutRoot, task.id);
@@ -1577,6 +1560,7 @@ async function loadResumableScan(
         : "repository";
   if (
     manifest.scan.status !== "completed" ||
+    (receipt.scanId !== undefined && receipt.scanId !== manifest.scan.id) ||
     producer.name !== "codex-security-plugin" ||
     matchedRoot === undefined ||
     !registeredTaskMatches(authority, receipt.revision, [matchedRoot]) ||
@@ -1610,9 +1594,8 @@ async function loadResumableScan(
     return undefined;
   if (
     reportMissing &&
-    (receipt.scanId === undefined
-      ? recoverScan === undefined
-      : receipt.scanId !== manifest.scan.id)
+    receipt.scanId === undefined &&
+    recoverScan === undefined
   )
     return undefined;
   let pythonPath: string | undefined;
@@ -1776,6 +1759,29 @@ async function loadResumableScan(
       return undefined;
     }
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
+    // The ledger can request cleanup only of the checkout bound to this scan.
+    const cleanupKind =
+      matchedRoot === checkout ? "checkout" : "recovery-checkout";
+    if (
+      !createdCheckout &&
+      receipt.status === "completed" &&
+      receipt.cleanupPending === cleanupKind
+    ) {
+      const selected = cleanupKind === "checkout" ? checkout : recoveryCheckout;
+      try {
+        if (await lstat(selected).catch(undefinedIfMissingFile)) {
+          if (cleanupKind === "recovery-checkout")
+            await ensureOutputDirectory(dirname(dirname(selected)));
+          const parent = await ensureOutputDirectory(dirname(selected));
+          if (relative(parent, dirname(matchedRoot)) !== "")
+            throw new Error("The registered checkout directory has moved.");
+          const warning = await removeCheckout(selected);
+          if (warning !== undefined) onWarning(warning);
+        }
+      } catch (error) {
+        onWarning(`Multiscan checkout cleanup failed: ${errorMessage(error)}`);
+      }
+    }
     return findings;
   } finally {
     if (createdCheckout) {

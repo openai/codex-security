@@ -514,6 +514,49 @@ describe("multiscan", () => {
     }
   });
 
+  test.each([false, true])(
+    "a forged cleanup kind preserves retained work (recovered=%p)",
+    async (recover) => {
+      const { paths } = await repositoryFixture("cleanup-kind", "done");
+      const scans = mock<SecurityClient["run"]>(completeRun);
+      const configured = options(paths, client(scans), { maxAttempts: 1 });
+      if (recover) {
+        scans.mockRejectedValueOnce(new Error("Interrupted"));
+        expect((await runMultiscan(configured)).failed).toBe(1);
+      }
+      const { resultsPath } = await runMultiscan(
+        recover
+          ? { ...configured, recoverScan: async () => undefined }
+          : configured,
+      );
+      const receipts = await results(resultsPath);
+      const receipt = receipts.at(-1)!;
+      expect(receipt["status"]).toBe("completed");
+      receipt["cleanupPending"] = recover ? "checkout" : "recovery-checkout";
+      await writeFile(
+        resultsPath,
+        receipts.map((row) => JSON.stringify(row) + "\n").join(""),
+      );
+      const other = recover
+        ? join(paths.output, "checkouts", "done")
+        : join(
+            paths.output,
+            "recovery-checkouts",
+            "done",
+            `attempt-${receipt["attempt"]}`,
+          );
+      await mkdir(other, { recursive: true, mode: 0o700 });
+      const retained = join(other, "retained.txt");
+      await writeFile(retained, "Keep this work.");
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+        failed: 0,
+      });
+      expect(await readFile(retained, "utf8")).toBe("Keep this work.");
+    },
+  );
+
   test.each(["root", "task"] as const)(
     "preserves completed scans and external files when the recovery checkout %s is linked",
     async (parent) => {
