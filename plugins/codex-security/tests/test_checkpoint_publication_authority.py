@@ -12,7 +12,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import (
     interrupt_publication,
