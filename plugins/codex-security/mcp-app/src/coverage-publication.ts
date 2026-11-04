@@ -39,7 +39,7 @@ function relativeComponents(
   if (
     /^[\p{White_Space}\x1c-\x1f]*$/u.test(value) ||
     (!allowDot && normalized.length === 0) ||
-    /^\p{L}:/u.test(value) ||
+    /^[A-Za-z]:/u.test(value) ||
     /[\\\x00-\x1f]/u.test(value) ||
     value.startsWith("/") ||
     parts.includes("..")
@@ -67,6 +67,7 @@ export function validateRetainedCoverage(coverage: JsonObject): void {
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
   ] as const)
     requirePublicationJson(coverage[field], `coverage.${field}`);
