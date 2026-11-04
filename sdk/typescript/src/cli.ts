@@ -6723,6 +6723,7 @@ export async function main(
                   errorOutput,
                   dependencies,
                   patchRisk,
+                  savedPatchIntroduction(patches),
                 )
               : undefined;
             if (structuredOutput) {
@@ -8368,6 +8369,15 @@ function patchExitCode(patches: readonly FindingPatch[]): number {
 const PATCH_PR_TITLE = "fix: apply security patch";
 const PATCH_PR_BODY =
   "Applies verified code changes for findings from a completed scan.";
+const CREDENTIAL_REVOCATION_FOLLOW_UP =
+  "Confirm revocation of the exposed credential with its issuer or owner. If it is still active, revoke it or deploy a replacement and disable the old value.";
+
+function savedPatchIntroduction(patches: readonly FindingPatch[]): string {
+  return patches.some((patch) => patch.credentialRevocationPending)
+    ? `${PATCH_PR_BODY} ${CREDENTIAL_REVOCATION_FOLLOW_UP}`
+    : PATCH_PR_BODY;
+}
+
 const PATCH_RISK_SUMMARY_START =
   "<!-- codex-security:patch-risk-summary:start -->";
 const PATCH_RISK_SUMMARY_END = "<!-- codex-security:patch-risk-summary:end -->";
@@ -8975,9 +8985,17 @@ async function runFindingPatches(
     }
 
     const title = safePatchText(finding.title);
+    const label =
+      patch.credentialRevocationPending &&
+      (patch.status === "verified" || patch.status === "no_change")
+        ? "REVOCATION PENDING"
+        : patch.status.toUpperCase();
     stderr.write(
-      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
+      `  ${label}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
     );
+    if (patch.credentialRevocationPending) {
+      stderr.write(`  ${CREDENTIAL_REVOCATION_FOLLOW_UP}\n`);
+    }
     patches.push(patch);
   }
   return patches;
@@ -10986,6 +11004,8 @@ async function executeScan(
           verifiedPatchFiles(selected, patches),
           errorOutput,
           dependencies,
+          undefined,
+          savedPatchIntroduction(patches),
         );
         if (pullRequest !== undefined) {
           scanData = { ...scanData, pullRequest };
@@ -11000,7 +11020,11 @@ async function executeScan(
 
   const resolved = new Set(
     patches
-      .filter(({ status }) => status === "verified" || status === "no_change")
+      .filter(
+        ({ status, credentialRevocationPending }) =>
+          (status === "verified" || status === "no_change") &&
+          !credentialRevocationPending,
+      )
       .map(({ occurrenceId }) => occurrenceId),
   );
   const blockingCount =

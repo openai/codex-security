@@ -13,7 +13,9 @@ def uses_legacy_review(scan: dict[str, Any]) -> bool:
 
 def review_summary(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "excludedPaths": [item["pattern"] for item in state.get("explicitExclusions", [])],
+        "excludedPaths": list(
+            dict.fromkeys(item["pattern"] for item in state.get("explicitExclusions", []))
+        ),
     }
 
 
@@ -28,7 +30,7 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
         "explicitExclusions",
         [
             {"pattern": path, "reason": "Excluded from review"}
-            for path in summary.get("excludedPaths", [])
+            for path in dict.fromkeys(summary.get("excludedPaths", []))
         ],
     )
     state.update(

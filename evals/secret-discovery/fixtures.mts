@@ -17,12 +17,15 @@ export function createFixture(externalTokenScanner = false) {
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
     publicKeyEncoding: { type: "spki", format: "pem" },
   });
+  const statusAccess =
+    "The status service accepts public requests from delivery clients.";
   const files: Record<string, string> = {
     "README.md": `# Delivery worker
 
 A small delivery worker with service clients, message signing, deployment
 configuration, and integration checks. Source access is also granted to
 reviewers who do not operate the delivery service or its database.
+${statusAccess}
 `,
     "src/client.py": `from urllib.request import Request
 
@@ -90,9 +93,11 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 `,
     "examples/settings.env.example": `SERVICE_TOKEN=YOUR_SERVICE_TOKEN_HERE
 DATABASE_PASSWORD=<replace-with-secret>
+GITLAB_TOKEN=glpat-${"0".repeat(20)}
 `,
     "config/public.pem": publicKey,
     "src/constants.py": `PUBLIC_CLIENT_ID = "delivery-worker"
+AWS_ACCESS_KEY_ID = "AKIA${randomBytes(8).toString("hex").toUpperCase()}"
 CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 `,
   };
@@ -124,6 +129,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
   };
   return {
     files,
+    statusAccessLine: files["README.md"].split("\n").indexOf(statusAccess) + 1,
     positives: [
       positive(
         "active-source",
@@ -213,6 +219,7 @@ export function sourceEvidence(
 export function expectedFindings(source: ReturnType<typeof createFixture>) {
   return source.positives.map((expected) => ({
     title: "Embedded credential",
+    validation: { summary: "Validity unchecked." },
     taxonomy: { category: expected.category, cwe: [expected.cwes[0]] },
     locations: [
       { path: expected.path, startLine: expected.line, role: "root_control" },

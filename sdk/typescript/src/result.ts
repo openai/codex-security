@@ -73,12 +73,16 @@ export class ScanResult {
       options.mode ?? options.manifest.scan.mode ?? options.coverage!.mode;
     this.manifest = options.manifest;
     this.findings = options.findings;
-    this.review = options.review ??
-      options.manifest.scan.review ?? {
-        excludedPaths: options.coverage!.explicitExclusions.map(
-          (item) => item.pattern,
+    const review = options.review ?? options.manifest.scan.review;
+    this.review = {
+      ...review,
+      excludedPaths: [
+        ...new Set(
+          review?.excludedPaths ??
+            options.coverage!.explicitExclusions.map((item) => item.pattern),
         ),
-      };
+      ],
+    };
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;

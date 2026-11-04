@@ -1842,7 +1842,7 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test("keeps a saved finding's source patch while credential retirement is blocked", async () => {
+  test("keeps a saved finding's source edits and reports why code verification is blocked", async () => {
     await using temp = await scopedTemporaryDirectory("credential-patch-");
     const repository = temp.path;
     const path = "deploy.env";
@@ -1853,7 +1853,9 @@ describe("scan and patch workflow", () => {
       status: "blocked",
       files: [path],
       verification: "The deployment reads the token from its environment.",
-      reason: "The owner must revoke the old registry token.",
+      credentialRevocationPending: true,
+      reason:
+        "The replacement token has not been provisioned, so deployment verification is blocked.",
     };
     fixtureGit(repository, "init", "--initial-branch=main");
     await writeFile(file, "TOKEN=synthetic-fixture\n");
@@ -1875,6 +1877,7 @@ describe("scan and patch workflow", () => {
       },
     );
     expect(outcome.exitCode, outcome.stderr).toBe(1);
+    expect(outcome.stderr).toContain("BLOCKED");
     expect(outcome.stderr).toContain(patch.reason);
     const response = JSON.parse(outcome.stdout);
     expect(response).toMatchObject({
@@ -1886,6 +1889,64 @@ describe("scan and patch workflow", () => {
     expect(fixtureGit(repository, "diff", "--name-only")).toBe(path);
     expect(fixtureGit(repository, "branch", "--show-current")).toBe("main");
   });
+
+  test.each(["verified", "no_change"] as const)(
+    "keeps pending credential retirement blocking CI after a %s code patch",
+    async (status) => {
+      const files = status === "verified" ? ["src/finding-1.ts"] : [];
+      let publishedBody: string | undefined;
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--create-pr",
+          "--fail-on-severity",
+          "high",
+          "--json",
+        ],
+        {
+          result: resultWithFindings(["high"]),
+          onCodex: (_args, output) => {
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status,
+                    files,
+                    verification:
+                      "The application now reads its password from the configured store.",
+                    credentialRevocationPending: true,
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+          onRepositoryCommand: (command, args) => {
+            if (command === "gh" && args[1] === "create") {
+              publishedBody = args.at(-1);
+              return "https://github.com/example/project/pull/1";
+            }
+            return files.length && args.includes("--name-only")
+              ? files[0] + "\0"
+              : "";
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(1);
+      expect(JSON.parse(outcome.stdout).patches).toMatchObject([
+        { status, credentialRevocationPending: true },
+      ]);
+      expect(outcome.stderr).toContain("REVOCATION PENDING");
+      expect(outcome.stderr).toContain("Confirm revocation");
+      if (status === "verified") {
+        expect(publishedBody).toContain("Confirm revocation");
+      } else {
+        expect(publishedBody).toBeUndefined();
+      }
+    },
+  );
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     const reason = "Revoke the exposed token with its issuer.";
