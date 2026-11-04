@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   patchRiskAssessment,
   publicationRepository,
+  repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
 } from "./cli-patch-fixtures.js";
@@ -161,5 +162,70 @@ test.each(["scrubbed copy", "filtered copy", "transform", "independent"])(
     expect(await readFile(join(directory, file), "utf8")).toBe(
       "Synthetic scrubbed working copy\n",
     );
+  },
+);
+
+test.each(["root", "nested", "disabled"])(
+  "checks clean filters before the publication snapshot: %s",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const checkout = mode === "nested" ? join(directory, "child") : directory;
+    const selected = repositoryGit(checkout);
+    if (mode === "nested") {
+      await mkdir(checkout);
+      selected("init", "--initial-branch=main");
+      selected("config", "user.name", "Synthetic User");
+      selected("config", "user.email", "synthetic@example.test");
+    }
+    selected("config", "filter.passthrough.clean", "cat");
+    if (mode === "disabled")
+      selected("config", "--add", "filter.passthrough.clean", "");
+    await writeFile(
+      join(checkout, ".gitattributes"),
+      "plain.txt filter=passthrough\n",
+    );
+    await writeFile(join(checkout, ".gitignore"), "local-note.txt\n");
+    await writeFile(join(checkout, "plain.txt"), "Plain fixture.\n");
+    selected("add", ".gitattributes", ".gitignore", "plain.txt");
+    selected("commit", "-m", "Configure a pass-through clean filter");
+    if (mode === "nested") {
+      git("add", "child");
+      git("commit", "-m", "Track the child repository");
+    }
+    await writeFile(join(checkout, "local-note.txt"), "Ordinary local note.\n");
+    const operations: string[] = [];
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onRepositoryCommand(command, args, cwd, options) {
+          if (command !== "git")
+            return args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1";
+          for (const operation of ["add", "status", "push"])
+            if (args.includes(operation)) operations.push(operation);
+          if (args[0] === "push") return "";
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        async onCodex(_args, output) {
+          operations.push("model");
+          await writeFile(
+            join(directory, "src/finding-1.ts"),
+            "Independent edit.\n",
+          );
+          output!.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      },
+    );
+    if (mode === "disabled") {
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(operations).toContain("push");
+      expect(git("show", "HEAD:src/finding-1.ts")).toBe("Independent edit.");
+    } else {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(operations).toEqual([]);
+    }
   },
 );
