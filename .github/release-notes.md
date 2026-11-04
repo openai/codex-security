@@ -37,6 +37,10 @@
 - ignore DOCX tab stop definitions when extracting text ([#2284](https://github.com/openai/codex-security/pull/2284))
 - audit bundled MCP and triage eval dependencies ([#2328](https://github.com/openai/codex-security/pull/2328))
 - give Promptfoo version updates their own PRs ([#2329](https://github.com/openai/codex-security/pull/2329))
+- simplify Cyber access feature selection ([#1044](https://github.com/openai/codex-security/pull/1044))
+- recognize usage limits reported during compaction ([#1844](https://github.com/openai/codex-security/pull/1844))
+- omit DOCX drawing positions and sizes from extracted text ([#2051](https://github.com/openai/codex-security/pull/2051))
+- report a failed ignored-but-tracked file listing ([#864](https://github.com/openai/codex-security/pull/864))
 
 <!-- release-section: highlights:end -->
 
