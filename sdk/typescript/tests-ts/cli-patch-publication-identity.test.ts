@@ -1,6 +1,14 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { BigIntStats, Stats } from "node:fs";
-import { readFile, rename, writeFile, type FileHandle } from "node:fs/promises";
+import {
+  link,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   publicationRepository,
@@ -149,3 +157,55 @@ for (const [name, before, after] of [
     }
   });
 }
+
+test.each([
+  "hardlinked HEAD",
+  "linked logs directory",
+  ...(process.platform === "win32" ? [] : ["symlinked HEAD"]),
+])("refuses a %s before switching the patch branch", async (mode) => {
+  const { directory, git, remote } = await publicationRepository(fixtures);
+  const external = await fixtures.create("patch-reflog-target-");
+  const logs = join(directory, ".git", "logs");
+  const headLog = join(logs, "HEAD");
+  let target = join(external, "unchanged");
+  if (mode === "linked logs directory") {
+    const moved = join(external, "logs");
+    await rename(logs, moved);
+    await symlink(
+      moved,
+      logs,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    target = join(moved, "HEAD");
+  } else {
+    await writeFile(target, "Synthetic external file\n");
+    await rm(headLog);
+    if (mode === "hardlinked HEAD") await link(target, headLog);
+    else await symlink(target, headLog);
+  }
+  const before = await readFile(target);
+  const branch = git("branch", "--show-current");
+  const result = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (command === "git")
+          return runGitRepositoryCommand(command, args, cwd, options);
+        return args[1] === "list"
+          ? "[]"
+          : "https://github.example.test/example/repository/pull/1";
+      },
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, "selected.txt"), "Synthetic change\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    },
+  );
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain("regular, unlinked Git reflogs");
+  expect(git("branch", "--show-current")).toBe(branch);
+  expect(repositoryGit(remote)("for-each-ref")).toBe("");
+  expect(await readFile(target)).toEqual(before);
+});

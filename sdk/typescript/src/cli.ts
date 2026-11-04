@@ -9931,6 +9931,42 @@ async function checkDeinitializedPatchSubmodules(
   }
 }
 
+async function checkPatchReflogs(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const directories = new Set<string>();
+  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
+    const output = await dependencies.runRepositoryCommand(
+      "git",
+      ["rev-parse", "--path-format=absolute", argument],
+      repository,
+      { trim: false },
+    );
+    directories.add(await realpath(output.replace(/\n$/u, "")));
+  }
+  // Git appends in place to existing logs. Check both worktree and shared refs.
+  const pending = [...directories].map((path) =>
+    Buffer.from(join(path, "logs")),
+  );
+  while (pending.length) {
+    const path = pending.pop()!;
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (metadata === undefined) continue;
+    if (metadata.isDirectory()) {
+      for (const name of await readdir(path, { encoding: "buffer" }))
+        pending.push(Buffer.concat([path, Buffer.from(sep), name]));
+    } else if (!metadata.isFile() || metadata.nlink !== 1) {
+      throw new CodexSecurityError(
+        "Patch publication requires regular, unlinked Git reflogs.",
+      );
+    }
+  }
+}
+
 async function publishPatchBranch(
   repository: string,
   branch: string,
@@ -10052,6 +10088,7 @@ async function publishPatchBranch(
           branch,
           dependencies,
         );
+      await checkPatchReflogs(repository, dependencies);
       await dependencies.runRepositoryCommand(
         "git",
         [
@@ -10595,6 +10632,7 @@ async function createPatchPullRequest(
   };
   let committed = false;
   try {
+    await checkPatchReflogs(repository, dependencies);
     await run(["switch", "-c", branch]);
     await withPatchGitIndex(
       indexCommand(false),
