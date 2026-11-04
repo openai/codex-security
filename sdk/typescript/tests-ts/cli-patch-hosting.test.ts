@@ -259,6 +259,42 @@ describe("patch change tracking", () => {
     expect(await readFile(marker, "utf8")).toBe("approved");
   });
 
+  test("publication commits do not run a checkout-selected signer", async () => {
+    const { directory, git, remote } = await publicationRepository();
+    const outside = await fixtures.create("patch-signer-");
+    const marker = join(outside, "called");
+    const signer = join(directory, "signer");
+    await writeFile(
+      signer,
+      `#!/bin/sh\nprintf called > '${marker.replaceAll("\\", "/").replaceAll("'", "'\\''")}'\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    git("add", "signer");
+    git("commit", "-m", "Synthetic signer fixture");
+    git("config", "commit.gpgSign", "true");
+    git("config", "gpg.program", "./signer");
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onCodex: async (_args, output) => {
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+        onRepositoryCommand: (tool, args, cwd, options) =>
+          tool === "git"
+            ? runGitRepositoryCommand(tool, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+      },
+    );
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
+  });
+
   test.each(
     [false, true].flatMap((resume) =>
       ["github.com", "gitlab.com"].flatMap((host) =>
