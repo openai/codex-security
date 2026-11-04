@@ -161,12 +161,19 @@ function requirePortableWindowsRepositoryPath(path: string): void {
   }
 }
 
+type ReadWorktreeGit = (
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<string>;
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean } = {},
+  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
+  const readGit = options.readGit ?? gitOutput;
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -174,7 +181,7 @@ export async function enclosingGitWorktreeRoot(
   try {
     if (strict) {
       if (
-        (await gitOutput(
+        (await readGit(
           repository,
           ["rev-parse", "--is-inside-git-dir"],
           signal,
@@ -186,7 +193,7 @@ export async function enclosingGitWorktreeRoot(
       }
       if (markerRoot === null) return null;
     }
-    const root = await gitOutput(
+    const root = await readGit(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
@@ -215,7 +222,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal);
+    await requireGitWorktreeBinding(canonicalRoot, signal, readGit);
   return canonicalRoot;
 }
 
@@ -321,11 +328,12 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean } = {},
+  options: { includeLocalObjects?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<[string, string, ...string[]]> {
+  const readGit = options.readGit ?? gitOutput;
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    readGit(repository, ["rev-parse", "--absolute-git-dir"], signal),
+    readGit(repository, ["rev-parse", "--git-common-dir"], signal),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -434,13 +442,15 @@ export async function gitObjectDirectories(
 
 async function requireGitWorktreeBinding(
   repository: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  readGit: ReadWorktreeGit,
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
+      { readGit },
     );
     if (
       [directory, commonDirectory].every(
@@ -451,11 +461,7 @@ async function requireGitWorktreeBinding(
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
       if (
-        await gitOutput(
-          repository,
-          ["config", "--get", "core.worktree"],
-          signal,
-        )
+        await readGit(repository, ["config", "--get", "core.worktree"], signal)
       )
         return;
     } else {
@@ -751,6 +757,28 @@ export async function gitHistoryIdentity(
   return { commonDirectory, origin };
 }
 
+/** Resolve Git and its sanitized executable search path for a single selected checkout. */
+export async function trustedGitCommand(
+  repository: string,
+  preserveConfiguration: boolean,
+  sourceEnvironment: NodeJS.ProcessEnv,
+  protectedRoots: string | readonly string[],
+  signal?: AbortSignal,
+) {
+  const command = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(preserveConfiguration, sourceEnvironment),
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
+  );
+  if (!command) throw new Error("Git is not available on a trusted PATH.");
+  return command;
+}
+
 export function gitOutput(
   repository: string,
   args: readonly string[],
@@ -782,26 +810,30 @@ export async function gitOutput(
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
-  const command = await resolveTrustedExecutable(
-    "git",
-    isolatedGitEnvironment(
-      args[0] === "rev-parse" ||
-        args[0] === "config" ||
-        args[0] === "ls-files" ||
-        (args[0] === "remote" &&
-          (args.length === 1 ||
-            (args[1] === "get-url" && args[2] === "--all"))),
-      sourceEnvironment,
-    ),
-    [
-      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
-      ...(typeof protectedRoots === "string"
-        ? [protectedRoots]
-        : protectedRoots),
-    ],
+  const command = await trustedGitCommand(
+    repository,
+    args[0] === "rev-parse" ||
+      (args[0] === "symbolic-ref" &&
+        args[1] === "--quiet" &&
+        args[2] === "HEAD" &&
+        args.length === 3) ||
+      (args[0] === "--exec-path" && args.length === 1) ||
+      args[0] === "config" ||
+      (args[0] === "fetch-pack" &&
+        args[1] === "--diag-url" &&
+        args.length === 3) ||
+      (args[0] === "ls-remote" &&
+        args[1] === "--get-url" &&
+        (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
+      args[0] === "ls-files" ||
+      (args[0] === "remote" &&
+        (args.length === 1 ||
+          (args[1] === "get-url" &&
+            (args[2] === "--all" || args[2] === "--")))),
+    sourceEnvironment,
+    protectedRoots,
+    signal,
   );
-  if (command === null)
-    throw new Error("Git is not available on a trusted PATH.");
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
@@ -813,9 +845,14 @@ export async function gitOutput(
       maxBuffer: Infinity,
     },
   );
-  return typeof stdout === "string"
-    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
-    : stdout;
+  if (typeof stdout !== "string") return stdout;
+  // Git writes remote URLs to binary stdout even on Windows. Only the final LF
+  // is a delimiter; a preceding CR belongs to the configured URL.
+  const remoteUrl = args[0] === "remote" && args[1] === "get-url";
+  return stdout.replace(
+    process.platform === "win32" && !remoteUrl ? /\r?\n$/u : /\n$/u,
+    "",
+  );
 }
 
 export async function gitMarkerRoot(

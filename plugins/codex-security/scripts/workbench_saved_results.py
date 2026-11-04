@@ -1303,7 +1303,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("A scan can only be canceled from its owning Codex thread.")
         if scan["canceled_at"] is not None:
             connection.commit()
-            return db.workspace_state(connection, scan["workspace_id"])
+            return {
+                **db.workspace_state(connection, scan["workspace_id"]),
+                "canceledScanId": scan["id"],
+            }
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be canceled.")
         updated = connection.execute(
@@ -1324,7 +1327,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if progress_updated.rowcount != 1:
             raise SystemExit("Codex Security scan progress not found.")
     preserve_stopped_results_after_transition(db, connection, scan["id"])
-    return db.workspace_state(connection, scan["workspace_id"])
+    return {**db.workspace_state(connection, scan["workspace_id"]), "canceledScanId": scan["id"]}
 
 
 def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id: str) -> None:

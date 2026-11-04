@@ -27,7 +27,7 @@ Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fi
 
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
-The generated `report.md` omits details for `informational` findings and, when any are present, records their count and severity mix with pointers to `findings.json` and SARIF and CSV exports.
+The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF or CSV.
 
 ## Review State And Pending Work
 
@@ -35,7 +35,7 @@ Keep unfinished requested work and essential in-scope proof gaps in `reviewState
 
 Standard and diff drafts use `{ surfaces, explicitExclusions, deferred }`. Give surfaces meaningful labels and schema-defined dispositions, preserving saved surface IDs in updates. Retain reasons and evidence for rejected, not-applicable, and follow-up work. Open questions may be strings or `{ question, followUpPrompt? }` objects. An open question does not prevent the configured review from finishing.
 
-Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Close a generic saved task in the final Standard or diff draft with `reviewState.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
+Preserve each saved deferred `id` or `candidateId`, use each deferred ID only once, and copy IDs assigned by the draft response into later updates. Omitting a saved task from the final draft does not by itself close it. Close a generic saved task in the final Standard or diff draft with `reviewState.resolvedDeferred: [{ id, reason }]`; keep unfinished tasks deferred and update linked surfaces by ID. Candidate-linked tasks close through findings or terminal dispositions. Deep parents cannot close worker tasks; original checkpoints remain unchanged.
 
 The workbench assigns IDs to new surfaces and derives a finding's `identity` when omitted. Review notes do not measure file coverage; do not add reviewed-surface tables or file-coverage claims to the report. Omit host-owned target/scope metadata, `reviewState.inventoryStrategy`, `reviewState.receiptRefs`, and each active finding's `findingId`, `occurrenceId` and `fingerprints` from semantic drafts. SDK-authored canonical files follow `scan-contract.md` and the SDK's supplied metadata.
 
