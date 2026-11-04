@@ -9838,10 +9838,16 @@ async function patchCommandContext(
 
   // Staging and Git's own child processes can change cwd. Keep relative
   // configuration files bound to the setup directory whose controls we captured.
-  const configurationPaths = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]
+  const configurationPaths = [
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    ...(process.platform === "win32" ? ["USERPROFILE"] : []),
+  ]
     .map(
       (name) =>
-        [name, environmentValue(dependencies.environment, name)] as const,
+        [name, environmentEntry(dependencies.environment, name)] as const,
     )
     .filter(
       (entry): entry is readonly [string, string] =>
@@ -9996,9 +10002,15 @@ async function bindPatchCommandContext(
             // accepting relative XDG paths and on legacy config precedence.
             ...(command === "glab"
               ? Object.fromEntries(
-                  Object.entries(context.glabConfigurationPaths).map(
-                    ([name, path]) => [name, relative(directory, path) || "."],
-                  ),
+                  ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"].map((name) => {
+                    const path = context.glabConfigurationPaths[name];
+                    return [
+                      name,
+                      path === undefined
+                        ? environmentEntry(dependencies.environment, name)
+                        : relative(directory, path) || ".",
+                    ];
+                  }),
                 )
               : {}),
             ...options?.environment,

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   publicationRepository,
@@ -184,3 +184,54 @@ test("publication preserves empty global and system configuration paths", async 
   expect(outcome.exitCode, outcome.stderr).toBe(0);
   expect(await readFile(effect, "utf8").catch(() => "")).toBe("");
 });
+
+test.each(["HOME", "XDG_CONFIG_HOME"])(
+  "publication keeps Git's relative %s anchored after the outside caller is removed",
+  async (selector) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const caller = await fixtures.create("patch-config-caller-");
+    const support = await fixtures.create("patch-config-home-");
+    const shadow = join(
+      directory,
+      "settings",
+      selector === "HOME" ? ".gitconfig" : "git/config",
+    );
+    await mkdir(dirname(shadow), { recursive: true });
+    await writeFile(shadow, "[i18n]\ncommitEncoding = ISO-8859-1\n");
+    git("add", ".");
+    git("commit", "-m", "Track harmless worktree configuration");
+    const environment = {
+      GIT_DIR: join(directory, ".git"),
+      GIT_WORK_TREE: directory,
+      GIT_CONFIG_GLOBAL: undefined,
+      GIT_CONFIG_NOSYSTEM: "1",
+      HOME: support,
+      XDG_CONFIG_HOME: support,
+      [selector]: "settings",
+    };
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: caller,
+        environment,
+        onRepositoryCommand: (tool, args, cwd, options) =>
+          tool === "git"
+            ? runGitRepositoryCommand(tool, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
+            : args[1] === "create"
+              ? "https://example.test/repository/pull/1"
+              : "[]",
+        onCodex: async (_args, output) => {
+          await rm(caller, { recursive: true });
+          await writeFile(join(directory, "src", "finding-1.ts"), "fixed\n");
+          output?.stdout.write("Synthetic patch complete.");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(git("cat-file", "-p", "HEAD")).not.toContain("encoding ISO-8859-1");
+  },
+);
