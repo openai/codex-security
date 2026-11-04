@@ -339,21 +339,14 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
         assert Path(cwd).is_relative_to(capture_dir)
         assert env["CX_CONFIG_FILE_PATH"] == str(config)
         assert {"PATH", *loaders}.isdisjoint(env)
-        assert args == [
-            cx,
-            "results",
-            "show",
-            "--config-file-path",
-            str(config),
-            "--scan-id",
-            ONE_SCAN.upper(),
-            "--report-format",
-            "json",
-            "--output-path",
-            cwd,
-            "--output-name",
-            "cx_result",
-        ]
+        assert tuple(args[:3]) == (cx, "results", "show")
+        assert dict(zip(args[3::2], args[4::2], strict=True)) == {
+            "--config-file-path": str(config),
+            "--scan-id": ONE_SCAN.upper(),
+            "--report-format": "json",
+            "--output-path": cwd,
+            "--output-name": "cx_result",
+        }
         stdout.write("retrieved existing scan\n")
         write_one(cwd)  # Servers can return a different case for the same UUID.
         Path(cwd, "vendor-log.txt").write_text("vendor diagnostic")

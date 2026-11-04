@@ -285,74 +285,81 @@ def create_capture(source: Path | None) -> Path:
     )
 
 
+def export_report(args: argparse.Namespace, source: Path | None, work: str, run_vendor) -> Path:
+    def fetch(report, env, *command):
+        # Only the validated report path goes to stdout; vendor diagnostics go to stderr.
+        status = run_vendor(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr)
+        if status:
+            raise ValueError(f"The Checkmarx tool exited with status {status}.")
+        if report.is_symlink() or not report.is_file():
+            raise ValueError("The Checkmarx tool did not produce the requested report.")
+
+    if args.product == "one":
+        env = one_environment(source, work)
+        report = Path(work, "cx_result.json")
+        fetch(
+            report,
+            env,
+            str(args.cx),
+            "results",
+            "show",
+            # Older clients reject this flag instead of authenticating with another profile.
+            "--config-file-path",
+            env["CX_CONFIG_FILE_PATH"],
+            "--scan-id",
+            args.scan_id,
+            "--report-format",
+            "json",
+            "--output-path",
+            work,
+            "--output-name",
+            report.stem,
+        )
+        verify_one(report, args.scan_id)
+        return report
+
+    team = args.team.rstrip("/\\")
+    report = Path(work, "checkmarx-results.xml")
+    fetch(
+        report,
+        cxsast_environment(work, args.use_env_credentials),
+        str(args.java),
+        f"-Djava.io.tmpdir={work}",
+        f"-DLOG_PATH={work}",
+        "-Dfile.encoding=UTF-8",
+        "-jar",
+        str(args.jar),
+        f"--spring.config.location={args.config.as_uri()}",
+        "--logging.config=classpath:logback-spring.xml",
+        f"--logging.file.path={work}",
+        f"--logging.file.name={Path(work, 'cx-flow.log')}",
+        f"--logging.logback.rollingpolicy.file-name-pattern={Path(work, 'cx-flow.%d{yyyy-MM-dd}.%i.gz')}",
+        "--project",
+        f"--scanId={args.scan_id}",
+        f"--cx-team={team}",
+        f"--cx-project={args.project}",
+        f"--app={args.project}",
+        "--bug-tracker=CxXml",
+        "--cx-flow.bug-tracker-impl=CxXml",
+        "--cx-flow.enabled-vulnerability-scanners=sast",
+        "--cx-flow.preserve-project-name=true",
+        "--cx-flow.mail.notification=false",
+        "--cx-flow.filter-script=",
+        "--disable-break-build",
+        "--checkmarx.cx-branch=false",
+        "--checkmarx.preserve-xml=true",
+        f"--cx-xml.data-folder={work}",
+        f"--cx-xml.file-name-format={report.name}",
+    )
+    verify_cxsast(report, str(args.scan_id), args.project, args.team)
+    return report
+
+
 def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
     output = create_capture(source)
     try:
         with tempfile.TemporaryDirectory(dir=output) as work:
-            if args.product == "one":
-                env = one_environment(source, work)
-                report = Path(work, "cx_result.json")
-                command = [
-                    str(args.cx),
-                    "results",
-                    "show",
-                    # Older clients reject this flag instead of authenticating with another profile.
-                    "--config-file-path",
-                    env["CX_CONFIG_FILE_PATH"],
-                    "--scan-id",
-                    args.scan_id,
-                    "--report-format",
-                    "json",
-                    "--output-path",
-                    work,
-                    "--output-name",
-                    "cx_result",
-                ]
-            else:
-                env = cxsast_environment(work, args.use_env_credentials)
-                team = args.team.rstrip("/\\")
-                report = Path(work, "checkmarx-results.xml")
-                command = [
-                    str(args.java),
-                    f"-Djava.io.tmpdir={work}",
-                    f"-DLOG_PATH={work}",
-                    "-Dfile.encoding=UTF-8",
-                    "-jar",
-                    str(args.jar),
-                    f"--spring.config.location={args.config.as_uri()}",
-                    "--logging.config=classpath:logback-spring.xml",
-                    f"--logging.file.path={work}",
-                    f"--logging.file.name={Path(work, 'cx-flow.log')}",
-                    f"--logging.logback.rollingpolicy.file-name-pattern={Path(work, 'cx-flow.%d{yyyy-MM-dd}.%i.gz')}",
-                    "--project",
-                    f"--scanId={args.scan_id}",
-                    f"--cx-team={team}",
-                    f"--cx-project={args.project}",
-                    f"--app={args.project}",
-                    "--bug-tracker=CxXml",
-                    "--cx-flow.bug-tracker-impl=CxXml",
-                    "--cx-flow.enabled-vulnerability-scanners=sast",
-                    "--cx-flow.preserve-project-name=true",
-                    "--cx-flow.mail.notification=false",
-                    "--cx-flow.filter-script=",
-                    "--disable-break-build",
-                    "--checkmarx.cx-branch=false",
-                    "--checkmarx.preserve-xml=true",
-                    f"--cx-xml.data-folder={work}",
-                    "--cx-xml.file-name-format=checkmarx-results.xml",
-                ]
-            # Reserve stdout for the report path and pass vendor diagnostics to stderr.
-            returncode = run_vendor(
-                command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr
-            )
-            if returncode:
-                raise ValueError(f"The Checkmarx tool exited with status {returncode}.")
-            if report.is_symlink() or not report.is_file():
-                raise ValueError("The Checkmarx tool did not produce the requested report.")
-            if args.product == "one":
-                verify_one(report, args.scan_id)
-            else:
-                verify_cxsast(report, str(args.scan_id), args.project, args.team)
+            report = export_report(args, source, work, run_vendor)
             report.chmod(0o600)
             saved = report.replace(output / report.name)
         sys.stdout.buffer.write(f"{saved}\n".encode("utf-8"))

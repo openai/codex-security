@@ -162,7 +162,7 @@ test("compares retained CxSAST instance URLs without rewriting the evidence", ()
   const instance = "https://SAST.EXAMPLE:443/Team";
   const retained = { ...row.evidence.source_data, instance };
   expect(checkmarxXmlScope(retained).instance).toBe(instance);
-  expect(checkmarxXmlId(retained, "100")).toBe(row.source_finding_id);
+  expect(checkmarxXmlId(retained)).toBe(row.source_finding_id);
   for (const different of [
     "https://sast.example/team",
     "https://sast.example/Team/other",

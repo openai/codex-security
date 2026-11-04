@@ -65,64 +65,64 @@ function checkBatchScope(
   formats: Iterable<string>,
   report: ExternalFindings["report"],
 ) {
-  function single(values: unknown[]) {
-    const claims = new Set(values.filter((value) => value != null));
-    if (claims.size > 1)
+  const claims = new Map<string, unknown>();
+  function claim(key: string, value: unknown) {
+    if (value == null) return;
+    if (claims.has(key) && claims.get(key) !== value)
       throw new Error(
         report
           ? mismatch
           : "Checkmarx occurrences must belong to the same product, project and scan.",
       );
-    return claims.values().next().value;
+    claims.set(key, value);
   }
-  const evidence = findings.map((finding) => finding.evidence);
-  const sources = [report, ...evidence.map((row) => row.source_data)].filter(
-    isRecord,
-  );
-  const scanner = single([
-    ...[report?.["format"], ...formats]
-      .filter(checkmarxFormat)
-      .map((format) =>
+
+  for (const format of [report?.["format"], ...formats])
+    if (checkmarxFormat(format))
+      claim(
+        "scanner",
         format === "cxsast-xml" ? "CxSAST" : "Checkmarx One SAST",
-      ),
-    ...evidence.map((row) => row.details?.scanner_origin),
-    sources.some(checkmarxResultViewer) ? "CxSAST" : undefined,
-  ]);
-  const xml = scanner === "CxSAST";
-  if (xml || sources.some((data) => text(data["teamFullPathOnReportDate"]))) {
-    single(sources.map((data) => text(data["projectName"])));
-    single(
-      sources.map((data) =>
+      );
+  const sources = [report];
+  for (const { evidence } of findings) {
+    claim("scanner", evidence.details?.scanner_origin);
+    if (evidence.source_data) sources.push(evidence.source_data);
+  }
+  if (sources.some(checkmarxResultViewer)) claim("scanner", "CxSAST");
+  const xml = claims.get("scanner") === "CxSAST";
+  const named =
+    xml || sources.some((data) => text(data?.["teamFullPathOnReportDate"]));
+  claim("scan", scanKey(report?.["scanId"], xml));
+  for (const { evidence } of findings)
+    claim("scan", scanKey(evidence.source_scan_id, xml));
+
+  let instance: string | undefined;
+  for (const data of sources) {
+    if (!data) continue;
+    claim("project", data["projectId"]);
+    if (named) {
+      claim("project name", text(data["projectName"]));
+      claim(
+        "team",
         text(data["teamFullPathOnReportDate"])
           ?.replaceAll("\\", "/")
           .replace(/^\/+|\/+$/gu, "")
           .replace(/[A-Z]/gu, (c) => c.toLowerCase()),
-      ),
-    );
-  }
-  const scopes = sources
-    .filter((data) => {
-      // An explicit deployment URL distinguishes an instance from opaque SDK metadata.
-      const instance = data["instance"];
-      return (
-        xml ||
-        (typeof instance === "string" &&
-          /^https?:$/u.test(URL.parse(instance)?.protocol ?? ""))
       );
-    })
-    .map((data) => checkmarxXmlScope(data));
-  let instance: string | undefined;
-  for (const scope of scopes)
-    instance = checkmarxXmlInstance(instance, scope.instance);
-  single([
-    ...sources.map((data) => data["projectId"]),
-    ...scopes.map((scope) => scope.projectId),
-  ]);
-  single([
-    scanKey(report?.["scanId"], xml),
-    ...evidence.map((row) => scanKey(row.source_scan_id, xml)),
-    ...scopes.map((scope) => scope.scanId),
-  ]);
+    }
+    // A URL identifies a deployment; other instance metadata in SDK rows is opaque.
+    const url = data["instance"];
+    if (
+      xml ||
+      (typeof url === "string" &&
+        /^https?:$/u.test(URL.parse(url)?.protocol ?? ""))
+    ) {
+      const scope = checkmarxXmlScope(data);
+      instance = checkmarxXmlInstance(instance, scope.instance);
+      claim("project", scope.projectId);
+      claim("scan", scope.scanId);
+    }
+  }
 }
 
 /** Identify report and row provenance once for both import destinations. */
@@ -204,13 +204,10 @@ export function checkmarxSelection(
       const kind = formats.get(finding);
       if (checkmarxFormat(kind) && data) {
         requireProvider();
-        const scan = requiredText(
-          evidence.source_scan_id,
-          "Checkmarx source scan ID",
-        );
+        requiredText(evidence.source_scan_id, "Checkmarx source scan ID");
         const expected =
           kind === "cxsast-xml"
-            ? checkmarxXmlId(data, scan)
+            ? checkmarxXmlId(data)
             : checkmarxOneId(data["row"]);
         if (id !== expected)
           throw new Error(

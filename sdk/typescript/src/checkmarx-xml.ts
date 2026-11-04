@@ -184,15 +184,11 @@ function readReport(contents: string) {
 }
 
 /** SimilarityId groups paths, including paths with different intermediate nodes. */
-export function checkmarxXmlId(
-  source: Record<string, unknown>,
-  scanId: string,
-): string {
+export function checkmarxXmlId(source: Record<string, unknown>): string {
   const projectId = requiredText(source["projectId"], "CxSAST ProjectId");
   const query = record(source["query"], "CxSAST Query");
   const result = record(source["result"], "CxSAST Result");
   const path = record(source["path"], "CxSAST Path");
-  checkmarxXmlScope(source, scanId, projectId);
   const nodes = array(source["nodes"], "CxSAST Path nodes");
   const route = (nodes.length ? nodes : [result]).map((value) => {
     const node = record(value, "CxSAST path node");
@@ -226,8 +222,6 @@ export function normalizeCheckmarxXml(
       rows,
       (row) => {
         const { query, result } = row;
-        const rowInstance =
-          viewerInstance(viewerLink(result["DeepLink"])) ?? instance;
         return checkmarxEvidence(
           report,
           {
@@ -241,12 +235,17 @@ export function normalizeCheckmarxXml(
                 ? "False positive"
                 : result["state"],
             cwe: query["cweId"],
-            sourceData: rowInstance ? { ...row, instance: rowInstance } : row,
+            sourceData:
+              !row["instance"] && instance ? { ...row, instance } : row,
           },
           target,
         );
       },
-      (row) => checkmarxXmlId(row, scanId),
+      (row) => {
+        const scope = checkmarxXmlScope(row, scanId, project.projectId);
+        if (scope.instance) row["instance"] = scope.instance;
+        return checkmarxXmlId(row);
+      },
       target,
       { report },
     );
