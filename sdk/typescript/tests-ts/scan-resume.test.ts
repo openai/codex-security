@@ -3,7 +3,7 @@ import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -18,11 +18,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { scanPreflightCodexConfig, type ScanOptions } from "../src/api.js";
-import type { JsonObject } from "../src/config.js";
+import { writeCodexConfig, type JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
@@ -48,7 +48,8 @@ async function interruptedScan(
     | "auth"
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
-  > & { config?: JsonObject } = {},
+    | "severityRubric"
+  > & { config?: JsonObject; providerProfile?: JsonObject } = {},
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
@@ -385,7 +386,28 @@ test.each([
 );
 
 test("CLI resumes through native execution with current permissions and preserves interrupted state and output permissions", async () => {
-  const f = await interruptedScan();
+  const markdown = "Keep the grading policy chosen when this scan started.";
+  const severityRubric = {
+    markdown,
+    revision: 12,
+    sha256: hash("sha256", markdown),
+  };
+  const f = await interruptedScan("deep", false, { severityRubric });
+  Object.assign(f.environment, {
+    CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC: "1",
+  });
+  using request = spyOn(globalThis, "fetch").mockRejectedValue(
+    new Error("Unexpected rubric lookup"),
+  );
+  await f.command([
+    "update-scan-context",
+    "--scan-id",
+    f.scanId,
+    "--thread-id",
+    f.threadId,
+    "--user-context",
+    "Review the revised scan scope.",
+  ]);
   if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
   const feedbackPath = join(
     f.scanDir,
@@ -425,7 +447,8 @@ test("CLI resumes through native execution with current permissions and preserve
   let resumedThread: string | undefined;
   const { stderr, runCli } = createCliTest(main);
 
-  const code = await runCli(["scans", "resume", f.scanId, "--json"], {
+  const flags = ["scans", "resume", f.scanId, "--json", "--verbose"];
+  const code = await runCli(flags, {
     ...dependencies({ environment: f.environment, currentDirectory: f.root }),
     runWorkbench: f.command,
     createSecurity: (config) =>
@@ -488,9 +511,8 @@ test("CLI resumes through native execution with current permissions and preserve
                   originalFeedback,
                 );
                 expect(prompt).toContain(f.scanId);
-                expect(prompt).toContain(
-                  "Keep the original scan instructions.",
-                );
+                expect(prompt).toContain("Review the revised scan scope.");
+                expect(prompt).toContain(JSON.stringify({ severityRubric }));
                 const joined = await f.command([
                   "begin-deep-scan",
                   "--scan-id",
@@ -511,10 +533,12 @@ test("CLI resumes through native execution with current permissions and preserve
       }),
   });
   expect(stderr.text()).toContain("Synthetic transport disconnected");
+  expect(stderr.text()).not.toContain("debug: scan.lifecycle ");
   expect(stderr.text()).toContain(`scans show ${f.scanId}`);
   expect(stderr.text()).toContain(`scans logs ${f.scanId}`);
   expect(code).not.toBe(0);
   expect(resumedThread).toBe(f.threadId);
+  expect(request).not.toHaveBeenCalled();
   expect(
     await f.command([
       "get-deep-scan",
@@ -531,6 +555,138 @@ test("CLI resumes through native execution with current permissions and preserve
   expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
   if (process.platform !== "win32")
     expect((await stat(f.scanDir)).mode & 0o777).toBe(0o755);
+});
+
+test.each([false, true])(
+  "resume restores private provider refinements (bulk: %p)",
+  async (bulk) => {
+    const name = `codex_security_${randomUUID()}`;
+    const f = await interruptedScan("deep", bulk, {
+      config: {
+        profile: "review",
+        model_provider: "openrouter",
+        model: "synthetic-model",
+        approval_policy: "never",
+      },
+      providerProfile: { name, home: "managed" },
+    });
+    await chmod(f.codexHome, 0o700);
+    const savedProvider = {
+      base_url: "https://saved.example.invalid/custom",
+      env_key: "SYNTHETIC_REPLAY_KEY",
+      http_headers: { "X-Synthetic-Token": "synthetic-private-replay-value" },
+    };
+    const savedPath = join(f.codexHome, `${name}.config.toml`);
+    await writeCodexConfig(savedPath, {
+      model_providers: { openrouter: savedProvider },
+    });
+    const original = await readFile(savedPath, "utf8");
+    const ambient = join(f.root, "ambient-home");
+    await mkdir(ambient);
+    await writeFile(
+      join(ambient, "review.config.toml"),
+      'model_provider="openrouter"\n[model_providers.openrouter]\nname="Synthetic"\nwire_api="responses"\nbase_url="https://old.example.invalid/"\nrequest_max_retries=4\n',
+    );
+    f.environment.CODEX_HOME = ambient;
+    Object.assign(f.environment, {
+      SYNTHETIC_REPLAY_KEY: "synthetic-replay-key",
+    });
+    let restored = false;
+    const { stderr, runCli } = createCliTest(main);
+    const code = await runCli(
+      bulk
+        ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
+        : ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(
+        f,
+        async (options) => {
+          const providerProfile = parseToml(
+            await readFile(
+              join(f.codexHome, `${options.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          );
+          expect(providerProfile).toMatchObject({
+            model_providers: {
+              openrouter: { ...savedProvider, request_max_retries: 4 },
+            },
+          });
+          expect(options.env?.["SYNTHETIC_REPLAY_KEY"]).toBe(
+            "synthetic-replay-key",
+          );
+          const worker = parseToml(
+            await readFile(
+              options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+              "utf8",
+            ),
+          ) as { worker_runtime: Record<string, unknown> };
+          expect(worker.worker_runtime["native_profile"]).toBe(
+            options.nativeProfile,
+          );
+          expect(worker.worker_runtime["environment"]).toEqual({
+            SYNTHETIC_REPLAY_KEY: "synthetic-replay-key",
+          });
+          restored = true;
+          return {
+            startThread: () => fail("Resume must use the original session."),
+            resumeThread: (threadId) => ({
+              id: threadId,
+              runStreamed: async () => {
+                throw new Error("Synthetic private resume checked");
+              },
+            }),
+          };
+        },
+        { deepScanConfigPath: join(f.codexHome, "worker-runtime.toml") },
+      ),
+    );
+    expect(code).not.toBe(0);
+    expect(restored, stderr.text()).toBe(true);
+    expect(await readFile(savedPath, "utf8")).toBe(original);
+    expect(
+      (await readdir(f.codexHome)).filter((path) =>
+        path.endsWith(".config.toml"),
+      ),
+    ).toEqual([`${name}.config.toml`]);
+    const saved = await f.command(["get-scan-recipe", "--scan-id", f.scanId]);
+    expect(saved["recipe"]).toEqual(f.recipe);
+    expect(JSON.stringify(saved)).not.toContain(savedProvider.base_url);
+    expect(JSON.stringify(saved)).not.toContain(
+      "synthetic-private-replay-value",
+    );
+  },
+);
+
+test("resuming reports a committed cancellation once without another launch", async () => {
+  const f = await interruptedScan();
+  const { stderr, runCli } = createCliTest(main);
+  const code = await runCli(
+    ["scans", "resume", f.scanId, "--json", "--verbose"],
+    resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread: (threadId) => ({
+        id: threadId,
+        async runStreamed() {
+          await f.command([
+            "cancel-scan",
+            "--scan-id",
+            f.scanId,
+            "--thread-id",
+            threadId,
+          ]);
+          throw new Error("Synthetic transport disconnected");
+        },
+      }),
+    })),
+  );
+  expect(code).not.toBe(0);
+  const lifecycle = stderr
+    .text()
+    .split("\n")
+    .filter((line) => line.includes("debug: scan.lifecycle "));
+  expect(lifecycle).toHaveLength(1);
+  expect(lifecycle[0]).toContain(`scan_id=${JSON.stringify(f.scanId)}`);
+  expect(lifecycle[0]).toContain('status="canceled"');
 });
 
 test("resumed Bedrock scans retain provider context for the account advisory", async () => {
