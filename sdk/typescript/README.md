@@ -729,6 +729,21 @@ use `ExternalPublicationOptions` for their supported formats. Both resolve the C
 calling `publish()`. Imported evidence remains not assessed by Codex, and saved
 requests and receipts support retries after interruption.
 
+To inspect dependency vulnerabilities in a saved Trivy schema-v2 repository or filesystem
+report, call `readTrivyFindings` with the JSON or gzip path. Use `normalizeTrivyFindings`
+for an already parsed report. Supply the scanned directory relative to the checkout
+(`.` for the whole checkout) unless the report's remote target and Git metadata establish it.
+
+```ts
+import { readTrivyFindings } from "@openai/codex-security";
+
+const { findings, excluded, report } = await readTrivyFindings(
+  "trivy.json.gz",
+  "local",
+  ".",
+);
+```
+
 For CLI examples and supported input formats, see the
 [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md).
 

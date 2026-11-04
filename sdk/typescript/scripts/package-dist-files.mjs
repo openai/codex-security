@@ -56,6 +56,7 @@ const distModules = [
   "sonar-import",
   "native-json-findings",
   "opengrep-findings",
+  "trivy-findings",
   "external-findings-publish",
   "private-finding-import",
   "external-import-contract",
