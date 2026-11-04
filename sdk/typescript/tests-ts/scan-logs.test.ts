@@ -165,6 +165,69 @@ describe("saved scan logs", () => {
     expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
   });
 
+  test.each([false, true])(
+    "collects parentless comparisons inside a shared Desktop scan window (archived: %p)",
+    async (archived) => {
+      const home = await temporaryHome();
+      const scanDir = join(home, "scan");
+      const cwd = join(scanDir, "artifacts", "deep_discovery");
+      await writeSession(home, "owner", [], undefined, "2026-08-01T00:00:00Z");
+      await writeSession(home, "other-task", [], "owner");
+      await writeSession(
+        home,
+        "worker",
+        [],
+        undefined,
+        "2026-08-02T00:30:00Z",
+        join(cwd, "workers", "discovery-0001", "output"),
+      );
+      await writeSession(
+        home,
+        "replacement-comparison",
+        [],
+        undefined,
+        "2026-08-02T02:00:00Z",
+        cwd,
+      );
+      await writeSession(
+        home,
+        "older-comparison",
+        [],
+        undefined,
+        "2026-08-01T01:00:00Z",
+        cwd,
+      );
+      await writeSession(
+        home,
+        "comparison",
+        [],
+        undefined,
+        "2026-08-02T01:00:00Z",
+        cwd,
+      );
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          scanDir: archived ? scanDir + ".previous-test" : scanDir,
+          mode: "deep",
+          continuationThreadId: "owner",
+          lifecycle: {
+            startedAt: "2026-08-02T00:00:00Z",
+            finishedAt: "2026-08-02T02:00:00Z",
+          },
+          progress: { status: "complete", updatedAt: "2026-08-03T00:00:00Z" },
+          executionThreadIds: ["worker"],
+        },
+        home,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
+        "comparison",
+        "owner",
+        "worker",
+      ]);
+    },
+  );
+
   test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
     const desktop = await temporaryHome();
     const cli = await temporaryHome();
