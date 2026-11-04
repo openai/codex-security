@@ -1055,7 +1055,8 @@ works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage
 ### Troubleshooting
 
 Use `--verbose` or `CODEX_SECURITY_LOG_LEVEL=debug` for lifecycle, configuration,
-retry, and worker diagnostics on stderr. Diagnostic text is preserved in output,
+retry, and worker diagnostics on stderr. Direct Deep Scans include coordinator events
+such as worker retries and duplicate-comparison failures. Diagnostic text is preserved in output,
 saved failures, receipts, and patch-risk summaries. Review it for sensitive
 information before sharing; upstream Codex output may already be redacted.
 
@@ -2092,9 +2093,21 @@ history. Inspect its saved status before choosing resume or rerun, and supply
 the original custom prompt files for reruns. Structured history and log output
 and command selection defaults are unchanged.
 
-Recipes save settings and authentication choice, not credentials. Reruns use the
-current checkout/context files and do not reload project files. Supply replacement
-scan and custom-validation prompts when the original used them:
+Reruns use the current checkout/context files and do not reload project files.
+The readable scan recipe records your authentication choice. A separate private
+replay profile stores explicit `openai_base_url`, `chatgpt_base_url`, and custom
+`model_providers` settings, including any credentials written directly in
+`http_headers`. If you use `env_key` or `env_http_headers`, the profile stores
+the variable names. Set those variables when you rerun or resume. Settings
+inherited from a named file profile are reloaded from that file. If an older
+scan omitted your endpoint, start a new scan with the original `--codex` override.
+
+When routing through environment variables, set them for each launch, including
+rerun and resume. Deep workers inherit `CODEX_OSS_BASE_URL` and `CODEX_OSS_PORT`
+for Ollama and LM Studio, and `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`,
+and `GOOGLE_APPLICATION_CREDENTIALS` for Vertex AI.
+
+Supply replacement scan and custom-validation prompts when the original used them:
 
 ```bash
 codex-security scans rerun SCAN_ID --scan-prompt-file instructions.md

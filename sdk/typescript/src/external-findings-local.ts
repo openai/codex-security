@@ -39,7 +39,10 @@ import {
   localFindingRepositories,
   semgrepSarifRepositories,
 } from "./external-findings-read.js";
-import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
+import {
+  guardianFindingSourceData,
+  guardianSelectionFormat,
+} from "./semgrep-guardian-findings.js";
 import {
   hasGitMetadata,
   localGitProtectionRoots,
@@ -961,13 +964,10 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
-    const guardian =
-      evidence.source_data?.["format"] === guardianSelectionFormat;
+    const guardian = guardianFindingSourceData(finding);
     const url = evidence.details?.repository?.url;
     if (guardian) {
-      const source = addGuardianSource(
-        evidence.source_data!["sourceRepositoryUrl"],
-      );
+      const source = addGuardianSource(guardian["sourceRepositoryUrl"]);
       if (
         (guardianReport &&
           !semgrepReferenceMatches(guardianReport, source.url)) ||

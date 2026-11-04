@@ -18,7 +18,7 @@ from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import _validate_finding_evidence, manifest_is_sealed
 from workbench.handoff import require_current_continuation
 from workbench.saved_sources import selected_iteration_result_path
-from workbench.storage import create_private_directory
+from workbench.storage import archived_deep_path, create_private_directory, saved_deep_workers
 from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count, require_scan_target_unchanged
@@ -339,15 +339,7 @@ def require_selected_repair_target(connection: sqlite3.Connection, scan: sqlite3
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
     run = require_deep_scan_run(connection, scan_id)
     scan = dependencies().require_scan(connection, run["scan_id"])
-    worker_rows = connection.execute(
-        """
-        SELECT *
-        FROM deep_scan_workers
-        WHERE scan_id = ?
-        ORDER BY created_at, id
-        """,
-        (run["scan_id"],),
-    )
+    worker_rows = saved_deep_workers(connection, scan)
     input_rows = connection.execute(
         """
         SELECT dedup_worker_id, discovery_worker_id, input_order
@@ -357,12 +349,13 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         """,
         (run["scan_id"],),
     )
+    manifest_path = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
     canonical_artifacts = None
     if (
         run["canonical_inventory_path"] is None
         and run["status"] == "succeeded"
-        and run["manifest_path"] is not None
-        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        and manifest_path is not None
+        and manifest_path != str(Path(scan["scan_dir"]) / "scan-manifest.json")
         and (Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "in_scope_files.txt").exists()
     ):
         canonical_artifacts = canonical_discovery_artifacts(scan)
@@ -419,7 +412,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "consecutiveErrors": run["consecutive_errors"],
         "cancelRequested": bool(run["cancel_requested"]),
         "canonicalArtifacts": canonical_artifacts,
-        "manifestPath": run["manifest_path"],
+        "manifestPath": manifest_path,
         "terminalReason": run["terminal_reason"],
         "error": deep_scan_error(run),
         "createdAt": run["created_at"],
@@ -1561,7 +1554,8 @@ def finish_deep_scan_locked(
         if run["status"] == "succeeded":
             if (
                 run["terminal_reason"] != args.terminal_reason
-                or run["manifest_path"] not in {None, manifest_path}
+                or archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
+                not in {None, manifest_path}
                 or not omissions_match
             ):
                 raise SystemExit(
@@ -1714,6 +1708,7 @@ def fail_deep_scan_locked(
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
+        recorded_manifest = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
         manifest_path = None
         if args.manifest_path:
             manifest_path = (
@@ -1726,14 +1721,14 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
-        elif run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
-            manifest_path = run["manifest_path"]
+        elif recorded_manifest == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+            manifest_path = recorded_manifest
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
                 run["status"] == args.deep_status
                 and scan["status"] == "failed"
                 and run["error_message"] == message
-                and run["manifest_path"] == manifest_path
+                and recorded_manifest == manifest_path
                 and scan["failure_message"] == message
             ):
                 connection.commit()

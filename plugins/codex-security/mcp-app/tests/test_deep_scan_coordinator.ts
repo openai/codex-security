@@ -30,6 +30,7 @@ import {
 } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
+  DeepScanNonRetryableError,
   WorkbenchDeepScanStore,
   DeepScanRemoteCoordinator,
   DeepScanNonRetryableError,
@@ -98,6 +99,48 @@ async function testStandardWorkersReceiveExistingFalsePositiveFeedback() {
     ),
     { code: "ENOENT" },
   );
+}
+
+async function testDiscoveryAllocatesUniqueLabelsAfterRecovery() {
+  const { fixture, store } = await coordinatorFixture({
+    maxDiscoveryRuns: 12,
+    stopAfterNoNew: 1,
+  });
+  const root = path.join(
+    fixture.run.scanDir,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  Object.assign(store.run, {
+    dispatchedCount: 1,
+    persistedWorkers: [
+      {
+        id: randomUUID(),
+        kind: "discovery",
+        status: "canceled",
+        attempt: 1,
+        mergeState: "none",
+        artifactDir: path.join(root, "discovery-0010", "output"),
+        promptPath: path.join(root, "discovery-0010", "prompt.md"),
+      },
+    ],
+  });
+  // A stale coordinator writes its final prompt after the new coordinator's listing.
+  const occupied = path.join(root, "discovery-0011", "prompt.md");
+  const updateProgress = store.updateProgress.bind(store);
+  store.updateProgress = async (input) => {
+    await mkdir(path.dirname(occupied), { recursive: true });
+    await writeFile(occupied, "old coordinator");
+    await updateProgress(input);
+  };
+  const executor = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: store.run,
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.deepEqual([...executor.discoveryAttempts.keys()], ["discovery-0012"]);
+  assert.equal(await readFile(occupied, "utf8"), "old coordinator");
 }
 
 async function testConcurrentCheckpointKeepsExistingIteration() {
@@ -2359,7 +2402,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
       async compareFindings(_prompt, _cwd, signal) {
         comparisons++;
         if (mode === "quota")
-          throw new DeepScanNonRetryableError(
+          throw codexWorkerTurnError(
             "Quota exceeded. Check your plan and billing details.",
           );
         await deadline.promise;
@@ -2827,6 +2870,7 @@ registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
 ]);
 test(testStandardWorkersReceiveExistingFalsePositiveFeedback);
 test(testConcurrentCheckpointKeepsExistingIteration);
+test(testDiscoveryAllocatesUniqueLabelsAfterRecovery);
 test(testDiscoveryWorkersKeepOneContextAfterPersistedUpdate);
 test(testPersistedContextDoesNotChangeAnotherProcessDiscoverySnapshot);
 test(testWorkerScopedCandidateSourceAggregation);
