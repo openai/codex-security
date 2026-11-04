@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { dependencies } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -533,6 +533,10 @@ describe("patch change tracking", () => {
     "assesses nested patch content from %s mode at %s for %s",
     async (mode, scope, change) => {
       const { directory, git } = await publicationRepository();
+      const objectDirectory = await realpath(
+        git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
+      );
+      const indexCommands = new Set<string>();
       const nestedPath = scope === "recursive" ? "nested/child" : "nested";
       const nested = join(directory, nestedPath);
       await mkdir(nested, { recursive: true });
@@ -606,6 +610,24 @@ describe("patch change tracking", () => {
             scope === "root" ? directory : join(directory, "package"),
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
+            const index = options?.environment?.["GIT_INDEX_FILE"];
+            if (
+              index &&
+              basename(index) === "index" &&
+              basename(dirname(index)).startsWith("codex-security-patch-risk-")
+            ) {
+              const indexDirectory = dirname(index);
+              expect(options?.patchSnapshot).toEqual([
+                objectDirectory,
+                indexDirectory,
+              ]);
+              expect(options?.sandbox?.profile["filesystem"]).toEqual({
+                ":root": "read",
+                [objectDirectory]: { ".": "write" },
+                [indexDirectory]: { ".": "write" },
+              });
+              indexCommands.add(args[0]!);
+            }
             if (
               afterTurn &&
               !args.includes("core.hooksPath=/dev/null") &&
@@ -676,6 +698,11 @@ describe("patch change tracking", () => {
               output.stdout.write(patchRiskAssessment().report);
               return 0;
             }
+            output?.appServer?.onPermissions?.({
+              directory,
+              environment: {},
+              profile: { filesystem: { ":root": "read" } },
+            });
             if (change === "rename") await rm(join(nested, "app.ts"));
             if (change === "replace") {
               retiredAdministration = join(
@@ -726,6 +753,10 @@ describe("patch change tracking", () => {
         change === "replace" ? 2 : 0,
       );
       expect(assessments).toBe(change === "replace" ? 0 : 1);
+      if (assessments > 0)
+        expect(indexCommands).toEqual(
+          new Set(["read-tree", "update-index", "write-tree"]),
+        );
       if (change === "replace") {
         expect(outcome.stderr).toContain(
           "Git metadata outside the pre-patch administration directories",
