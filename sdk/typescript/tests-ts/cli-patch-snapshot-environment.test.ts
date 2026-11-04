@@ -17,6 +17,10 @@ const declaration = source.match(
 expect(declaration).not.toBeNull();
 const runner = new Function(`return ${declaration![1]};`)() as string;
 
+function bindingFrame(environment: Record<string, string> = {}): Buffer {
+  return Buffer.from(JSON.stringify({ bindings: Object.entries(environment) }));
+}
+
 const nativeGrants = ["C:/synthetic/repository", "C:/synthetic/repository/*"];
 const cases = [
   { name: "wildcard reset", caller: ["*", ""], active: [] },
@@ -65,7 +69,7 @@ for (const platform of ["win32", "linux"] as const) {
         ...entries,
         ...nativeGrants.map((value) => ["safe.directory", value]),
       ]);
-      const header = Buffer.from(JSON.stringify(Object.entries(original)));
+      const header = bindingFrame(original);
       const input = Buffer.from([0, 255, 10, 13]);
       const frame = Buffer.concat([header, input]);
       let consumed = 0;
@@ -174,13 +178,21 @@ test("snapshot Git launch failures retain diagnostics with a non-emitting stderr
     signal: string | null;
     stderr: string;
   }[] = [];
+  const header = bindingFrame();
   for (const dummyStderr of [false, true]) {
     const prefix = dummyStderr
       ? 'Object.defineProperty(process,"stderr",{value:new (require("node:stream").Writable)({write(chunk,encoding,callback){callback();}})});'
       : "";
     const child = spawn(
       Bun.which("node")!,
-      ["-e", prefix + runner, "--", "2", missingGit, "status"],
+      [
+        "-e",
+        prefix + runner,
+        "--",
+        String(header.length),
+        missingGit,
+        "status",
+      ],
       { stdio: "pipe" },
     );
     let stderr = "";
@@ -193,7 +205,7 @@ test("snapshot Git launch failures retain diagnostics with a non-emitting stderr
         child.once("close", (code, signal) => resolve({ code, signal }));
       },
     );
-    child.stdin.end("[]");
+    child.stdin.end(header);
     results.push({ ...(await closed), stderr });
   }
   expect(results[0]).toMatchObject({ code: 1, signal: null });
