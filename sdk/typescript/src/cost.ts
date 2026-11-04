@@ -2314,6 +2314,14 @@ export class ScanCostTracker {
         : this.#options.repository;
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
+    const observeHealthySessions =
+      this.#options.maxCostUsd === undefined &&
+      (this.#options.onActivity !== undefined ||
+        this.#options.onProgress !== undefined ||
+        this.#options.onSessionEvent !== undefined ||
+        this.#options.onWorkerEvent !== undefined);
+    const unreadable = new Map<SessionUsage, unknown>();
+    let blocked: [SessionUsage, unknown] | undefined;
     const included = new Set([this.#threadId, ...this.#receipts.keys()]);
     const keepReading = (session: SessionUsage): boolean =>
       (this.#options.onSessionEvent !== undefined ||
@@ -2322,7 +2330,6 @@ export class ScanCostTracker {
         (session.parentThreadId !== null &&
           included.has(session.parentThreadId)));
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     const buffers = [buffer];
     const pending: Promise<void | { session: SessionUsage; error: unknown }>[] =
       [];
@@ -2331,10 +2338,15 @@ export class ScanCostTracker {
       pending.length = 0;
       for (const result of results) {
         if (result === undefined) continue;
-        if (result.session.threadId === null) throw result.error;
-        unreadable.push(result);
+        const { session, error } = result;
+        if (session.threadId === null) {
+          if (!observeHealthySessions || !isDeniedLogRead(error)) throw error;
+          blocked ??= [session, error];
+        }
+        unreadable.set(session, error);
       }
     };
+    let traversalFailure: { error: unknown } | undefined;
     try {
       for await (const path of this.#sessionFiles()) {
         let session = this.#sessions.get(path);
@@ -2367,12 +2379,15 @@ export class ScanCostTracker {
             (error: unknown) => ({ session: tracked, error }),
           ),
         );
-        if (pending.length === 8) await drain();
+        // Identify a new log before walking past a failing metadata read.
+        if (tracked.threadId === null || pending.length === 8) await drain();
       }
-    } finally {
-      // Directory traversal can fail while reads still own file handles.
-      await drain();
+    } catch (error) {
+      traversalFailure = { error };
     }
+    // Drain reads already in flight before choosing between read and traversal errors.
+    await drain();
+    if (traversalFailure && !blocked) throw traversalFailure.error;
 
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
@@ -2413,14 +2428,23 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
+    blocked ??= unreadable
+      .entries()
+      .find(
+        ([session]) =>
+          session.threadId !== null && included.has(session.threadId),
+      );
+    if (blocked && !observeHealthySessions) throw blocked[1];
 
     const usages = new Map(this.#receipts);
     for (const [path, session] of this.#sessions) {
       const threadId = session.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
+      if (
+        threadId === null ||
+        !included.has(threadId) ||
+        unreadable.has(session)
+      )
+        continue;
       if (session.deferred) {
         session.deferred = false;
         try {
@@ -2434,35 +2458,43 @@ export class ScanCostTracker {
           );
         } catch (error) {
           session.deferred = true;
-          throw error;
+          if (!observeHealthySessions) throw error;
+          blocked ??= [session, error];
+          continue;
         }
       }
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
-        // Replay event history through the already-read snapshot without
-        // replacing its authoritative progress, usage, or partial-line decoder.
-        const replay: SessionUsage = createSessionUsage(false);
-        replay.events = [];
-        await readSessionUsage(
-          path,
-          replay,
-          undefined,
-          undefined,
-          session.offset,
-        );
-        if (replay.offset === session.offset) {
-          session.events = replay.events;
-          // At stop there is no next poll to read usage appended during replay.
-          if (this.#timer === null)
-            await readSessionUsage(
-              path,
-              session,
-              repository,
-              progressThread,
-              "file-size",
-            );
+        try {
+          // Replay event history through the already-read snapshot without
+          // replacing its authoritative progress, usage, or partial-line decoder.
+          const replay: SessionUsage = createSessionUsage(false);
+          replay.events = [];
+          await readSessionUsage(
+            path,
+            replay,
+            undefined,
+            undefined,
+            session.offset,
+          );
+          if (replay.offset === session.offset) {
+            session.events = replay.events;
+            // At stop there is no next poll to read usage appended during replay.
+            if (this.#timer === null)
+              await readSessionUsage(
+                path,
+                session,
+                repository,
+                progressThread,
+                "file-size",
+              );
+          }
+        } catch (error) {
+          if (!observeHealthySessions) throw error;
+          blocked ??= [session, error];
+          continue;
         }
       }
       const worker =
@@ -2553,6 +2585,8 @@ export class ScanCostTracker {
         usages.set(threadId, session.usage);
       }
     }
+    // Healthy sessions can report activity even when a read blocks the total.
+    if (blocked) throw blocked[1];
     let usage: ScanTokenUsage | null = null;
     let complete = true;
     for (const value of usages.values()) {
@@ -3849,6 +3883,14 @@ function subtractTokenUsage(
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
+}
+
+function isDeniedLogRead(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["code"] === "EACCES" || error["code"] === "EPERM") &&
+    (error["syscall"] === "open" || error["syscall"] === "read")
+  );
 }
 
 function isMissingFile(error: unknown): boolean {

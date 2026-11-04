@@ -1174,7 +1174,9 @@ export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
 /** Terminal native account limits cannot be fixed by retrying discovery. */
 export function isCodexNonRetryableFailure(error: unknown): boolean {
   if (isCodexCybersecurityPolicyRefusal(error)) return true;
-  const message = error instanceof Error ? error.message : String(error);
+  const message = (
+    error instanceof Error ? error.message : String(error)
+  ).replace(/^Error running remote compact task: /, "");
   if (
     message.startsWith("You’ve hit your usage limit.") ||
     message.startsWith("You’ve hit your usage limit for ")

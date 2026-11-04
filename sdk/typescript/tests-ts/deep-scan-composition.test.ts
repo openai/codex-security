@@ -1821,6 +1821,8 @@ const runtimeRefusals = [
   "Request rejected: cyber_policy.",
   "cyber_policy",
   "Quota exceeded. Check your plan and billing details.",
+  "Error running remote compact task: Quota exceeded. Check your plan and billing details.",
+  "Error running remote compact task: You’ve hit your usage limit. Try again later.",
   "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
   "You’ve hit your usage limit. Try again later.",
   "You’ve hit your usage limit for synthetic-model. Try again later.",
@@ -1842,11 +1844,16 @@ test.each(runtimeRefusals)(
   },
 );
 
-test.each([...runtimeRefusals, "SDK parser", "schema"])(
+test.each([
+  ...runtimeRefusals,
+  "Error running remote compact task: stream disconnected before completion: synthetic reset",
+  "SDK parser",
+  "schema",
+])(
   "distinguishes a %s from policy-like diagnostic data during merging",
   async (kind) => {
     const h = await fixture();
-    const runtimeRefusal = kind !== "SDK parser" && kind !== "schema";
+    const runtimeRefusal = runtimeRefusals.includes(kind);
     let failure: unknown = new Error(
       "findings.findings[0].severity.level: unsupported severity: cyber_policy",
     );
@@ -1858,7 +1865,7 @@ test.each([...runtimeRefusals, "SDK parser", "schema"])(
         _exec: { run(): AsyncGenerator<string> };
       };
       executable._exec.run = async function* () {
-        yield runtimeRefusal
+        yield kind !== "SDK parser"
           ? JSON.stringify({
               type: "turn.failed",
               error: { message: kind },

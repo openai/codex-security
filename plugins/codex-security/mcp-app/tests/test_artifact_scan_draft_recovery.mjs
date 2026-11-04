@@ -297,23 +297,32 @@ async function publicationFixture(t, mode = "standard") {
     await git("commit", "-qm", "Add source");
     target = { kind: "refs", paths: [], base: "HEAD~1", head: "HEAD" };
   }
-  const { scanId } = await workbench(
-    [
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--registration-json-stdin",
-    ],
-    JSON.stringify({
-      recipe: {
+  const register = (directory, scanMode, parentId) =>
+    workbench(
+      [
+        "register-cli-scan",
+        "--repository",
         repository,
-        target,
-        mode: mode === "diff" ? "standard" : mode,
-        config: {},
-      },
-    }),
+        "--scan-dir",
+        directory,
+        "--registration-json-stdin",
+        ...(parentId ? ["--parent-scan-id", parentId] : []),
+      ],
+      JSON.stringify({
+        recipe: { repository, target, mode: scanMode, config: {} },
+        ...(parentId ? { parentScanRole: "deep_pass" } : {}),
+      }),
+    );
+  let parentId;
+  if (mode === "worker") {
+    const parent = join(root, "parent");
+    await mkdir(parent, { mode: 0o700 });
+    parentId = (await register(parent, "deep")).scanId;
+  }
+  const { scanId } = await register(
+    scanDir,
+    mode === "deep" ? "deep" : "standard",
+    parentId,
   );
   const context = await createScanArtifactContext(scanId, workbench);
   const save = (input, interruptedAt) =>
@@ -757,6 +766,53 @@ for (const complete of [false, true]) {
         );
     });
   }
+}
+
+for (const mode of ["standard", "diff", "worker"]) {
+  test(`${mode} rejects repeated closures without altering saved work`, async (t) => {
+    const f = await publicationFixture(t, mode);
+    const remaining = { id: "other-review", reason: "Check another boundary." };
+    await f.save({
+      complete: false,
+      coverage: semanticCoverage({
+        completeness: "partial",
+        deferred: [
+          { id: "review", reason: "Inspect both callers." },
+          remaining,
+        ],
+      }),
+    });
+    const snapshot = async () => {
+      const entries = await readdir(f.scanDir, {
+        recursive: true,
+        withFileTypes: true,
+      });
+      const files = entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(entry.parentPath, entry.name))
+        .sort();
+      return Promise.all(
+        files.map(async (path) => [path, await readFile(path)]),
+      );
+    };
+    const before = await snapshot();
+    const close = (...reasons) =>
+      f.save({
+        coverage: semanticCoverage({
+          resolvedDeferred: reasons.map((reason) => ({ id: "review", reason })),
+        }),
+      });
+    await assert.rejects(
+      close("Review completed.", "Checked both callers."),
+      /resolvedDeferred repeats review/,
+    );
+    assert.deepEqual(await snapshot(), before);
+    await close("Checked both callers.");
+    assert.deepEqual(
+      (await f.read("scan-manifest.json")).scan.reviewState.deferred,
+      [remaining],
+    );
+  });
 }
 
 for (const mode of ["standard", "diff"]) {
