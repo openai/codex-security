@@ -1,199 +1,292 @@
+import { afterEach, expect, test } from "bun:test";
+import { readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
-import type { CodexRolloutSnapshot } from "../src/codex-rollouts.js";
-import {
-  MAX_ROLLOUT_SESSION_INDEX_ENTRIES,
-  ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+  readRolloutSessionIndex,
   writeRolloutSessionIndex,
-  type RolloutSessionIndex,
 } from "../src/rollout-session-index.js";
+import { readJsonLines } from "./support/json.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures("rollout-index-");
+afterEach(cleanup);
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(prefix: string): Promise<string> {
-  const directory = await realpath(await mkdtemp(join(tmpdir(), prefix)));
-  temporaryDirectories.push(directory);
-  return directory;
+const scanId = "scan-1";
+const rootThreadIds = ["parent"];
+const startedAt = "2026-07-01T09:00:00.000Z";
+const later = "2026-07-01T10:00:00.000Z";
+function rows(threadId: string) {
+  return [
+    { type: "session_meta", payload: { id: threadId } },
+    {
+      type: "response_item",
+      payload: { output: "private command output\nnext line" },
+    },
+  ];
 }
 
-async function fixture(): Promise<{
-  codexHome: string;
-  scanDir: string;
-  snapshot: CodexRolloutSnapshot;
-}> {
-  const root = await temporaryDirectory("codex-security-session-index-");
-  const codexHome = join(root, "codex-home");
-  const scanDir = join(root, "scan");
-  const sessionDirectory = join(codexHome, "sessions", "2026", "08", "04");
-  await mkdir(sessionDirectory, { recursive: true });
-  await mkdir(scanDir, { mode: 0o700 });
-  const coordinator = join(sessionDirectory, "rollout-coordinator.jsonl");
-  const worker = join(sessionDirectory, "rollout-worker.jsonl");
-  await writeFile(coordinator, "coordinator private source\n");
-  await writeFile(worker, "worker private source\n");
+function session(threadId: string, parentThreadId: string | null) {
   return {
-    codexHome,
-    scanDir,
-    snapshot: {
-      complete: true,
-      rootThreadId: "coordinator",
-      sessions: [
-        {
-          path: coordinator,
-          threadId: "coordinator",
-          parentThreadId: null,
-          usage: null,
-        },
-        {
-          path: worker,
-          threadId: "worker",
-          parentThreadId: "coordinator",
-          usage: null,
-        },
-      ],
+    threadId,
+    parentThreadId,
+    async *events() {
+      yield* rows(threadId);
     },
   };
 }
 
-async function readIndex(path: string): Promise<RolloutSessionIndex> {
-  return JSON.parse(await readFile(path, "utf8")) as RolloutSessionIndex;
-}
+const interrupted = {
+  ...session("child", "parent"),
+  async *events() {
+    yield { type: "partial" };
+    throw new Error("lost rollout");
+  },
+};
 
-describe("rollout session index", () => {
-  test("indexes source rollouts without copying sensitive contents by default", async () => {
-    const { codexHome, scanDir, snapshot } = await fixture();
+test("indexes lineage without reading rollout contents by default", async () => {
+  const scanDir = await temporaryDirectory();
+  expect(await readRolloutSessionIndex(scanDir, scanId)).toBeNull();
+  const lineage = [
+    { threadId: "parent", parentThreadId: null },
+    { threadId: "child", parentThreadId: "parent" },
+  ];
+  let opened = false;
+  const path = await writeRolloutSessionIndex({
+    scanDir,
+    scanId,
+    startedAt,
+    rootThreadIds,
+    sessions: lineage.map((entry) => ({
+      ...entry,
+      events() {
+        opened = true;
+        throw new Error("Indexing opened a rollout");
+      },
+    })),
+  });
+  expect(opened).toBe(false);
+  expect(path).toBe(
+    join(scanDir, "artifacts", "rollout-sessions", "index.json"),
+  );
+  const index = {
+    schemaVersion: 1 as const,
+    scanId,
+    rootThreadIds,
+    sessions: lineage,
+  };
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual(index);
+  expect(await readRolloutSessionIndex(scanDir, scanId)).toEqual(index);
+  expect(await readdir(dirname(path))).toEqual(["index.json"]);
+});
 
-    const path = await writeRolloutSessionIndex({
-      codexHome,
+test("publishes only metadata when the first event export fails partway", async () => {
+  const scanDir = await temporaryDirectory();
+  const warnings: string[] = [];
+  const path = await writeRolloutSessionIndex({
+    scanDir,
+    scanId,
+    startedAt,
+    rootThreadIds,
+    sessions: [session("parent", null), interrupted],
+    retainEvents: true,
+    onWarning: (warning) => warnings.push(warning),
+  });
+  expect(warnings).toHaveLength(1);
+  const index = await readRolloutSessionIndex(scanDir, scanId);
+  expect(index!.sessions).toEqual([
+    { threadId: "parent", parentThreadId: null },
+    { threadId: "child", parentThreadId: "parent" },
+  ]);
+  expect(await readdir(dirname(path))).toEqual(["index.json"]);
+});
+
+test("metadata retries and failed refreshes preserve published events and unrelated files", async () => {
+  const scanDir = await temporaryDirectory();
+  const options = {
+    scanDir,
+    scanId,
+    startedAt,
+    rootThreadIds,
+    sessions: [session("parent", null), session("child", "parent")],
+  };
+  const path = await writeRolloutSessionIndex({
+    ...options,
+    retainEvents: true,
+  });
+  const index = await readRolloutSessionIndex(scanDir, scanId);
+  const directory = dirname(path);
+  const logs = index!.sessions.map(({ threadId, eventSegments }) => {
+    expect(eventSegments).toHaveLength(1);
+    const segment = eventSegments![0]!;
+    expect(segment.startedAt).toBe(startedAt);
+    expect(isAbsolute(segment.path)).toBe(false);
+    const log = resolve(directory, segment.path);
+    expect(log.startsWith(directory + sep)).toBe(true);
+    return { threadId, log };
+  });
+  expect(new Set(logs.map(({ log }) => log)).size).toBe(2);
+  for (const { threadId, log } of logs) {
+    expect(await readJsonLines(log)).toEqual(rows(threadId));
+    if (process.platform !== "win32") {
+      for (const artifact of [path, directory, log, dirname(log)]) {
+        expect((await stat(artifact)).mode & 0o077).toBe(0);
+      }
+    }
+  }
+  await writeRolloutSessionIndex({
+    ...options,
+    rootThreadIds: ["resumed"],
+    sessions: [session("resumed", null)],
+  });
+  const resumed = await readRolloutSessionIndex(scanDir, scanId);
+  expect(resumed!.rootThreadIds.toSorted()).toEqual(["parent", "resumed"]);
+  expect(resumed!.sessions).toHaveLength(3);
+  expect(resumed!.sessions).toEqual(
+    expect.arrayContaining([
+      ...index!.sessions,
+      { threadId: "resumed", parentThreadId: null },
+    ]),
+  );
+  const sentinel = join(directory, "unrelated.txt");
+  await writeFile(sentinel, "keep");
+  const before = (await readdir(directory, { recursive: true })).toSorted();
+  const warnings: string[] = [];
+  await writeRolloutSessionIndex({
+    ...options,
+    startedAt: later,
+    sessions: [
+      session("parent", null),
+      session("late-child", "parent"),
+      interrupted,
+    ],
+    retainEvents: true,
+    onWarning: (warning) => warnings.push(warning),
+  });
+  expect(warnings).toHaveLength(1);
+  const recovered = await readRolloutSessionIndex(scanDir, scanId);
+  expect(recovered!.rootThreadIds).toEqual(resumed!.rootThreadIds);
+  expect(recovered!.sessions).toHaveLength(4);
+  expect(recovered!.sessions).toEqual(
+    expect.arrayContaining([
+      ...resumed!.sessions,
+      { threadId: "late-child", parentThreadId: "parent" },
+    ]),
+  );
+  for (const { threadId, log } of logs)
+    expect(await readJsonLines(log)).toEqual(rows(threadId));
+  expect(await readFile(sentinel, "utf8")).toBe("keep");
+  expect((await readdir(directory, { recursive: true })).toSorted()).toEqual(
+    before,
+  );
+});
+
+test("retains disjoint invocations chronologically and reads each invocation only once", async () => {
+  const scanDir = await temporaryDirectory();
+  const opened: string[] = [];
+  const archive = (start: string, childIdentified = true) =>
+    writeRolloutSessionIndex({
       scanDir,
-      snapshot,
-      retain: false,
-    });
-
-    expect(path).toBe(join(scanDir, ...ROLLOUT_SESSION_INDEX_RELATIVE_PATH));
-    expect(await readIndex(path)).toEqual({
-      schemaVersion: 1,
-      rootThreadId: "coordinator",
-      complete: true,
-      retained: false,
+      scanId,
+      startedAt: start,
+      rootThreadIds,
+      retainEvents: true,
       sessions: [
         {
-          threadId: "coordinator",
+          threadId: "parent",
           parentThreadId: null,
-          role: "coordinator",
-          sourcePath: snapshot.sessions[0]!.path,
+          async *events() {
+            opened.push(start);
+            yield { invocation: start };
+          },
         },
         {
-          threadId: "worker",
-          parentThreadId: "coordinator",
-          role: "worker",
-          sourcePath: snapshot.sessions[1]!.path,
+          ...session("child", "parent"),
+          async *events() {
+            if (childIdentified) yield { invocation: start };
+          },
         },
       ],
     });
-    await expect(
-      lstat(join(scanDir, "artifacts", "rollout-sessions", "sessions")),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+  const path = await archive(later, false);
+  const previous = await readRolloutSessionIndex(scanDir, scanId);
+  expect(previous!.sessions[1]).toEqual({
+    threadId: "child",
+    parentThreadId: "parent",
   });
-
-  test("copies only indexed rollouts into private artifacts when requested", async () => {
-    const { codexHome, scanDir, snapshot } = await fixture();
-
-    const path = await writeRolloutSessionIndex({
-      codexHome,
-      scanDir,
-      snapshot,
-      retain: true,
-    });
-    const index = await readIndex(path);
-
-    expect(index.retained).toBe(true);
-    expect(index.sessions.map((session) => session.retainedPath)).toEqual([
-      "artifacts/rollout-sessions/sessions/2026/08/04/rollout-coordinator.jsonl",
-      "artifacts/rollout-sessions/sessions/2026/08/04/rollout-worker.jsonl",
+  expect(await readdir(dirname(path))).toHaveLength(2);
+  await Promise.all([archive(startedAt), archive(startedAt)]);
+  await archive(later);
+  expect(opened).toEqual([later, startedAt]);
+  const published = await readRolloutSessionIndex(scanDir, scanId);
+  const segments = published!.sessions[0]!.eventSegments!;
+  expect(segments.map((segment) => segment.startedAt)).toEqual([
+    startedAt,
+    later,
+  ]);
+  expect(segments[1]).toEqual(previous!.sessions[0]!.eventSegments![0]);
+  expect(
+    published!.sessions[1]!.eventSegments?.map(({ startedAt }) => startedAt),
+  ).toEqual([startedAt, later]);
+  for (const segment of segments) {
+    expect(await readJsonLines(join(dirname(path), segment.path))).toEqual([
+      { invocation: segment.startedAt },
     ]);
-    for (const [session, source] of index.sessions.map(
-      (session, index) => [session, snapshot.sessions[index]!.path] as const,
-    )) {
-      const retainedPath = join(scanDir, ...session.retainedPath!.split("/"));
-      expect(await readFile(retainedPath, "utf8")).toBe(
-        await readFile(source, "utf8"),
-      );
-      if (process.platform !== "win32") {
-        expect((await lstat(retainedPath)).mode & 0o777).toBe(0o600);
-      }
-    }
-    if (process.platform !== "win32") {
-      expect((await lstat(path)).mode & 0o777).toBe(0o600);
-      expect(
-        (await lstat(join(scanDir, "artifacts", "rollout-sessions"))).mode &
-          0o777,
-      ).toBe(0o700);
-    }
-  });
+  }
+});
 
-  test("rejects indexes that exceed the session safety limit", async () => {
-    const { codexHome, scanDir, snapshot } = await fixture();
-
-    await expect(
-      writeRolloutSessionIndex({
-        codexHome,
-        scanDir,
-        snapshot: {
-          ...snapshot,
-          sessions: Array.from(
-            { length: MAX_ROLLOUT_SESSION_INDEX_ENTRIES + 1 },
-            (_, index) => ({
-              ...snapshot.sessions[0]!,
-              threadId: `thread-${index}`,
-            }),
-          ),
-        },
-        retain: false,
-      }),
-    ).rejects.toThrow(
-      `exceeds the ${MAX_ROLLOUT_SESSION_INDEX_ENTRIES}-session safety limit`,
-    );
-  });
-
-  test("accepts an index at the session safety limit", async () => {
-    const { codexHome, scanDir, snapshot } = await fixture();
-    const path = await writeRolloutSessionIndex({
-      codexHome,
+test("refuses a linked artifact directory without writing through it", async () => {
+  const scanDir = await temporaryDirectory();
+  const other = await temporaryDirectory();
+  await symlink(other, join(scanDir, "artifacts"), "junction");
+  await expect(
+    writeRolloutSessionIndex({
       scanDir,
-      snapshot: {
-        ...snapshot,
-        sessions: Array.from(
-          { length: MAX_ROLLOUT_SESSION_INDEX_ENTRIES },
-          (_, index) => ({
-            ...snapshot.sessions[0]!,
-            threadId: `thread-${index}`,
-          }),
-        ),
-      },
-      retain: false,
-    });
+      scanId,
+      startedAt,
+      rootThreadIds,
+      sessions: [session("parent", null)],
+      retainEvents: true,
+    }),
+  ).rejects.toThrow();
+  expect(await readdir(other)).toEqual([]);
+});
 
-    expect((await readIndex(path)).sessions).toHaveLength(
-      MAX_ROLLOUT_SESSION_INDEX_ENTRIES,
-    );
-  });
+test("refuses mismatched or unsafe saved indexes without replacing them", async () => {
+  const scanDir = await temporaryDirectory();
+  const options = {
+    scanDir,
+    scanId,
+    startedAt,
+    rootThreadIds,
+    sessions: [session("parent", null)],
+  };
+  const path = await writeRolloutSessionIndex(options);
+  const valid = await readRolloutSessionIndex(scanDir, scanId);
+  await expect(
+    writeRolloutSessionIndex({
+      ...options,
+      rootThreadIds: ["other"],
+      sessions: [session("other", null), session("parent", "other")],
+    }),
+  ).rejects.toThrow();
+  expect(await readRolloutSessionIndex(scanDir, scanId)).toEqual(valid);
+  for (const invalid of [
+    { ...valid, scanId: "different-scan" },
+    {
+      ...valid,
+      sessions: [
+        {
+          threadId: "parent",
+          parentThreadId: null,
+          eventSegments: [{ startedAt, path: "../private.jsonl" }],
+        },
+      ],
+    },
+  ]) {
+    const original = JSON.stringify(invalid);
+    await writeFile(path, original);
+    await expect(readRolloutSessionIndex(scanDir, scanId)).rejects.toThrow();
+    await expect(writeRolloutSessionIndex(options)).rejects.toThrow();
+    expect(await readFile(path, "utf8")).toBe(original);
+  }
 });

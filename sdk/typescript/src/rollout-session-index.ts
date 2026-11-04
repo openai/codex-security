@@ -1,204 +1,310 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import type { Stats } from "node:fs";
-import type { CodexRolloutSnapshot } from "./codex-rollouts.js";
+import {
+  lstat,
+  mkdir,
+  open,
+  rename,
+  rm,
+  type FileHandle,
+} from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { z } from "zod";
+import { CodexSecurityError } from "./errors.js";
+import {
+  createWindowsOutputDirectory,
+  requirePrivateDirectory,
+  requirePrivateOutputDirectory,
+  validatePreparedOutputDir,
+  withCredentialHomeLock,
+} from "./runtime.js";
+import {
+  MAX_SCAN_ROLLOUT_SESSIONS,
+  type ScanRolloutSession,
+} from "./scan-logs.js";
+import { nullIfMissingFile } from "./targets.js";
+import { compareTimestamps } from "./timestamps.js";
+import { notify } from "./value.js";
 
-export const ROLLOUT_SESSION_INDEX_RELATIVE_PATH = [
-  "artifacts",
-  "rollout-sessions",
-  "index.json",
-] as const;
-export const MAX_ROLLOUT_SESSION_INDEX_ENTRIES = 4_096;
+export const ROLLOUT_SESSION_INDEX_RELATIVE_PATH =
+  "artifacts/rollout-sessions/index.json";
 
-export interface RolloutSessionIndexEntry {
-  threadId: string;
-  parentThreadId: string | null;
-  role: "coordinator" | "worker";
-  sourcePath: string;
-  retainedPath?: string;
-}
+const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u);
+const timestamp = z.iso.datetime().max(35);
+const segment = z.strictObject({
+  startedAt: timestamp,
+  path: z
+    .string()
+    .regex(/^events-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.jsonl$/u),
+});
+const sessionEntry = z.strictObject({
+  threadId: id,
+  parentThreadId: id.nullable(),
+  eventSegments: z.array(segment).optional(),
+});
+const MAX_INDEX_BYTES = 8 * 1024 * 1024;
+const indexSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  scanId: id,
+  rootThreadIds: z.array(id).max(MAX_SCAN_ROLLOUT_SESSIONS),
+  sessions: z.array(sessionEntry).max(MAX_SCAN_ROLLOUT_SESSIONS),
+});
+export type RolloutSessionIndex = z.infer<typeof indexSchema>;
 
-export interface RolloutSessionIndex {
-  schemaVersion: 1;
-  rootThreadId: string;
-  complete: boolean;
-  retained: boolean;
-  sessions: RolloutSessionIndexEntry[];
-}
-
-interface WriteRolloutSessionIndexOptions {
-  codexHome: string;
-  scanDir: string;
-  snapshot: CodexRolloutSnapshot;
-  retain: boolean;
-}
-
-export async function writeRolloutSessionIndex(
-  options: WriteRolloutSessionIndexOptions,
-): Promise<string> {
-  if (options.snapshot.sessions.length > MAX_ROLLOUT_SESSION_INDEX_ENTRIES) {
-    throw new Error(
-      `Rollout session index exceeds the ${MAX_ROLLOUT_SESSION_INDEX_ENTRIES}-session safety limit.`,
+async function prepareDirectory(path: string, create: boolean): Promise<void> {
+  if (create) {
+    if (process.platform === "win32")
+      await createWindowsOutputDirectory(path, true);
+    else await mkdir(path, { recursive: true, mode: 0o700 });
+  }
+  if (!(await lstat(path)).isDirectory()) {
+    throw new CodexSecurityError(
+      "Rollout artifact directories must be real directories.",
     );
   }
-  const artifactsDir = join(options.scanDir, "artifacts");
-  await mkdir(artifactsDir, { recursive: true, mode: 0o700 });
-  const artifactsMetadata = await lstat(artifactsDir);
-  if (artifactsMetadata.isSymbolicLink() || !artifactsMetadata.isDirectory()) {
-    throw new Error("Scan artifacts path is not a regular directory.");
-  }
+}
 
-  const rolloutDir = join(artifactsDir, "rollout-sessions");
-  await mkdir(rolloutDir, { mode: 0o700 });
+async function indexDirectory(
+  scanDir: string,
+  create: boolean,
+): Promise<string> {
+  const root = await validatePreparedOutputDir(
+    resolve(scanDir),
+    undefined,
+    true,
+  );
+  const artifacts = join(root, "artifacts");
+  await prepareDirectory(artifacts, create);
+  const directory = join(artifacts, "rollout-sessions");
+  await prepareDirectory(directory, create);
+  await validatePreparedOutputDir(directory, undefined, true);
+  const metadata = await lstat(directory);
+  if (create)
+    await requirePrivateDirectory(
+      metadata,
+      directory,
+      "rollout artifact directory",
+    );
+  else requirePrivateOutputDirectory(metadata, directory);
+  return directory;
+}
+
+function requireUnique(items: string[]): void {
+  if (new Set(items).size !== items.length) {
+    throw new CodexSecurityError(
+      "Duplicate identifier or event file in the rollout session index.",
+    );
+  }
+}
+
+async function readIndex(
+  directory: string,
+  scanId: string,
+): Promise<RolloutSessionIndex | null> {
+  const path = join(directory, "index.json");
+  const file = await open(
+    path,
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  ).catch(nullIfMissingFile);
+  if (!file) return null;
+  let index: RolloutSessionIndex;
   try {
-    await chmod(rolloutDir, 0o700);
-    const sessions: RolloutSessionIndexEntry[] = [];
-    for (const session of options.snapshot.sessions) {
-      const entry: RolloutSessionIndexEntry = {
-        threadId: session.threadId,
-        parentThreadId: session.parentThreadId,
-        role:
-          session.threadId === options.snapshot.rootThreadId
-            ? "coordinator"
-            : "worker",
-        sourcePath: session.path,
-      };
-      if (options.retain) {
-        const sourceRelativePath = sessionRelativePath(
-          options.codexHome,
-          session.path,
-        );
-        const destination = join(
-          rolloutDir,
-          "sessions",
-          ...sourceRelativePath.split("/"),
-        );
-        await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-        await copyPrivateFile(session.path, destination);
-        entry.retainedPath = relative(options.scanDir, destination)
-          .split(sep)
-          .join("/");
-      }
-      sessions.push(entry);
+    const metadata = await file.stat();
+    if (
+      !metadata.isFile() ||
+      metadata.nlink > 1 ||
+      metadata.size > MAX_INDEX_BYTES
+    ) {
+      throw new CodexSecurityError("Invalid rollout session index file.");
     }
-    const index: RolloutSessionIndex = {
-      schemaVersion: 1,
-      rootThreadId: options.snapshot.rootThreadId,
-      complete: options.snapshot.complete,
-      retained: options.retain,
-      sessions,
-    };
-    const path = join(options.scanDir, ...ROLLOUT_SESSION_INDEX_RELATIVE_PATH);
-    await writeFile(path, `${JSON.stringify(index, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    await chmod(path, 0o600);
-    return path;
+    if (!constants.O_NOFOLLOW) {
+      const leaf = await lstat(path);
+      if (
+        !leaf.isFile() ||
+        leaf.dev !== metadata.dev ||
+        leaf.ino !== metadata.ino
+      )
+        throw new CodexSecurityError(
+          "The rollout session index must remain a regular file.",
+        );
+    }
+    requirePrivateOutputDirectory(metadata, path);
+    index = indexSchema.parse(JSON.parse(await file.readFile("utf8")));
+  } finally {
+    await file.close();
+  }
+  if (index.scanId !== scanId)
+    throw new CodexSecurityError(
+      "The rollout session index belongs to another scan.",
+    );
+  requireUnique(index.rootThreadIds);
+  requireUnique(index.sessions.map(({ threadId }) => threadId));
+  const eventPaths = index.sessions.flatMap(({ eventSegments = [] }) => {
+    for (let i = 1; i < eventSegments.length; i++) {
+      if (
+        compareTimestamps(
+          eventSegments[i - 1]!.startedAt,
+          eventSegments[i]!.startedAt,
+        ) >= 0
+      )
+        throw new CodexSecurityError(
+          "Rollout event segments must have distinct, chronological invocation times.",
+        );
+    }
+    return eventSegments.map(({ path }) => path);
+  });
+  requireUnique(eventPaths);
+  for (const filename of eventPaths) {
+    const eventPath = join(directory, filename);
+    const event = await lstat(eventPath);
+    if (!event.isFile() || event.nlink !== 1) {
+      throw new CodexSecurityError("Invalid retained rollout event file.");
+    }
+    requirePrivateOutputDirectory(event, eventPath);
+  }
+  return index;
+}
+
+export async function readRolloutSessionIndex(
+  scanDir: string,
+  scanId: string,
+): Promise<RolloutSessionIndex | null> {
+  const dir = await indexDirectory(scanDir, false).catch(nullIfMissingFile);
+  return dir === null ? null : readIndex(dir, scanId);
+}
+
+async function writeSegment(
+  path: string,
+  session: ScanRolloutSession,
+): Promise<boolean> {
+  let file: FileHandle | undefined;
+  try {
+    try {
+      for await (const event of session.events()) {
+        file ??= await open(path, "wx", 0o600);
+        await file.writeFile(JSON.stringify(event) + "\n");
+      }
+      await file?.sync();
+    } finally {
+      await file?.close();
+    }
   } catch (error) {
-    await rm(rolloutDir, { recursive: true, force: true });
+    if (file) await rm(path, { force: true });
     throw error;
   }
+  return file !== undefined;
 }
 
-function sessionRelativePath(codexHome: string, path: string): string {
-  const relativePath = relative(join(codexHome, "sessions"), path);
-  if (
-    relativePath === "" ||
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  ) {
-    throw new Error("Codex rollout path is outside the session directory.");
-  }
-  return relativePath.split(sep).join("/");
+function serialize(index: RolloutSessionIndex): string {
+  const contents = JSON.stringify(index) + "\n";
+  if (Buffer.byteLength(contents) > MAX_INDEX_BYTES)
+    throw new CodexSecurityError("The rollout session index is too large.");
+  return contents;
 }
 
-async function copyPrivateFile(
-  source: string,
-  destination: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await copyPrivateFileOnce(source, destination);
-      return;
-    } catch (error) {
-      await rm(destination, { force: true });
-      if (attempt === 1) throw error;
-    }
-  }
-}
-
-async function copyPrivateFileOnce(
-  source: string,
-  destination: string,
-): Promise<void> {
-  const sourceMetadata = await lstat(source);
-  if (sourceMetadata.isSymbolicLink() || !sourceMetadata.isFile()) {
-    throw new Error(`Codex rollout is not a regular file: ${source}`);
-  }
-  const input = await open(
-    source,
-    constants.O_RDONLY |
-      (process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
-  );
-  let output: Awaited<ReturnType<typeof open>> | null = null;
+async function publish(directory: string, contents: string): Promise<void> {
+  const path = join(directory, `.index-${randomUUID()}.tmp`);
+  const file = await open(path, "wx", 0o600);
   try {
-    const openedMetadata = await input.stat();
-    if (!sameFile(sourceMetadata, openedMetadata)) {
-      throw new Error(
-        `Codex rollout changed before it could be retained: ${source}`,
-      );
+    try {
+      await file.writeFile(contents);
+      await file.sync();
+    } finally {
+      await file.close();
     }
-    output = await open(
-      destination,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        (process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
-      0o600,
-    );
-    const buffer = Buffer.alloc(64 * 1_024);
-    let offset = 0;
-    while (offset < openedMetadata.size) {
-      const length = Math.min(buffer.length, openedMetadata.size - offset);
-      const { bytesRead } = await input.read(buffer, 0, length, offset);
-      if (bytesRead === 0) {
-        throw new Error(
-          `Codex rollout changed while it was retained: ${source}`,
-        );
-      }
-      let chunkOffset = 0;
-      while (chunkOffset < bytesRead) {
-        const { bytesWritten } = await output.write(
-          buffer,
-          chunkOffset,
-          bytesRead - chunkOffset,
-          offset + chunkOffset,
-        );
-        if (bytesWritten === 0) {
-          throw new Error(`Could not retain Codex rollout: ${source}`);
-        }
-        chunkOffset += bytesWritten;
-      }
-      offset += bytesRead;
-    }
-    const retainedMetadata = await input.stat();
-    if (
-      retainedMetadata.size !== openedMetadata.size ||
-      retainedMetadata.mtimeMs !== openedMetadata.mtimeMs ||
-      retainedMetadata.ctimeMs !== openedMetadata.ctimeMs
-    ) {
-      throw new Error(`Codex rollout changed while it was retained: ${source}`);
-    }
-    await output.chmod(0o600);
+    await rename(path, join(directory, "index.json"));
   } finally {
-    await output?.close();
-    await input.close();
+    await rm(path, { force: true });
   }
 }
 
-function sameFile(left: Stats, right: Stats): boolean {
-  return right.isFile() && left.dev === right.dev && left.ino === right.ino;
+export async function writeRolloutSessionIndex(options: {
+  scanDir: string;
+  scanId: string;
+  startedAt: string;
+  rootThreadIds: readonly string[];
+  sessions: readonly ScanRolloutSession[];
+  retainEvents?: boolean;
+  onWarning?: (message: string) => void;
+}): Promise<string> {
+  const { scanDir, scanId, rootThreadIds, sessions } = options;
+  const directory = await indexDirectory(scanDir, true);
+  const path = join(directory, "index.json");
+  // Resume and terminal callbacks can overlap across SDK processes.
+  const writerState = join(dirname(directory), ".rollout-session-writer");
+  await prepareDirectory(writerState, true);
+  return withCredentialHomeLock(writerState, async () => {
+    const previous = await readIndex(directory, scanId);
+    requireUnique(sessions.map(({ threadId }) => threadId));
+    const entries = new Map(
+      previous?.sessions.map((entry) => [entry.threadId, entry]),
+    );
+    for (const { threadId, parentThreadId } of sessions) {
+      const saved = entries.get(threadId);
+      if (saved && saved.parentThreadId !== parentThreadId) {
+        throw new CodexSecurityError(
+          "The rollout session parent changed for an existing thread.",
+        );
+      }
+      entries.set(threadId, saved ?? { threadId, parentThreadId });
+    }
+    const index = indexSchema.parse({
+      schemaVersion: 1,
+      scanId,
+      rootThreadIds: [
+        ...new Set([...(previous?.rootThreadIds ?? []), ...rootThreadIds]),
+      ],
+      sessions: [...entries.values()],
+    });
+    let contents = serialize(index);
+    const pending: string[] = [];
+    try {
+      if (options.retainEvents) {
+        try {
+          const startedAt = timestamp.parse(options.startedAt);
+          const sources = new Map(
+            sessions.map((session) => [session.threadId, session]),
+          );
+          for (const entry of index.sessions) {
+            const source = sources.get(entry.threadId);
+            // Published segments are immutable. An overlapping terminal callback for
+            // this invocation may already have retained the same thread.
+            const segments = entry.eventSegments ?? [];
+            if (
+              !source ||
+              segments.some(
+                (s) => compareTimestamps(s.startedAt, startedAt) === 0,
+              )
+            )
+              continue;
+            const filename = `events-${randomUUID()}.jsonl`;
+            const eventPath = join(directory, filename);
+            if (!(await writeSegment(eventPath, source))) continue;
+            pending.push(eventPath);
+            entry.eventSegments = [
+              ...segments,
+              { startedAt, path: filename },
+            ].sort((a, b) => compareTimestamps(a.startedAt, b.startedAt));
+          }
+          contents = serialize(index);
+        } catch {
+          await Promise.all(
+            pending.splice(0).map((path) => rm(path, { force: true })),
+          );
+          notify(() =>
+            options.onWarning?.(
+              "Could not retain rollout events. The session index preserves available metadata and previous event files.",
+            ),
+          );
+        }
+      }
+      await publish(directory, contents);
+      pending.length = 0;
+    } finally {
+      await Promise.all(pending.map((path) => rm(path, { force: true })));
+    }
+    return path;
+  });
 }

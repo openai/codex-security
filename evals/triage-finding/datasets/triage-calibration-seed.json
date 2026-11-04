@@ -1,0 +1,462 @@
+{
+  "schema_version": "triage-finding-calibration-dataset/v0",
+  "name": "triage-finding-calibration-seed",
+  "created_at": "2026-06-12",
+  "description": "OSS-only seed calibration cases for $codex-security:triage-finding. GitHub advisory metadata is source material; expected verdicts are pinned-revision static triage labels.",
+  "case_count": 8,
+  "variant_count": 16,
+  "static_constraints": [
+    "Do not run tests, builds, applications, exploit PoCs, or dynamic validation.",
+    "Do not edit the target repository while triaging.",
+    "Inspect only the smallest static evidence set needed to classify the supplied finding."
+  ],
+  "scoring_targets": [
+    "verdict_exact_match",
+    "severe_error_class",
+    "required_evidence_coverage",
+    "boundary_assessment_correctness",
+    "triage_finding_v0_schema_validity",
+    "static_only_compliance"
+  ],
+  "shared_evidence_sets": {
+    "oss-vulnerable-fixed-pair": [
+      "Inspect the vulnerable commit for the named anchor location and affected code path.",
+      "Inspect the fix commit or patch reference and explain why the fixed variant no longer has the same affected condition.",
+      "Use repository policy or product-surface evidence when available instead of treating source-to-sink reachability alone as enough."
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "oss-mantisbt-ghsa-73vx-49mv-v8w5",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "mantisbt/mantisbt",
+        "url": "https://github.com/mantisbt/mantisbt"
+      },
+      "finding": {
+        "input_id_base": "GHSA-73vx-49mv-v8w5-000",
+        "title": "GHSA-73vx-49mv-v8w5 / CVE-2026-33548",
+        "advisory_ids": [
+          "GHSA-73vx-49mv-v8w5",
+          "CVE-2026-33548"
+        ],
+        "weakness": "xss",
+        "severity": "high",
+        "language": "PHP",
+        "anchor_locations": [
+          {
+            "path": "core/classes/IssueTagTimelineEvent.class.php",
+            "line": 61
+          }
+        ],
+        "fix_patch_ref": "https://github.com/mantisbt/mantisbt/commit/f32787c14d4518476fe7f05f992dbfe6eaccd815"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "80990f43153167c73f11eb4b2bc7108d0c3d6b46",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "f32787c14d4518476fe7f05f992dbfe6eaccd815",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-73vx-49mv-v8w5-mantisbt-mantisbt-f32787c14d45",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-imagemagick-ghsa-qpgx-jfcq-r59f",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "ImageMagick/ImageMagick",
+        "url": "https://github.com/ImageMagick/ImageMagick"
+      },
+      "finding": {
+        "input_id_base": "GHSA-qpgx-jfcq-r59f-000",
+        "title": "GHSA-qpgx-jfcq-r59f / CVE-2026-27798",
+        "advisory_ids": [
+          "GHSA-qpgx-jfcq-r59f",
+          "CVE-2026-27798"
+        ],
+        "weakness": "memory-corruption",
+        "severity": "medium",
+        "language": "C/C++",
+        "anchor_locations": [
+          {
+            "path": "MagickCore/visual-effects.c",
+            "line": 3566
+          }
+        ],
+        "fix_patch_ref": "https://github.com/ImageMagick/ImageMagick/commit/0377e60b3c0d766bd7271221c95d9ee54f6a3738"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "83847c348aafccbbea89ec8ed44382598aea3f98",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "0377e60b3c0d766bd7271221c95d9ee54f6a3738",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-qpgx-jfcq-r59f-imagemagick-imagemagick-0377e60b3c0d",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-scitokens-ghsa-rh5m-2482-966c",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "scitokens/scitokens",
+        "url": "https://github.com/scitokens/scitokens"
+      },
+      "finding": {
+        "input_id_base": "GHSA-rh5m-2482-966c-000",
+        "title": "GHSA-rh5m-2482-966c / CVE-2026-32714",
+        "advisory_ids": [
+          "GHSA-rh5m-2482-966c",
+          "CVE-2026-32714"
+        ],
+        "weakness": "sql-injection",
+        "severity": "critical",
+        "language": "Python",
+        "anchor_locations": [
+          {
+            "path": "src/scitokens/utils/keycache.py",
+            "line": 80
+          }
+        ],
+        "fix_patch_ref": "https://github.com/scitokens/scitokens/commit/3dba108853f2f4a6c0f2325c03779bf083c41cf2"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "66b075c35da18f8364276553513a53c596b4b8e3",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "3dba108853f2f4a6c0f2325c03779bf083c41cf2",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-rh5m-2482-966c-scitokens-scitokens-3dba108853f2",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-emissary-ghsa-3p24-9x7v-7789",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "NationalSecurityAgency/emissary",
+        "url": "https://github.com/NationalSecurityAgency/emissary"
+      },
+      "finding": {
+        "input_id_base": "GHSA-3p24-9x7v-7789-000",
+        "title": "GHSA-3p24-9x7v-7789 / CVE-2026-35582",
+        "advisory_ids": [
+          "GHSA-3p24-9x7v-7789",
+          "CVE-2026-35582"
+        ],
+        "weakness": "command-injection",
+        "severity": "high",
+        "language": "Java",
+        "anchor_locations": [
+          {
+            "path": "src/main/java/emissary/util/shell/Executrix.java",
+            "line": 77
+          }
+        ],
+        "fix_patch_ref": "https://github.com/NationalSecurityAgency/emissary/commit/1faf33f2494c0128f250d7d2e8f2da99bbd32ae8"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "082b263a19532454b24dfbed1605311854ea778f",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "1faf33f2494c0128f250d7d2e8f2da99bbd32ae8",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-3p24-9x7v-7789-nationalsecurityagency-emissary-1faf33f2494c",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-free5gc-pcf-ghsa-6rgm-gr97-x3j5",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "free5gc/pcf",
+        "url": "https://github.com/free5gc/pcf"
+      },
+      "finding": {
+        "input_id_base": "GHSA-6RGM-GR97-X3J5",
+        "title": "GHSA-6RGM-GR97-X3J5 / CVE-2026-42083",
+        "advisory_ids": [
+          "GHSA-6RGM-GR97-X3J5",
+          "CVE-2026-42083"
+        ],
+        "weakness": "authz",
+        "severity": "high",
+        "language": "Go",
+        "anchor_locations": [
+          {
+            "path": "internal/sbi/server.go",
+            "line": 72
+          }
+        ],
+        "fix_patch_ref": "https://github.com/free5gc/pcf/commit/8c4d457cdf58bb239ee30e88c56b370b22073964"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "508d70b8527a6c8c923179dad450ea01e16b6aeb",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "8c4d457cdf58bb239ee30e88c56b370b22073964",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ian-security-free5gc-pcf-508d70b8527a-ghsa-6rgm-gr97-x3j5",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-actualbudget-ghsa-27vg-33gh-4hwg",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "actualbudget/actual",
+        "url": "https://github.com/actualbudget/actual"
+      },
+      "finding": {
+        "input_id_base": "GHSA-27vg-33gh-4hwg-000",
+        "title": "GHSA-27vg-33gh-4hwg / CVE-2026-3089",
+        "advisory_ids": [
+          "GHSA-27vg-33gh-4hwg",
+          "CVE-2026-3089"
+        ],
+        "weakness": "path-traversal",
+        "severity": "medium",
+        "language": "TypeScript",
+        "anchor_locations": [
+          {
+            "path": "packages/sync-server/src/app-sync.ts",
+            "line": 49
+          },
+          {
+            "path": "packages/sync-server/src/app-sync.test.ts",
+            "line": 366
+          }
+        ],
+        "fix_patch_ref": "https://github.com/actualbudget/actual/commit/18072e1d8b5281db43ded8b21433ee177bae9dfa"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "a1e0b3f45d36232a0f4319a60cf264912edac48f",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "18072e1d8b5281db43ded8b21433ee177bae9dfa",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-27vg-33gh-4hwg-actualbudget-actual-18072e1d8b52",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-dompurify-ghsa-v8jm-5vwx-cfxm",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "cure53/DOMPurify",
+        "url": "https://github.com/cure53/DOMPurify"
+      },
+      "finding": {
+        "input_id_base": "GHSA-v8jm-5vwx-cfxm-gap-fill-000",
+        "title": "GHSA-v8jm-5vwx-cfxm / CVE-2025-15599",
+        "advisory_ids": [
+          "GHSA-v8jm-5vwx-cfxm",
+          "CVE-2025-15599"
+        ],
+        "weakness": "xss",
+        "severity": "moderate",
+        "language": "JavaScript",
+        "anchor_locations": [
+          {
+            "path": "src/purify.ts",
+            "line": 1385
+          },
+          {
+            "path": "dist/purify.js",
+            "line": 1130
+          }
+        ],
+        "fix_patch_ref": "https://github.com/cure53/DOMPurify/commit/c861f5a83fb8d90800f1680f855fee551161ac2b"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "c361baa18dbdcb3344a41110f4c48ad85bf48f80",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "c861f5a83fb8d90800f1680f855fee551161ac2b",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "gap-fill-ghsa-v8jm-5vwx-cfxm-cure53-dompurify-c861f5a83fb8",
+        "review_status": "seed_from_external_benchmark"
+      }
+    },
+    {
+      "case_id": "oss-monetr-ghsa-29v9-frvh-c426",
+      "case_family": "oss-vuln-fix-pair",
+      "source_type": "cve",
+      "repo": {
+        "name": "monetr/monetr",
+        "url": "https://github.com/monetr/monetr"
+      },
+      "finding": {
+        "input_id_base": "GHSA-29v9-frvh-c426-000",
+        "title": "GHSA-29v9-frvh-c426 / CVE-2026-41644",
+        "advisory_ids": [
+          "GHSA-29v9-frvh-c426",
+          "CVE-2026-41644"
+        ],
+        "weakness": "ssrf",
+        "severity": "high",
+        "language": "YAML/Go/TypeScript",
+        "anchor_locations": [
+          {
+            "path": "compose/monetr.yaml",
+            "line": 34
+          },
+          {
+            "path": "server/controller/lunch_flow.go",
+            "line": 100
+          },
+          {
+            "path": "server/datasources/lunch_flow/lunch_flow_jobs/sync_lunch_flow.go",
+            "line": 213
+          }
+        ],
+        "fix_patch_ref": "https://github.com/monetr/monetr/commit/c260caa3c573a4a396ec2d264c7641a5d958385b"
+      },
+      "variants": [
+        {
+          "variant_id": "vulnerable",
+          "checkout_ref": "195a0c94cad26105dc1e9ee9d5ed902af41ed46c",
+          "expected_verdict": "confirmed",
+          "expected_binary_label": "positive",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        },
+        {
+          "variant_id": "fixed",
+          "checkout_ref": "c260caa3c573a4a396ec2d264c7641a5d958385b",
+          "expected_verdict": "not_actionable",
+          "expected_binary_label": "negative",
+          "required_evidence_set_ids": [
+            "oss-vulnerable-fixed-pair"
+          ]
+        }
+      ],
+      "gold": {
+        "basis": "scanbench-lite public repo vulnerable/fixed pair",
+        "source_case_id": "ghsa-ghsa-29v9-frvh-c426-monetr-monetr-c260caa3c573",
+        "review_status": "seed_from_external_benchmark"
+      }
+    }
+  ]
+}

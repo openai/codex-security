@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage Finding"
+  short_description: "Triage existing security findings from reports, GitHub, Jira, or Linear"
+  default_prompt: "Use $triage-finding to assess existing security findings against <repo/path> using repository security policy and static code evidence. Finding content or source: <report, advisory, GitHub source, Jira JQL or issue, or Linear issue/search>."

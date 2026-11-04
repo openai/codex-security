@@ -1,104 +1,141 @@
-import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
-import { runScanEvents } from "../../src/api.js";
-import type {
-  ScanOptions,
-  ScanReconnectDetails,
-  ScanWorkerStatus,
-} from "../../src/index.js";
-import { PLUGIN_ROOT } from "../plugin-root.js";
+import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
+import { CodexSecurity, runScanEvents } from "../../src/api.js";
+import type { ScanOptions } from "../../src/index.js";
+import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
+
+type PreparedRuntime = Awaited<
+  ReturnType<
+    NonNullable<
+      NonNullable<
+        ConstructorParameters<typeof CodexSecurity>[1]
+      >["prepareRuntime"]
+    >
+  >
+>;
+
+export function preparedRuntime(
+  codexHome: string,
+  marketplaceRoot = PLUGIN_ROOT,
+): PreparedRuntime {
+  return {
+    codexHome,
+    deepScanConfigPath: join(codexHome, "deep-scan.toml"),
+    plugin: {
+      pluginRoot: PLUGIN_ROOT,
+      marketplaceRoot,
+      installedRoot: PLUGIN_ROOT,
+      marketplaceName: "codex-security-sdk",
+      name: "codex-security",
+      version: "0.1.0",
+    },
+    environment: {},
+    credentialsAvailable: true,
+  };
+}
+
+export function scanRuntimeDependencies(codexHome: string, scanDir: string) {
+  return {
+    prepareRuntime: async () => preparedRuntime(codexHome),
+    resolvePluginPython: async () => "/managed/python",
+    prepareOutputDir: async () => scanDir,
+    repositoryRevision: async () => "deadbeef",
+  };
+}
 
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
 
-export function createApiTestFixtures() {
-  const temporaryDirectories: string[] = [];
+type ScanEventOptions = Omit<
+  Parameters<typeof runScanEvents>[0],
+  "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
+> & { abortController?: AbortController };
 
+export function completedTurn(): Extract<
+  ThreadEvent,
+  { type: "turn.completed" }
+> {
   return {
-    async cleanup(): Promise<void> {
-      await Promise.all(
-        temporaryDirectories
-          .splice(0)
-          .map((path) => rm(path, { recursive: true, force: true })),
-      );
-    },
-
-    async copyCompletedScan(root: string): Promise<string> {
-      const scanDir = join(root, "scan");
-      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
-        recursive: true,
-      });
-      await chmod(scanDir, 0o700);
-      await writeFile(join(scanDir, "report.md"), "# Scan report\n");
-      return scanDir;
-    },
-
-    async temporaryDirectory(): Promise<string> {
-      const path = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-api-")),
-      );
-      temporaryDirectories.push(path);
-      return path;
-    },
-  };
-}
-
-export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
-  yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
-  yield {
     type: "turn.completed",
     usage: {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     },
   };
 }
 
+export async function* completedEvents(
+  threadId = "thread-1",
+  events?: AsyncIterable<ThreadEvent>,
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
+  yield { type: "turn.started" };
+  if (events) yield* events;
+  else {
+    yield {
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "scan complete" },
+    };
+  }
+  yield completedTurn();
+}
+
 export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
-  abortController = new AbortController(),
-  onReconnect?: (
-    attempt: number,
-    maxAttempts: number,
-    details?: ScanReconnectDetails,
-  ) => void,
-  onWorkerStatus?: (status: ScanWorkerStatus) => void,
-  onScanStarted?: () => void,
-  onObserverError?: (observer: ScanObserverName, error: unknown) => void,
+  options: ScanEventOptions = {},
+  repositoryRevision = "deadbeef",
 ): ReturnType<typeof runScanEvents> {
   return runScanEvents({
-    thread: {
-      id: null,
-      async runStreamed() {
-        return { events };
-      },
-    },
+    thread: { id: null },
     events,
-    signal: abortController.signal,
+    signal: (options.abortController ?? new AbortController()).signal,
     scanDir,
     pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
-    onScanStarted,
-    onReconnect,
-    onWorkerStatus,
-    onObserverError,
+    ...options,
     expectation: {
       repository: "/repository",
-      repositoryRevision: "deadbeef",
+      repositoryRevision,
       target: { kind: "repository", paths: [] },
       mode: "standard",
       pluginVersion: "0.1.0",
     },
   });
 }
+
+export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+  yield {
+    type: "turn.failed",
+    error: { message: "Could not draft fixes." },
+  };
+}
+
+export function completedCodex(root: string, threadId: string | null = null) {
+  return (_options: CodexOptions) =>
+    codexFactory(async () => {
+      await copyCompletedScan(root);
+      return { events: completedEvents() };
+    }, threadId)();
+}
+
+export function collectObserverErrors(errors: [ScanObserverName, string][]) {
+  return (observer: ScanObserverName, error: unknown) => {
+    errors.push([observer, (error as Error).message]);
+  };
+}
+
+export function codexFactory<Run>(
+  runStreamed: Run,
+  threadId: string | null = null,
+) {
+  return () => ({
+    startThread: () => ({ id: threadId, runStreamed }),
+  });
+}
+
+export const failedPostScanEvents = failedEvents;
