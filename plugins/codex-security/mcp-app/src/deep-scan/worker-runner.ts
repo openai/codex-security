@@ -318,7 +318,6 @@ export class DeepScanWorkerRunner {
             : undefined;
           await this.options.store.updateWorker({
             ...baseMutation,
-            threadId: activeThreadId,
             status: replaceableFailureKind ? "canceled" : "failed",
             error: deepScanErrorMessage(
               replaceableFailureKind
