@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import {
@@ -14,12 +15,14 @@ import {
 try {
   await testResumeRepairsPreviouslyAcceptedEvidence(false);
   await testResumeRepairsPreviouslyAcceptedEvidence(true);
+  await testResumeRepairsPreviouslyAcceptedEvidence(true, true);
 } finally {
   await temporaryDirectories.cleanup();
 }
 
 async function testResumeRepairsPreviouslyAcceptedEvidence(
   completedIteration: boolean,
+  withLaterBatch = false,
 ) {
   const { fixture, store } = await coordinatorFixture({
     workers: 1,
@@ -44,7 +47,23 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       continue;
     }
     const saved = await readJson(worker.resultManifestPath!);
-    for (const finding of saved.findings) delete finding.validation;
+    for (const finding of saved.findings) {
+      delete finding.validation;
+      if (withLaterBatch && worker.kind === "dedup") {
+        // A pre-upgrade checkpoint can retain multiple source groups from one repair.
+        const source = structuredClone(finding);
+        const ids = ["first", "second"];
+        finding.provenance.sourceFindingIds = ids;
+        finding.provenance.sourceFindings = ids.map((id) => ({
+          id,
+          finding: source,
+        }));
+        finding.provenance.deepScanRepairGroups = ids.map((id, order) => ({
+          order,
+          sources: [id],
+        }));
+      }
+    }
     await writeJson(worker.resultManifestPath!, saved);
     if (!completedIteration && worker.kind === "discovery")
       store.workers.set(worker.id, { ...worker, mergeState: "buffered" });
@@ -58,7 +77,8 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       status: "running",
       terminalReason: undefined,
       manifestPath: undefined,
-      noNewStreak: completedIteration ? 1 : 0,
+      config: { ...store.run.config, maxDiscoveryRuns: withLaterBatch ? 2 : 1 },
+      noNewStreak: completedIteration && !withLaterBatch ? 1 : 0,
       persistedWorkers: structuredClone([...store.workers.values()]),
       persistedDedupInputs: store.iterations.flatMap(iterationInputs),
     };
@@ -73,11 +93,15 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   let repairCalls = 0;
   const executor = Object.assign(new FakeExecutor(), {
     async repairFindingEvidence(prompt: string, cwd: string) {
-      assert.equal(cwd, fixture.run.targetPath);
+      assert.equal(
+        cwd,
+        join(fixture.run.scanDir, "artifacts", "deep_discovery"),
+      );
       assert.match(prompt, /missing evidence/i);
       repairCalls++;
       if (repairCalls === 1) return "{}";
-      const { finding } = JSON.parse(prompt.split("\n")[1]!);
+      const { finding, targetPath } = JSON.parse(prompt.split("\n")[1]!);
+      assert.equal(targetPath, fixture.run.targetPath);
       return JSON.stringify({
         codeEvidence: finding.codeEvidence,
         rootCause: finding.rootCause.summary,
@@ -100,17 +124,17 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(
     executor.discoveryCalls,
-    0,
+    withLaterBatch ? 1 : 0,
     "repair must honor the discovery cap",
   );
-  assert.equal(repairCalls, 2, "incomplete repair uses the normal retry");
-  assert.equal(store.run.dispatchedCount, 1);
+  assert.equal(repairCalls, withLaterBatch ? 3 : 2);
+  assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(published.length, 1);
   assert.ok(published[0].findings[0].validation);
   assert.equal(
     store.iterations.at(-1)!.workerIds.length,
-    completedIteration ? 0 : 1,
+    completedIteration && !withLaterBatch ? 0 : 1,
   );
   assert.deepEqual(
     await Promise.all(acceptedPaths.map((file) => readFile(file, "utf8"))),

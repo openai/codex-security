@@ -806,7 +806,10 @@ export class DeepScanCoordinator {
 
     this.logProgress(acceptedCount);
 
-    let recovered = true;
+    // Later merges can restore pre-upgrade source reports from the saved aggregate.
+    const hasRecoveredFindings =
+      result.findings.length > 0 ||
+      batch.some((worker) => worker.result.findings.length > 0);
     for (;;) {
       signal.throwIfAborted();
       // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
@@ -818,11 +821,12 @@ export class DeepScanCoordinator {
       }
       // Only recovery can introduce findings that predate the worker evidence gate.
       const repaired =
-        recovered &&
+        hasRecoveredFindings &&
         !stop &&
         (await repairAcceptedEvidence(
           result.findings,
           this.state,
+          this.artifacts.deepRoot,
           this.options.executor,
           signal,
           () => this.options.store.checkRepairTarget(scanId),
@@ -839,7 +843,6 @@ export class DeepScanCoordinator {
             await this.clock.sleep(delayMs, signal);
           },
         ));
-      recovered = false;
       if (batch.length || repaired) {
         resultPath = join(
           await reserveWorkerDirectory(

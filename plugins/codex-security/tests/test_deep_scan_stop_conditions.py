@@ -628,6 +628,11 @@ def test_evidence_repair_preserves_selected_deadline_findings(
         del worker_finding["validation"]
         output = output.parent / "attempts" / "attempt-1"
     surface = {"id": "entry", "label": "Worker review", "disposition": "reported"}
+    if sparse:
+        receipt = output / "artifacts" / "proof.md"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("Checkpoint evidence.")
+        surface["receiptRefs"] = ["artifacts/proof.md"]
     draft = saved_draft(scan.scan_id, findings=[worker_finding], surfaces=[surface])
     if checkpoint != "late":
         source = write_checkpoint(output / "checkpoints", draft)

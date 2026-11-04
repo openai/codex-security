@@ -659,7 +659,7 @@ def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, s
     for worker in workers:
         try:
             for path, attempt in _worker_outputs(scan_dir, worker):
-                attempts[path] = (worker["id"], attempt)
+                attempts[path] = (worker, attempt)
         except (TypeError, ValueError):
             continue
     selected_keys = {}
@@ -686,11 +686,16 @@ def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, s
             continue
         if digest != expected:
             continue
-        owner, attempt = attempts[directory]
+        worker, attempt = attempts[directory]
+        owner = worker["id"]
         surface_ids = set()
         for row in _coverage_rows(draft["reviewState"], "surfaces"):
             if isinstance(row, dict):
-                projected = _project_worker_coverage_row(row, owner, "surfaces")
+                resolved = {
+                    **row,
+                    "receiptRefs": resolve_coverage_receipts(scan_dir, row, worker, path),
+                }
+                projected = _project_worker_coverage_row(resolved, owner, "surfaces")
                 if surface_id := saved_surfaces.get(
                     _digest(_coverage_comparison_row(projected, "surfaces"))
                 ):
