@@ -382,21 +382,20 @@ def independent_review_progress(
     ).fetchone()
     if run is None:
         return None
-    active = connection.execute(
+    active, buffered = connection.execute(
         """
-        SELECT COUNT(*)
+        SELECT COUNT(*) FILTER (WHERE status IN ('queued', 'running')),
+               COUNT(*) FILTER (WHERE status = 'succeeded' AND merge_state = 'buffered')
         FROM deep_scan_workers
-        WHERE scan_id = ?
-            AND kind = 'discovery'
-            AND status IN ('queued', 'running')
+        WHERE scan_id = ? AND kind = 'discovery'
         """,
         (scan_id,),
-    ).fetchone()[0]
+    ).fetchone()
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] in {"reducing", "terminal"},
+        "consolidating": run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0),
         "updatedAt": str(run["updated_at"]),
     }
 
