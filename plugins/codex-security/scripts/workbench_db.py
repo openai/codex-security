@@ -55,7 +55,12 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
-from workbench.storage import create_private_directory, resolve_scan_root, state_dir
+from workbench.storage import (
+    create_private_directory,
+    resolve_scan_root,
+    saved_deep_workers,
+    state_dir,
+)
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -1253,10 +1258,7 @@ def complete_scan_locked(
                     scan_dir,
                     scan["id"],
                     completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
+                    saved_deep_workers(connection, scan),
                     warnings,
                     stopped=False,
                     scan_mode=scan["mode"],
@@ -2472,6 +2474,20 @@ def scan_context(
 
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "progress_only", False):
+        scan = connection.execute(
+            """
+            SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
+                   progress.*, progress.updated_at AS progress_updated_at
+            FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+            WHERE scans.id = ?
+            """,
+            (resolve_scan_id(connection, args.scan_id),),
+        ).fetchone()
+        if scan is None:
+            raise SystemExit("Codex Security scan not found.")
+        progress, _ = scan_progress_result(connection, scan)
+        return {"scan": {"progress": progress}}
     result = scan_context(connection, args.scan_id, args.occurrence_id)
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
@@ -2522,6 +2538,43 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
             "total": total,
         }
     }
+
+
+def scan_progress_result(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[dict[str, Any], str]:
+    independent_reviews = (
+        deep_scan.independent_review_progress(connection, scan["id"])
+        if scan["mode"] == "deep"
+        else None
+    )
+    progress_result = {
+        "candidates": {"reportable": scan["reportable_findings_count"]},
+        "coverage": {
+            "closedRows": scan["review_items_completed"],
+            "filesTotal": scan["scope_file_count"],
+            "worklistRows": scan["review_items_total"],
+        },
+        "phase": scan["phase"],
+        "phaseProgress": {
+            "completed": scan["phase_items_completed"],
+            "total": scan["phase_items_total"],
+            "unit": scan["phase_progress_unit"],
+        },
+        "preflightProgress": {
+            "completed": scan["preflight_checks_completed"],
+            "total": scan["preflight_checks_total"],
+        },
+        "preflightIssues": json.loads(scan["preflight_issues_json"]),
+        "reviewPass": scan["deep_review_pass"],
+        "status": "canceled" if scan["canceled_at"] else scan["status"],
+        "updatedAt": scan["progress_updated_at"],
+    }
+    review_updated_at = ""
+    if independent_reviews is not None:
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
+    return progress_result, review_updated_at
 
 
 def scan_result(
@@ -2575,37 +2628,7 @@ def scan_result(
         )
     }
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
-    independent_reviews = (
-        deep_scan.independent_review_progress(connection, scan["id"])
-        if scan["mode"] == "deep"
-        else None
-    )
-    progress_result = {
-        "candidates": {"reportable": scan["reportable_findings_count"]},
-        "coverage": {
-            "closedRows": scan["review_items_completed"],
-            "filesTotal": scan["scope_file_count"],
-            "worklistRows": scan["review_items_total"],
-        },
-        "phase": scan["phase"],
-        "phaseProgress": {
-            "completed": scan["phase_items_completed"],
-            "total": scan["phase_items_total"],
-            "unit": scan["phase_progress_unit"],
-        },
-        "preflightProgress": {
-            "completed": scan["preflight_checks_completed"],
-            "total": scan["preflight_checks_total"],
-        },
-        "preflightIssues": json.loads(scan["preflight_issues_json"]),
-        "reviewPass": scan["deep_review_pass"],
-        "status": "canceled" if scan["canceled_at"] else scan["status"],
-        "updatedAt": scan["progress_updated_at"],
-    }
-    review_updated_at = ""
-    if independent_reviews is not None:
-        review_updated_at = str(independent_reviews.pop("updatedAt"))
-        progress_result["independentReviews"] = independent_reviews
+    progress_result, review_updated_at = scan_progress_result(connection, scan)
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )

@@ -27,7 +27,10 @@ import {
   type PrivateImportJob,
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
-import { guardianSelectionFormat } from "./semgrep-guardian-findings.js";
+import {
+  guardianFindingId,
+  guardianSelectionFormat,
+} from "./semgrep-guardian-findings.js";
 import {
   cloudBaseUrl,
   cloudFindingsUrl,
@@ -102,6 +105,8 @@ import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import {
+  NoPublishableFindingsError,
+  reportForJson,
   snapshotSourceRepositories,
   type ExternalSourceRepository,
   snapshotImportOptions,
@@ -367,15 +372,6 @@ async function readOptionalFile(path: string): Promise<string | undefined> {
   });
 }
 
-function reportForJson(report: ExternalFindings["report"]) {
-  const errors = report?.["errors"];
-  if (!Array.isArray(errors)) return report;
-  const json = JSON.stringify(errors, (_key, entry: unknown) =>
-    entry instanceof Error ? { ...entry, message: entry.message } : entry,
-  );
-  return { ...report, errors: JSON.parse(json) as unknown[] };
-}
-
 export function externalPublicationStateDirectory(
   environment: NodeJS.ProcessEnv,
 ): string {
@@ -579,7 +575,7 @@ function storedFindingId(finding: ExternalFinding): string {
 function rejectGuardianSelection(input: ExternalFindings): void {
   const isGuardian = (row: ExternalFinding) =>
     row &&
-    (/^semgrep-guardian:[0-9a-f]{64}$/u.test(storedFindingId(row)) ||
+    (guardianFindingId.test(storedFindingId(row)) ||
       ownData(ownData(row.evidence, "source_data"), "format") ===
         guardianSelectionFormat);
   if (
@@ -1398,13 +1394,10 @@ async function preparePublicationInput(
       "The source key must contain 1–512 UTF-8 bytes and no NUL characters. Use a stable scanner organization/project/branch namespace across imports.",
     );
   }
+  const environment = dependencies.environment ?? process.env;
+  dependencies.signal?.throwIfAborted();
+  requireExternalImports(environment);
   progress({ phase: "reading", completed: 0 });
-  function noFindings(parsed: ExternalFindings): never {
-    const diagnostics = reportForJson(parsed.report)?.["errors"];
-    throw new CodexSecurityError(
-      `No supported findings are ready to publish. ${parsed.excluded.map((item) => `Item ${item.position}: ${item.reason}`).join(" ")}${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`,
-    );
-  }
   function checkSelection(input: PublicationSelection) {
     const parsed = input.current;
     if (
@@ -1416,12 +1409,10 @@ async function preparePublicationInput(
       !input.unprovenOccurrenceCount &&
       !input.unprovenIdPrefixes?.length
     )
-      noFindings(parsed);
+      throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
   progress({ phase: "discovering", completed: 0 });
-  const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
   // Validate the configured return destination before authentication or uploads.
@@ -2584,7 +2575,7 @@ async function preparePublicationInput(
   }
   const saved = selected?.content ?? recovered;
   if (historicalOnly && !saved) throw unmatchedPreviousNumbers();
-  if (!parsed.findings.length) noFindings(parsed);
+  if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   if (saved) {
     await retireIfReset(saved, () =>
       underLocks(lockKeys, async () => {
