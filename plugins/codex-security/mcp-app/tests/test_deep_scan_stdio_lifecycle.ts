@@ -1013,6 +1013,8 @@ service_tier = "ultrafast"
       assert.deepEqual(resumed.result.structuredContent, {
         scanId: resumedScanId,
         scanDir: resumedScan.scanDir,
+        completedAudits: 2,
+        terminalReason: "saturated",
         manifestPath,
         reportPath: path.join(resumedScan.scanDir, "report.md"),
         instructions,
