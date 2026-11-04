@@ -1,11 +1,17 @@
-import { readJson } from "./support/json.js";
+import { readJson, writeJson } from "./support/json.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
 import { emptyNeighborhoodReviewer } from "./support/deduplication.js";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { expect, test, mock } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
-import type { Finding, FindingsDocument } from "../src/models.js";
+import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
+import { deriveFindingIdentity } from "../src/contract.js";
+import type {
+  FindingNeighborhood,
+  FindingSourceSnapshot,
+} from "../src/finding-retrieval.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import {
   contradictionFreeSubgroups,
@@ -34,7 +40,7 @@ import type { JsonObject } from "../src/config.js";
 import { fail } from "./support/errors.js";
 
 const document = await readJson<FindingsDocument>(
-  join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  join(PLUGIN_ROOT, "examples/legacy-completed-scan/findings.json"),
 );
 function entry(index: number): Finding {
   return {
@@ -1154,6 +1160,315 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
     expect(() => validateReview(invalid, findings)).toThrow();
   }
 });
+
+test.each(
+  (
+    [
+      "stable",
+      "changed",
+      "missing",
+      "same-body-missing",
+      "same-body-changed",
+      "empty",
+    ] as const
+  ).flatMap((kind) => [false, true].map((reverse) => ({ kind, reverse }))),
+)(
+  "saved-scan provenance follows each retrieved record: %j",
+  async ({ kind, reverse }) => {
+    const fixture = await workflowFixture();
+    const gates = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let pending: Promise<unknown> | undefined;
+    try {
+      const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+      const findingsPath = join(fixture.scanDir, "findings.json");
+      const manifest = await readJson<ScanManifest>(manifestPath);
+      const targetId = manifest.scan.target.targetId;
+      const first = fixture.document.findings[0]!;
+      const second: Finding = {
+        ...structuredClone(first),
+        ...deriveFindingIdentity(manifest.scan.id, targetId, first.ruleId, {
+          anchor: "second-synthetic-control",
+        }),
+        title: "Second saved finding",
+      };
+      await writeJson(findingsPath, {
+        ...fixture.document,
+        findings: [first, second],
+      });
+      const findingsBytes = await readFile(findingsPath, "utf8");
+      manifest.scan.artifacts.find(
+        (artifact) => artifact.path === "findings.json",
+      )!.sha256 = createHash("sha256").update(findingsBytes).digest("hex");
+      await writeJson(manifestPath, manifest);
+      const manifestBytes = await readFile(manifestPath, "utf8");
+      const latest = [first, second].map((finding): Finding => {
+        if (
+          kind === "stable" ||
+          kind.startsWith("same-body") ||
+          kind === "empty"
+        )
+          return structuredClone(finding);
+        return {
+          ...structuredClone(finding),
+          ...deriveFindingIdentity(
+            "scan_later_observation",
+            targetId,
+            finding.ruleId,
+            finding.identity,
+          ),
+          title: `Later observation: ${finding.title}`,
+        };
+      });
+      const initialSnapshot = {
+        repositoryId: "target_initial",
+        revision: manifest.scan.target.revision!,
+        snapshotDigest: manifest.scan.target.snapshotDigest ?? null,
+      } satisfies FindingSourceSnapshot;
+      const laterSnapshot =
+        kind === "stable"
+          ? initialSnapshot
+          : {
+              repositoryId: "target_later",
+              revision: "a".repeat(40),
+              snapshotDigest: `codex-security-snapshot/v1:sha256:${"b".repeat(64)}`,
+            };
+      const ids = [first.findingId, second.findingId];
+      const repositories = (repositoryIds: string[]) =>
+        Object.fromEntries(ids.map((id) => [id, repositoryIds]));
+      const snapshots = (snapshot: FindingSourceSnapshot) =>
+        Object.fromEntries(ids.map((id) => [id, snapshot]));
+      const neighborhoods: FindingNeighborhood[] = [
+        {
+          finding: first,
+          potentialDuplicates: [second],
+          repositoryIds: repositories([initialSnapshot.repositoryId]),
+          sourceSnapshots: snapshots(initialSnapshot),
+        },
+        {
+          finding: latest[1]!,
+          potentialDuplicates: [latest[0]!],
+          ...(kind.includes("missing")
+            ? {}
+            : {
+                repositoryIds: repositories(
+                  kind === "empty" ? [] : [laterSnapshot.repositoryId],
+                ),
+                sourceSnapshots:
+                  kind === "empty" ? {} : snapshots(laterSnapshot),
+              }),
+        },
+      ];
+      const originalNeighborhoods = structuredClone(neighborhoods);
+      const starts = [
+        Promise.withResolvers<void>(),
+        Promise.withResolvers<void>(),
+      ];
+      const reviewed: string[][] = [];
+      const writes: unknown[] = [];
+      pending = deduplicateScanInternal(
+        manifest.scan.id,
+        {
+          findingsUrl: "https://synthetic.test/api",
+          allRepositories: true,
+          concurrency: 2,
+        },
+        {
+          environment: fixture.environment,
+          resolveReviewEnvironment: async () => ({
+            CODEX_HOME: fixture.environment.CODEX_HOME,
+          }),
+          runWorkbench: async () => ({
+            scan: {
+              scanId: manifest.scan.id,
+              scanDir: fixture.scanDir,
+              targetPath: fixture.repository,
+              progress: { status: "complete" },
+            },
+          }),
+          fetch: async (url, options) => {
+            if (options.method === "POST") {
+              writes.push(JSON.parse(String(options.body)));
+              return Response.json({});
+            }
+            const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+            const index = ids.indexOf(id);
+            expect(index).toBeGreaterThanOrEqual(0);
+            starts[index]!.resolve();
+            await gates[index]!.promise;
+            return Response.json(neighborhoods[index]);
+          },
+          reviewRunner: {
+            async run<T>(review: CodexReview<T>): Promise<T> {
+              const assignedIds =
+                review.findingIds ?? fail("Missing review participants");
+              const origin =
+                review.stage === "screening" ? ids.indexOf(assignedIds[0]!) : 1;
+              const neighborhood = neighborhoods[origin]!;
+              const expected = [
+                neighborhood.finding,
+                ...neighborhood.potentialDuplicates,
+              ];
+              const records: { findings: Finding[] } = JSON.parse(
+                review.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"findings":'))!,
+              );
+              expect(records.findings).toEqual(expected);
+              const context: {
+                approvedRepositoryId: string;
+                findings: {
+                  findingId: string;
+                  repositoryIds: string[];
+                  sourceSnapshot?: FindingSourceSnapshot;
+                }[];
+              } = JSON.parse(
+                review.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"approvedRepositoryId":'))!,
+              );
+              expect(context.approvedRepositoryId).toBe(targetId);
+              expect(context.findings).toHaveLength(expected.length);
+              for (const [index, finding] of expected.entries()) {
+                const snapshot =
+                  neighborhood.sourceSnapshots?.[finding.findingId];
+                expect(context.findings[index]).toEqual({
+                  findingId: finding.findingId,
+                  repositoryIds: neighborhood.repositoryIds?.[
+                    finding.findingId
+                  ] ?? [targetId],
+                  ...(snapshot === undefined
+                    ? {}
+                    : { sourceSnapshot: snapshot }),
+                });
+                expect(
+                  Object.hasOwn(context.findings[index]!, "sourceSnapshot"),
+                ).toBe(snapshot !== undefined);
+              }
+              reviewed.push([...assignedIds]);
+              return review.validate(
+                review.stage === "screening"
+                  ? {
+                      decisions: {
+                        "pair-1": {
+                          decision: "SAME",
+                          rationale: "Inspect the supplied source.",
+                        },
+                      },
+                    }
+                  : {
+                      decision: "SAME",
+                      rationale: "One correction covers both findings.",
+                    },
+              );
+            },
+          },
+        },
+      );
+      await Promise.race([
+        Promise.all(starts.map((start) => start.promise)),
+        pending.then(() =>
+          fail("Review completed before both lookups started"),
+        ),
+      ]);
+      for (const index of reverse ? [1, 0] : [0, 1]) {
+        gates[index]!.resolve();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const group = [...ids].sort();
+      expect(await pending).toEqual({
+        scanId: manifest.scan.id,
+        uniqueFindingIds: [group[0]],
+        duplicateGroups: [group],
+        deduplicationStatus: "completed",
+      });
+      expect(reviewed).toEqual([ids, [...ids].reverse(), [...ids].reverse()]);
+      expect(writes).toEqual([{ groups: [group] }]);
+      expect(neighborhoods).toEqual(originalNeighborhoods);
+      expect(await readFile(findingsPath, "utf8")).toBe(findingsBytes);
+      expect(await readFile(manifestPath, "utf8")).toBe(manifestBytes);
+    } finally {
+      for (const gate of gates) gate.resolve();
+      await pending?.catch(() => undefined);
+      await fixture[Symbol.asyncDispose]();
+    }
+  },
+);
+
+test.each(
+  [false, true].flatMap((allRepositories) =>
+    [false, true].map((emptyMaps) => ({ allRepositories, emptyMaps })),
+  ),
+)(
+  "saved-scan repository fallback respects selection: %j",
+  async ({ allRepositories, emptyMaps }) => {
+    await using fixture = await workflowFixture();
+    const manifest = await readJson<ScanManifest>(
+      join(fixture.scanDir, "scan-manifest.json"),
+    );
+    const selected = fixture.document.findings[0]!;
+    const neighbor = entry(2);
+    let reviews = 0;
+    const result = await deduplicateScanInternal(
+      manifest.scan.id,
+      { findingsUrl: "https://synthetic.test/api", allRepositories },
+      {
+        environment: fixture.environment,
+        resolveReviewEnvironment: async () => ({
+          CODEX_HOME: fixture.environment.CODEX_HOME,
+        }),
+        runWorkbench: async () => ({
+          scan: {
+            scanId: manifest.scan.id,
+            scanDir: fixture.scanDir,
+            targetPath: fixture.repository,
+            progress: { status: "complete" },
+          },
+        }),
+        fetch: async () =>
+          Response.json({
+            finding: selected,
+            potentialDuplicates: [neighbor],
+            ...(emptyMaps ? { repositoryIds: {}, sourceSnapshots: {} } : {}),
+          }),
+        reviewRunner: {
+          async run<T>(review: CodexReview<T>): Promise<T> {
+            reviews++;
+            const context = JSON.parse(
+              review.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"approvedRepositoryId":'))!,
+            );
+            expect(context.findings).toEqual([
+              {
+                findingId: selected.findingId,
+                repositoryIds: [manifest.scan.target.targetId],
+              },
+              {
+                findingId: neighbor.findingId,
+                repositoryIds: allRepositories
+                  ? []
+                  : [manifest.scan.target.targetId],
+              },
+            ]);
+            return review.validate({
+              decisions: {
+                "pair-1": {
+                  decision: "DISTINCT",
+                  rationale: "Independent controls.",
+                },
+              },
+            });
+          },
+        },
+      },
+    );
+    expect(reviews).toBe(1);
+    expect(result.duplicateGroups).toEqual([]);
+  },
+);
 
 test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {
   const fixture = await workflowFixture();

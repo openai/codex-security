@@ -93,15 +93,13 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-luna": [200, 20, 250, 1_200],
   // https://developers.openai.com/api/docs/pricing#cyber-models
   "gpt-5.6-cyber": [12_500, 1_250, 15_625, 75_000],
-  "gpt-daybreak-blue-latest": [4_000, 400, 5_000, 20_000],
-  "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
 
 // Verified Standard rates: https://developers.openai.com/api/docs/pricing
 // GPT-5.5: https://developers.openai.com/api/docs/models/gpt-5.5
 // GPT-6 Sol: https://developers.openai.com/api/docs/models/gpt-6-sol
 // Do not infer tiers from aggregate scan tokens: the runtime does not report
-// which usage received long-context pricing. Cyber/Daybreak Red has no verified
+// which usage received long-context pricing. GPT-5.6-Cyber has no verified
 // long-context rate in the pricing table, so its upper estimate stays unavailable.
 const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
   {
@@ -115,7 +113,6 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-5.6-sol": [8_000, 800, 10_000, 30_000],
     "gpt-5.6-terra": [4_000, 400, 5_000, 18_000],
     "gpt-5.6-luna": [400, 40, 500, 1_800],
-    "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
 function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
@@ -176,13 +173,18 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
+    ? BEDROCK_MODEL_PRICING[model]
+    : undefined;
   const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
   const pricing =
-    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
+    bedrockPricing?.short ??
+    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
+      ? MODEL_PRICING_NANODOLLARS[pricingModel]
+      : undefined);
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;

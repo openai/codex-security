@@ -2,6 +2,11 @@ name: native-windows
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Source commit to build; defaults to the calling workflow commit.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -31,12 +36,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - name: Set up TypeScript tools
         uses: ./.github/actions/setup-tools
         with:
           architecture: ${{ matrix.arch }}
           compile: true
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Install helper dependencies
         working-directory: .
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
@@ -99,7 +108,7 @@ jobs:
       - name: Upload verified native artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-platform-win32-${{ matrix.arch }}-${{ github.sha }}
+          name: native-platform-win32-${{ matrix.arch }}-${{ inputs.ref || github.sha }}
           path: plugins/codex-security/native/dist/*/*.node
           if-no-files-found: error
           overwrite: true

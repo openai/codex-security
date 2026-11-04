@@ -29,6 +29,7 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
+const retryMissingResult = process.env.PACKAGE_DEEP_RETRY !== "false";
 let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
@@ -76,7 +77,9 @@ try {
 
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
-      console.log("Validated installed SDK direct Deep Scan and worker retry."),
+      console.log(
+        `Validated installed SDK direct Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
+      ),
     ),
     runDetachedPlugin(detachedPlugin, executable).then(() =>
       console.log("Validated detached plugin restart and finalization."),
@@ -88,7 +91,7 @@ try {
   if (failures.length > 0)
     throw new AggregateError(failures, "Deep Scan package checks failed.");
   console.log(
-    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
+    "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, worker checkpoints, finding union, restart before finalization, and sealed results.",
   );
 } catch (error) {
   for (const name of ["installed", "detached"]) {
@@ -121,7 +124,7 @@ async function fixture(name, pluginRoot, executable) {
   );
   await writeFile(
     join(home, "codex-security", "config.toml"),
-    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 2\n",
+    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
   );
   const env = Object.fromEntries(
     [
@@ -261,7 +264,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
       )
       .catch((error) => error);
     const deadline = Date.now() + 30_000;
-    while (!(await readExecutions(f)).some((entry) => entry.phase === "held")) {
+    while ((await readFile(f.env.PACKAGE_DEEP_HOLD, "utf8")) !== "held") {
       assert.ok(
         Date.now() < deadline,
         "Second worker did not reach the interruption boundary.",
@@ -362,7 +365,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId);
 }
 
 async function workbench(f, args) {
@@ -380,10 +383,12 @@ async function workbench(f, args) {
 
 async function runInstalledSdk(pluginRoot, executable) {
   const f = await fixture("installed", pluginRoot, executable);
-  f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
-    f.directory,
-    "missing-result-completion",
-  );
+  if (retryMissingResult) {
+    f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
+      f.directory,
+      "missing-result-completion",
+    );
+  }
   const sdk = await import(
     pathToFileURL(join(installedRoot, "dist", "index.js")).href
   );
@@ -434,7 +439,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       workers: 1,
       subagents: 0,
       maxDiscoveryRuns: 2,
-      stopAfterNoNew: 1,
+      stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
       onScanRegistered(scan) {
         scanId = scan.scanId;
@@ -452,7 +457,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 5);
+  await assertExecutions(f, scanId);
 }
 
 async function assertDraft(path) {
@@ -477,7 +482,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId, preflights = 3) {
+async function assertExecutions(f, scanId) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -486,17 +491,16 @@ async function assertExecutions(f, scanId, preflights = 3) {
     );
   }
   const workers = executions.filter((entry) => entry.phase === "worker");
-  const reducers = executions.filter((entry) => entry.phase === "reducer");
+
   const incomplete = f.env.PACKAGE_DEEP_EMPTY_ONCE ? 1 : 0;
   assert.equal(workers.length, 2 + incomplete);
   assert.equal(workers.filter((entry) => !entry.complete).length, incomplete);
   assert.equal(workers.filter((entry) => entry.resumed).length, incomplete);
-  assert.equal(reducers.length, 1);
   assert.equal(
     executions.filter((entry) => entry.phase === "preflight").length,
-    preflights,
+    3 + incomplete,
   );
-  for (const execution of [...workers, ...reducers]) {
+  for (const execution of workers) {
     assert.equal(execution.scanId, scanId);
     assert.equal(execution.home, f.home);
     assert.equal(execution.hasApiKey, true);

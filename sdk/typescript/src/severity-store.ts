@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   severityClassificationSchema,
   type SeverityClassification,
+  type SeverityClassificationBinding,
   type SeverityClassificationCheckpoint,
 } from "./classify-severity.js";
 import type { JsonObject } from "./config.js";
@@ -26,6 +27,7 @@ export class SeverityStore {
     private readonly environment: NodeJS.ProcessEnv,
     private readonly scanDirectory: string,
     private readonly signal?: AbortSignal,
+    private readonly protectedRoots: readonly string[] = [],
   ) {}
 
   checkpoint(
@@ -40,7 +42,12 @@ export class SeverityStore {
           scanId,
           findingIds,
           assessedAt: result.assessedAt,
-          rubricSha256: result.rubricSha256,
+          classificationRuns: result.classificationRuns,
+          rubricSha256: result.rubricCheckpointSha256,
+          rubric: {
+            sha256: result.rubricSha256,
+            revision: result.rubricRevision,
+          },
           knowledgeBaseSha256: result.knowledgeBaseSha256,
         });
         return reprocess
@@ -57,7 +64,8 @@ export class SeverityStore {
           finding,
           assessment: {
             ...assessment,
-            rubricSha256: result.rubricSha256,
+            classificationRuns: result.classificationRuns,
+            rubricSha256: result.rubricCheckpointSha256,
             knowledgeBaseSha256: result.knowledgeBaseSha256,
           },
         });
@@ -79,12 +87,21 @@ export class SeverityStore {
     }
     const saved = await this.run("read-severity-classification", { scanId });
     if (saved["scanId"] === undefined) return undefined;
+    const rubric = saved["rubric"] as
+      { sha256: string | null; revision?: number } | null | undefined;
+    const rubricCheckpointSha256 = saved["rubricSha256"] as string | null;
     const result = matchingClassification(
       saved["assessments"] as JsonObject[],
       {
         schemaVersion: 1,
         assessedAt: saved["assessedAt"] as string,
-        rubricSha256: saved["rubricSha256"] as string | null,
+        classificationRuns: (saved["classificationRuns"] ?? undefined) as
+          number | undefined,
+        rubricSha256: rubric?.sha256 ?? rubricCheckpointSha256,
+        ...(rubric?.revision === undefined
+          ? {}
+          : { rubricRevision: rubric.revision }),
+        rubricCheckpointSha256,
         knowledgeBaseSha256: saved["knowledgeBaseSha256"] as string | null,
       },
     );
@@ -119,6 +136,7 @@ export class SeverityStore {
       environment,
       protectedRoot: [
         this.scanDirectory,
+        ...this.protectedRoots,
         ...(await gitProtectionRoots(process.cwd(), this.signal)),
         ...(await gitProtectionRoots(this.scanDirectory, this.signal)),
       ],
@@ -130,19 +148,22 @@ export class SeverityStore {
 
 function matchingClassification(
   stored: JsonObject[],
-  result: Omit<SeverityClassification, "assessments">,
+  { rubricCheckpointSha256, ...result }: SeverityClassificationBinding,
 ): SeverityClassification {
   return severityClassificationSchema.parse({
     ...result,
     assessments: stored
       .filter(
         (row) =>
-          row["rubricSha256"] === result.rubricSha256 &&
+          (row["classificationRuns"] ?? undefined) ===
+            result.classificationRuns &&
+          row["rubricSha256"] === rubricCheckpointSha256 &&
           row["knowledgeBaseSha256"] === result.knowledgeBaseSha256,
       )
       .map(
         ({
           assessedAt: _assessedAt,
+          classificationRuns: _runs,
           rubricSha256: _rubric,
           knowledgeBaseSha256: _knowledge,
           ...assessment

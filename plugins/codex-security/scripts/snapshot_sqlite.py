@@ -22,6 +22,13 @@ def main() -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source_uri = f"file:{quote(str(source), safe='')}?mode=ro"
     with sqlite3.connect(source_uri, uri=True) as source_connection:
+        creation_destination = destination.resolve()
+        try:
+            creation_destination.touch(mode=0o600, exist_ok=False)
+        except FileExistsError:
+            pass
+        else:
+            creation_destination.chmod(0o600)
         with sqlite3.connect(destination) as destination_connection:
             source_connection.backup(destination_connection)
     destination.chmod(0o600)

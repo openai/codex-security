@@ -97,6 +97,50 @@ const observedUsage: ScanTokenUsage = {
   total_tokens: 1280,
 };
 
+test("headless scan reports account limits independently of token receipts", async () => {
+  const { stdout, stderr, runCli } = createCliTest(main);
+  const deps = dependencies();
+  deps.createSecurity = () =>
+    fakeSecurity(async (_repository, options = {}) => {
+      options.onAuthentication?.({
+        method: "stored_credentials",
+        credentialType: "chatgpt",
+        verified: false,
+      });
+      options.onScanStarted?.();
+      expect(stderr.text()).toContain("ChatGPT allowance not reported");
+      const accountRateLimits = [
+        {
+          limitId: "codex",
+          observedAt: "2026-01-01T14:02:00.000Z",
+          primary: null,
+          secondary: { usedPercent: 87, windowMinutes: 10080, resetsAt: null },
+        },
+      ];
+      await options.onUsageObservation?.({
+        tokensUpdatedAt: null,
+        accountRateLimits,
+      });
+      expect(stderr.text()).toContain("7d 87% used");
+      expect(stderr.text()).not.toContain("Last usage report");
+      options.onUsageObservation?.({
+        tokensUpdatedAt: "2026-01-01T14:03:00.000Z",
+        accountRateLimits,
+      });
+      await options.onUsage?.(observedUsage);
+      options.onScanStarted?.();
+      const progress = stderr.text().trim().split("\n").at(-1)!;
+      expect(progress).toContain("1,280 total");
+      expect(progress).toContain("14:03:00 UTC");
+      expect(progress).toContain("in-flight");
+      expect(progress).toContain("14:02:00 UTC");
+      expect(progress).not.toContain("$");
+      return result;
+    });
+  expect(await runCli(["scan", ".", "--headless", "--json"], deps)).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+});
+
 test.each([
   { name: "headless", args: ["--headless"], tty: true, environment: {} },
   { name: "CI", args: [], tty: true, environment: { CI: "true" } },
@@ -120,7 +164,9 @@ test.each([
       expect(stderr.text()).toContain("1,280 total");
       expect(stderr.text()).not.toContain("REPORT");
       options.onScanStarted?.();
-      expect(stderr.text().trim().split("\n").at(-1)).toContain("1,280 total");
+      const progress = stderr.text().trim().split("\n").at(-1);
+      expect(progress).toContain("1,280 total");
+      expect(progress).toContain("Usage report time unavailable");
       return unpriced;
     });
   expect(await runCli(["scan", ".", ...mode.args], deps)).toBe(0);

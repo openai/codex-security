@@ -180,6 +180,59 @@ test("rechecks the provider after a create response is lost", async () => {
   expect(events).toEqual(["find", "push", "create", "find"]);
 });
 
+test.each([
+  [
+    "https://gitlab.com/group/project.git",
+    "https://gitlab.com/group/project.git",
+    {},
+  ],
+  [
+    "ssh://git@gitlab.com/group/project.git",
+    "ssh://git@gitlab.com/group/project.git",
+    {},
+  ],
+  [
+    "git@gitlab.com:group/project.git",
+    "ssh://git@gitlab.com/group/project.git",
+    {},
+  ],
+  [
+    "git@[2001:db8::1]:group/subgroup/project.git",
+    "ssh://git@[2001:db8::1]/group/subgroup/project.git",
+    { GITLAB_HOST: "[2001:db8::1]" },
+  ],
+  [
+    "ssh://git@[2001:db8::1]:2222/group/project.git",
+    "ssh://git@[2001:db8::1]:2222/group/project.git",
+    { GITLAB_HOST: "[2001:db8::1]" },
+  ],
+] as const)(
+  "routes GitLab remote %s without changing the review project",
+  async (origin, expectedProject, environment) => {
+    const calls: { executable: string; args: readonly string[] }[] = [];
+    const publisher = resolvePatchReviewPublisher(
+      origin,
+      environment,
+      async (executable, args) => {
+        calls.push({ executable, args });
+        return "";
+      },
+    );
+    await publisher.findExisting(request.branch);
+    await publisher.createDraft(request);
+    expect(calls.map(({ args }) => args.slice(0, 2))).toEqual([
+      ["mr", "list"],
+      ["mr", "create"],
+    ]);
+    for (const { executable, args } of calls) {
+      expect(executable).toBe("glab");
+      expect(args[args.indexOf("--repo") + 1]).toBe(expectedProject);
+    }
+    const create = calls[1]!.args;
+    expect(create[create.indexOf("--head") + 1]).toBe(expectedProject);
+  },
+);
+
 test("keeps native gh repository resolution for an unrecognized remote host", async () => {
   const url = "https://forge.example.test/team/project/pull/42";
   const calls: Array<readonly string[]> = [];

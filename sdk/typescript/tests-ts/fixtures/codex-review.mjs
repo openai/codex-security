@@ -17,6 +17,10 @@ const turnFailures = {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",
   },
+  "rate-limit-turn": {
+    message: "Rate limit reached",
+    codexErrorInfo: "rateLimitExceeded",
+  },
   "server-error": {
     message: "Provider temporarily unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
