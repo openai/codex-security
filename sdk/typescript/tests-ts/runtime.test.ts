@@ -3680,7 +3680,9 @@ describe("runtime directories and plugin Python boundary", () => {
         : missing && !pathNotFound
           ? "NotSpecified"
           : "ObjectNotFound";
-    const failurePath = kind.endsWith("home") ? home : descendant;
+    const failurePath = kind.endsWith("home")
+      ? home
+      : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
     const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     const marker = "function Write-CredentialAcl($path) {";
@@ -5202,6 +5204,43 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(JSON.parse(inspection.stdout)).toEqual({ unexpected: 0 });
       expect(await readFile(auth, "utf8")).toContain("synthetic-root");
       expect(await readFile(nestedAuth, "utf8")).toContain("synthetic-nested");
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "repairs an unsafe ACL on a Windows credential file beyond MAX_PATH",
+    async () => {
+      const { home } = await credentialHome(true);
+      const nested = win32.toNamespacedPath(
+        join(home, "sessions", "a".repeat(130), "b".repeat(130)),
+      );
+      await mkdir(nested, { recursive: true });
+      const credential = join(nested, "credentials.json");
+      await writeFile(credential, '{"token":"synthetic-nested"}\n');
+
+      const unsafe = windowsTestCommand("icacls.exe", [
+        credential,
+        "/inheritance:r",
+        "/grant:r",
+        `*${windowsUserSid()}:F`,
+        "*S-1-1-0:R",
+      ]);
+      expect(unsafe.status, unsafe.stderr).toBe(0);
+
+      await requireSecureCredentialHome(home);
+
+      const inspection = inspectWindowsTestAcl(
+        [
+          "$ErrorActionPreference = 'Stop'",
+          "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+          "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+          "$everyone.Count",
+        ],
+        { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: credential },
+      );
+      expect(inspection.status, inspection.stderr).toBe(0);
+      expect(inspection.stdout.trim()).toBe("0");
+      expect(await readFile(credential, "utf8")).toContain("synthetic-nested");
     },
   );
 
