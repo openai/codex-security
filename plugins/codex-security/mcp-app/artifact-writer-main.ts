@@ -64,6 +64,15 @@ export async function createCodexSecurityArtifactWriterServer(
       "Codex Security worker target root",
     ),
     layout: "worker",
+    ...(environment.CODEX_SECURITY_DISCOVERY_BOARD_ROOT && {
+      discoveryBoard: {
+        root: environment.CODEX_SECURITY_DISCOVERY_BOARD_ROOT,
+        author: requiredEnvironment(
+          environment,
+          "CODEX_SECURITY_DISCOVERY_WORKER",
+        ),
+      },
+    }),
     ...defined("scanId", scanId),
     ...defined("scope", scope),
     ...defined("includePaths", includePaths as string[] | undefined),
