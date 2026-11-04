@@ -672,6 +672,20 @@ describe("scan knowledge bases", () => {
         "<w:r><w:instrText>Visible scope</w:instrText></w:r></w:p>",
       "Visible scope\n",
     ],
+    [
+      "drawing placement and relative dimensions around visible text",
+      '<w:p xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:r><w:t>Before </w:t>' +
+        '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+        '<mc:Choice Requires="wps"><w:drawing><d:anchor><d:positionH relativeFrom="column"><d:align>center</d:align></d:positionH>' +
+        '<d:positionV relativeFrom="paragraph"><d:posOffset><![CDATA[12700]]></d:posOffset></d:positionV>' +
+        "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Rule 12700.</w:t></w:r></w:p></w:txbxContent></wps:txbx>" +
+        '<sizeRelH xmlns="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><pctWidth>75000</pctWidth></sizeRelH>' +
+        '</d:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml">' +
+        '<div xmlns:d="urn:example:format">Rule <d:align>12700.</d:align></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        "<w:drawing><d:anchor><d:positionH><d:posOffset>25400</d:posOffset></d:positionH></d:anchor></w:drawing>" +
+        "<w:t> After.</w:t></w:r></w:p>",
+      "Before Rule 12700.\nRule 12700. After.\n",
+    ],
   ])("preserves DOCX text with %s", async (_description, body, expected) => {
     const root = await temporaryDirectory();
     const source = join(root, "field-context.docx");
@@ -873,6 +887,7 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
     await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    await writeFile(join(root, "._policy.md"), "Keep audit records.");
     const appleDouble = Buffer.alloc(82);
     appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
     await writeFile(join(root, "._guide.md"), appleDouble);
@@ -883,6 +898,7 @@ describe("scan knowledge bases", () => {
 
     expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.",
+      "Keep audit records.",
       "Rotate admin keys monthly.",
     ]);
   });
