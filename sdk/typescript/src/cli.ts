@@ -1267,6 +1267,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
 interface SkillRunOptions {
   readonly patchGitContext?: GitPatchState["context"];
   readonly signal?: AbortSignal;
+  automaticPublication?: boolean;
   context?: string;
   contextFile?: string;
   knowledgeBasePath?: string;
@@ -7232,6 +7233,9 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                get automaticPublication() {
+                  return options.createPr && publication === undefined;
+                },
                 onBeforeTurn: preparePatch,
                 verificationMode: options.verificationMode,
               },
@@ -7466,6 +7470,7 @@ export async function main(
                     ? undefined
                     : patchBase?.context;
                 },
+                automaticPublication: options.createPr,
                 onBeforeTurn: preparePatch,
                 verificationMode: options.verificationMode,
               },
@@ -9190,7 +9195,7 @@ async function patchPreflightRemoteSettings(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<string[]> {
-  const entries = await patchTransportConfig(
+  const entries = await patchScopedConfig(
     "^remote\\.origin\\.(vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
     repository,
     dependencies,
@@ -9453,7 +9458,7 @@ async function operatorPatchConfig(
   );
 }
 
-async function patchTransportConfig(
+async function patchScopedConfig(
   pattern: string,
   repository: string,
   dependencies: CliDependencies,
@@ -9499,7 +9504,7 @@ async function patchTransportEnvironment(
     if (override !== undefined) {
       environment = { ...environment, GIT_PROXY_COMMAND: override };
     } else {
-      const proxies = await patchTransportConfig(
+      const proxies = await patchScopedConfig(
         "^core\\.gitproxy$",
         repository,
         dependencies,
@@ -9526,7 +9531,7 @@ async function patchTransportEnvironment(
   if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
     return environment;
   // Git accumulates credential helpers until an empty helper resets them.
-  const entries = await patchTransportConfig(
+  const entries = await patchScopedConfig(
     "^(http\\..*|credential(\\..*)?\\.helper|core\\.askpass)$",
     repository,
     dependencies,
@@ -13062,6 +13067,7 @@ async function runSkill(
             "GIT_ALTERNATE_OBJECT_DIRECTORIES",
           ),
         },
+        options.automaticPublication,
       )
     : undefined;
   const patchPermissions =
@@ -15010,6 +15016,12 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
+          get automaticPublication() {
+            return (
+              publication === undefined &&
+              (arguments_.createPr || patchSelection?.createPullRequest)
+            );
+          },
           onBeforeTurn: async (signal) => {
             if (
               publication === undefined &&
