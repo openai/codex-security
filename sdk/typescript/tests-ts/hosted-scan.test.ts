@@ -763,14 +763,16 @@ test("hosted receipts hash MCP checkpoints as written", async () => {
           request.runtime.outputDirectory,
           "checkpoints",
         );
-        const [name] = (await readdir(checkpointDirectory)).filter((entry) =>
-          entry.endsWith(".json"),
-        );
-        const file = join(checkpointDirectory, name!);
-        await writeFile(
-          file,
-          JSON.stringify(await readJson(file), null, 2) + "\n",
-        );
+        // The writer emits multiple candidates before publication chooses the accepted one.
+        for (const name of await readdir(checkpointDirectory)) {
+          if (name.endsWith(".json")) {
+            const file = join(checkpointDirectory, name);
+            await writeFile(
+              file,
+              JSON.stringify(await readJson(file), null, 2) + "\n",
+            );
+          }
+        }
         return receipt(request);
       },
     },
