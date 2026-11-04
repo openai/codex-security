@@ -234,6 +234,9 @@ jobs:
         with:
           # Stryker 10's Babel 8 requires Node 22.18+ or 24.11+.
           node-version: "24.15.0"
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            sdk/mutation/pnpm-lock.yaml
       - *set-up-bun
       - *install-sdk-dependencies
       - name: Run mutation trial
