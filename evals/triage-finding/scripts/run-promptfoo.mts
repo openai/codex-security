@@ -26,12 +26,9 @@ const PROMPTFOO_ENTRYPOINT = path.join(
 function copyDirectory(
   sourceRoot: string,
   targetRoot: string,
-  excludedNames = new Set<string>(),
+  filter?: (source: string) => boolean,
 ) {
-  fs.cpSync(sourceRoot, targetRoot, {
-    recursive: true,
-    filter: (source) => !excludedNames.has(path.basename(source)),
-  });
+  fs.cpSync(sourceRoot, targetRoot, { recursive: true, filter });
 }
 
 /**
@@ -46,12 +43,14 @@ function stageSkillRuntime() {
   copyDirectory(
     TRIAGE_SKILL_ROOT,
     path.join(stagedPluginRoot, "skills", "triage-finding"),
-    new Set(["evals"]),
+    (source) => path.basename(source) !== "evals",
   );
   for (const sharedDirectory of ["references", "schemas"]) {
     copyDirectory(
       path.join(PLUGIN_ROOT, sharedDirectory),
       path.join(stagedPluginRoot, sharedDirectory),
+      // Schema generation atomically renames temporary files in this directory.
+      (source) => sharedDirectory !== "schemas" || !source.endsWith(".tmp"),
     );
   }
   for (const relativePath of [

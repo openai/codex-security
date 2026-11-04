@@ -115,6 +115,7 @@ export class DeepScanWorkerRunner {
     let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
+      workerLabel,
       promptPath,
       promptRoot,
       artifactDir,
@@ -193,6 +194,7 @@ export class DeepScanWorkerRunner {
 
   private async runWorkerWithRetries(input: {
     workerId: string;
+    workerLabel: string;
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
@@ -251,7 +253,14 @@ export class DeepScanWorkerRunner {
                 ? [JSON.stringify({ severityRubric: run.severityRubric })]
                 : []),
             ].join("\n"),
-          artifactContext: { root: input.artifactDir, layout: "worker" },
+          artifactContext: {
+            root: input.artifactDir,
+            layout: "worker",
+            discoveryBoard: {
+              root: this.options.artifacts.peerNotesRoot,
+              author: input.workerLabel,
+            },
+          },
           onThreadStarted: async (threadId) => {
             activeThreadId = threadId;
             lastThreadId = threadId;

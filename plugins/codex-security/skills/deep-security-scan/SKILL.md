@@ -5,7 +5,7 @@ description: Run repeated Standard security scans of a repository or scoped path
 
 # Deep Security Scan
 
-The host runs Standard audits and merges their findings. Later passes receive the titles and locations already reported. The host stops when consecutive audits add nothing new or the configured scan or time limit is reached. Its final report includes every accepted audit.
+The host runs Standard audits and merges their findings. Workers in the same scan can exchange investigation leads and verify each other’s evidence. Later passes receive the titles and locations already reported. The host stops when consecutive audits add nothing new or the configured scan or time limit is reached. Its final report includes every accepted audit.
 
 Use the host-supplied scan runtime instructions for startup, progress, checkpoint storage and completion. For a native invocation, resolve the `deep-scan` topic as described in `../../references/skill-runtime.md` before reviewing source. Preserve authoritative ownership throughout the scan.
 
