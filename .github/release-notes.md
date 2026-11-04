@@ -80,6 +80,7 @@
 - avoid worker dispatch for empty targets ([#2054](https://github.com/openai/codex-security/pull/2054))
 - honor native provider API-key settings for scans ([#139](https://github.com/openai/codex-security/pull/139))
 - preserve Guardian attribution and Snyk evidence on replay ([#2316](https://github.com/openai/codex-security/pull/2316))
+- preserve inference endpoints on rerun and resume ([#2286](https://github.com/openai/codex-security/pull/2286))
 
 <!-- release-section: highlights:end -->
 
