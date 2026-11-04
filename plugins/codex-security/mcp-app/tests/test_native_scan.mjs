@@ -850,13 +850,15 @@ test("native preparation protects enclosing repositories for fresh and resumed c
   }
 });
 
-test("native preparation excludes scan output and knowledge sources from executable selection", async () => {
+test("native preparation excludes scan output and selected source directories from executable selection", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "native-inputs-")));
   const repository = join(root, "repository");
   const scanDir = join(root, "scan");
   const knowledgeRoot = join(root, "knowledge");
   const documents = join(knowledgeRoot, "docs");
   const external = join(root, "external");
+  const project = join(root, "project");
+  const projectFile = join(project, "scan.json");
   const name = process.platform === "win32" ? "codex.exe" : "codex";
   const restoreEnvironment = captureEnvironment([
     "CODEX_HOME",
@@ -870,17 +872,18 @@ test("native preparation excludes scan output and knowledge sources from executa
   ]);
   try {
     await mkdir(scanDir, { mode: 0o700 });
-    for (const directory of [repository, documents, external]) {
+    for (const directory of [repository, documents, project, external]) {
       await mkdir(directory, { recursive: true });
     }
     await mkdir(join(knowledgeRoot, ".git"));
+    await writeFile(projectFile, "{}");
     await writeFile(
       join(documents, "architecture.md"),
       "Synthetic architecture.",
     );
     const snapshot = await readKnowledgeBaseSnapshot([documents]);
     await saveScanKnowledge(scanDir, snapshot);
-    for (const directory of [scanDir, knowledgeRoot, external]) {
+    for (const directory of [scanDir, knowledgeRoot, project, external]) {
       await writeFile(join(directory, name), "inert executable fixture");
       await chmod(join(directory, name), 0o700);
     }
@@ -895,6 +898,7 @@ test("native preparation excludes scan output and knowledge sources from executa
       const request = {
         ...input(),
         scan: { ...input().scan, targetPath: repository, scanDir },
+        projectConfigPaths: [projectFile],
         ...(saved
           ? {
               recipe: {
@@ -909,7 +913,7 @@ test("native preparation excludes scan output and knowledge sources from executa
             }
           : {}),
       };
-      for (const directory of [scanDir, knowledgeRoot]) {
+      for (const directory of [scanDir, knowledgeRoot, project]) {
         process.env.CODEX_CLI_PATH = join(directory, name);
         await assert.rejects(
           prepareNativeExecution(request),
@@ -917,7 +921,9 @@ test("native preparation excludes scan output and knowledge sources from executa
         );
       }
       delete process.env.CODEX_CLI_PATH;
-      process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
+      process.env.PATH = [scanDir, knowledgeRoot, project, external].join(
+        delimiter,
+      );
       const prepared = await prepareNativeExecution(request);
       const environment = prepared.client.dependencies.environment;
       assert.equal(environment.CODEX_CLI_PATH, join(external, name));
@@ -2346,6 +2352,11 @@ test(
     const target = join(repository, "src");
     const repositoryBin = join(repository, "bin");
     const selectedTools = join(root, "selected tools");
+    const projectRoots = [join(root, "selected"), join(root, "resolved")];
+    const projectBins = projectRoots.map((path) => join(path, "bin"));
+    const projectFiles = projectRoots.map((path) =>
+      join(path, "config", "scan.yaml"),
+    );
     const keys = [
       "HOME",
       "USERPROFILE",
@@ -2379,6 +2390,16 @@ test(
         mkdir(join(root, "alias")),
         mkdir(join(root, "real-child")),
       ]);
+      for (const path of projectRoots) {
+        await mkdir(join(path, ".git"), { recursive: true });
+        await mkdir(join(path, "config"));
+        await mkdir(join(path, "bin"));
+        await writeFile(join(path, "bin", "codex"), "inert project fixture", {
+          mode: 0o700,
+        });
+      }
+      await writeFile(projectFiles[1], "{}");
+      await symlink(projectFiles[1], projectFiles[0]);
       await symlink(join(root, "real-child"), join(root, "alias", "link"));
       await writeFile(
         join(root, "alias", "codex"),
@@ -2422,7 +2443,7 @@ if (process.argv.includes("app-server")) {
         { mode: 0o700 },
       );
       for (const [role, selection] of ["discovery", "merge"].flatMap((role) =>
-        ["home", "home-parent", "relative", "path", "relative-path"].map(
+        ["path", "relative-path", "home", "home-parent", "relative"].map(
           (selection) => [role, selection],
         ),
       )) {
@@ -2432,9 +2453,12 @@ if (process.argv.includes("app-server")) {
             : selection === "relative-path"
               ? `${relative(process.cwd(), root)}/alias/link/..`
               : root;
-        process.env.PATH = [repositoryBin, pathRoot, selectedTools].join(
-          delimiter,
-        );
+        process.env.PATH = [
+          ...projectBins,
+          repositoryBin,
+          pathRoot,
+          selectedTools,
+        ].join(delimiter);
         if (selection === "path" || selection === "relative-path")
           delete process.env.CODEX_CLI_PATH;
         else
@@ -2482,6 +2506,7 @@ if (process.argv.includes("app-server")) {
             native: await prepareNativeExecution({
               ...input(),
               scan: { ...input().scan, targetPath: target },
+              projectConfigPaths: [relative(target, projectFiles[0])],
               recipe,
             }),
             expectedProgram: recipe?.cyberAccessProgram ?? selectedProgram,
@@ -2502,7 +2527,9 @@ if (process.argv.includes("app-server")) {
           );
           assert.equal(
             process.env.PATH,
-            [repositoryBin, pathRoot, selectedTools].join(delimiter),
+            [...projectBins, repositoryBin, pathRoot, selectedTools].join(
+              delimiter,
+            ),
           );
           const gitEnvironment = {
             PATH: selectedEnvironment.PATH,

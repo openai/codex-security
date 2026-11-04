@@ -125,6 +125,13 @@ async function fixture(state: FixtureState) {
         repository,
         "--thread-id",
         owner,
+        // The saved project directory can be replaced by a file after sealing.
+        ...(state === "sealed-running"
+          ? [
+              "--project-config-path",
+              path.join(repository, "app.py", "scan.json"),
+            ]
+          : []),
         "--scan-root",
         environment.CODEX_SECURITY_SCAN_ROOT,
       ]).scan;

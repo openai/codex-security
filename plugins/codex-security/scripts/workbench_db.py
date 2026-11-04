@@ -2623,6 +2623,11 @@ def scan_context(
     }
     if setup := workspace.get("deepScanConfig"):
         context["deepScanSettings"] = setup["settings"]
+        if "projectConfigPaths" in setup:
+            context["projectConfigPaths"] = setup["projectConfigPaths"]
+        elif setup.get("projectConfigPath"):
+            # Older headless setups saved only the caller's target-relative selection.
+            context["projectConfigPaths"] = [setup["projectConfigPath"]]
         if "serviceTier" in setup:
             context["serviceTier"] = setup["serviceTier"]
     if scan["recipe_json"] is not None:

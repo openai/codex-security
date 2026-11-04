@@ -1117,6 +1117,9 @@ export function createCodexSecurityServer(): McpServer {
           {
             scan,
             semanticInputs,
+            projectConfigPaths: Array.isArray(begun.projectConfigPaths)
+              ? begun.projectConfigPaths
+              : undefined,
             savedDeepScanSettings: isJsonObject(begun.deepScanSettings)
               ? begun.deepScanSettings
               : undefined,

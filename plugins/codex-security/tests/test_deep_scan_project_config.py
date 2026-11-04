@@ -23,7 +23,8 @@ def test_native_setup_snapshots_limits_before_first_batch(tmp_path, monkeypatch)
     legacy.write_text("[deep_scan]\nworkers=7\nsubagents=2\nmax_time_hours=4\n")
     monkeypatch.setenv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", str(legacy))
     project = {
-        "path": str(target / "security.yaml"),
+        "path": str(tmp_path / "resolved" / "security.yaml"),
+        "selectedPath": str(tmp_path / "selected" / "security.yaml"),
         "settings": {
             "workers": 2,
             "subagents": 1,
@@ -56,9 +57,11 @@ def test_native_setup_snapshots_limits_before_first_batch(tmp_path, monkeypatch)
     legacy.write_text("invalid TOML")
     scan_id, _ = start_workspace_scan(state, workspace_id, tmp_path / "scans")
     initial = resume_deep_scan(state, scan_id, "project-owner")
+    assert initial["projectConfigPaths"] == [project["selectedPath"], project["path"]]
     assert initial["deepScanSettings"] == preview["settings"]
     resumed = resume_deep_scan(state, scan_id, "project-owner")
     assert resumed["deepScanSettings"] == initial["deepScanSettings"]
+    assert resumed["projectConfigPaths"] == initial["projectConfigPaths"]
     assert get_scan(state, scan_id)["workspace"]["deepScanConfig"] == preview
 
 
@@ -77,6 +80,8 @@ def test_headless_project_limits_are_isolated_from_unrelated_scans(tmp_path, mon
         str(target),
         "--scan-root",
         str(tmp_path / "scans"),
+        "--project-config-path",
+        "security.json",
         "--deep-scan-project-json",
         json.dumps(
             {"path": str(target / "security.json"), "settings": {"workers": 2, "maxTimeHours": 0.5}}
@@ -88,6 +93,7 @@ def test_headless_project_limits_are_isolated_from_unrelated_scans(tmp_path, mon
     second = begin_deep_scan(
         state, "other-owner", "--target-path", str(target), "--scan-root", str(tmp_path / "scans")
     )
+    assert first["projectConfigPaths"] == [str(target / "security.json")]
     assert first["deepScanSettings"]["workers"] == 2
     assert first["deepScanSettings"]["maxTimeHours"] == 0.5
     assert second["deepScanSettings"]["workers"] == 7

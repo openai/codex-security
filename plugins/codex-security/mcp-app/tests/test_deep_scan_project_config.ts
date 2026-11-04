@@ -203,6 +203,18 @@ await test("built MCP setup previews and saves the selected project before scan 
     } else if (process.platform !== "win32") {
       await mkdir(join(targetPath, "subdirectory"));
       await symlink(join(targetPath, "subdirectory"), join(root, "link"));
+      const linkedConfig = join(root, "selected-link.yaml");
+      await symlink(projectConfigPath, linkedConfig);
+      const linked = (
+        await call("inspect_codex_security_setup", {
+          ...selection,
+          projectConfigPath: linkedConfig,
+        })
+      ).setup.deepScanConfig;
+      assert.deepEqual(linked.projectConfigPaths, [
+        linkedConfig,
+        projectConfigPath,
+      ]);
       await writeFile(
         join(root, "selected.yaml"),
         "scan: {deep: {workers: 7}}",

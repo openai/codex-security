@@ -125,7 +125,7 @@ for (const scenario of [
     );
     const deepConfigPath = path.join(root, "deep.toml");
     const projectConfigPath = scenario.includes("project")
-      ? path.join(root, "scan.json")
+      ? path.join(root, "project", "scan.json")
       : undefined;
     const selectedConfigPath = path.join(root, "selected.toml");
     const originalInstructionFile = path.join(root, "instructions-a.md");
@@ -293,11 +293,21 @@ for (const scenario of [
         ? await readKnowledgeBaseSnapshot([knowledgePath])
         : undefined;
       const deep = (await resolveDeepScanConfig({}, deepConfigPath)).settings;
-      if (projectConfigPath !== undefined)
+      if (projectConfigPath !== undefined) {
+        const project = path.dirname(projectConfigPath);
+        await mkdir(project);
+        environment.CODEX_CLI_PATH = path.join(
+          project,
+          process.platform === "win32" ? "codex.exe" : "codex",
+        );
+        await writeFile(environment.CODEX_CLI_PATH, "inert project fixture", {
+          mode: 0o700,
+        });
         await writeFile(
           projectConfigPath,
           JSON.stringify({ scan: { deep: { workers: 3 } } }),
         );
+      }
       const begun = workbench([
         "begin-deep-scan",
         "--target-path",

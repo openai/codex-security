@@ -11,6 +11,7 @@ import {
   restoreScanKnowledge,
 } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
+import { selectedProjectConfigPath } from "./deep-scan/project-config.js";
 import {
   CodexSecurity,
   type ScanOptions,
@@ -79,6 +80,7 @@ export interface NativeScanInput {
   scan: ScanResults;
   recipe?: SavedScanRecipe;
   savedDeepScanSettings?: DeepScanOptions;
+  projectConfigPaths?: string[];
   semanticInputs?: NativeScanSemanticInputs;
   threadId: string;
   pluginRoot: string;
@@ -473,15 +475,26 @@ export async function prepareNativeScan(
       ),
     )),
   ];
-  for (const key of MODEL_FILE_SETTINGS) {
-    const modelFile = executionPaths[key];
-    if (typeof modelFile !== "string") continue;
-    const destination = await realpath(modelFile).catch(nullIfMissingFile);
-    protectedRoots.push(
-      ...(await gitProtectionRoots(modelFile, signal)),
-      dirname(modelFile),
-      ...(destination === null ? [] : [dirname(destination)]),
-    );
+  if (!publicationOnly) {
+    const files = [
+      ...MODEL_FILE_SETTINGS.map((key) => executionPaths[key]),
+      ...(input.projectConfigPaths ?? []).map((path) =>
+        selectedProjectConfigPath(path, input.scan.targetPath),
+      ),
+    ];
+    const protectedFiles = new Set<string>();
+    for (const file of files) {
+      if (typeof file !== "string" || protectedFiles.has(file)) continue;
+      protectedFiles.add(file);
+      const destination = await realpath(file).catch(nullIfMissingFile);
+      if (destination !== null) protectedFiles.add(destination);
+    }
+    for (const file of protectedFiles) {
+      protectedRoots.push(
+        ...(await gitProtectionRoots(file, signal)),
+        dirname(file),
+      );
+    }
   }
   const codex = publicationOnly
     ? null

@@ -97,12 +97,18 @@ def resolve_deep_scan_setup(
             if name == "maxTimeHours"
             else require_integer(value, f"deep_scan.{key}", minimum=0 if name == "subagents" else 1)
         )
-    return {
+    setup: dict[str, Any] = {
         "settings": settings,
         "sources": sources,
         **({"legacyConfigPath": str(path)} if exists else {}),
-        **({"projectConfigPath": project["path"]} if project is not None else {}),
     }
+    if project is not None:
+        setup["projectConfigPath"] = project["path"]
+        # Retain the checkout on each side of a selected symlink, even after it moves.
+        setup["projectConfigPaths"] = [
+            project[key] for key in ("selectedPath", "path") if key in project
+        ]
+    return setup
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
