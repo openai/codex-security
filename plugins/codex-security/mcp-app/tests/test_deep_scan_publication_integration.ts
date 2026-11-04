@@ -19,7 +19,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { buildServer } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
-import { finding as sourceFinding } from "./scan-draft-fixture.ts";
+import { completedFinding as sourceFinding } from "./scan-draft-fixture.ts";
 import type { RunArtifactWorkbench } from "../src/artifact-context.ts";
 import type {
   DeepScanRunState,
