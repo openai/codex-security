@@ -2675,7 +2675,16 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(jobs["test"]?.strategy?.["fail-fast"]).toBe(false);
     expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
     expect(jobs["test"]?.env).toEqual(jobs["verify"]?.env);
-    expect(jobs["publish"]?.needs).toEqual(["verify", "test"]);
+    expect(jobs["publish"]?.needs).toEqual([
+      "verify",
+      "test",
+      "macos-review-items",
+    ]);
+    expect(
+      jobs["macos-review-items"]?.steps?.find(
+        (step) => step.name === "Download verified package",
+      )?.with?.["artifact-ids"],
+    ).toBe("${{ needs.verify.outputs.artifact-id }}");
     expect(jobs["publish"]?.name).toBe(
       `\${{ needs.verify.outputs.mode == 'recover' && '${recoveryPublisher}' || '${combinedPublisher}' }}`,
     );
@@ -2757,7 +2766,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
     expect(protectedReleaseWorkflow).toContain(
       [
         "  dispatch-github-release:",
-        "    if: github.repository == 'openai/codex-security'",
+        "    if: ${{ !cancelled() && needs.publish.result == 'success' }}",
         "    name: dispatch GitHub release",
         "    needs: publish",
         "    runs-on: ubuntu-latest",
