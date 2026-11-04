@@ -3715,30 +3715,16 @@ async function withWorkerFixture<Result>(
 }
 
 async function testWorkerTerminalEvents() {
-  const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
-  try {
-    const promptPath = path.join(fixture.root, "prompt.md");
+  await withWorkerFixture(async (_fixture, promptPath, workingDirectory) => {
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const wrappedQuota = `Error running remote compact task: ${quotaMessage}`;
+    const disconnect =
+      "Error running remote compact task: stream disconnected before completion: stream closed before response.completed";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: wrappedQuota } },
+      { type: "turn.failed", error: { message: disconnect } },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
       {
@@ -3754,19 +3740,14 @@ async function testWorkerTerminalEvents() {
       );
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         const onNonRetryableError = mock.fn();
-        const execution = new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind: "discovery",
-          promptPath,
-          workingDirectory: fixture.root,
-          subagents: 0,
+        const execution = runWorker(promptPath, workingDirectory, {
           resumeThreadId,
-          signal: new AbortController().signal,
           onNonRetryableError,
         });
         if (event?.type === "turn.failed") {
-          const isQuota = event.error.message === quotaMessage;
+          const isQuota = [quotaMessage, wrappedQuota].includes(
+            event.error.message,
+          );
           await assert.rejects(execution, {
             name: isQuota ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
@@ -3775,7 +3756,7 @@ async function testWorkerTerminalEvents() {
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,
             ),
-            isQuota ? [quotaMessage] : [],
+            isQuota ? [event.error.message] : [],
           );
           continue;
         }
@@ -3784,9 +3765,5 @@ async function testWorkerTerminalEvents() {
         assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
       }
     }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
-  }
+  });
 }
