@@ -56,7 +56,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { mockWorkbench } from "./support/api-client.js";
+import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 
 const { temporaryDirectory, cleanup } =
@@ -472,6 +472,49 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   );
 });
 
+test.each([true, false])(
+  "saves the registered scan ID for failed components (lifecycle observer: %p)",
+  async (observe) => {
+    const paths = await fixture();
+    const controller = new AbortController();
+    const stateDir = join(paths.root, "state");
+    const client = TestClient.withDependencies({
+      runWorkbench: runtime.runWorkbench,
+      environment: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_SECURITY_STATE_DIR: stateDir,
+      },
+    });
+    const events: ComponentScanEvent[] = [];
+    const summary = await scan(paths, {
+      components: [components[0]!],
+      createSecurity: () => ({
+        close: () => client.close(),
+        run: (repository, options) =>
+          client.run(repository, {
+            ...options,
+            mock: true,
+            signal: controller.signal,
+            onScanStarted: () => controller.abort(),
+          }),
+      }),
+      onScanEvent: observe ? (event) => events.push(event) : undefined,
+    });
+    const [receipt] = (await json(summary.summaryPath!)).components;
+    expect(receipt.status).toBe("failed");
+    expect(typeof receipt.scanId).toBe("string");
+    expect(events.filter((event) => event.type === "lifecycle")).toMatchObject(
+      observe
+        ? ["running", "failed"].map((status) => ({
+            componentId: receipt.id,
+            value: { status, scanId: receipt.scanId },
+          }))
+        : [],
+    );
+  },
+);
+
 test("forwards scan events with their component identity without letting observers stop scans", async () => {
   const paths = await fixture();
   const events: ComponentScanEvent[] = [];
@@ -579,6 +622,54 @@ test("forwards scan events with their component identity without letting observe
     });
   }
 });
+
+test.each([true, false])(
+  "CLI displays Deep component review counts (headless: %p)",
+  async (headless) => {
+    const paths = await fixture();
+    const config = join(paths.root, "settings.yaml");
+    await writeFile(config, "scan:\n  mode: deep\n");
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const code = await runCli(
+      [
+        "scan-components",
+        paths.repository,
+        "--config",
+        config,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        ...(headless ? ["--headless"] : []),
+      ],
+      {
+        ...dependencies({
+          currentDirectory: paths.root,
+          environment: { NO_COLOR: "1" },
+        }),
+        createSecurity: client(async (repository, options) => {
+          expect(options.mode).toBe("deep");
+          options.onDeepProgress?.({ completed: 3, active: 2, maximum: 40 });
+          await Promise.resolve();
+          options.onDeepProgress?.({
+            completed: 5,
+            active: 0,
+            maximum: 40,
+            consolidating: true,
+          });
+          return completed(repository, options);
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(stderr.text()).toContain(
+      headless
+        ? "apps/api discovery | Reviews: 3 completed, 2 active, cap 40"
+        : "3 done, 2 active",
+    );
+    expect(stderr.text()).toContain("consolidating results");
+  },
+);
 
 test.each([
   ["dashboard", []],

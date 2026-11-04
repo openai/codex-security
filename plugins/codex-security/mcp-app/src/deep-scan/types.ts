@@ -1,3 +1,4 @@
+import type { DiscoveryBoardContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 
@@ -205,6 +206,7 @@ export interface DeepScanStore {
 export interface CodexWorkerArtifactContext {
   root: string;
   layout: "worker";
+  discoveryBoard?: DiscoveryBoardContext;
 }
 
 /** Transport-neutral contract for one top-level Codex worker. */
@@ -261,6 +263,7 @@ export interface DeepScanLogEvent {
   count?: number;
   completed?: number;
   newFindings?: number;
+  retainedFindings?: number;
   pass?: number;
   reason?: string;
   total?: number;
