@@ -11,6 +11,7 @@ import {
   selectedScanEnvironment,
   type CodexSecuritySurface,
   type ScanAuthentication,
+  type ScanLifecycle,
   type ScanOptions,
 } from "./api.js";
 import {
@@ -37,6 +38,7 @@ import { errorMessage } from "./errors.js";
 import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { DeepScanProgress } from "./scan-progress.js";
 import type { ScanSettings } from "./scan-settings.js";
 import type { ScanProgress, ScanWorkerStatus } from "./worker-progress.js";
 import {
@@ -90,7 +92,9 @@ export interface ComponentReceipt {
 
 type ComponentScanUpdate =
   | { type: "authentication"; value: ScanAuthentication }
+  | { type: "lifecycle"; value: ScanLifecycle }
   | { type: "progress"; value: ScanProgress }
+  | { type: "deep-progress"; value: DeepScanProgress }
   | { type: "activity"; value: ScanActivity }
   | { type: "session"; value: ScanSessionEvent }
   | { type: "cost"; value: Readonly<ScanCost> }
@@ -171,6 +175,7 @@ export async function runComponentScans(
       auth,
       provider,
       providerEnvKey,
+      configuration,
     );
   }
   const repository = await normalizeRepository(
@@ -250,7 +255,10 @@ export async function runComponentScans(
               : {
                   onAuthentication: (value) =>
                     emit({ type: "authentication", value }),
+                  onLifecycle: (value) => emit({ type: "lifecycle", value }),
                   onProgress: (value) => emit({ type: "progress", value }),
+                  onDeepProgress: (value) =>
+                    emit({ type: "deep-progress", value }),
                   onActivity: (value) => emit({ type: "activity", value }),
                   onSessionEvent: (value) => emit({ type: "session", value }),
                   onCost: (value) => emit({ type: "cost", value }),
@@ -264,6 +272,9 @@ export async function runComponentScans(
             const result = await security.run(repository, {
               ...options.scanOptions,
               ...observers,
+              onScanRegistered: ({ scanId }) => {
+                receipt.scanId = scanId;
+              },
               mode: options.scanOptions?.mode ?? "standard",
               target: receipt.paths.map((path) => resolve(repository, path)),
               outputDir: receipt.outputDir,
