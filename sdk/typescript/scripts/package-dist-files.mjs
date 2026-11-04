@@ -185,6 +185,7 @@ const distModules = [
   "scan-registration",
   "scan-preparation",
   "scan-merge",
+  "same-fix",
   "scan-semantics",
   "semantic-models",
   "workbench-types",

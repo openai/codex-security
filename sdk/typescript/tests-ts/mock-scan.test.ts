@@ -367,7 +367,7 @@ test("aborting mock generation leaves a terminal scan record", async () => {
     ]);
     const [saved] = history["scans"] as JsonObject[];
     expect(onLifecycle.mock.calls.map(([snapshot]) => snapshot.status)).toEqual(
-      ["running", "failed"],
+      ["running", "canceled"],
     );
     expect(saved?.["lifecycle"]).toEqual(onLifecycle.mock.lastCall?.[0]);
   } finally {
