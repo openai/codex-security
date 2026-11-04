@@ -100,6 +100,7 @@ import {
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
+  type JsonValue,
   type ScanModelConfiguration,
   writeCodexConfig,
 } from "./config.js";
@@ -179,7 +180,10 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
-import { forwardExternalImportSetting } from "./external-imports-feature.js";
+import {
+  forwardExternalImportSetting,
+  requireExternalImports,
+} from "./external-imports-feature.js";
 import {
   knowledgeBaseProtectedRoots,
   prepareKnowledgeBase,
@@ -1564,6 +1568,7 @@ export class CodexSecurity {
     request: DependencyFindingSkillRequest,
     requestedSignal?: AbortSignal,
   ): Promise<string> {
+    requireExternalImports(this.#dependencies.environment);
     return await this.#trackOperation(async () => {
       const controller = new AbortController();
       const signal = AbortSignal.any([

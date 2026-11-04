@@ -117,7 +117,11 @@ function fixture(
   const calls: (readonly string[])[] = [];
   const timers: NodeJS.Timeout[] = [];
   const cleared: NodeJS.Timeout[] = [];
-  const deps = dependencies({ currentDirectory: repository, signals });
+  const deps = dependencies({
+    currentDirectory: repository,
+    signals,
+    environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+  });
   deps.dependencyFindingsPrompt = unexpectedPrompt();
   deps.setInterval = () => {
     const timer = {} as NodeJS.Timeout;
@@ -131,7 +135,10 @@ function fixture(
     new DependencyFindings(
       {
         ...configuration,
-        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        environment: {
+          ...configuration.environment,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
       },
       {
         currentDirectory: () => repository,

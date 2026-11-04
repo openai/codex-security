@@ -745,6 +745,8 @@ finding evidence does not include the surrounding inventory.
 
 ### Assess existing dependency reports
 
+Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` to enable this workflow.
+
 Import Endor JSON or CSV findings, or Snyk or Socket JSON findings, into local
 history, then assess whether they affect the application. After installing the
 CLI (`npm install -g @openai/codex-security`), run these commands from your
@@ -789,7 +791,7 @@ the picker; each assessment accepts 1–100 findings. Assessment displays elapse
 time while running, then verdicts, explanations, and remaining unknowns.
 
 Python is discovered automatically. Reports use the normal Codex Security state
-directory; no environment variables or shell helpers are needed. Use
+directory. Use
 `--repository /path/to/repository` when importing from another directory. For
 local CLI development, run `npm link` from `sdk/typescript` after building the
 package, then use the same `codex-security` commands.

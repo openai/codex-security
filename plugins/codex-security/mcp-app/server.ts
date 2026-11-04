@@ -1956,7 +1956,8 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
-  registerDependencyImportTools(server, runWorkbench);
+  if (process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS === "1")
+    registerDependencyImportTools(server, runWorkbench);
   registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,

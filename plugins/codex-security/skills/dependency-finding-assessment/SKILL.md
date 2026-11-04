@@ -1,9 +1,11 @@
 ---
 name: dependency-finding-assessment
-description: Import an existing Endor Labs, Snyk Open Source, or Socket report and assess explicitly selected dependency findings against the current repository, preserving vendor evidence and unresolved questions. Use with an imported report or assessment ID; do not start discovery.
+description: Requires CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1. Import an existing Endor Labs, Snyk Open Source, or Socket report and assess explicitly selected dependency findings against the current repository, preserving vendor evidence and unresolved questions. Use with an imported report or assessment ID; do not start discovery.
 ---
 
 # Assess imported dependency findings
+
+Before acquiring a report or starting an assessment, check that the operator has enabled external imports with `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1`. If imports are disabled, stop and ask the user to enable them. Do not enable the flag yourself or use a direct workbench command to bypass it.
 
 Before choosing paths for temporary evidence, read `../../references/artifact-storage.md`. Assessment records are saved through the assessment tools below; do not create a discovery scan to store them.
 

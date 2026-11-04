@@ -41,7 +41,12 @@ test.each(["import", "assess"] as const)(
       }));
       const runSkill = mock(async () => "Complete");
       const client = new DependencyFindings(
-        { environment },
+        {
+          environment: {
+            ...environment,
+            CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+          },
+        },
         {
           currentDirectory: () => root,
           workbench,

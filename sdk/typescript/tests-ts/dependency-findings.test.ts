@@ -1,3 +1,4 @@
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preflightReadOnlyProfileCodex } from "../src/provider-profile.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { spawnSync } from "node:child_process";
@@ -28,7 +29,6 @@ import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   OutputInsideProtectedRootError,
   ScanInterruptedError,
@@ -57,12 +57,87 @@ function client(
   return new DependencyFindings(
     {
       environment: {
+        CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
         CODEX_SECURITY_STATE_DIR: join(dirname(currentDirectory), "state"),
       },
     },
     { workbench, runSkill, currentDirectory: () => currentDirectory },
   );
 }
+
+test("dependency operators require the caller's import opt-in before side effects", async () => {
+  const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
+  const previous = process.env[flag];
+  const workbench = mock(async () => ({
+    reports: [],
+    total: 0,
+    nextOffset: null,
+  }));
+  const currentDirectory = mock(() => {
+    throw new Error("Unexpected repository lookup");
+  });
+  const runSkill = mock(async () => {
+    throw new Error("Unexpected model session");
+  });
+  try {
+    process.env[flag] = "1";
+    for (const environment of [{}, { [flag]: "0" }]) {
+      const client = new DependencyFindings(
+        { environment },
+        { workbench, currentDirectory, runSkill },
+      );
+      for (const operation of [
+        () =>
+          client.import("missing.json", {
+            vendor: "snyk",
+            targetPath: "missing",
+          }),
+        () => client.list("missing"),
+        () => client.show("report"),
+        () => client.getFinding("report", "finding"),
+        () => client.assess("report", ["finding"]),
+        () => client.fix("report", "finding"),
+      ])
+        await expect(operation()).rejects.toThrow(flag);
+    }
+    expect(workbench).not.toHaveBeenCalled();
+    expect(currentDirectory).not.toHaveBeenCalled();
+    expect(runSkill).not.toHaveBeenCalled();
+    const inherited = new DependencyFindings(
+      {},
+      { workbench, currentDirectory, runSkill },
+    );
+    await inherited.list();
+    process.env[flag] = "0";
+    await expect(inherited.list()).rejects.toThrow(flag);
+    const explicit = new DependencyFindings(
+      { environment: { [flag]: "1" } },
+      { workbench, currentDirectory, runSkill },
+    );
+    await explicit.list();
+    expect(workbench).toHaveBeenCalledTimes(2);
+    const session = new TestClient(
+      {},
+      {
+        environment: {},
+        createCodex: () => {
+          throw new Error("Unexpected Codex client");
+        },
+      },
+    );
+    await expect(
+      session.runDependencyFindingSkill({
+        skill: "fix-finding",
+        targetPath: "missing",
+        reportId: "report",
+        findingId: "finding",
+      }),
+    ).rejects.toThrow(flag);
+  } finally {
+    if (previous === undefined) delete process.env[flag];
+    else process.env[flag] = previous;
+  }
+});
 
 describe("imported dependency findings", () => {
   test("keeps import, history, and filtered detail calls local", async () => {
@@ -352,7 +427,10 @@ describe("imported dependency findings", () => {
       ];
       for (const [args, expected, response] of cases) {
         const calls: (readonly string[])[] = [];
-        const deps = dependencies({ currentDirectory: repository });
+        const deps = dependencies({
+          currentDirectory: repository,
+          environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+        });
         deps.createDependencyFindings = () =>
           client(
             async (args) => {
@@ -392,7 +470,10 @@ describe("imported dependency findings", () => {
     const repository = join(await temporaryDirectory(), "repository");
     await mkdir(repository);
     const signals = new FakeSignals();
-    const deps = dependencies({ signals });
+    const deps = dependencies({
+      signals,
+      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+    });
     let signal: AbortSignal | undefined;
     deps.createDependencyFindings = (options) => {
       signal = options.signal;
@@ -455,12 +536,14 @@ async function skillSession(
     : join(root, "credentials");
   await mkdir(stateDirectory);
   await Promise.all([mkdir(repository), mkdir(codexHome)]);
+  const modelPluginRoot = PLUGIN_ROOT;
   const configuredStateDirectory = stateAlias
     ? join(root, "state-alias")
     : stateDirectory;
   if (stateAlias)
     await symlink(stateDirectory, configuredStateDirectory, "junction");
   const environment = {
+    CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
     CODEX_HOME: join(root, "ambient-home"),
     CODEX_CLI_PATH: process.execPath,
     CODEX_SECURITY_STATE_DIR: configuredStateDirectory,
@@ -492,8 +575,7 @@ async function skillSession(
   });
   const permissionCheck = mock(
     async (
-      options: Parameters<typeof preflightReadOnlyProfileCodex>[0],
-      profile: JsonObject,
+      ...[options, profile]: Parameters<typeof preflightReadOnlyProfileCodex>
     ) => ({
       permissionProfileId: "codex_security_deep_scan_worker",
       configOverrides: [
@@ -567,6 +649,7 @@ async function skillSession(
     selected,
     permissionCheck,
     permissionWarning,
+    modelPluginRoot,
   };
 }
 
@@ -604,7 +687,7 @@ describe("imported finding SDK sessions", () => {
       }));
       const { DependencyFindings } = await import(join(source, "dependency-findings.ts"));
       const client = new DependencyFindings({
-        environment: { CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1", CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
         model: "requested-model",
         reasoningEffort: "high",
       });
@@ -645,7 +728,7 @@ describe("imported finding SDK sessions", () => {
           // Typical home plugin configuration must not trip SDK plugin ownership checks.
           await mergedCodexConfig({ codexOverrides: overrides });
           const configuredClient = new DependencyFindings({
-            environment: { CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
+            environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1", CODEX_HOME: root, CODEX_SECURITY_STATE_DIR: join(root, "state") },
           });
           await configuredClient.assess("report-1", ["finding-1"]);
           assert.deepEqual(overrides, settings);
@@ -657,7 +740,7 @@ describe("imported finding SDK sessions", () => {
         profiles: { interactive: { approval_policy: "on-request" } },
       });
       await client.assess("report-1", ["finding-1"]);
-      assert.equal(overrides.approval_policy, "never");
+      assert.equal(overrides.approval_policy, "on-request");
       await writeCodexConfig(join(root, "config.toml"), {});
       await client.assess("report-1", ["finding-1"]);
       assert.deepEqual(overrides, { approval_policy: "on-request", model: "requested-model", model_reasoning_effort: "high" });
@@ -697,6 +780,7 @@ describe("imported finding SDK sessions", () => {
         captured,
         workbench,
         permissionCheck,
+        modelPluginRoot,
       } = await skillSession(
         undefined,
         {
@@ -723,12 +807,12 @@ describe("imported finding SDK sessions", () => {
         ...captured.codex!.configOverrides!.map((value) => parse(value)),
       );
       expect(permissionCheck.mock.calls[0]).toEqual([
-        captured.codex,
+        captured.codex!,
         {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
-            [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
+            [codexHome]: { ".": "deny" },
             [stateDirectory]: { ".": "deny" },
           },
         },
@@ -760,7 +844,7 @@ describe("imported finding SDK sessions", () => {
             filesystem: {
               ":root": "read",
               ":workspace_roots": "write",
-              [codexHome]: credentialHomeInState ? { ".": "deny" } : "read",
+              [codexHome]: { ".": "deny" },
               [stateDirectory]: { ".": "deny" },
             },
           },
@@ -842,12 +926,17 @@ describe("imported finding SDK sessions", () => {
         JSON.stringify(join(output, "dependency-request.json")),
       );
       expect(captured.prompt).toContain(
-        JSON.stringify(join(PLUGIN_ROOT, "skills", skill, "SKILL.md")),
+        JSON.stringify(join(modelPluginRoot, "skills", skill, "SKILL.md")),
       );
       if (skill === "dependency-finding-assessment")
         expect(captured.prompt).toContain(
           JSON.stringify(
-            join(PLUGIN_ROOT, "skills", "dependency-resolution", "SKILL.md"),
+            join(
+              modelPluginRoot,
+              "skills",
+              "dependency-resolution",
+              "SKILL.md",
+            ),
           ),
         );
     },
@@ -1002,7 +1091,10 @@ describe("imported finding SDK sessions", () => {
       await using client = new TestClient(
         {},
         {
-          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          environment: {
+            CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
           prepareRuntime,
         },
       );

@@ -5520,7 +5520,6 @@ export async function main(
     })
     .command(scanHistory)
     .command(findingFeedback)
-    .command(dependencyReports)
     .command(publication)
     .command("suggest-owners", {
       description: "Suggest finding owners from CODEOWNERS and Git history.",
@@ -7562,6 +7561,8 @@ export async function main(
       },
     });
 
+  if (importsEnabled) cli.command(dependencyReports);
+
   const commands = Cli.toCommands.get(cli)!;
   let valueOptions = cliValueOptions(commands);
   function isScanImportCommand(argv: readonly string[]): boolean {
@@ -7628,6 +7629,12 @@ export async function main(
     if (argv.includes("--help") || argv.includes("-h")) return undefined;
     const commandIndex = cliCommandIndex(argv);
     const command = argv[commandIndex];
+    if (
+      !importsEnabled &&
+      command === "dependency-findings" &&
+      !argv.includes("--version")
+    )
+      return externalImportsDisabledMessage;
     if (command === undefined || !commands.has(command)) return undefined;
     const structuredOutput = argv.some(
       (value, index) =>

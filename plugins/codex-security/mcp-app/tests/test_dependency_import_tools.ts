@@ -409,7 +409,7 @@ async function testDependencyImportTools() {
     ],
   });
 
-  async function connect() {
+  async function connect(importsEnabled = true) {
     const client = new Client({
       name: "dependency-import-tools-test",
       version: "1.0.0",
@@ -423,6 +423,7 @@ async function testDependencyImportTools() {
         env: {
           ...process.env,
           CODEX_HOME: codexHome,
+          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: importsEnabled ? "1" : "0",
           CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
           CODEX_SECURITY_SCAN_ROOT: path.join(temporaryRoot, "scans"),
           CODEX_SECURITY_STATE_DIR: stateDir,
@@ -510,6 +511,21 @@ async function testDependencyImportTools() {
     ]);
 
     await buildServer(serverPath, { target: "node20" });
+    const disabled = await connect(false);
+    assert.ok(
+      !(await disabled.listTools()).tools.some((tool) =>
+        tool.name.includes("dependency_"),
+      ),
+    );
+    const unavailable = await disabled.callTool({
+      name: "list_dependency_reports",
+      arguments: {},
+    });
+    assert.equal(unavailable.isError, true);
+    assert.match(
+      JSON.stringify(unavailable.content),
+      /tool list_dependency_reports not found/i,
+    );
     const client = await connect();
     const imported = await call(client, "import_dependency_findings", {
       targetPath: target,
