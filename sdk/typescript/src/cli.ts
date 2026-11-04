@@ -10030,18 +10030,17 @@ async function publishPatchBranch(
         "push.recursesubmodules\nonly",
         "submodule.recurse\ntrue",
       ]);
-      // Git parses Boolean values and applies these settings in configuration order.
-      // Leave unrecognized values, including overridden invalid settings, to Git.
-      if (
-        !recursionSettings.length ||
-        (enabledRecursion.has(recursionSettings.at(-1)!) &&
-          recursionSettings.every(
-            (setting) =>
-              enabledRecursion.has(setting) ||
-              setting === "push.recursesubmodules\nfalse" ||
-              setting === "submodule.recurse\nfalse",
-          ))
-      )
+      const disabledRecursion = new Set([
+        "push.recursesubmodules\nfalse",
+        "submodule.recurse\nfalse",
+      ]);
+      const knownSettings = recursionSettings.every(
+        (setting) =>
+          enabledRecursion.has(setting) || disabledRecursion.has(setting),
+      );
+      const disabled =
+        knownSettings && disabledRecursion.has(recursionSettings.at(-1) ?? "");
+      if (knownSettings && !disabled)
         await checkDeinitializedPatchSubmodules(
           repository,
           branch,
@@ -10051,7 +10050,8 @@ async function publishPatchBranch(
         "git",
         [
           "push",
-          ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
+          // Nested transports have separate configuration from the validated parent.
+          disabled ? "--recurse-submodules=no" : "--recurse-submodules=check",
           "--set-upstream",
           `--force-with-lease=refs/heads/${branch}:`,
           "origin",

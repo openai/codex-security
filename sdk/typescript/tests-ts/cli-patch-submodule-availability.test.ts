@@ -60,7 +60,7 @@ describe("deinitialized patch submodule availability", () => {
                 throw new Error("Synthetic publication interruption");
               }
               if (initialized) {
-                // Native recursive push uses the parent's branch refspec for the child.
+                // A matching ref lets an unintended recursive push succeed.
                 const branch = arguments_.at(-1)!;
                 if (
                   !inner(
@@ -118,8 +118,10 @@ describe("deinitialized patch submodule availability", () => {
     }
     const update = async () => {
       const commit = initialized ? await commitUpdate() : preparedCommit;
-      if (initialized) git("add", "nested");
-      else git("update-index", "--cacheinfo", `160000,${commit},nested`);
+      if (initialized) {
+        if (published) inner("push", "origin", "HEAD:main");
+        git("add", "nested");
+      } else git("update-index", "--cacheinfo", `160000,${commit},nested`);
       return commit;
     };
     return {
@@ -261,7 +263,7 @@ describe("deinitialized patch submodule availability", () => {
   type ConfigurationCase = {
     name: string;
     settings: readonly Setting[];
-    expected: "blocked" | "success" | "opt-out" | "native";
+    expected: "blocked" | "success" | "opt-out" | "native" | "unpublished";
     published?: boolean;
     initialized?: boolean;
   };
@@ -294,15 +296,22 @@ describe("deinitialized patch submodule availability", () => {
       published: true,
     },
     {
-      name: "initialized child with push recursion on-demand",
+      name: "published initialized child with push recursion on-demand",
       settings: [["push.recurseSubmodules", "on-demand"]],
       expected: "success",
       initialized: true,
+      published: true,
     },
+    ...["on-demand", "only"].map((value): ConfigurationCase => ({
+      name: `initialized child with push recursion ${value}`,
+      settings: [["push.recurseSubmodules", value]],
+      expected: "unpublished",
+      initialized: true,
+    })),
     {
       name: "initialized child with submodule recursion true",
       settings: [["submodule.recurse", "true"]],
-      expected: "success",
+      expected: "unpublished",
       initialized: true,
     },
     ...[
@@ -429,6 +438,9 @@ describe("deinitialized patch submodule availability", () => {
         expect(current.pushes).toEqual(
           Array.from({ length: interrupted ? 2 : 1 }, () => [
             "push",
+            configuration.expected === "opt-out"
+              ? "--recurse-submodules=no"
+              : "--recurse-submodules=check",
             "--set-upstream",
             `--force-with-lease=refs/heads/${branch}:`,
             "origin",
@@ -437,6 +449,16 @@ describe("deinitialized patch submodule availability", () => {
         );
         expect(current.nativePushes).toHaveLength(1);
         const native = current.nativePushes[0]!;
+        if (configuration.expected === "unpublished") {
+          expect(result.exitCode).toBe(2);
+          expect(native.exitCode).not.toBe(0);
+          expect(current.git("ls-remote", "origin")).toBe("");
+          expect(repositoryGit(current.childRemote)("show-ref")).not.toContain(
+            commit,
+          );
+          expect(current.counts().creations).toBe(0);
+          continue;
+        }
         if (configuration.expected === "native") {
           // Git versions differ on an invalid value overwritten by a later valid one.
           // Preserve the native push result and diagnostic in either case.
