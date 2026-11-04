@@ -242,12 +242,9 @@ def _same_repository(
             return before_origin == after_origin
         if before_directory is not None and after_directory is not None:
             return before_directory == after_directory
-        return (
-            same_target
-            or (
-                Path(before_identity["commonDirectory"])
-                == Path(saved_after_identity["commonDirectory"])
-            )
+        return same_target or (
+            Path(before_identity["commonDirectory"])
+            == Path(saved_after_identity["commonDirectory"])
         )
     if same_target:
         return True
