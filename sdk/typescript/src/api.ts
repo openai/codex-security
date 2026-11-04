@@ -2255,6 +2255,7 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
             session.providerEnvKey,
+            effectiveConfig,
           ),
         ),
         ...(session.apiKey === null
@@ -4187,6 +4188,7 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
             ),
           ),
         ),
@@ -4382,6 +4384,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         providerEnvKey,
+        requestedConfig,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -4526,7 +4529,12 @@ export class CodexSecurity {
       }
       notifyObserver(options, "onAuthentication")(authentication);
       const helperEnvironment = withoutProviderKey(
-        scanEnvironment,
+        selectedScanEnvironment(
+          scanEnvironment,
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+        ),
         providerEnvKey,
       );
       const python = await (
@@ -5064,6 +5072,7 @@ export class CodexSecurity {
       auth,
       modelProvider,
       providerEnvKey,
+      requestedConfig,
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -6078,6 +6087,7 @@ export function selectedScanEnvironment(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
@@ -6087,6 +6097,13 @@ export function selectedScanEnvironment(
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
+  // Managed native settings can select any explicitly configured provider.
+  const declared =
+    selectedProviderKey !== null &&
+    standardProviderKey === null &&
+    config !== undefined
+      ? providerEnvironmentNames(resolveCodexProfile(config)["model_providers"])
+      : [];
   const selected = Object.fromEntries(
     Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
@@ -6105,7 +6122,12 @@ export function selectedScanEnvironment(
           !bedrockProvider &&
           (selectedProviderKey === null ||
             key === standardProviderKey ||
-            key === selectedProviderKey.toUpperCase())
+            key === selectedProviderKey.toUpperCase() ||
+            declared.some((variable) =>
+              process.platform === "win32"
+                ? variable.toUpperCase() === key
+                : variable === name,
+            ))
         );
       }
       return true;
@@ -6654,18 +6676,8 @@ async function requireCurrentDeepScanPlugin(
   }
 }
 
-function selectedWorkerRuntimeConfig(
-  config: JsonObject,
-  selectedProvider: unknown,
-  workingDirectory: string,
-  environment: ProcessEnvironment,
-): JsonObject {
-  const provider =
-    typeof selectedProvider === "string" ? selectedProvider : undefined;
-  const resolved = resolveCodexProfile(config);
-  resolveNestedConfigPaths(resolved, workingDirectory);
-  const providers = resolved["model_providers"];
-  const providerEnvironmentNames = isRecord(providers)
+function providerEnvironmentNames(providers: unknown): string[] {
+  return isRecord(providers)
     ? Object.values(providers)
         .flatMap((providerConfig) =>
           isRecord(providerConfig)
@@ -6679,8 +6691,21 @@ function selectedWorkerRuntimeConfig(
         )
         .filter((name): name is string => typeof name === "string")
     : [];
+}
+
+function selectedWorkerRuntimeConfig(
+  config: JsonObject,
+  selectedProvider: unknown,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
+): JsonObject {
+  const provider =
+    typeof selectedProvider === "string" ? selectedProvider : undefined;
+  const resolved = resolveCodexProfile(config);
+  resolveNestedConfigPaths(resolved, workingDirectory);
+  const providers = resolved["model_providers"];
   const providerEnvironment = Object.fromEntries(
-    providerEnvironmentNames.flatMap((name) => {
+    providerEnvironmentNames(providers).flatMap((name) => {
       const key =
         process.platform === "win32"
           ? Object.keys(environment)

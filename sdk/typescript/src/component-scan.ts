@@ -165,6 +165,7 @@ export async function runComponentScans(
       auth,
       provider,
       providerEnvKey,
+      configuration,
     );
   }
   const repository = await normalizeRepository(

@@ -664,6 +664,7 @@ test.each([
 
 const fileProviderKeyCases = [
   ["gateway", "custom only", "SYNTHETIC_GATEWAY_TOKEN"],
+  ["gateway", "declared external header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -723,14 +724,28 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
       const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const headerKey =
+        _selection === "declared external header"
+          ? "FIREWORKS_API_KEY"
+          : _selection === "canonical header"
+            ? canonicalKey
+            : undefined;
       const headerEnvironment =
-        _selection === "canonical header" ||
-        _selection === "missing custom primary"
-          ? { [canonicalKey]: " synthetic-header-key " }
+        headerKey || _selection === "missing custom primary"
+          ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
+          : {};
+      const inactiveKey =
+        _selection === "declared external header"
+          ? "CHEAPER_INFERENCE_API_KEY"
+          : "INACTIVE_GATEWAY_TOKEN";
+      const inactiveEnvironment =
+        _selection === "declared external header"
+          ? { [inactiveKey]: "synthetic-inactive-key" }
           : {};
       const inheritedEnvironment: Record<string, string> = {
         ...(_selection === "custom Codex key" ||
-        _selection === "other external key"
+        _selection === "other external key" ||
+        _selection === "declared external header"
           ? Object.fromEntries(
               [
                 "OPENAI_API_KEY",
@@ -743,6 +758,7 @@ for (const mode of ["standard", "deep"] as const) {
             )
           : {}),
         ...headerEnvironment,
+        ...inactiveEnvironment,
         ...(_selection === "missing custom primary"
           ? {
               OPENAI_API_KEY: "synthetic-unrelated-account",
@@ -752,6 +768,7 @@ for (const mode of ["standard", "deep"] as const) {
       };
       const workerEnvironment = {
         ...headerEnvironment,
+        ...inactiveEnvironment,
         [providerKey]: "synthetic-file-key",
       };
       const provider = {
@@ -759,8 +776,8 @@ for (const mode of ["standard", "deep"] as const) {
         wire_api: "responses",
         base_url: "https://provider.example.test/v1",
         env_key: providerKey,
-        ...(_selection === "canonical header"
-          ? { env_http_headers: { "X-Synthetic-Token": canonicalKey } }
+        ...(headerKey
+          ? { env_http_headers: { "X-Synthetic-Token": headerKey } }
           : {}),
       };
       const original = stringifyToml({
@@ -768,7 +785,7 @@ for (const mode of ["standard", "deep"] as const) {
         model_provider: providerId,
         model_providers: {
           [providerId]: provider,
-          inactive: { ...provider, env_key: "INACTIVE_GATEWAY_TOKEN" },
+          inactive: { ...provider, env_key: inactiveKey },
         },
         features: { shell_tool: false, unified_exec: false },
       });
@@ -786,8 +803,13 @@ for (const mode of ["standard", "deep"] as const) {
           prepareOutputDir: async () => scan,
           repositoryRevision: async () => "deadbeef",
           runWorkbench: async (options, args, input) => {
-            if (args[0] === "register-cli-scan")
+            if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
+              if (_selection === "declared external header") {
+                expect(options.environment).not.toHaveProperty(headerKey!);
+                expect(options.environment).not.toHaveProperty(inactiveKey);
+              }
+            }
             return mockWorkbench(args, input);
           },
           createCodex: (options) => {
@@ -804,9 +826,13 @@ for (const mode of ["standard", "deep"] as const) {
                     "CODEX_API_KEY",
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
+                    "CHEAPER_INFERENCE_API_KEY",
                   ]) {
                     expect(environment[name]).toBe(
-                      name === providerKey || name === canonicalKey
+                      name === providerKey ||
+                        name === canonicalKey ||
+                        name === headerKey ||
+                        name === inactiveKey
                         ? inheritedEnvironment[name]
                         : undefined,
                     );
@@ -859,6 +885,7 @@ for (const mode of ["standard", "deep"] as const) {
                   ]) {
                     expect(text).not.toContain("synthetic-file-key");
                     expect(text).not.toContain("synthetic-header-key");
+                    expect(text).not.toContain("synthetic-inactive-key");
                   }
                   throw new Error("synthetic file provider child checked");
                 },
