@@ -1484,3 +1484,65 @@ test("resuming partial source ancestry isolates only the ambiguous finding", asy
     ]);
   }
 });
+
+for (const partialSource of ["primary", "secondary"] as const) {
+  test(`an exact repeat stays merged after reloading a partial ${partialSource} source`, async () => {
+    const { mergeBatch } = await importSource(
+      join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
+    );
+    const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
+      await importSource(
+        join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+      );
+    const scanId = randomUUID();
+    const sources = [lookup, lookup].map((finding, index) => ({
+      id: `old:${index}`,
+      finding:
+        index === (partialSource === "primary" ? 0 : 1)
+          ? { title: finding.title }
+          : finding,
+    }));
+    const checkpoint = {
+      scanId,
+      findings: [
+        {
+          ...lookup,
+          provenance: { ...lookup.provenance, sourceFindings: sources },
+        },
+      ],
+    };
+    const result = parseScanUnion(
+      JSON.parse(JSON.stringify(persistedScanUnion(checkpoint))),
+    );
+    const worker = {
+      id: "new",
+      resultPath: "/tmp/new/result.json",
+      result: {
+        ...standardScanDraft(scanId, undefined, "new"),
+        findings: parseScanUnion({ scanId, findings: [lookup] }).findings,
+      },
+    };
+    let comparisons = 0;
+    const compare = async () => {
+      comparisons++;
+      return JSON.stringify({ uncertain: [0, 1], defects: [] });
+    };
+    assert.deepEqual(
+      await mergeBatch(result, [worker], "/tmp", compare, () => {}),
+      [0],
+    );
+    const published = scanUnionToDraft(result).findings;
+    assert.equal(published.length, 1);
+    assert.equal(comparisons, 0);
+    assert.equal(published[0].title, lookup.title);
+    assert.deepEqual(published[0].provenance.sourceFindingIds, [
+      "old:0",
+      "old:1",
+      "new:0",
+    ]);
+    assert.deepEqual(
+      published[0].provenance.sourceFindings.slice(0, 2),
+      sources,
+    );
+  });
+}
