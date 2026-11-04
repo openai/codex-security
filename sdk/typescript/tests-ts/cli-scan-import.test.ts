@@ -228,6 +228,17 @@ describe("scan import", () => {
     expect(stderr.text()).toContain("Imported 2 findings as scan scan.");
   });
 
+  test("uses the singular for one imported finding", async () => {
+    const { deps } = importDependencies();
+    deps.importScan = async () => fakeResult(["high"]);
+    const { stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(["scan", "import", "--json", "findings.json"], deps),
+    ).toBe(0);
+    expect(stderr.text()).toContain("Imported 1 finding as scan scan.");
+  });
+
   test.each([
     [[], "exactly one"],
     [["--csv", "findings.csv", "--json", "findings.json"], "exactly one"],

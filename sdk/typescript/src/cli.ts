@@ -3951,11 +3951,16 @@ export async function main(
                 `${local ? "Local import" : "Publication"} needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.`,
               );
             if (structured) showPreview();
+            const findings =
+              preview.findings.length === 1
+                ? "this finding"
+                : `these ${preview.findings.length} findings`;
             const action = local
-              ? `Store these ${preview.findings.length} findings locally`
-              : `Publish these ${preview.findings.length} findings`;
+              ? `Store ${findings} locally`
+              : `Publish ${findings}`;
+            const excluded = preview.excluded.length;
             return prompt.confirm(
-              `${action}${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
+              `${action}${excluded ? ` and skip ${excluded} excluded record${excluded === 1 ? "" : "s"}` : ""}?`,
               false,
               controller.signal,
             );
@@ -7985,7 +7990,7 @@ async function runScanImport(
     if ("dryRun" in result) return { exitCode: 0, data: { ...result } };
     try {
       errorOutput.write(
-        `Imported ${result.findings.findings.length} findings as scan ${result.manifest.scan.id}.\n` +
+        `Imported ${result.findings.findings.length} finding${result.findings.findings.length === 1 ? "" : "s"} as scan ${result.manifest.scan.id}.\n` +
           `Artifacts: ${result.scanDir}\n`,
       );
     } catch {}
