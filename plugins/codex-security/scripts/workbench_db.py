@@ -2474,7 +2474,7 @@ def scan_context(
 
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    if args.progress_only:
+    if getattr(args, "progress_only", False):
         scan = scan_history.scan_with_progress(
             connection, resolve_scan_id(connection, args.scan_id)
         )
