@@ -15,7 +15,6 @@ const slowFiles: Record<string, number> = {
   "test_artifact_storage_regressions.ts": 34,
   "test_compact_artifact_server.ts": 84,
   "test_coverage_provenance.ts": 60,
-  "test_deep_reducer_paging_eval.ts": 80,
   "test_deep_scan_coordinator.ts": 18,
   "test_deep_scan_executor.ts": 40,
   "test_deep_scan_publication_integration.ts": 153,
