@@ -210,8 +210,8 @@ Empty scans and findings without eligible candidates make no review calls.
 Other scans can require multiple calls per finding. Completion means the
 retrieval, review, and group write finished; it does not mean that every pair
 in the database was compared. Use Ctrl-C or SIGTERM in the CLI, or an
-`AbortSignal` in the SDK, to cancel. This workflow is separate from Deep Scan's
-internal reducer.
+`AbortSignal` in the SDK, to cancel. Deep Scan merges its own workers’ findings
+locally.
 
 ### Resume a findings workflow
 
