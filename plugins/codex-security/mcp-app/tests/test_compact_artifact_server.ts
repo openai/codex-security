@@ -80,14 +80,72 @@ try {
     [runtimeBundle, "source"],
     [shipped, "shipped"],
   ]) {
-    await test(`${label}: parent, discovery, and reducer tool registration and worker writes`, async () => {
+    await test(`${label}: parent and Standard scan worker tools`, async () => {
       await testParentToolList(bundle);
       await testDiscoveryWorkerToolList(bundle);
-      await testReducerWorkerToolList(bundle);
     });
   }
   await test("shipped: claimed parent operations", () =>
     testClaimedParentArtifactOperations(shipped, "shipped"));
+  await test("shipped: a desktop retry rejoins its prompt-only checkpoint", async () => {
+    const { repoRoot, environment } = await createScanFixture("desktop-retry");
+    const client = await startClient(shipped, environment);
+    const call = toolCaller(client, "desktop-retry");
+    const selection = {
+      targetPath: repoRoot,
+      scope: ".",
+      mode: "standard",
+      userContext: "Review the fixture",
+    };
+    try {
+      const desktopTool = "start_codex_security_prompt_only_scan";
+      const first = await call(desktopTool, selection);
+      const started = requireSuccessfulTool<WorkspaceResult>(first);
+      assert.match(
+        (first.content as TextContent[])[0].text,
+        /Skip it for Amazon Bedrock or API-key-only scans/,
+      );
+      const { scanId, scanDir } = started.workspace.results;
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...workerDraft([]),
+          scanId,
+          complete: false,
+        }),
+      );
+      const head = path.join(scanDir, "checkpoint-head.json");
+      const checkpoint = await readFile(head, "utf8");
+      // Exercise the retry tool selected by the current desktop skill.
+      const instructions = await readFile(
+        path.join(bundledPluginRoot, "skills/security-scan/SKILL.md"),
+        "utf8",
+      );
+      const desktopRoute = /desktop[^.\n]*?`(start_codex_security_\w+)`/i.exec(
+        instructions,
+      );
+      assert.ok(desktopRoute);
+      const retry = await call(desktopRoute[1], selection);
+      const joined = requireSuccessfulTool<
+        WorkspaceResult & { startDisposition: string }
+      >(retry);
+      assert.doesNotMatch(
+        (retry.content as TextContent[])[0].text,
+        /access-advisory/,
+      );
+      assert.equal(joined.startDisposition, "joined");
+      assert.equal(joined.workspace.results.scanId, scanId);
+      assert.equal(await readFile(head, "utf8"), checkpoint);
+      const { scans } = requireSuccessfulTool<{ scans: { scanId: string }[] }>(
+        await call("list_codex_security_scans", { status: "running" }),
+      );
+      assert.deepEqual(
+        scans.map(({ scanId }) => scanId),
+        [scanId],
+      );
+    } finally {
+      await client.close();
+    }
+  });
   await test("shipped: semantic scan draft completion", () =>
     testSemanticScanDraftCompletion(shipped, "shipped"));
   for (const artifactWriter of [false, true]) {
@@ -820,6 +878,15 @@ async function testSemanticScanDraftCompletion(
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
+    const [resubmitted, ...remaining] = checkpointDeferred;
+    const resumed = requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...checkpoint,
+        reviewState: { ...reviewState, deferred: [resubmitted] },
+      }),
+    );
+    assert.equal(resumed.deferredCount, checkpointDeferred.length);
+    assert.deepEqual(resumed.retainedDeferred, remaining);
     const generatedIds = checkpointDeferred
       .slice(5, 9)
       .map(({ id }: { id: string }) => id);
@@ -871,6 +938,7 @@ async function testSemanticScanDraftCompletion(
       scanId,
       findingCount: 1,
       surfaceCount: 1,
+      deferredCount: deferred.length,
       assignedDeferred: reviewState.deferred.flatMap((row, index) =>
         "id" in row ? [] : [{ index, id: deferred[index].id }],
       ),
@@ -1442,9 +1510,11 @@ async function testParentToolList(bundle: string) {
 
 async function testDiscoveryWorkerToolList(bundle: string) {
   const repoRoot = path.join(temporaryRoot, "discovery-repository");
-  const artifactRoot = await mkdtemp(
-    path.join(temporaryRoot, "discovery-output-"),
+  const workerRoot = await mkdtemp(
+    path.join(temporaryRoot, "discovery-worker-"),
   );
+  const artifactRoot = path.join(workerRoot, "output");
+  await mkdir(artifactRoot);
   const scanId = randomUUID();
   const resultPath = path.join(artifactRoot, "result.json");
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
@@ -1453,13 +1523,14 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     "print('fixture')\n",
   );
 
-  const client = await startClient(bundle, {
+  const environment = {
     CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
     CODEX_SECURITY_SCAN_ID: scanId,
     CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
-  });
+  };
+  let client = await startClient(bundle, environment);
   try {
     assert.deepEqual(
       client.getServerCapabilities()?.experimental?.[
@@ -1496,12 +1567,18 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       );
     }
 
+    const followUp = {
+      id: "uploads",
+      label: "Uploads",
+      disposition: "needs_follow_up",
+      notes: "Check the upload handler.",
+    };
     const input = {
       scanId,
       findings: [],
       reviewState: {
         ...workerDraft([]).reviewState,
-        surfaces: [{ label: "API", disposition: "no_issue_found" }],
+        surfaces: [{ label: "API", disposition: "no_issue_found" }, followUp],
         explicitExclusions: [
           { pattern: "vendor/**", reason: "Third-party source." },
         ],
@@ -1549,7 +1626,8 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     assert.deepEqual(result.structuredContent, {
       scanId,
       findingCount: 0,
-      surfaceCount: 1,
+      surfaceCount: 2,
+      deferredCount: 1,
       assignedSurfaces: [{ index: 0, id: savedSurface.id }],
       operation: "replace",
       status: "draft_written",
@@ -1568,9 +1646,17 @@ async function testDiscoveryWorkerToolList(bundle: string) {
             id: savedSurface.id,
             receiptRefs: [],
           },
+          { ...followUp, receiptRefs: [] },
         ],
       },
     });
+    // The coordinator moves the previous output to attempts before relaunching.
+    await client.close();
+    const attempts = path.join(workerRoot, "attempts");
+    await mkdir(attempts);
+    await rename(artifactRoot, path.join(attempts, "attempt-1"));
+    await mkdir(artifactRoot);
+    client = await startClient(bundle, environment);
     const next = await client.callTool({
       name: tool.name,
       arguments: {
@@ -1581,7 +1667,10 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     assert.deepEqual(next.structuredContent, {
       scanId,
       findingCount: 0,
-      surfaceCount: 1,
+      surfaceCount: 2,
+      deferredCount: 1,
+      retainedDeferred: input.reviewState.deferred,
+      retainedSurfaces: [{ ...followUp, receiptRefs: [] }],
       operation: "replace",
       status: "draft_written",
     });
@@ -1589,6 +1678,29 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       (await readJson(resultPath)).reviewState,
       saved.reviewState,
     );
+    const closed = requireSuccessfulTool(
+      await client.callTool({
+        name: tool.name,
+        arguments: {
+          ...input,
+          complete: true,
+          reviewState: {
+            ...input.reviewState,
+            surfaces: [{ ...followUp, disposition: "no_issue_found" }],
+            deferred: [],
+            resolvedDeferred: [
+              {
+                id: next.structuredContent.retainedDeferred[0].id,
+                reason: "Checked the runtime behavior.",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    assert.equal(closed.deferredCount, 0);
+    assert.equal(closed.retainedDeferred, undefined);
+    assert.equal(closed.retainedSurfaces, undefined);
     for (const canonicalName of [
       "scan-manifest.json",
       "findings.json",
@@ -1598,247 +1710,6 @@ async function testDiscoveryWorkerToolList(bundle: string) {
         code: "ENOENT",
       });
     }
-  } finally {
-    await client.close();
-  }
-}
-
-async function testReducerWorkerToolList(bundle: string) {
-  const repoRoot = path.join(temporaryRoot, "reducer-repository");
-  const scanRoot = await realpath(
-    await mkdtemp(path.join(temporaryRoot, "reducer-scan-")),
-  );
-  const scanId = randomUUID();
-  const workerId = "worker-paging-fixture";
-  const workerRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "workers",
-    "discovery-0001",
-    "output",
-  );
-  const previousRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    "dedup-0001",
-    "output",
-  );
-  const artifactRoot = path.join(
-    scanRoot,
-    "artifacts",
-    "deep_discovery",
-    "dedup",
-    "dedup-0002",
-    "output",
-  );
-  await mkdir(repoRoot, { recursive: true });
-  await mkdir(workerRoot, { recursive: true });
-  await mkdir(previousRoot, { recursive: true });
-  await mkdir(artifactRoot, { recursive: true });
-  const sourceOriginal = finding("original-source", "src/fixture.ts");
-  const workerFinding = {
-    ...finding("fresh-source", "src/fixture.ts"),
-    summary: 'A large finding with quoted "evidence" and Unicode 🧭. '.repeat(
-      120,
-    ),
-    provenance: {
-      source: "local_plugin",
-      sourceFindings: [{ id: "earlier-worker:0", finding: sourceOriginal }],
-      previousFindings: [sourceOriginal],
-      originalCandidates: [{ summary: "retained source candidate" }],
-    },
-  };
-  const previousOriginal = finding("previous-original", "src/fixture.ts");
-  const previousFinding = {
-    ...finding("previous-aggregate", "src/fixture.ts"),
-    provenance: {
-      source: "local_plugin",
-      sourceFindingIds: ["previous-worker:0"],
-      sourceFindings: [{ id: "previous-worker:0", finding: previousOriginal }],
-      previousFindings: [previousOriginal],
-      originalCandidates: [{ summary: "retained previous candidate" }],
-    },
-  };
-  const workerResultPath = path.join(workerRoot, "result.json");
-  const previousReducerResultPath = path.join(previousRoot, "result.json");
-  await writeJson(workerResultPath, {
-    scanId,
-    findings: [workerFinding],
-    reviewState: workerDraft([]).reviewState,
-  });
-  await writeJson(previousReducerResultPath, {
-    scanId,
-    findings: [previousFinding],
-  });
-
-  const client = await startClient(bundle, {
-    CODEX_SECURITY_ARTIFACT_ROOT: artifactRoot,
-    CODEX_SECURITY_REPO_ROOT: repoRoot,
-    CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
-    CODEX_SECURITY_SCAN_ID: scanId,
-    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
-    CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
-      scanRoot,
-      claimedWorkers: [{ id: workerId, resultPath: workerResultPath }],
-      previousReducerResultPath,
-    }),
-  });
-  try {
-    assert.deepEqual(
-      client.getServerCapabilities()?.experimental?.[
-        "codex/sandbox-state-meta"
-      ],
-      {},
-      "The reducer worker MCP must advertise actual parent sandbox-state metadata.",
-    );
-    const tools = (await client.listTools()).tools;
-    assert.equal(
-      tools.some(
-        (tool) => tool.name === "record_codex_security_worker_threat_model",
-      ),
-      false,
-      "The reducer MCP must not expose a discovery worker's threat-model tool.",
-    );
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      "get_codex_security_deep_reducer_inputs",
-      "record_codex_security_deep_reduction",
-    ]);
-
-    for (const tool of tools) {
-      assert.equal(
-        Object.hasOwn(tool.inputSchema.properties ?? {}, "scanId"),
-        tool.name === "record_codex_security_deep_reduction",
-        `${tool.name} must expose scanId only when submitting its complete reduction.`,
-      );
-      if (tool.name === "record_codex_security_deep_reduction") {
-        assertSemanticInputProperties(tool.inputSchema);
-        assert.deepEqual(tool.inputSchema.required, ["scanId", "findings"]);
-        assert.equal(tool.inputSchema.additionalProperties, false);
-        assert.equal(
-          Object.hasOwn(tool.inputSchema.properties!, "reviewState"),
-          false,
-          "The reducer must not be asked to submit reviewState.",
-        );
-      } else {
-        assert.deepEqual(tool.inputSchema.required, ["maxBytes"]);
-        assert.equal(tool.inputSchema.additionalProperties, false);
-        assert.deepEqual(Object.keys(tool.inputSchema.properties!).sort(), [
-          "cursor",
-          "findingRef",
-          "maxBytes",
-        ]);
-      }
-      for (const forbidden of [
-        "path",
-        "artifactRoot",
-        "resultPath",
-        "consumedWorkerIds",
-        "schemaVersion",
-      ]) {
-        assert.equal(
-          Object.hasOwn(tool.inputSchema.properties ?? {}, forbidden),
-          false,
-          `${tool.name} must not accept coordinator-owned ${forbidden}.`,
-        );
-      }
-    }
-
-    const maxBytes = 768;
-    async function readPagedInputs(findingRef?: string) {
-      const fragments = [];
-      const cursors = new Set();
-      let cursor;
-      do {
-        const response = await client.callTool({
-          name: "get_codex_security_deep_reducer_inputs",
-          arguments: {
-            maxBytes,
-            ...(cursor === undefined ? {} : { cursor }),
-            ...(findingRef === undefined ? {} : { findingRef }),
-          },
-        });
-        assert.notEqual(response.isError, true, JSON.stringify(response));
-        assert.equal(Object.hasOwn(response, "structuredContent"), false);
-        assert.equal((response.content as TextContent[]).length, 1);
-        assert.equal((response.content as TextContent[])[0].type, "text");
-        assert.ok(
-          Buffer.byteLength(JSON.stringify(response), "utf8") <= maxBytes,
-          "The full encoded MCP result must fit the requested byte budget.",
-        );
-        const page = JSON.parse((response.content as TextContent[])[0].text);
-        assert.equal(typeof page.json, "string");
-        assert.ok(page.json.length > 0, "Every page must make progress.");
-        fragments.push(page.json);
-        cursor = page.nextCursor;
-        if (cursor !== undefined) {
-          assert.equal(typeof cursor, "string");
-          assert.equal(
-            cursors.has(cursor),
-            false,
-            "Paging must not repeat a cursor.",
-          );
-          cursors.add(cursor);
-        }
-      } while (cursor !== undefined);
-      return {
-        value: JSON.parse(fragments.join("")),
-        pageCount: fragments.length,
-      };
-    }
-
-    const inputs = await readPagedInputs();
-    assert.ok(inputs.pageCount > 1, "A single large finding must span pages.");
-    assert.equal(inputs.value.discoveries.length, 1);
-    assert.equal(inputs.value.discoveries[0].workerId, workerId);
-    assert.equal(inputs.value.discoveries[0].result.scanId, scanId);
-    assert.equal(inputs.value.previous.scanId, scanId);
-    const fresh = inputs.value.discoveries[0].result.findings[0];
-    const previous = inputs.value.previous.findings[0];
-    assert.equal(fresh.summary, workerFinding.summary);
-    assert.equal(previous.title, previousFinding.title);
-    assert.deepEqual(fresh.provenance.sourceFindingIds, [`${workerId}:0`]);
-    assert.deepEqual(previous.provenance.sourceFindingIds, [
-      "previous-worker:0",
-    ]);
-    for (const finding of [fresh, previous]) {
-      for (const body of [
-        "sourceFindings",
-        "previousFindings",
-        "originalCandidates",
-      ]) {
-        assert.equal(
-          Object.hasOwn(finding.provenance, body),
-          false,
-          `The slim reducer input must omit ${body} bodies.`,
-        );
-      }
-    }
-    const fullSource = await readPagedInputs(
-      `source:${fresh.provenance.sourceFindingIds[0]}`,
-    );
-    assert.ok(fullSource.pageCount > 1);
-    assert.deepEqual(fullSource.value, {
-      ...workerFinding,
-      provenance: {
-        ...workerFinding.provenance,
-        sourceFindingIds: [`${workerId}:0`],
-      },
-    });
-    assert.deepEqual(
-      (await readPagedInputs("previous:0")).value,
-      previousFinding,
-    );
-    assert.deepEqual(
-      (
-        await readPagedInputs(
-          `source:${previous.provenance.sourceFindingIds[0]}`,
-        )
-      ).value,
-      previousOriginal,
-    );
   } finally {
     await client.close();
   }

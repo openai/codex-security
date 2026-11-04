@@ -8,4 +8,4 @@ For a host-backed diff scan, use its authoritative scan context and advance to `
 
 ## Daybreak Access Advisory
 
-Standard receives any account advisory at launch. For a diff scan, read `access-advisory.md` before the first substantive scan action. It does not gate the scan or change runtime setup.
+For Standard scans, follow the launch instructions for the optional account check. For a diff scan, read `access-advisory.md` before the first substantive scan action. It does not gate the scan or change runtime setup.

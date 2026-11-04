@@ -363,6 +363,7 @@ test.each(sealedScopes)(
     const executor = draftExecutor((request) => {
       expect(request.scope.paths).toEqual(normalized);
       expect(request.identity).toEqual(input.identity);
+      expect(request.runtime.environment["CODEX_SECURITY_SURFACE"]).toBe("sdk");
       expect(request).toMatchObject({
         model: input.model,
         reasoningEffort: input.reasoningEffort,
@@ -892,6 +893,9 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(
+            message.params.runtime.environment.CODEX_SECURITY_SURFACE,
+          ).toBe("cli");
           if (cancel) {
             expect(message.params).not.toHaveProperty("severityRubric");
             expect(message.params.prompt).not.toContain('"severityRubric"');
@@ -1042,18 +1046,22 @@ test("standalone SDK forwards progress, isolates observer errors and defaults to
   const input = await fixture();
   delete input.scope;
   const events: string[] = [];
-  const result = await runHostedScan(input, {
-    executor: draftExecutor((request, options) => {
-      expect(request.scope.paths).toEqual(["."]);
-      options.onEvent?.(progressEvent);
-      options.onEvent?.(activityEvent);
-    }),
-    onEvent(event) {
+  const executor = draftExecutor((request, options) => {
+    expect(request.scope.paths).toEqual(["."]);
+    options.onEvent?.(progressEvent);
+    options.onEvent?.(activityEvent);
+  });
+  class Options {
+    get executor() {
+      return executor;
+    }
+    onEvent(event: ScanExecutionEvent) {
       events.push(event.type);
       if (event.type === "progress")
         throw new Error("Optional progress failed");
-    },
-  });
+    }
+  }
+  const result = await runHostedScan(input, new Options());
   expect(result.status, JSON.stringify(result)).toBe("completed");
   expect(result.scope.paths).toEqual(["."]);
   expect(events).toContain("progress");
@@ -1261,6 +1269,21 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
+async function hostedHistory(input: HostedScanInput) {
+  return runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+}
+
 test("cancellation after registration retains scan identity before executor dispatch", async () => {
   const input = await fixture();
   const controller = new AbortController();
@@ -1281,23 +1304,12 @@ test("cancellation after registration retains scan identity before executor disp
   expect(executor.run).not.toHaveBeenCalled();
   expect(result.scanId).toBeString();
   expect(result.execution).toBeUndefined();
-  const history = await runWorkbench(
-    {
-      python: pythonExecutable()!,
-      pluginRoot: PLUGIN_ROOT,
-      environment: {
-        PATH: process.env["PATH"],
-        SYSTEMROOT: process.env["SYSTEMROOT"],
-        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-      },
-    },
-    ["list-scans", "--repository", input.repository],
-  );
+  const history = await hostedHistory(input);
   expect(history["scans"]).toMatchObject([
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "failed", phase: "preflight" },
     },
   ]);
 });
@@ -1332,6 +1344,13 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
     sessionId: "canceled-session",
     usage: { input_tokens: 42 },
   });
+  const history = await hostedHistory(input);
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      progress: { status: "failed", phase: "threat_model" },
+    },
+  ]);
 });
 
 test("mismatched execution receipts are never accepted or retried", async () => {
@@ -1428,7 +1447,7 @@ test.each(["cancel", "disconnect", "signal"])(
     const input = new PassThrough();
     const controller = new AbortController();
     const { output, writing, release } = blockedOutput();
-    const run = spyOn(hostedScan, "runHostedScan");
+    const run = spyOn(hostedScan, "runHostedScanInternal");
     try {
       const finished = runHostedScanProtocol(input, output, controller.signal);
       send(input, { id: "run", method: "run", params });

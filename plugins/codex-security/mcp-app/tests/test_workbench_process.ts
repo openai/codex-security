@@ -18,10 +18,20 @@ interface WorkbenchModule {
   ): Promise<Record<string, unknown>>;
 }
 
-const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
+const { executeWorkbench, runWorkbench, workbenchTimeout } =
+  await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
 );
+await test("token-bearing context reads share the get-scan timeout", () => {
+  assert.equal(workbenchTimeout(["mark-handoff-delivered"]), 30_000);
+  assert.equal(workbenchTimeout(["get-scan"]), 300_000);
+  assert.equal(
+    workbenchTimeout(["mark-handoff-delivered", "--return-context"]),
+    300_000,
+  );
+});
+
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
   const { stdout } = await promisify(execFile)(
@@ -68,16 +78,16 @@ def main():
     ];
     const result = await executeParser(
       process.env.PYTHON?.trim() || "python3",
-      workbenchArgs("claim-deep-scan-dedup", {
+      workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
-        promptPath: "--prompt.md",
-        artifactDir: "",
+        resultManifestPath: "--result.json",
+        noNewStreak: 1,
+        consecutiveErrors: 0,
         inputWorkerId: workerIds,
       }),
     );
-    assert.equal(result.prompt_path, "--prompt.md");
-    assert.equal(result.artifact_dir, "");
+    assert.equal(result.result_manifest_path, "--result.json");
     assert.deepEqual(result.input_worker_id, workerIds);
   } finally {
     await rm(root, { recursive: true, force: true });

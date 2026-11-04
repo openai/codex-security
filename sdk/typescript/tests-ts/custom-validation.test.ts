@@ -1280,8 +1280,16 @@ describe("custom validation", () => {
   });
 
   test("renders only the discovery portion of the shipped workflows", async () => {
-    const standard = await customDiscoveryPrompt(PLUGIN_ROOT, "security-scan");
-    const diff = await customDiscoveryPrompt(PLUGIN_ROOT, "security-diff-scan");
+    const standard = await customDiscoveryPrompt(
+      PLUGIN_ROOT,
+      "security-scan",
+      true,
+    );
+    const diff = await customDiscoveryPrompt(
+      PLUGIN_ROOT,
+      "security-diff-scan",
+      false,
+    );
     expect(standard).toContain("<plugin_dir>/references/core-scan.md");
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
@@ -1311,7 +1319,7 @@ describe("custom validation", () => {
       "Changed workflow\n",
     );
     await expect(
-      customDiscoveryPrompt(changed, "security-diff-scan"),
+      customDiscoveryPrompt(changed, "security-diff-scan", false),
     ).rejects.toThrow("incompatible");
   });
 

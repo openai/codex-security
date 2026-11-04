@@ -144,6 +144,10 @@ def test_headless_standard_scan_joins_only_the_owning_thread(tmp_path: Path) -> 
     assert first["startDisposition"] == "created"
     assert Path(first["scan"]["scanDir"]).parent == scan_root / target.name
     assert joined["startDisposition"] == "joined"
+    assert first["scan"]["lifecycle"]["surface"] == "plugin"
+    assert first["scan"]["lifecycle"]["packageVersion"] is None
+    assert first["scan"]["lifecycle"]["mock"] is False
+    assert joined["scan"]["lifecycle"] == first["scan"]["lifecycle"]
     assert joined["scan"]["scanId"] == first["scan"]["scanId"]
     assert joined["scan"]["handoffClaimToken"] == first["scan"]["handoffClaimToken"]
     assert other["startDisposition"] == "created"

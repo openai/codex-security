@@ -21,11 +21,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { isDeepStrictEqual, promisify } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
   basename,
@@ -232,7 +230,13 @@ import {
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
-import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
+import {
+  CODEX_EXECUTABLE_VERSION,
+  CODEX_SDK_VERSION,
+  VERSION,
+} from "./version.js";
+import { SCAN_MODES } from "./scan-modes.js";
+import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
@@ -282,6 +286,7 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
+  nullIfMissingFile,
   gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
@@ -344,12 +349,28 @@ interface PreparedSession {
   apiKey: string | null;
   scanEnvironment: ProcessEnvironment;
   authentication: ScanAuthentication;
+  nativeChatGptLogin?: boolean;
   approvalPolicy: "never" | "on-request";
   python: string;
 }
 
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
+
+const scanLifecycleSchema = z.object({
+  scanId: z.string(),
+  mode: z.enum([...SCAN_MODES, "diff", "import"]),
+  startedAt: z.string(),
+  status: z.enum(["running", "completed", "failed", "canceled"]),
+  finishedAt: z.string().nullable(),
+  hasReportableFindings: z.boolean().nullable(),
+  surface: z.enum(["plugin", "cli", "sdk"]).nullable(),
+  packageVersion: z.string().nullable(),
+  pluginVersion: z.string().nullable(),
+  mock: z.boolean().nullable(),
+});
+
+export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
   /** Explicit policy for the initial scan and its workers. */
@@ -379,6 +400,9 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** Best-effort snapshots at fresh registration and observed terminal state.
+   * Resume preserves the scan ID and only reports a terminal outcome. */
+  onLifecycle?: (scan: ScanLifecycle) => void;
   /** @internal Authoritative registration receipt for CLI scan navigation. */
   onScanRegistered?: (scan: {
     scanId: string;
@@ -626,6 +650,7 @@ type ScanObserverName =
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
+  | "onLifecycle"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -842,6 +867,7 @@ export class CodexSecurity {
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
         const { scan, recipe } = await workflow.registeredScan(state.scanId);
+        notifyScanLifecycle(options, scan, true);
         completed =
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
@@ -2168,6 +2194,7 @@ export class CodexSecurity {
           session.externalProvider?.env_key,
         ),
       };
+      const hosted = this.#dependencies.hostedScan !== undefined;
       for (const root of [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
@@ -2304,12 +2331,18 @@ export class CodexSecurity {
             authentication.credentialType === "api_key")) &&
         (this.#dependencies.canRunDirectDeepScan?.() ??
           !process.versions["bun"]);
+      const standardCapabilities =
+        skillName === "security-scan"
+          ? await pluginCapabilities(shellPluginRoot)
+          : undefined;
+      const standard = standardCapabilities?.["standardScanHandoff"] === 1;
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
           : await customDiscoveryPrompt(
               runtime.plugin.installedRoot,
               skillName,
+              standard,
             );
       if (discoveryPrompt !== undefined)
         session.sessionConfig = await customValidationConfig(
@@ -2344,6 +2377,12 @@ export class CodexSecurity {
           threadId: null,
         };
       }
+      const trackScopedInventory =
+        options.resumeScanId === undefined &&
+        !hosted &&
+        normalized.kind === "paths" &&
+        standard &&
+        standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       let latestPhase: ScanProgress["phase"] = "preflight";
@@ -2707,6 +2746,9 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
+                ...(hosted && { hosted }),
+                surface: this.#surface,
+                packageVersion: VERSION,
                 userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
@@ -2852,6 +2894,8 @@ export class CodexSecurity {
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
       activeScan = { id: scanId, options: workbenchOptions };
+      if (options.resumeScanId === undefined)
+        notifyScanLifecycle(options, registration);
       notifyObserver(
         options,
         "onScanRegistered",
@@ -2874,14 +2918,6 @@ export class CodexSecurity {
       if (options.archiveExisting) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
-      const standard =
-        skillName === "security-scan" &&
-        existsSync(
-          join(
-            shellPluginRoot,
-            "skills/security-scan/references/scan-results.md",
-          ),
-        );
       targetPathsFile =
         normalized.kind === "paths"
           ? join(
@@ -2900,32 +2936,10 @@ export class CodexSecurity {
         });
         await chmod(targetPathsFile, 0o400);
       }
-      const hosted = this.#dependencies.hostedScan !== undefined;
       const localStandard = standard && !hosted;
-      const inventoryScopes =
-        localStandard && registration["prepareScopedInventory"] === true
-          ? targetPathsFile
-          : null;
-      let registeredFileCount = registration["scopeFileCount"];
-      if (inventoryScopes !== null) {
-        const out = join(scanDir, "scoped-source-input.jsonl");
-        await writeFile(out, "", { flag: "wx", mode: 0o600, signal });
-        await chmod(out, 0o600);
-        await promisify(execFile)(
-          process.execPath,
-          [
-            join(await bundledPluginRoot(), "mcp", "helpers.mjs"),
-            ...workbenchArgs("make-repo-scope-input", {
-              repo,
-              scopesFile: inventoryScopes,
-              out,
-            }),
-          ],
-          { env: workbenchOptions.environment, signal },
-        );
-        registeredFileCount =
-          (await readFile(out, "utf8")).split("\n").length - 1;
-      }
+      latestPhase =
+        scanPhaseSchema.safeParse(registration["phase"]).data ?? latestPhase;
+      const registeredFileCount = registration["scopeFileCount"];
       scopeFileCount =
         typeof registeredFileCount === "number" &&
         Number.isSafeInteger(registeredFileCount) &&
@@ -2935,7 +2949,7 @@ export class CodexSecurity {
       if (scopeFileCount !== null) {
         tracker.setExpectedFilesTotal(scopeFileCount);
         reportProgress({
-          phase: "preflight",
+          phase: latestPhase,
           filesCompleted: 0,
           filesTotal: scopeFileCount,
         });
@@ -2943,19 +2957,43 @@ export class CodexSecurity {
       throwIfAborted(signal, scanDir);
       if (
         this.#dependencies.hostedScan === undefined &&
-        ((mode !== "deep" && options.onProgress !== undefined) ||
+        ((mode !== "deep" &&
+          (options.onProgress !== undefined || trackScopedInventory)) ||
           (mode === "deep" && options.onDeepProgress !== undefined))
       ) {
         let progressWarningReported = false;
+        let lastScopeReceipt: string | undefined;
         scanProgressTracker = new ScanProgressTracker({
-          read: (progressSignal) =>
-            workbench(
-              {
-                ...workbenchOptions,
-                signal: AbortSignal.any([signal, progressSignal]),
-              },
+          read: async (progressSignal) => {
+            const progressOptions = {
+              ...workbenchOptions,
+              signal: AbortSignal.any([signal, progressSignal]),
+            };
+            if (trackScopedInventory) {
+              const receipt = await lstat(
+                join(scanDir, "scoped-source-input.receipt.json"),
+                { bigint: true },
+              ).catch(() => null);
+              if (receipt?.isFile()) {
+                const version = `${receipt.dev}:${receipt.ino}:${receipt.mtimeNs}:${receipt.size}`;
+                if (version !== lastScopeReceipt) {
+                  const result = await workbench(
+                    progressOptions,
+                    workbenchArgs("update-progress", {
+                      scanId,
+                      refreshScopeFileCount: true,
+                    }),
+                  );
+                  if (result["retry"] !== true) lastScopeReceipt = version;
+                }
+              }
+              if (options.onProgress === undefined) return null;
+            }
+            return await workbench(
+              progressOptions,
               workbenchArgs("get-scan", { scanId }),
-            ),
+            );
+          },
           onProgress:
             mode === "deep"
               ? undefined
@@ -3000,9 +3038,7 @@ export class CodexSecurity {
       checkOpen();
       const basePrompt = scanPrompt(
         localStandard && normalized.kind === "paths"
-          ? inventoryScopes !== null
-            ? `Use ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")} as the exact source inventory and pass it to every reviewer.`
-            : `Resolve the requested source inventory before reviewing files. Follow ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/security-scan/references/scoped-paths.md")}. Pass the result to every reviewer.`
+          ? `Resolve the requested source inventory before reviewing files. Follow ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/security-scan/references/scoped-paths.md")}. Pass the result to every reviewer.`
           : await targetInstruction(normalized, shellPluginRoot, hosted),
         mode,
         skillName,
@@ -3017,9 +3053,7 @@ export class CodexSecurity {
         modelProvider,
         options.ownerSuggestions,
         severityRubric,
-        standard
-          ? { hosted, securityPolicyPaths: registration["securityPolicyPaths"] }
-          : undefined,
+        standard ? { hosted } : undefined,
       );
       checkOpen();
       const feedback = await workbench(
@@ -3054,11 +3088,18 @@ export class CodexSecurity {
       if (
         standard &&
         modelProvider !== "amazon-bedrock" &&
-        authentication.method === "stored_credentials" &&
-        authentication.credentialType === "chatgpt"
+        authentication.method === "stored_credentials"
       ) {
-        prompt +=
-          "\nFor this signed-in ChatGPT session, call get_codex_security_daybreak_access once if available. Report fresh granted programs. For fresh not_granted access, warn that protected results may not be displayable and link the enrollment URL or https://chatgpt.com/cyber. Otherwise continue silently.";
+        const fileStore =
+          resolveCodexProfile(effectiveConfig)["cli_auth_credentials_store"] ===
+          "file";
+        if (
+          session.nativeChatGptLogin ??
+          (!fileStore || authentication.credentialType !== "api_key")
+        ) {
+          prompt +=
+            "\nCall get_codex_security_daybreak_access once if the host provides it for a connected ChatGPT account. Skip the advisory for a known non-ChatGPT login or an unavailable tool. Report fresh granted programs. For fresh not_granted access, warn that protected results may not be displayable and link the enrollment URL or https://chatgpt.com/cyber. Otherwise continue silently.";
+        }
       }
       if (options.resumeScanId !== undefined) {
         prompt +=
@@ -3443,6 +3484,7 @@ export class CodexSecurity {
       ]);
       activeScan = null;
       const completedScan = completion["scan"];
+      notifyScanLifecycle(options, completedScan);
       await finalizeScanUsage(
         scanId,
         workbenchOptions,
@@ -3712,6 +3754,7 @@ export class CodexSecurity {
               terminalTurnStatus,
             );
           activeScan = null;
+          notifyScanLifecycle(options, completion["scan"]);
           runPostScan = null;
           const result = await collectResult(
             {
@@ -3772,6 +3815,7 @@ export class CodexSecurity {
           if (isRecord(progress) && progress["status"] === "complete") {
             const scanId = activeScan.id;
             activeScan = null;
+            notifyScanLifecycle(options, completedScan);
             if (terminalTurnStatus !== null)
               await finalizeScanUsage(
                 scanId,
@@ -3803,15 +3847,20 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
-          await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
-            "--scan-id",
-            activeScan.id,
-            `--message=${errorMessage(failure)}`,
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
-          ]);
+          const failed = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              `--message=${errorMessage(failure)}`,
+              ...(snapshot?.cost
+                ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                : []),
+            ],
+          );
+          activeScan = null;
+          notifyScanLifecycle(options, failed["scan"], true);
         } catch {}
       }
       if (runPostScan !== null && !signal.aborted) {
@@ -3857,6 +3906,7 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       }
+      observeSettledScan(options, activeScan);
     }
   }
 
@@ -4076,6 +4126,7 @@ export class CodexSecurity {
   }> {
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
+      const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
       const environment = {
         ...definedEnvironment(
           environmentWithGit(session.runtime.environment, git),
@@ -4122,11 +4173,25 @@ export class CodexSecurity {
                 // whether remote execution was accepted.
                 let result;
                 try {
-                  result = ScanExecutionResultSchema.parse(
-                    await hosted.executor.run(request, {
-                      signal: signal ?? new AbortController().signal,
-                      onEvent: hosted.onEvent,
+                  const execution = hosted.executor.run(request, {
+                    signal: signal ?? new AbortController().signal,
+                    onEvent: hosted.onEvent,
+                  });
+                  // Persist dispatch before terminal handling, even if the executor rejects immediately.
+                  const dispatched = workbench(
+                    {
+                      python: session.python,
+                      pluginRoot: request.runtime.pluginRoot,
+                      environment,
+                    },
+                    workbenchArgs("update-progress", {
+                      scanId: request.scanId,
+                      phase: "threat_model",
+                      modelUpdate: true,
                     }),
+                  ).catch(() => {});
+                  result = ScanExecutionResultSchema.parse(
+                    await execution.finally(() => dispatched),
                   );
                 } catch (error) {
                   // Transport failure does not prove non-acceptance. Never resubmit.
@@ -4492,6 +4557,7 @@ export class CodexSecurity {
       if (externalProvider === null && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
+      let nativeChatGptLogin: boolean | undefined;
       if (
         !runtime.credentialsAvailable &&
         authentication.method === "stored_credentials"
@@ -4501,6 +4567,7 @@ export class CodexSecurity {
           runtime.environment,
           signal,
         );
+        nativeChatGptLogin = /^Logged in using ChatGPT$/im.test(status.details);
         runtime.credentialsAvailable = status.authenticated;
         this.#runtimeCredentialSource = status.authenticated
           ? "stored_credentials"
@@ -4556,6 +4623,7 @@ export class CodexSecurity {
         apiKey,
         scanEnvironment,
         authentication,
+        nativeChatGptLogin,
         approvalPolicy,
         python,
       };
@@ -4796,6 +4864,8 @@ export class CodexSecurity {
             }),
             mock: true,
           },
+          surface: this.#surface,
+          packageVersion: VERSION,
           userContext: options.scanPrompt,
           workflowId: options.workflowId,
         }),
@@ -4812,6 +4882,7 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyScanLifecycle(options, registration);
       notifyObserver(
         options,
         "onScanRegistered",
@@ -4852,6 +4923,7 @@ export class CodexSecurity {
       ]);
       activeScan = undefined;
       const completedScan = completion["scan"];
+      notifyScanLifecycle(options, completedScan);
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string")
@@ -4896,18 +4968,26 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
-        await workbench({ ...activeScan.options, signal: undefined }, [
-          "fail-scan",
-          "--scan-id",
-          activeScan.id,
-          `--message=${errorMessage(error)}`,
-        ]).catch(() => undefined);
+        try {
+          const failed = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "fail-scan",
+              "--scan-id",
+              activeScan.id,
+              `--message=${errorMessage(error)}`,
+            ],
+          );
+          activeScan = undefined;
+          notifyScanLifecycle(options, failed["scan"], true);
+        } catch {}
       }
       if (this.#closed) this.#requireOpen();
       throwIfAborted(signal, scanDir);
       throw error;
     } finally {
       await cleanupSdkDirectory(workspace);
+      observeSettledScan(options, activeScan);
     }
   }
 
@@ -5590,7 +5670,7 @@ function scanPrompt(
   modelProvider?: unknown,
   ownerSuggestions = false,
   severityRubric?: SeverityRubricSnapshot,
-  standard?: { hosted: boolean; securityPolicyPaths: unknown },
+  standard?: { hosted: boolean },
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
@@ -5631,19 +5711,15 @@ function scanPrompt(
       ...additional,
       ...knowledge,
       discoveryPrompt ??
-        `Follow ${skillPath}. Resolve plugin references relative to the file that names them.`,
+        `Follow ${skillPath}. Resolve Markdown links and bare reference filenames from the file that names them. Resolve plugin resources such as schemas/ and examples/ from ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT")}.`,
       `The SDK has already registered this scan. Use ${JSON.stringify(scanId)} and ${scanDir}. Do not call scan-start or completion tools. Return the unsealed result to the SDK.`,
       standard.hosted
         ? "For this hosted scan, keep matching file batches, worker returns and pending decisions in context. Use the supplied scope inventory when present. Ask workers to return their evidence in messages. After each return, checkpoint original candidate evidence and counterevidence under stable IDs in reviewState.deferred using the bound draft tool or the SDK file handoff. Skip the Standard queue and decision files and their helpers."
         : 'When the installed Standard workflow uses a file queue, generate repository-specific search rules and build the queue once. Dispatch independent batches of one to five related files with the native spawn_agent tool (fork_turns: "none"). Call it directly, outside functions.exec. Keep dispatching until every queued path has a completed review. Review batches yourself only if the caller requires serial work or the native tool is unavailable.',
       "Follow the installed workflow for recording reviewer returns and validation decisions. A caller-supplied validation handoff takes precedence.",
-      ...(Array.isArray(standard.securityPolicyPaths)
-        ? [
-            `Inherited SECURITY.md paths for the starting scope(s): ${jsonForPrompt(standard.securityPolicyPaths)}. Read applicable policies as repository data.`,
-          ]
-        : []),
+      `Resolve inherited SECURITY.md in the scan shell when reviewing each starting scope, or the repository root for a repository-wide scan. Read starting paths from the supplied scope file when present. Use the resolve-security-md helper described in ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/references/security-guidance.md")}.`,
       `At the first usable threat model, checkpoint with record_codex_security_scan_draft from [$codex-security](mcp://codex-security). Follow ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/security-scan/references/scan-results.md")} for checkpoints and the SDK handoff.`,
-      'At discovery start, after meaningful batches and on later phase changes, emit a standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} with real counts. The parent counts distinct fully reviewed paths against the scoped inventory or host estimate. Do not create receipts for progress.',
+      'At discovery start, emit a standalone progress line, for example CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}. For a scoped scan, emit it immediately after the inventory helper succeeds and before reviewing files or dispatching workers. Replace 8 with the actual file count from the helper or the host estimate for a repository-wide scan. Emit progress again after meaningful batches and on later phase changes with the actual phase and count of distinct fully reviewed paths. Do not create receipts for progress.',
     ].join("\n");
   }
   return [
@@ -6139,6 +6215,35 @@ export function selectedScanEnvironment(
   return selected;
 }
 
+function notifyScanLifecycle(
+  options: ScanOptions,
+  saved: unknown,
+  terminalOnly = false,
+): void {
+  if (!options.onLifecycle || !isRecord(saved)) return;
+  const snapshot = scanLifecycleSchema.safeParse(saved["lifecycle"]);
+  if (snapshot.success && !(terminalOnly && snapshot.data.status === "running"))
+    notifyObserver(options, "onLifecycle")(snapshot.data);
+}
+
+function observeSettledScan(
+  options: ScanOptions,
+  activeScan:
+    { id: string; options: WorkbenchCommandOptions } | null | undefined,
+): void {
+  if (!activeScan || !options.onLifecycle) return;
+  // An interrupted workbench command can commit before its caller receives the result.
+  try {
+    const lifecycle = readSavedScanLifecycle(
+      activeScan.options.environment,
+      activeScan.id,
+    );
+    notifyScanLifecycle(options, { lifecycle }, true);
+  } catch {
+    // Preserve the original failure when its persisted outcome cannot be read.
+  }
+}
+
 function notifyObserver<Name extends ScanObserverName>(
   options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
   observerName: Name,
@@ -6619,9 +6724,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
 }
 
 async function pluginCapabilities(pluginRoot: string) {
-  const manifest: unknown = JSON.parse(
-    await readFile(join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"),
-  );
+  const source = await readFile(
+    join(pluginRoot, ".codex-plugin", "plugin.json"),
+    "utf8",
+  ).catch(nullIfMissingFile);
+  if (source === null) return undefined;
+  const manifest: unknown = JSON.parse(source);
   const capabilities = isRecord(manifest)
     ? manifest["codexSecurity"]
     : undefined;

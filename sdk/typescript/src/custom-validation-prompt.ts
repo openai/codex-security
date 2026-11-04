@@ -9,9 +9,6 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md": [
-    "6bd3507592e3dd8b4df35f825a579b531e845951bcf6ccc010d2ec7ebe69fae2",
-    "5197aefbcb75f418ddcac104a7a81378c40bf8d83006094f78a54ff63947cc08",
-    "226e229a4459fdf0508606323a85f770f175f2c76b8c3336ec27a2ad4fb54ed6",
     "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
     "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
@@ -56,8 +53,11 @@ function step(text: string, number: number): string {
   return text.match(new RegExp(`^${number}\\. (.+)$`, "m"))![1]!;
 }
 
-async function legacyDiscoveryPrompt(pluginRoot: string, core: string) {
-  const skill = await source(pluginRoot, "skills/security-scan/SKILL.md");
+async function legacyDiscoveryPrompt(pluginRoot: string) {
+  const [skill, core] = await Promise.all([
+    source(pluginRoot, "skills/security-scan/SKILL.md"),
+    source(pluginRoot, "references/core-scan.md"),
+  ]);
   const discovery = core
     .replace(
       /^7\. .+$/m,
@@ -89,17 +89,17 @@ async function legacyDiscoveryPrompt(pluginRoot: string, core: string) {
 export async function customDiscoveryPrompt(
   pluginRoot: string,
   skillName: string,
+  standardHandoff: boolean,
 ): Promise<string> {
   let workflow: string;
   if (skillName === "security-scan") {
-    const core = await source(pluginRoot, "references/core-scan.md");
-    workflow = core.includes("## Baseline Auditor Prompt")
-      ? await legacyDiscoveryPrompt(pluginRoot, core)
-      : [
+    workflow = standardHandoff
+      ? [
           "Use <plugin_dir>/references/core-scan.md for source discovery. This caller supplies the validation handoff: the SDK runs independent final validation in a separate turn. Check source evidence and counterevidence now, but do not run the default validation pass.",
           "Keep any supplied investigation time allowance unchanged. Only for an explicit time request with no existing allowance, render <plugin_dir>/references/investigation-time-budget.md once before source review.",
           HANDOFF,
-        ].join("\n\n");
+        ].join("\n\n")
+      : await legacyDiscoveryPrompt(pluginRoot);
   } else if (skillName === "security-diff-scan") {
     const skill = await source(
       pluginRoot,

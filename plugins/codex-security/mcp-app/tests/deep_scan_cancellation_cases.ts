@@ -15,7 +15,7 @@ import { restoreEnv } from "./support/fake-codex-source.ts";
 
 export function mockWorkerSpawn(
   executablePath: string,
-  onExec: (
+  onExec?: (
     child: ChildProcess,
     args: readonly string[],
     options: SpawnOptions,
@@ -37,7 +37,7 @@ export function mockWorkerSpawn(
         : args,
       options,
     );
-    if (args[0] === "exec") onExec(child, args, options);
+    if (args[0] === "exec") onExec?.(child, args, options);
     return child;
   }) as typeof childProcess.spawn;
   syncBuiltinESMExports();

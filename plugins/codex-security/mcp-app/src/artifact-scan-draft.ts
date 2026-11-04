@@ -133,7 +133,7 @@ export interface ScanDraftResult {
   warnings?: string[];
 }
 
-/** Return only IDs the caller needs to learn to update its submitted rows. */
+/** Keep the receipt compact while making saved work discoverable on resume. */
 export function scanDraftToolResponse(
   { reviewState, ...receipt }: ScanDraftResult,
   input: ScanDraftInput,
@@ -150,19 +150,47 @@ export function scanDraftToolResponse(
         : [],
     );
   };
+  const omitted = <Row extends { id?: string }>(
+    saved: Row[],
+    submitted: Row[],
+  ) => {
+    if (!saved.length) return [];
+    const submittedById = new Map(submitted.map((row) => [row.id, row]));
+    return saved.filter(
+      (row) => !isDeepStrictEqual(submittedById.get(row.id), row),
+    );
+  };
   const { surfaces, deferred } = input.reviewState;
+  const normalizedSurfaces = normalizeSurfaces(surfaces);
+  const savedSurfaces =
+    reviewState.surfaces as (DraftCoverage["surfaces"][number] & {
+      id: string;
+    })[];
   const assignedSurfaces = assigned(
     surfaces,
-    normalizeSurfaces(surfaces),
-    reviewState.surfaces as { id: string }[],
+    normalizedSurfaces,
+    savedSurfaces,
   );
+  const retainedSurfaces = omitted(
+    savedSurfaces.filter((row) => row.disposition === "needs_follow_up"),
+    normalizedSurfaces,
+  );
+  const savedDeferred =
+    reviewState.deferred as (DraftCoverage["deferred"][number] & {
+      id: string;
+    })[];
+  const normalizedDeferred = normalizeDeferred(deferred);
   const assignedDeferred = assigned(
     deferred,
-    normalizeDeferred(deferred),
-    reviewState.deferred as { id: string }[],
+    normalizedDeferred,
+    savedDeferred,
   );
+  const retainedDeferred = omitted(savedDeferred, normalizedDeferred);
   return {
     ...receipt,
+    deferredCount: savedDeferred.length,
+    ...(retainedSurfaces.length ? { retainedSurfaces } : {}),
+    ...(retainedDeferred.length ? { retainedDeferred } : {}),
     ...(assignedSurfaces.length ? { assignedSurfaces } : {}),
     ...(assignedDeferred.length ? { assignedDeferred } : {}),
   };
