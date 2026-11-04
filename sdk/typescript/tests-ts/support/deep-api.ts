@@ -15,7 +15,12 @@ import {
 import { prepareSemanticScanDraft } from "../../src/scan-semantics.js";
 import { ScanTransportClosedError } from "../../src/scan-execution.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../../src/thread-source.js";
-import { semanticCoverage, semanticFinding } from "../helpers/semantic-scan.js";
+import {
+  sameReview,
+  sameSource,
+  semanticCoverage,
+  semanticFinding,
+} from "../helpers/semantic-scan.js";
 import { createApiTestFixtures } from "./api-events.js";
 import { tokenUsageEvent, writeSession } from "./usage-rollout.js";
 
@@ -441,6 +446,19 @@ export function createDeepApiFixtures() {
                                   ...(scanId === firstChild
                                     ? { title: "First completed discovery" }
                                     : {}),
+                                  ...(mergeDuplicates && {
+                                    codeEvidence: [
+                                      {
+                                        id: "source",
+                                        label: "Shared operation",
+                                        path: "source.ts",
+                                        startLine: 1,
+                                        code: "export const value = 1;",
+                                        explanation:
+                                          "Both workers inspected this operation.",
+                                      },
+                                    ],
+                                  }),
                                   locations: [
                                     { path: "source.ts", startLine: 1 },
                                   ],
@@ -527,7 +545,15 @@ export function createDeepApiFixtures() {
                       const catalogue = prompt
                         .split("\n")
                         .find((line) => line.startsWith('{"page":'));
-                      if (catalogue !== undefined) {
+                      const properties = (
+                        runOptions?.outputSchema as
+                          { properties?: JsonObject } | undefined
+                      )?.properties;
+                      if (properties?.["reviews"]) {
+                        matchingDecision = { reviews: [sameReview] };
+                      } else if (properties?.["sources"]) {
+                        matchingDecision = { sources: [sameSource] };
+                      } else if (catalogue !== undefined) {
                         const { findings } = JSON.parse(catalogue);
                         matchingDecision = {
                           matches: mergeDuplicates

@@ -23,7 +23,12 @@ import {
   type SemanticCoverage,
   type SemanticFinding,
 } from "../src/scan-semantics.js";
-import { semanticFinding, semanticCoverage } from "./helpers/semantic-scan.js";
+import {
+  sameReview,
+  sameSource,
+  semanticFinding,
+  semanticCoverage,
+} from "./helpers/semantic-scan.js";
 
 const parent = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 const targetContract = {
@@ -53,20 +58,6 @@ const codeEvidence = [
     explanation: "An input reaches the renderer.",
   },
 ];
-const sameReview = {
-  pair: 0,
-  decision: "same",
-  reason: "One renderer",
-  leftEvidence: 0,
-  rightEvidence: 0,
-};
-const sameSource = {
-  id: 0,
-  fixA: "encode in render",
-  fixB: "encode in render",
-  survivingPaths: [],
-  same: true,
-};
 
 const mergeOptions = { contextPath: join(root, "merge-context.json") };
 const merge = reconcileScanMerge.bind(undefined, parent);

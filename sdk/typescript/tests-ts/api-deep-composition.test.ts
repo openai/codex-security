@@ -275,7 +275,7 @@ test("shared matching reads evidence through the prepared parent session", async
       h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode ===
       "deep",
   );
-  expect(parentTurns).toHaveLength(2);
+  expect(parentTurns).toHaveLength(4);
   expect(h.preparations()).toBe(1);
   expect(h.threadScans.size).toBe(3);
   for (const turn of parentTurns) {
@@ -290,10 +290,15 @@ test("shared matching reads evidence through the prepared parent session", async
       },
     });
     expect(turn.runOptions?.signal).toBeInstanceOf(AbortSignal);
-    expect(turn.runOptions?.outputSchema).toMatchObject({
-      properties: { matches: { type: "array" }, request: expect.any(Object) },
-    });
   }
+  expect(
+    parentTurns.map((turn) => turn.runOptions?.outputSchema),
+  ).toMatchObject([
+    { properties: { matches: {}, request: {} } },
+    { properties: { matches: {}, request: {} } },
+    { properties: { reviews: {} } },
+    { properties: { sources: {} } },
+  ]);
   expect(
     h.completedPrompts.some((prompt) => prompt.includes('"content":')),
   ).toBe(true);

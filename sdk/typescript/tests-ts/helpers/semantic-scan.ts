@@ -33,3 +33,18 @@ export function semanticCoverage(
     ...overrides,
   };
 }
+
+export const sameReview = {
+  pair: 0,
+  decision: "same",
+  reason: "One renderer",
+  leftEvidence: 0,
+  rightEvidence: 0,
+};
+export const sameSource = {
+  id: 0,
+  fixA: "encode in render",
+  fixB: "encode in render",
+  survivingPaths: [],
+  same: true,
+};
