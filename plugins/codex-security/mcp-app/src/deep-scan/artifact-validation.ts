@@ -3,7 +3,10 @@ import { dirname, join, posix, relative, sep } from "node:path";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
-import { validateRetainedCoverage } from "../coverage-publication.js";
+import {
+  validateRetainedCoverage,
+  validateWorkerReport,
+} from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
   scanDraftInputSchema,
@@ -62,6 +65,7 @@ export async function validateDiscoveryArtifacts(
     ArtifactContext,
     "scope" | "includePaths" | "filePaths"
   > = {},
+  admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
@@ -86,6 +90,8 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  // Preserve the existing publication of previously accepted historical payloads.
+  if (admission === "new") validateWorkerReport(result);
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
