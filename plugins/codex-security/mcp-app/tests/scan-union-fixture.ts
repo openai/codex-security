@@ -1,9 +1,10 @@
+import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { scanId as fixtureScanId } from "./scan-draft-fixture.ts";
 
 const load = (file: string) =>
   importSource(
-    new URL(`../src/deep-scan/${file}.ts`, import.meta.url).pathname,
+    fileURLToPath(new URL(`../src/deep-scan/${file}.ts`, import.meta.url)),
   );
 
 const { createDeepScanArtifacts } = await load("artifacts");

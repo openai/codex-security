@@ -1,6 +1,11 @@
 import { readReviewState } from "./support/review-state.js";
+import {
+  mergeWorkerFiles,
+  scanUnionToDraft,
+} from "../../../plugins/codex-security/mcp-app/tests/scan-union-fixture.ts";
 import { importModule } from "../../../plugins/codex-security/mcp-app/tests/import-module.ts";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,15 +27,16 @@ const artifactApi = importModule({
     resolveDir: join(sourcePlugin, "mcp-app/src"),
     contents: `
       export * as context from "./artifact-context.ts";
+      export { DeepScanCoordinator } from "./deep-scan/coordinator.ts";
+      export { WorkbenchDeepScanStore } from "./deep-scan/store.ts";
       export * as draft from "./artifact-scan-draft.ts";
-      export * as reducer from "./artifact-deep-reducer.ts";
-      export * as validation from "./deep-scan/artifact-validation.ts";
       export * as artifacts from "./deep-scan/artifacts.ts";
       export * as discovery from "./artifact-discovery.ts";
       export * as validate from "./artifact-candidate-ledger.ts";
       export * as inventory from "./artifact-inventory.ts";
     `,
   },
+  loader: { ".md": "text" },
   define: {
     "process.execPath": JSON.stringify(Bun.which("node")!),
     "import.meta.url": JSON.stringify(
@@ -39,7 +45,8 @@ const artifactApi = importModule({
   },
 });
 
-async function fixture(diff = false) {
+async function fixture(mode: "diff" | "deep" | "standard" = "standard") {
+  const diff = mode === "diff";
   const directory = await temporaryDirectory("worker-candidate-lifecycle-");
   const api = await artifactApi;
   const repoRoot = join(directory, "repository"),
@@ -81,8 +88,19 @@ async function fixture(diff = false) {
         },
       ),
     );
-  const { scan } = await workbench([
-    diff ? "start-prompt-only-scan" : "start-headless-standard-scan",
+  if (mode === "deep") {
+    await mkdir(join(home, "codex-security"));
+    await writeFile(
+      join(home, "codex-security/config.toml"),
+      "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
+    );
+  }
+  const started = await workbench([
+    mode === "deep"
+      ? "begin-deep-scan"
+      : diff
+        ? "start-prompt-only-scan"
+        : "start-headless-standard-scan",
     "--thread-id",
     "synthetic-worker-lifecycle",
     "--target-path",
@@ -102,6 +120,7 @@ async function fixture(diff = false) {
         ]
       : []),
   ]);
+  const scan = mode === "deep" ? started.deepScan : started.scan;
   const parent = await api.context.createScanArtifactContext(
     scan.scanId,
     workbench,
@@ -208,11 +227,11 @@ for (const scenario of [
   "archive-confirmed-reopened-repeat",
   "archive-rejected-repeat",
 ]) {
-  test(`public worker state reaches reducer and SDK: ${scenario}`, async () => {
-    const f = await fixture();
+  test(`public worker state reaches the scan union and SDK: ${scenario}`, async () => {
+    const f = await fixture("deep");
     const workerRoot = join(
       f.parent.root,
-      "artifacts/deep_discovery/workers/worker-one/output",
+      "artifacts/deep_discovery/workers/discovery-0001/output",
     );
     await mkdir(workerRoot, { recursive: true });
     const context = {
@@ -334,31 +353,23 @@ for (const scenario of [
       await write(f.draft({}));
     }
     await f.remember(workerRoot);
-    const validated = await f.api.validation.validateDiscoveryArtifacts(
-      { workersRoot: workerRoot },
-      join(workerRoot, "result.json"),
-      f.scanId,
-    );
-    expect(validated).toBeDefined();
-    const reducerRoot = join(
-      f.parent.root,
-      "artifacts/deep_discovery/dedup/reducer/output",
-    );
-    await mkdir(reducerRoot, { recursive: true });
-    const contextReducer = {
-      root: reducerRoot,
-      repoRoot: f.repoRoot,
+    const store = new f.api.WorkbenchDeepScanStore(f.workbench);
+    const promptPath = join(workerRoot, "../prompt.md");
+    await writeFile(promptPath, "Synthetic completed discovery.");
+    const worker = {
+      id: randomUUID(),
       scanId: f.scanId,
-      layout: "reducer",
-      deepReducer: {
-        scanRoot: f.parent.root,
-        claimedWorkers: [
-          { id: "worker-one", resultPath: join(workerRoot, "result.json") },
-        ],
-      },
+      kind: "discovery",
+      artifactDir: workerRoot,
+      promptPath,
+      attempt: 1,
     };
-    const input =
-      await f.api.reducer.getCodexSecurityDeepReducerInputs(contextReducer);
+    await store.updateWorker({ ...worker, status: "running" });
+    await store.updateWorker({
+      ...worker,
+      status: "succeeded",
+      resultManifestPath: join(workerRoot, "result.json"),
+    });
     const expectedPending =
       scenario === "confirmation-pending" ||
       scenario === "archive-missing" ||
@@ -370,26 +381,40 @@ for (const scenario of [
       scenario.startsWith("archive-confirmed")
         ? 1
         : 0;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await f.api.reducer.recordCodexSecurityDeepReduction(contextReducer, {
-        scanId: f.scanId,
-        findings: input.discoveries[0].result.findings,
-      });
-      const result = await f.json(join(reducerRoot, "result.json"));
-      expect(result.findings.length).toBe(expectedFindings);
-      expect((result.unresolvedCandidates ?? []).length).toBe(
-        Number(expectedPending),
-      );
-    }
-    const result = await f.json(join(reducerRoot, "result.json"));
-    await f.publish(f.api.validation.deepReductionToScanDraft(result));
-    await f.workbench([
-      "prepare-scan-completion",
-      "--scan-id",
-      f.scanId,
-      "--claim-token",
-      f.parent.handoffClaimToken,
-    ]);
+    const { run: claimed } = await store.claimCoordinator({
+      scanId: f.scanId,
+      threadId: "synthetic-worker-lifecycle",
+    });
+    const coordinator = new f.api.DeepScanCoordinator({
+      run: claimed,
+      store,
+      pluginRoot: PLUGIN_ROOT,
+      executor: {
+        run() {
+          throw new Error("An accepted discovery must be reused.");
+        },
+      },
+      onComplete: async (draft: Row, signal: AbortSignal, publication: Row) => {
+        expect(draft["findings"]).toHaveLength(expectedFindings);
+        expect(
+          draft["reviewState"].deferred.filter(
+            (row: Row) => row["candidateId"],
+          ),
+        ).toHaveLength(Number(expectedPending));
+        await f.api.draft.recordCodexSecurityScanDraftViaWorkbench(
+          f.parent,
+          draft,
+          f.workbench,
+          signal,
+          publication,
+        );
+      },
+    });
+    coordinator.start();
+    const terminal = await coordinator.settled();
+    expect(terminal?.error).toBeUndefined();
+    expect(terminal?.status).toBe("succeeded");
+    await f.workbench(["prepare-scan-completion", "--scan-id", f.scanId]);
     const sdk = await f.complete();
     expect(sdk.findings.findings.length).toBe(expectedFindings);
     expect(sdk.unresolvedCandidates.length).toBe(Number(expectedPending));
@@ -401,6 +426,16 @@ for (const scenario of [
       expect(JSON.stringify(sdk.unresolvedCandidates)).toContain(
         "Original synthetic evidence",
       );
+    for (const row of sdk.findings.findings)
+      expect(row.provenance).toMatchObject({
+        sourceWorkerId: worker.id,
+        candidateId: "candidate-one",
+      });
+    for (const row of sdk.unresolvedCandidates)
+      expect(row.provenance).toMatchObject({
+        workerId: worker.id,
+        candidateId: "candidate-one",
+      });
     if (scenario === "confirmation-inherited")
       expect(
         sdk.findings.findings[0]!.provenance["candidateReopened"],
@@ -413,7 +448,7 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
   for (const resolution of ["none", "receipt", "validation"]) {
     const replacement = resolution === "receipt";
     test(`public draft after prepared receipt recovery retains current decision: ${decision}, resolution=${resolution}`, async () => {
-      const f = await fixture(true);
+      const f = await fixture("diff");
       const discovery = join(f.parent.root, "artifacts/02_discovery");
       await mkdir(discovery, { recursive: true });
       await writeFile(join(discovery, "in_scope_files.txt"), "app.py\n");
@@ -595,29 +630,17 @@ for (const candidateId of ["", "   ", "candidate-one"]) {
             (surface: Row) => surface["disposition"] === "needs_follow_up",
           ),
         ).toBe(missing);
-        await f.api.validation.validateDiscoveryArtifacts(
-          { workersRoot: workerRoot },
-          join(workerRoot, "result.json"),
-          f.scanId,
-        );
-        const reducerRoot = join(
+        const merged = await mergeWorkerFiles(
           f.parent.root,
-          "artifacts/deep_discovery/dedup/reducer/output",
+          [{ id: "worker-one", resultPath: join(workerRoot, "result.json") }],
+          { scanId: f.scanId, findings: [] },
         );
-        await mkdir(reducerRoot, { recursive: true });
-        const inputs = await f.api.reducer.getCodexSecurityDeepReducerInputs({
-          root: reducerRoot,
-          repoRoot: f.repoRoot,
-          scanId: f.scanId,
-          layout: "reducer",
-          deepReducer: {
-            scanRoot: f.parent.root,
-            claimedWorkers: [
-              { id: "worker-one", resultPath: join(workerRoot, "result.json") },
-            ],
-          },
-        });
-        expect(inputs.discoveries).toHaveLength(1);
+        const surfaces = scanUnionToDraft(merged).reviewState.surfaces;
+        expect(
+          surfaces.some(
+            (surface: Row) => surface["disposition"] === "needs_follow_up",
+          ),
+        ).toBe(missing);
       }
       await f.unchanged();
     });
@@ -633,7 +656,7 @@ for (const decision of ["suppressed", "not_applicable"]) {
     ["fail-scan", "validation"],
   ]) {
     test(`explicit Diff reopening survives ${termination}: ${decision}, resolution=${resolution}`, async () => {
-      const f = await fixture(true);
+      const f = await fixture("diff");
       const discovery = join(f.parent.root, "artifacts/02_discovery");
       await mkdir(discovery, { recursive: true });
       await writeFile(join(discovery, "in_scope_files.txt"), "app.py\n");
@@ -791,7 +814,7 @@ for (const publication of ["writer", "file-authored"]) {
     "unlinked",
   ]) {
     test(`stopped Diff retains shared terminal evidence: ${publication}, ${reference}`, async () => {
-      const f = await fixture(true);
+      const f = await fixture("diff");
       await f.api.inventory.prepareCodexSecurityReviewItems(f.parent);
       await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
         {
@@ -980,7 +1003,7 @@ for (const mode of ["standard", "diff"] as const) {
     "history-only",
   ]) {
     test(`parent reconfirmation preserves current intent: ${mode}, ${submission}`, async () => {
-      const f = await fixture(mode === "diff");
+      const f = await fixture(mode);
       const owner = submission.includes("owner") ? "worker-a" : undefined;
       const initial = {
         ...finding(),
