@@ -31,7 +31,8 @@ test("rerun recognizes unchanged context after the workbench serializes its reci
   await mkdir(scanDir, { mode: 0o700 });
   await writeFile(join(repository, "source.ts"), "// synthetic source\n");
   const document = join(root, "architecture.md");
-  await writeFile(document, "Original architecture.");
+  const selectedDocument = join(root, "architecture.md");
+  await writeFile(selectedDocument, "Original architecture.");
   const scanInputs = scanInputIdentity(
     undefined,
     await readKnowledgeBaseSnapshot([document]),
@@ -169,17 +170,18 @@ test("rerun identifies changed instructions and captures current knowledge for t
     const link = join(root, "context");
     await symlink(join(physical, "child"), link);
     context = `${link}/..`;
-    await writeFile(join(root, "architecture.md"), "Other architecture.");
+    await writeFile(`${context}/architecture.md`, "Outside architecture.");
     await writeFile(join(root, "instructions.md"), "Other instructions.");
   }
   const document = `${context}/architecture.md`;
   const prompt = `${context}/instructions.md`;
-  await writeFile(document, "Original architecture.");
+  const selectedDocument = join(root, "architecture.md");
+  await writeFile(selectedDocument, "Original architecture.");
   const scanInputs = scanInputIdentity(
     "Original instructions.",
     await readKnowledgeBaseSnapshot([document]),
   );
-  await writeFile(document, "Current architecture.");
+  await writeFile(selectedDocument, "Current architecture.");
   await writeFile(prompt, "Current instructions.");
   let selected: unknown;
   const stderr = captureCli(main, "stderr");
