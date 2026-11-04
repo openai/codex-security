@@ -112,7 +112,7 @@ async function testDeepScanDetachedCompletion(mode: string) {
   await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
   await writeFile(
     path.join(codexHome, "codex-security", "config.toml"),
-    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 1\nmax_discovery_runs = 2\n",
+    "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
   );
   await writeFile(controlPath, "wait-for-completion");
   await writePythonWrapper(pythonWrapperPath);
@@ -301,7 +301,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         (row: PersistedDeepScanWorker) =>
           row.kind === "dedup" && row.status === "succeeded",
       ).length,
-      1,
+      2,
     );
     const selectedBytes = await readFile(
       path.join(finished.scanDir, finished.finalizationInput.resultPath),
@@ -644,7 +644,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         );
         assert.equal(
           (await readJsonLines(startLogPath)).length,
-          3,
+          2,
           "rejected replay launches no workers",
         );
         const afterReplay = await runWorkbench(environment, [
@@ -717,8 +717,8 @@ with sqlite3.connect(sys.argv[1]) as connection:
     assert.equal(publicScan.scan.executionAttribution.owner.threadId, threadId);
     assert.equal(
       (await readJsonLines(startLogPath)).length,
-      3,
-      "completion and replay launch no extra model workers",
+      2,
+      "only the two Standard workers launch model processes",
     );
     assert.equal(
       (await readJsonLines(finalizerLogPath)).length,

@@ -30,6 +30,7 @@ test("Deep engine preserves stopped results for an option-shaped thread ID", asy
   const fixture = await fixtureRun();
   const store = new FakeStore(fixture.run);
   store.run.coordinatorGeneration = 7;
+  store.run.workflowVersion = "deep-scan-mcp/v1";
   const handoffClaimToken = randomUUID();
   const registry = new DeepScanCoordinatorRegistry();
   const executor = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
@@ -47,6 +48,7 @@ test("Deep engine preserves stopped results for an option-shaped thread ID", asy
     threadId: "--fixture-owner",
     handoffClaimToken,
     runWorkbench: async (args: string[]) => {
+      if (args[0] === "get-scan") return { scan: {} };
       calls.push(args);
       return {};
     },
@@ -105,6 +107,7 @@ test("Deep engine publishes an accepted historical scan without another model tu
     mergeState: "buffered" as const,
   };
   store.workers.set(worker.id, worker);
+  run.workflowVersion = "deep-scan-mcp/v1";
   run.persistedWorkers = [worker];
   run.dispatchedCount = 1;
   const staged: { draft: string; checkpoint: string }[] = [];

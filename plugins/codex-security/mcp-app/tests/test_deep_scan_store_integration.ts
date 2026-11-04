@@ -1,3 +1,4 @@
+import { WORKBENCH_PYTHON } from "../src/server/workbench-process.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
 import { finding } from "./scan-draft-fixture.ts";
@@ -79,44 +80,51 @@ async function testCoordinatorCommitResponseRecovery(
   const attempts = new Map<string, string[][]>();
   let failureWrites = 0;
   let committedManifest: string | undefined;
-  const store = new WorkbenchDeepScanStore(async (args: string[]) => {
-    const result = await runWorkbench(args);
-    if (args[0] === "fail-deep-scan") failureWrites += 1;
-    if (args[0] === "finish-deep-scan") {
-      committedManifest ??= await readFile(
-        args[args.indexOf("--manifest-path") + 1],
-        "utf8",
+  const store = new WorkbenchDeepScanStore(
+    async (args, input, selectFinalization = false) => {
+      const result = await runWorkbench(
+        args,
+        input,
+        Boolean(selectFinalization),
       );
-    }
-    if (
-      args[0] !== "record-deep-scan-iteration" &&
-      args[0] !== "finish-deep-scan" &&
-      !(
-        args[0] === "upsert-deep-scan-worker" &&
-        args[args.indexOf("--kind") + 1] === "discovery" &&
-        args[args.indexOf("--status") + 1] === "succeeded"
+      if (selectFinalization) return result;
+      if (args[0] === "fail-deep-scan") failureWrites += 1;
+      if (args[0] === "finish-deep-scan") {
+        committedManifest ??= await readFile(
+          args[args.indexOf("--manifest-path") + 1],
+          "utf8",
+        );
+      }
+      if (
+        args[0] !== "record-deep-scan-iteration" &&
+        args[0] !== "finish-deep-scan" &&
+        !(
+          args[0] === "upsert-deep-scan-worker" &&
+          args[args.indexOf("--kind") + 1] === "discovery" &&
+          args[args.indexOf("--status") + 1] === "succeeded"
+        )
       )
-    )
+        return result;
+      const calls = attempts.get(args[0]) ?? [];
+      calls.push([...args]);
+      attempts.set(args[0], calls);
+      if (
+        args[0] === "record-deep-scan-iteration" &&
+        (calls.length === 1 || exhaustCommitRetries)
+      ) {
+        throw Object.assign(
+          new Error("workbench response timed out after commit"),
+          {
+            code: "ETIMEDOUT",
+          },
+        );
+      }
+      // Reproduce truncated stdout after the actual SQLite mutation committed.
+      if (calls.length === 1 || args[0] === exhaustOperation)
+        return JSON.parse('{"deepScan":');
       return result;
-    const calls = attempts.get(args[0]) ?? [];
-    calls.push([...args]);
-    attempts.set(args[0], calls);
-    if (
-      args[0] === "record-deep-scan-iteration" &&
-      (calls.length === 1 || exhaustCommitRetries)
-    ) {
-      throw Object.assign(
-        new Error("workbench response timed out after commit"),
-        {
-          code: "ETIMEDOUT",
-        },
-      );
-    }
-    // Reproduce truncated stdout after the actual SQLite mutation committed.
-    if (calls.length === 1 || args[0] === exhaustOperation)
-      return JSON.parse('{"deepScan":');
-    return result;
-  });
+    },
+  );
   try {
     await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
       recursive: true,
@@ -233,12 +241,28 @@ async function createWorkbenchFixture(prefix: string) {
 
 function createWorkbenchRunner(environment: NodeJS.ProcessEnv, bounded = true) {
   const python = process.env.PYTHON?.trim() || "python3";
-  return async (args: string[]) => {
-    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
-      cwd: pluginRoot,
-      env: environment,
-      ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
-    });
+  return async (
+    args: string[],
+    input?: string | Buffer,
+    selectFinalization = false,
+  ) => {
+    const execution = execFileAsync(
+      python,
+      [
+        "-c",
+        WORKBENCH_PYTHON,
+        workbenchPath,
+        ...(selectFinalization ? ["select_finalization"] : []),
+      ],
+      {
+        cwd: pluginRoot,
+        env: environment,
+        ...(bounded ? { timeout: 30_000, maxBuffer: 4 * 1024 * 1024 } : {}),
+      },
+    );
+    execution.child.stdin!.write(JSON.stringify(args) + "\n");
+    execution.child.stdin!.end(input);
+    const { stdout } = await execution;
     return JSON.parse(stdout);
   };
 }

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { importModule } from "./import-module.ts";
+import { importNativeModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -97,7 +97,7 @@ const {
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
-} = (await importModule({
+} = (await importNativeModule({
   stdin: {
     contents: [
       'export { archiveDirectory } from "./src/deep-scan/artifacts.ts";',
@@ -214,12 +214,21 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     return JSON.parse((await execution).stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  let run = await store.begin({
+  // Exercise saved v1 checkpoints with the writer version that produced them.
+  const historical = await runWorkbench([
+    "begin-deep-scan",
+    "--target-path",
     targetPath,
-    scope: ".",
+    "--scope",
+    ".",
+    "--thread-id",
     threadId,
+    "--scan-root",
     scanRoot,
-  });
+    "--workflow-version",
+    "deep-scan-mcp/v1",
+  ]);
+  let run = await store.get(historical.deepScan.scanId, threadId);
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
