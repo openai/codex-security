@@ -1664,7 +1664,6 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
-          providerEnvKey,
         );
         if (output.appServer !== undefined) {
           const controller = new AbortController();
@@ -4753,11 +4752,10 @@ export async function main(
                     config,
                     scanCodexHome(dependencies.environment),
                   );
-                  if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider(effectiveConfig),
+                      config: effectiveConfig,
                       command: "policy",
                       signal,
                     },
@@ -9857,24 +9855,25 @@ function diagnosticValue(value: unknown): string {
 async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
-    provider: unknown;
+    config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanAuthMode | undefined> {
-  const { auth, provider, signal } = options;
+  const { auth, config, signal } = options;
   if (
     errorOutput.isTTY !== true ||
-    isExternalModelProvider(provider) ||
+    hasCommandAuth(config) ||
+    scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
     return auth;
   const authentication = scanAuthentication(
     dependencies.environment,
     auth,
-    provider,
+    scanModelProvider(config),
   );
   if (authentication.method !== "api_key") return auth;
   const prompt =
@@ -10140,7 +10139,7 @@ async function executeScan(
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
-              provider,
+              config: effectiveConfiguration,
               command: "scan",
               signal: preparationAbortController.signal,
             },

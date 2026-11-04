@@ -257,6 +257,7 @@ async function harness(
         await rename(temporary, path);
         return {};
       }
+      if (args[0] === "check-deep-scan-target") return {};
       if (args[0] === "list-scans")
         return {
           scans: [...records.values()],
@@ -342,6 +343,37 @@ async function harness(
 }
 
 describe("ordinary scan composition", () => {
+  test("an empty fresh target records failure without reserving or starting children", async () => {
+    const h = await harness();
+    const workbench = h.input.workbench;
+    let checks = 0;
+    h.input.workbench = (args, input, signal) => {
+      if (args[0] === "check-deep-scan-target") {
+        checks++;
+        expect(args).toEqual([
+          "check-deep-scan-target",
+          "--scan-id",
+          h.input.scanId,
+        ]);
+        expect(signal?.aborted).toBe(false);
+        throw new Error(
+          "Deep Scan target is empty; no security audit was performed.",
+        );
+      }
+      return workbench(args, input, signal);
+    };
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      "Deep Scan target is empty",
+    );
+    expect(checks).toBe(1);
+    expect(h.calls).toHaveLength(0);
+    expect(await h.checkpoint()).toMatchObject({
+      passes: [],
+      terminalReason: "failed",
+      aggregate: null,
+    });
+  });
+
   test.each(
     (["discovery", "merge"] as const).flatMap((role) =>
       [false, true].flatMap((resumed) =>

@@ -31,6 +31,7 @@ import workbench_remediation as remediation_state
 import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
+from check_deep_scan_target import check_selected_targets
 from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import (
     PRODUCER_NAME,
@@ -3344,9 +3345,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         **globals(),
         preserve_stopped_results=preserve_stopped_results_after_transition,
     )
-    with closing(
-        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
-    ) as connection:
+    deferred = args.command in {"check-deep-scan-target", "get-scan", "list-scans", "database-info"}
+    with closing(connect(deferred=deferred)) as connection:
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
             "create-workspace": create_workspace,
@@ -3402,6 +3402,17 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "begin-deep-scan":
             result = begin_deep_scan(connection, args)
+        elif args.command == "check-deep-scan-target":
+            scan = require_scan(connection, args.scan_id)
+            try:
+                check_selected_targets(
+                    Path(scan["target_path"]),
+                    requested_scan_paths(scan),
+                    requested_scan_file_paths(scan),
+                )
+            except (OSError, ValueError) as exc:
+                raise SystemExit(str(exc)) from exc
+            result = {}
         elif args.command == "get-scan":
             if args.check_target:
                 require_scan_target_unchanged(require_scan(connection, args.scan_id))

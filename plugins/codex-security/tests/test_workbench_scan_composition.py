@@ -40,6 +40,18 @@ def _scan_workspace(tmp_path: Path, source: str = "print('fixture')\n") -> tuple
     return tmp_path / "state", target
 
 
+def test_fresh_deep_scan_admission_reads_only_the_registered_selection(tmp_path: Path) -> None:
+    state, target = _scan_workspace(tmp_path)
+    selected = target / "selected"
+    selected.mkdir()
+    parent = register(state, target, tmp_path / "scan", mode="deep", paths=("selected",))
+    command = ("check-deep-scan-target", "--scan-id", parent["scanId"])
+    stopped = run_workbench(state, *command, check=False)
+    assert stopped["returncode"] and "Deep Scan target is empty" in stopped["stderr"]
+    (selected / "valid.py").touch()
+    assert run_workbench(state, *command) == {}
+
+
 def _result_files(scan_dir: Path, *extra: str) -> dict[str, bytes]:
     manifest = (scan_dir / "scan-manifest.json").read_bytes()
     names = ["findings.json", *extra]

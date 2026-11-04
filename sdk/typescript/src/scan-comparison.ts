@@ -30,6 +30,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
+  isExternalModelProvider,
+  scanProviderEnvKey,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -43,6 +45,13 @@ import {
   type JsonObject,
 } from "./config.js";
 import { prepareReadOnlyExecution } from "./execution-preparation.js";
+import {
+  scanAuthentication,
+  selectedScanEnvironment,
+  declaredProviderEnvironment,
+  withoutProviderEnvironment,
+  definedEnvironment,
+} from "./execution-auth.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
@@ -287,7 +296,11 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput & SavedComparisonContext,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    singleTurn?: boolean;
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   validateComparisonInput(input);
@@ -647,7 +660,9 @@ async function startPreparedReadOnlyCodexThread(
 
 async function startReadOnlyCodexThread(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3],
+  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+    nativeProviderEnvironment?: Record<string, string>;
+  },
 ): Promise<{
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
@@ -741,6 +756,11 @@ async function startReadOnlyCodexThread(
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
+  const modelProvider = scanModelProvider(providerConfig);
+  const nativeKey =
+    !commandAuth && !isExternalModelProvider(modelProvider)
+      ? scanProviderEnvKey(providerConfig)
+      : undefined;
   const environment = await comparisonEnvironment(
     source,
     accountStatus,
@@ -748,7 +768,21 @@ async function startReadOnlyCodexThread(
     undefined,
     providerConfig,
     options.preserveProviderEnvironment,
+    nativeKey,
+    options.auth,
   );
+  const helperEnvironment =
+    nativeKey === undefined
+      ? environment
+      : definedEnvironment(
+          withoutProviderEnvironment(
+            environment,
+            declaredProviderEnvironment(
+              resolveCodexProfile(providerConfig)["model_providers"],
+              environment,
+            ),
+          ),
+        );
   const command = resolveCodexCommand(environment);
   const prepared = prepareReadOnlyExecution(
     sdkConfig,
@@ -759,20 +793,21 @@ async function startReadOnlyCodexThread(
   const codexOptions: CodexOptions = {
     configOverrides: [...prepared.overrides, requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
-    env: environment,
+    env: helperEnvironment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
-    apiKey: options.preserveProviderEnvironment
-      ? undefined
-      : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
-        environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
-        undefined,
+    apiKey:
+      options.preserveProviderEnvironment || nativeKey !== undefined
+        ? undefined
+        : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
+          environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
+          undefined,
     config: {
       ...prepared.config,
       windows,
       mcp_servers: await disabledMcpServers(
         await providerPreflightCommand(command, providerSettings),
         config,
-        environment,
+        helperEnvironment,
         options,
       ),
       allow_login_shell: false,
@@ -848,6 +883,12 @@ async function startReadOnlyCodexThread(
       );
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
+    }
+    if (nativeKey !== undefined) {
+      codexOptions.env = {
+        ...runtimeOptions.nativeProviderEnvironment,
+        ...environment,
+      };
     }
     const codex =
       profile === undefined
@@ -1365,6 +1406,8 @@ export async function comparisonEnvironment(
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
   preserveProviderEnvironment = false,
+  nativeKey?: string,
+  auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -1380,6 +1423,13 @@ export async function comparisonEnvironment(
     }
   }
   if (preserveProviderEnvironment) return environment;
+  if (nativeKey !== undefined && config !== undefined) {
+    const provider = scanModelProvider(config);
+    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+    return definedEnvironment(
+      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+    );
+  }
   if (
     hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
   ) {

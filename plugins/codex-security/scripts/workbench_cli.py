@@ -128,6 +128,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
         diff_content_digest=None,
     )
 
+    add_command("check-deep-scan-target", "--scan-id")
     get_scan = add_command("get-scan", "--scan-id")
     get_scan.add_argument("--occurrence-id")
     get_scan.add_argument("--check-target", action="store_true")

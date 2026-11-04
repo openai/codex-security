@@ -127,12 +127,18 @@ export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
 ): string | undefined {
   const selected = scanModelProvider(config);
-  if (!isExternalModelProvider(selected)) return undefined;
+  if (
+    typeof selected !== "string" ||
+    ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
+  )
+    return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"
     ? provider["env_key"]
-    : EXTERNAL_CODEX_PROVIDERS[selected].env_key;
+    : isExternalModelProvider(selected)
+      ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
+      : undefined;
 }
 
 /** @internal Native Codex validates the auth table, including invalid selections. */

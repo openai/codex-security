@@ -16,12 +16,10 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import {
-  EXTERNAL_CODEX_PROVIDERS,
   MODEL_FILE_SETTINGS,
   deepMerge,
   hasCommandAuth,
   inlineToml,
-  isExternalModelProvider,
   resolveCodexProfile,
   scanModelProvider,
   scanProviderEnvKey,
@@ -32,9 +30,11 @@ import {
   writePrivateConfig,
   type JsonObject,
 } from "./config.js";
-import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
+import { CodexSecurityError } from "./errors.js";
 import {
   scanAuthentication,
+  declaredProviderEnvironment,
+  withoutProviderEnvironment,
   environmentApiKey,
   environmentValue,
   selectedScanEnvironment,
@@ -89,11 +89,9 @@ export interface ExecutionSource {
   readonly environment: ProcessEnvironment;
   readonly authentication: ScanAuthentication;
   readonly modelProvider: unknown;
-  readonly externalProvider: {
-    readonly name: string;
-    readonly env_key: string;
-    readonly base_url: string;
-  } | null;
+  readonly providerEnvKey?: string;
+  /** Native credentials travel only to the model process. */
+  readonly modelEnvironment?: Record<string, string>;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
 }
@@ -119,48 +117,51 @@ export function prepareExecutionSource(input: {
   const modelProvider = scanModelProvider(configuration);
   const preserveProviderEnvironment =
     input.preserveProviderEnvironment === true;
-  const externalProvider =
-    !preserveProviderEnvironment &&
-    !commandAuth &&
-    isExternalModelProvider(modelProvider)
-      ? {
-          ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
-          env_key:
-            scanProviderEnvKey(configuration) ??
-            EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key,
-        }
-      : null;
+  const providerEnvKey = commandAuth
+    ? undefined
+    : scanProviderEnvKey(configuration);
   const authentication = scanAuthentication(
     environment,
-    preserveProviderEnvironment ? "auto" : input.auth,
+    preserveProviderEnvironment && input.auth !== "chatgpt"
+      ? "auto"
+      : input.auth,
     modelProvider,
     commandAuth,
-    { preserveProviderEnvironment, providerEnvKey: externalProvider?.env_key },
+    { preserveProviderEnvironment, providerEnvKey },
   );
   const apiKey =
     !preserveProviderEnvironment && authentication.method === "api_key"
-      ? environmentApiKey(environment, modelProvider, externalProvider?.env_key)
+      ? environmentApiKey(environment, modelProvider, providerEnvKey)
       : null;
-  if (externalProvider !== null && apiKey === null)
-    throw new AuthenticationRequiredError(
-      `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
-    );
+  const selected = preserveProviderEnvironment
+    ? environment
+    : selectedScanEnvironment(
+        commandAuth ? configuredAuthEnvironment(environment) : environment,
+        input.auth,
+        modelProvider,
+        providerEnvKey,
+        configuration,
+      );
+  const modelEnvironment =
+    providerEnvKey === undefined
+      ? undefined
+      : {
+          ...declaredProviderEnvironment(
+            resolveCodexProfile(configuration)["model_providers"],
+            selected,
+          ),
+          ...(apiKey === null ? {} : { [providerEnvKey]: apiKey }),
+        };
   return {
     command: { ...input.command },
     configuration,
     modelProvider,
-    externalProvider,
+    providerEnvKey,
+    modelEnvironment,
     authentication,
     apiKey,
     preserveProviderEnvironment,
-    environment: preserveProviderEnvironment
-      ? environment
-      : selectedScanEnvironment(
-          commandAuth ? configuredAuthEnvironment(environment) : environment,
-          input.auth,
-          modelProvider,
-          externalProvider?.env_key,
-        ),
+    environment: withoutProviderEnvironment(selected, modelEnvironment),
   };
 }
 
@@ -278,7 +279,8 @@ export async function createExecutionCodex(
   const { runtime, python, sessionConfig } = session;
   const {
     environment: scanEnvironment,
-    externalProvider,
+    providerEnvKey,
+    modelEnvironment,
     apiKey,
     preserveProviderEnvironment,
   } = session.source;
@@ -290,9 +292,7 @@ export async function createExecutionCodex(
       }),
       git,
     ),
-    ...(externalProvider === null
-      ? {}
-      : { [externalProvider.env_key]: apiKey! }),
+    ...modelEnvironment,
     CODEX_HOME: runtime.codexHome,
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(scanEnvironment),
     ...runtimePaths,
@@ -342,9 +342,7 @@ export async function createExecutionCodex(
       ? environment
       : {
           ...configuredAuthEnvironment(environment),
-          ...(externalProvider === null
-            ? {}
-            : { [externalProvider.env_key]: apiKey! }),
+          ...modelEnvironment,
         },
   );
   if (
@@ -364,7 +362,7 @@ export async function createExecutionCodex(
     ...(codexPathOverride === undefined
       ? {}
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
-    ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+    ...(providerEnvKey !== undefined || apiKey === null ? {} : { apiKey }),
     configOverrides: [requestContext.configOverride, ...configOverrides],
     env: sdkEnvironment,
     config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
