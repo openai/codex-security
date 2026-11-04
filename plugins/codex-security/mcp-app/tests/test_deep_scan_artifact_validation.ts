@@ -681,6 +681,10 @@ async function testCoveragePublicationParity(root: string) {
     "artifacts/review.md",
     "artifacts/./review.md",
     "artifacts//review.md",
+    workerReceiptRef(output, "artifacts/review.md").replace(
+      "/workers/",
+      "/./workers//",
+    ),
   ]) {
     const result = structuredClone(original);
     result.reviewState.surfaces[0].receiptRefs = [ref];
@@ -688,7 +692,7 @@ async function testCoveragePublicationParity(root: string) {
       {
         id: "review",
         reason: "Review another route.",
-        paths: [".", "./src//api.ts"],
+        paths: [".", "./src//api.ts", "é:helper.ts"],
         surfaceIds: ["api"],
         receiptRefs: { external: "opaque metadata" },
       },
@@ -712,6 +716,9 @@ async function testCoveragePublicationParity(root: string) {
       { ...worker, result: accepted },
       worker.artifacts.scanDir,
     );
+    assert.deepEqual(coverage.surfaces[0].receiptRefs, [
+      workerReceiptRef(output, "artifacts/review.md"),
+    ]);
     assert.deepEqual(coverage.deferred[0].receiptRefs, {
       external: "opaque metadata",
     });
@@ -755,6 +762,41 @@ async function testCoveragePublicationParity(root: string) {
       error: /well-formed Unicode/,
     },
   ];
+  const closure = { id: "route", reason: "Reviewed route." };
+  cases.push(
+    {
+      patch: (result) => {
+        result.reviewState.resolvedDeferred = [closure, closure];
+      },
+      error: /repeats resolved deferred id/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.deferred = [
+          { id: "route", reason: "Still pending." },
+        ];
+        result.reviewState.resolvedDeferred = [closure];
+      },
+      error: /deferred work is still active/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.deferred = [
+          { id: "other", candidateId: "route", reason: "Needs evidence." },
+        ];
+        result.reviewState.resolvedDeferred = [closure];
+      },
+      error: /deferred work is still active/,
+    },
+    {
+      patch: (result) => {
+        result.reviewState.resolvedDeferred = [
+          { ...closure, reason: "Invalid \ud800 text." },
+        ];
+      },
+      error: /well-formed Unicode/,
+    },
+  );
   for (const ref of ["artifacts/conİn$", "artifacts/conın$"]) {
     cases.push({
       patch: (result) => {
@@ -776,15 +818,20 @@ async function testCoveragePublicationParity(root: string) {
     path.join(output, "artifacts/Review.md"),
     "Other case-sensitive evidence.\n",
   );
-  cases.push({
-    patch: (result) => {
-      result.reviewState.surfaces[0].receiptRefs = [
-        "artifacts/review.md",
-        "artifacts/Review.md",
-      ];
-    },
-    error: /duplicate artifact path/,
-  });
+  for (const second of [
+    "artifacts/Review.md",
+    workerReceiptRef(output, "artifacts/Review.md"),
+  ]) {
+    cases.push({
+      patch: (result) => {
+        result.reviewState.surfaces[0].receiptRefs = [
+          "artifacts/review.md",
+          second,
+        ];
+      },
+      error: /duplicate artifact path/,
+    });
+  }
   for (const { patch, error } of cases) {
     const result = structuredClone(original);
     patch(result);
