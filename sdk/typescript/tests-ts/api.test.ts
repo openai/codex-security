@@ -13742,10 +13742,33 @@ if __name__ == "__main__":
       undefined,
     ],
     ["managed provider selection retains matching", "managed", undefined],
+    [
+      "post-scan inference needs a declared Codex header",
+      "CODEX_API_KEY",
+      undefined,
+    ],
+    [
+      "post-scan inference needs a declared OpenAI header",
+      "OPENAI_API_KEY",
+      undefined,
+    ],
     ["relative model files preserve scan origin", "model-files", undefined],
   ] as const)(
     "keeps a completed scan when %s",
-    async (_scenario, failure, warning) => {
+    async (_scenario, variant, warning) => {
+      const nativeHeader =
+        variant === "OPENAI_API_KEY" || variant === "CODEX_API_KEY"
+          ? variant
+          : undefined;
+      const failure = nativeHeader ? "managed" : variant;
+      const gatewayEnvironment: Record<string, string> = nativeHeader
+        ? {
+            GATEWAY_TOKEN: "synthetic-gateway-primary",
+            CODEX_API_KEY: "synthetic-unrelated",
+            OPENAI_API_KEY: "synthetic-unrelated",
+            [nativeHeader]: " synthetic-required-header ",
+          }
+        : {};
       const limited = failure === "budget" || failure === "budget-context";
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const current = {
@@ -13805,8 +13828,11 @@ if __name__ == "__main__":
             wire_api: "responses",
             env_http_headers: {
               "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+              ...(nativeHeader ? { "X-Gateway-Header": nativeHeader } : {}),
             },
-            auth: { command: "synthetic-auth" },
+            ...(nativeHeader
+              ? { env_key: "GATEWAY_TOKEN" }
+              : { auth: { command: "synthetic-auth" } }),
           },
           ...(failure === "managed"
             ? { "synthetic.managed": managedProvider }
@@ -13831,6 +13857,13 @@ if __name__ == "__main__":
           }
           const kind = args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec";
           const call = { kind, args };
+          if (${Boolean(nativeHeader)}) {
+            call.credentials = {
+              GATEWAY_TOKEN: process.env.GATEWAY_TOKEN,
+              OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+              CODEX_API_KEY: process.env.CODEX_API_KEY,
+            };
+          }
           if (kind !== "exec") {
             call.metadata = config.model_providers;
             appendFileSync(${JSON.stringify(startupCallsPath)}, JSON.stringify(call) + "\\n");
@@ -13859,7 +13892,7 @@ if __name__ == "__main__":
             const request = JSON.parse(line);
             if (request.id === undefined) continue;
             const result = request.method === "config/read"
-              ? { config: { ...config, model_provider: "synthetic.managed" } }
+              ? { config: { ...config, model_provider: ${JSON.stringify(nativeHeader ? "synthetic.provider" : "synthetic.managed")} } }
               : request.method === "permissionProfile/list"
                 ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null }
                 : {};
@@ -13910,9 +13943,11 @@ if __name__ == "__main__":
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
+          environment: gatewayEnvironment,
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
+              ...gatewayEnvironment,
               ...(failure === "managed"
                 ? {
                     PATH: process.env["PATH"] ?? "",
@@ -14120,7 +14155,7 @@ if __name__ == "__main__":
       );
 
       const ownerSpy =
-        failure === "managed"
+        failure === "managed" && !nativeHeader
           ? spyOn(
               ownerArtifacts,
               "writeScanOwnerSuggestions",
@@ -14151,7 +14186,7 @@ if __name__ == "__main__":
           : undefined;
       try {
         const result = await client.run(repository, {
-          ownerSuggestions: failure === "managed",
+          ownerSuggestions: ownerSpy !== undefined,
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onProgress() {},
@@ -14210,18 +14245,16 @@ if __name__ == "__main__":
             .trim()
             .split("\n")
             .map((line) => JSON.parse(line));
-          expect(ownerSpy).toHaveBeenCalledTimes(1);
-          expect(result.ownerSuggestionsPath).toBe(
-            join(scanDir, "owner-suggestions.json"),
+          if (ownerSpy) {
+            expect(ownerSpy).toHaveBeenCalledTimes(1);
+            expect(result.ownerSuggestionsPath).toBe(
+              join(scanDir, "owner-suggestions.json"),
+            );
+          }
+          const startup = ["mcp", "preflight", "exec"];
+          expect(calls.map(({ kind }) => kind)).toEqual(
+            ownerSpy ? [...startup, ...startup] : startup,
           );
-          expect(calls.map(({ kind }) => kind)).toEqual([
-            "mcp",
-            "preflight",
-            "exec",
-            "mcp",
-            "preflight",
-            "exec",
-          ]);
           const metadata = {
             "synthetic.provider": {
               name: "Synthetic provider",
@@ -14233,6 +14266,19 @@ if __name__ == "__main__":
               requires_openai_auth: false,
             },
           };
+          if (nativeHeader) {
+            for (const call of calls) {
+              if (call.kind === "exec") {
+                expect(call.credentials).toEqual({
+                  GATEWAY_TOKEN: "synthetic-gateway-primary",
+                  [nativeHeader]: " synthetic-required-header ",
+                });
+              } else {
+                expect(call.credentials).not.toHaveProperty("OPENAI_API_KEY");
+                expect(call.credentials).not.toHaveProperty("CODEX_API_KEY");
+              }
+            }
+          }
           expect(calls[0].metadata).toEqual(metadata);
           expect(calls[1].metadata).toEqual(metadata);
           expect(calls[2]).toMatchObject({

@@ -41,15 +41,15 @@ export async function createCodexSecurityArtifactWriterServer(
   // Older coordinators sent only the requested paths, with lexical scope matching.
   const includePaths = isRecord(scopeInput) ? scopeInput.paths : scopeInput;
   const filePaths = isRecord(scopeInput) ? scopeInput.filePaths : undefined;
-  for (const paths of [includePaths, filePaths]) {
-    if (
-      paths !== undefined &&
-      (!Array.isArray(paths) || paths.some((path) => typeof path !== "string"))
-    ) {
-      throw new Error(
-        "The coordinator-bound include paths must be an array of paths.",
-      );
-    }
+  const isPathList = (paths: unknown): paths is string[] =>
+    Array.isArray(paths) && paths.every((path) => typeof path === "string");
+  if (
+    (scopeInput !== undefined && !isPathList(includePaths)) ||
+    (filePaths !== undefined && !isPathList(filePaths))
+  ) {
+    throw new Error(
+      "The coordinator-bound include paths must be an array of paths.",
+    );
   }
   const pluginRoot = environment.CODEX_SECURITY_PLUGIN_ROOT
     ? environment.CODEX_SECURITY_PLUGIN_ROOT
@@ -57,8 +57,7 @@ export async function createCodexSecurityArtifactWriterServer(
   const pythonCommand = environment.CODEX_SECURITY_PYTHON_COMMAND
     ? environment.CODEX_SECURITY_PYTHON_COMMAND
     : undefined;
-  // Preserve the asynchronous context boundary before server construction.
-  const context: ArtifactContext = await (async () => ({
+  const context: ArtifactContext = {
     root: await canonicalDirectory(root, "Codex Security worker artifact root"),
     repoRoot: await canonicalDirectory(
       repoRoot,
@@ -80,7 +79,7 @@ export async function createCodexSecurityArtifactWriterServer(
     ...defined("filePaths", filePaths as string[] | undefined),
     ...defined("pluginRoot", pluginRoot),
     ...defined("pythonCommand", pythonCommand),
-  }))();
+  };
   const server = new McpServer(
     { name: "codex-security-artifacts", version: MCP_APP_VERSION },
     {
