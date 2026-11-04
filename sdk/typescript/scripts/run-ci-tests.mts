@@ -66,19 +66,15 @@ process.stderr.on("error", () => {
 });
 const flush = (): Promise<void> => {
   flushing ??= (async () => {
-    for (;;) {
+    while (!relayFailed) {
       const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
       if (bytesRead === 0) return;
       offset += bytesRead;
-      if (relayFailed) continue;
       await new Promise<void>((resolve) => {
-        process.stderr.write(
-          Buffer.from(buffer.subarray(0, bytesRead)),
-          (error) => {
-            if (error) relayFailed = true;
-            resolve();
-          },
-        );
+        process.stderr.write(buffer.subarray(0, bytesRead), (error) => {
+          if (error) relayFailed = true;
+          resolve();
+        });
       });
     }
   })()
@@ -116,7 +112,7 @@ try {
   clearInterval(relay);
   await flushing;
   await flush();
-  await reader.close();
-  await output.close();
-  await rm(outputDirectory, { recursive: true, force: true });
+  await Promise.allSettled([reader.close(), output.close()]);
+  // A lingering Windows file lock only affects these temporary diagnostics.
+  await rm(outputDirectory, { recursive: true, force: true }).catch(() => {});
 }
