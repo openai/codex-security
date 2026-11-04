@@ -137,7 +137,7 @@ def check_cxflow_version(jar: Path) -> None:
         raise ValueError(f"Unsupported CxFlow version {version or '(unknown)'}. {advice}")
 
 
-def cxsast_environment(work: str) -> dict[str, str]:
+def cxsast_environment(work: str, use_env_credentials: bool = False) -> dict[str, str]:
     # CxFlow uses the chosen profile for its server and Spring configuration.
     env = {name: work for name in ("TEMP", "TMP", "TMPDIR")}
     if os.name == "nt":
@@ -145,48 +145,11 @@ def cxsast_environment(work: str) -> dict[str, str]:
     else:
         # The Java launcher decodes native arguments before applying file.encoding.
         env["LC_CTYPE"] = "UTF-8" if sys.platform == "darwin" else "C.UTF-8"
-    for name in ("CHECKMARX_USERNAME", "CHECKMARX_PASSWORD", "CHECKMARX_CLIENT_SECRET"):
-        if name in os.environ:
-            env[name] = os.environ[name]
+    if use_env_credentials:
+        for name in ("CHECKMARX_USERNAME", "CHECKMARX_PASSWORD", "CHECKMARX_CLIENT_SECRET"):
+            if name in os.environ:
+                env[name] = os.environ[name]
     return env
-
-
-def one_default_profiles() -> set[Path]:
-    # Both cx configuration and its keyring resolver use Go's os/user.Current.
-    if os.name == "nt":
-        import ctypes.wintypes
-
-        get_profile = ctypes.windll.userenv.GetUserProfileDirectoryW
-        token = ctypes.wintypes.HANDLE(-4)  # GetCurrentProcessToken() pseudo-handle
-        size = ctypes.wintypes.DWORD()
-        get_profile(token, None, ctypes.byref(size))
-        directory = ctypes.create_unicode_buffer(size.value)
-        if not get_profile(token, directory, ctypes.byref(size)):
-            raise ctypes.WinError()
-        homes = {Path(directory.value)}
-    else:
-        import pwd
-
-        try:
-            homes = {Path(pwd.getpwuid(os.getuid()).pw_dir)}
-        except KeyError:
-            homes = {Path.home()}
-        if sys.platform == "linux":
-            # The static CLI also checks local passwd entries, with HOME as its fallback.
-            # Guard candidate homes without deciding which matching record Go accepts.
-            homes.add(Path.home())
-            uid = str(os.getuid()).encode()
-            try:
-                with Path("/etc/passwd").open("rb") as passwd:
-                    for row in passwd:
-                        if row.lstrip().startswith((b"#", b"+", b"-")):
-                            continue
-                        fields = row.split(b":", 6)
-                        if len(fields) == 7 and fields[2] == uid:
-                            homes.add(Path(os.fsdecode(fields[5])))
-            except OSError:
-                pass  # Go falls back to HOME when passwd is unreadable.
-    return {home / ".checkmarx" / "checkmarxcli.yaml" for home in homes}
 
 
 def one_environment(source: Path | None, work: str) -> dict[str, str]:
@@ -223,14 +186,13 @@ def one_environment(source: Path | None, work: str) -> dict[str, str]:
                     env[name] = os.environ[name]
         return env
 
-    profiles = {Path(configured)} if configured else one_default_profiles()
-    if any(not path.is_absolute() or in_source(path, source) for path in profiles):
+    profile = Path(configured) if configured else Path.home() / ".checkmarx" / "checkmarxcli.yaml"
+    if not profile.is_absolute() or in_source(profile, source):
         raise ValueError(
             "Set CX_CONFIG_FILE_PATH to a trusted absolute path outside the source checkout. "
             "The collector runs Checkmarx One from a private directory."
         )
-    if configured:
-        env["CX_CONFIG_FILE_PATH"] = configured
+    env["CX_CONFIG_FILE_PATH"] = configured or str(profile)
     if "CX_KEYRING_MODE" in os.environ:
         env["CX_KEYRING_MODE"] = os.environ["CX_KEYRING_MODE"]
     return env
@@ -348,6 +310,9 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                     str(args.cx),
                     "results",
                     "show",
+                    # Older clients reject this flag instead of authenticating with another profile.
+                    "--config-file-path",
+                    env["CX_CONFIG_FILE_PATH"],
                     "--scan-id",
                     args.scan_id,
                     "--report-format",
@@ -358,7 +323,7 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                     "cx_result",
                 ]
             else:
-                env = cxsast_environment(work)
+                env = cxsast_environment(work, args.use_env_credentials)
                 team = args.team.rstrip("/\\")
                 report = Path(work, "checkmarx-results.xml")
                 command = [
@@ -387,6 +352,7 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                     "--cx-flow.mail.notification=false",
                     "--cx-flow.filter-script=",
                     "--disable-break-build",
+                    "--checkmarx.cx-branch=false",
                     "--checkmarx.preserve-xml=true",
                     f"--cx-xml.data-folder={work}",
                     "--cx-xml.file-name-format=checkmarx-results.xml",
@@ -405,7 +371,8 @@ def collect(args: argparse.Namespace, source: Path | None, run_vendor) -> None:
                 verify_cxsast(report, str(args.scan_id), args.project, args.team)
             report.chmod(0o600)
             saved = report.replace(output / report.name)
-        print(saved, flush=True)
+        sys.stdout.buffer.write(f"{saved}\n".encode("utf-8"))
+        sys.stdout.buffer.flush()
     except BaseException:
         shutil.rmtree(output)
         raise
@@ -425,6 +392,11 @@ def main() -> int:
     cxsast.add_argument("--config", required=True)
     cxsast.add_argument("--team", required=True)
     cxsast.add_argument("--project", required=True)
+    cxsast.add_argument(
+        "--use-env-credentials",
+        action="store_true",
+        help="use the Checkmarx credentials selected for this profile's server",
+    )
     args = parser.parse_args()
     if os.environ.get("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS") != "1":
         parser.error("Set CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1 to enable external imports.")
@@ -455,7 +427,7 @@ def main() -> int:
         # Popen can have spawned the child before it returns the handle needed for cleanup.
         defer_termination = True
         try:
-            child = subprocess.Popen(command, **kwargs)
+            child = subprocess.Popen(command, start_new_session=os.name == "posix", **kwargs)
             defer_termination = False
             if pending_signal is not None:
                 raise SystemExit(128 + pending_signal)
@@ -463,7 +435,14 @@ def main() -> int:
         except BaseException:
             defer_termination = True
             if child is not None:
-                child.kill()
+                if os.name == "posix":
+                    # A foreground credential helper can survive the vendor process.
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    child.kill()
                 child.wait()
             raise
         finally:

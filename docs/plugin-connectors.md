@@ -2,7 +2,8 @@
 
 Codex Security uses optional connected apps for Cloud reads, finding intake
 and tracking. The [app manifest](../plugins/codex-security/.app.json)
-declares their identities.
+declares each connection with `required: false` so users can run local scans
+without connecting an app.
 
 | App                  | Workflows                                                 |
 | -------------------- | --------------------------------------------------------- |

@@ -60,8 +60,9 @@ export function checkmarxSource(
 export function projectedCheckmarxRepositoryUrl(
   finding: ExternalFinding,
   target: ExternalImportTarget,
+  reportProvenance = false,
 ) {
-  if (!checkmarxSource(finding)) return;
+  if (!reportProvenance && !checkmarxSource(finding)) return;
   const source = finding.evidence.source_data?.["sourceRepositoryUrl"];
   return typeof source === "string"
     ? declaredScannerRepositoryUrl(source, "Checkmarx", target)

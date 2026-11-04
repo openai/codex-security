@@ -240,6 +240,27 @@ test("a projected Checkmarx row under Wiz retains the report and original asset 
   expect(
     (await bind([row("sdk-row", other)], other)).preview.findings,
   ).toHaveLength(1);
+  const retained = (id: string, url: string) => ({
+    source_finding_id: id,
+    evidence: {
+      ...row(id).evidence,
+      source_data: { sourceRepositoryUrl: url },
+    },
+  });
+  const anchor = row(projected);
+  for (const siblingId of ["wiz-row", "checkmarx-one:" + "b".repeat(64)]) {
+    await expect(
+      bind([anchor, retained(siblingId, other)], source),
+    ).rejects.toThrow(/does not match/);
+    expect(
+      (await bind([anchor, retained(siblingId, source)], source)).preview
+        .findings,
+    ).toHaveLength(2);
+  }
+  expect(
+    (await bind([row("sdk-row"), retained("wiz-row", other)], source)).preview
+      .findings,
+  ).toHaveLength(2);
 });
 
 test("selected native Checkmarx rows bind explicit SDK and reader claims without remotes", async () => {

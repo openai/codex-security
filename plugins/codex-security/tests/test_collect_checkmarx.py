@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import re
 import runpy
+import select
 import shutil
 import signal
 import subprocess
@@ -59,20 +61,6 @@ def executable(directory, name):
     path = directory / (f"{name}.exe" if os.name == "nt" else name)
     shutil.copy(shutil.which("true", path=os.defpath) or sys.executable, path)
     return str(path)
-
-
-@pytest.mark.native_windows
-@pytest.mark.skipif(os.name != "nt", reason="requires the Windows account profile API")
-def test_one_default_profile_uses_the_windows_account_home(monkeypatch, tmp_path):
-    import ctypes.wintypes
-
-    # CSIDL_PROFILE asks the Windows shell for the current user's profile folder.
-    account = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
-    assert ctypes.windll.shell32.SHGetFolderPathW(None, 0x28, None, 0, account) == 0
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    assert Path.home() == tmp_path
-    profiles = runpy.run_path(str(SCRIPT))["one_default_profiles"]()
-    assert profiles == {Path(account.value) / ".checkmarx" / "checkmarxcli.yaml"}
 
 
 @pytest.mark.cross_platform
@@ -379,6 +367,8 @@ def test_one_collects_exact_scan_to_a_fresh_private_path(
             cx,
             "results",
             "show",
+            "--config-file-path",
+            str(config),
             "--scan-id",
             ONE_SCAN,
             "--report-format",
@@ -458,7 +448,16 @@ def test_one_refuses_before_vendor_invocation(refusal, capture_dir, monkeypatch,
 
 @pytest.mark.parametrize(
     "result",
-    ["selected", "scan", "project", "team", "missing team", "expanded team", "invalid XML"],
+    [
+        "profile login",
+        "environment login",
+        "scan",
+        "project",
+        "team",
+        "missing team",
+        "expanded team",
+        "invalid XML",
+    ],
 )
 @pytest.mark.cross_platform
 def test_cxsast_collects_selected_scan_with_xml_tracker(
@@ -508,7 +507,10 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         assert {name.lower() for name in startup_settings}.isdisjoint(
             name.lower() for name in kwargs["env"]
         )
-        assert {name: kwargs["env"][name] for name in credentials} == credentials
+        if result == "environment login":
+            assert {name: kwargs["env"][name] for name in credentials} == credentials
+        else:
+            assert credentials.keys().isdisjoint(kwargs["env"])
         assert all(kwargs["env"][name] == str(cwd) for name in ("TMP", "TEMP", "TMPDIR"))
         if os.name == "nt":
             assert kwargs["env"]["SystemRoot"] == os.environ["SystemRoot"]
@@ -539,6 +541,7 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
             "--cx-flow.preserve-project-name=true",
             "--cx-flow.mail.notification=false",
             "--cx-flow.filter-script=",
+            "--checkmarx.cx-branch=false",
             "--checkmarx.preserve-xml=true",
             f"--cx-xml.data-folder={cwd}",
             "--cx-xml.file-name-format=checkmarx-results.xml",
@@ -577,10 +580,11 @@ def test_cxsast_collects_selected_scan_with_xml_tracker(
         "/CxServer/Masse Team/",
         "--project",
         "Example Project",
+        *(["--use-env-credentials"] if result == "environment login" else []),
     )
     assert {name: os.environ[name] for name in startup_settings} == startup_settings
     stdout = capsys.readouterr().out
-    if result == "selected":
+    if result in {"profile login", "environment login"}:
         assert code == 0
         path = Path(stdout.rstrip("\n"))
         assert path.is_absolute() and path.is_relative_to(capture_dir)
@@ -655,57 +659,6 @@ def test_excludes_source_by_filesystem_identity(capture_dir, monkeypatch, tmp_pa
     assert "outside the source checkout" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "lookup", ["libc", "passwd", "HOME"] if sys.platform == "linux" else ["libc"]
-)
-@pytest.mark.skipif(os.name == "nt", reason="exercises Unix account home lookup")
-@pytest.mark.native_macos
-def test_one_checks_default_profile_from_account_home(
-    lookup, capture_dir, monkeypatch, tmp_path, capsys
-):
-    import pwd
-
-    account = tmp_path / "account"
-    account.mkdir()
-    (account / ".checkmarx").symlink_to(Path.cwd(), target_is_directory=True)
-    (Path.cwd() / "checkmarxcli.yaml").touch()
-    other = tmp_path / "alternate-home"
-    monkeypatch.setenv("HOME", str(account if lookup == "HOME" else other))
-    libc_home = account if lookup == "libc" else other
-    monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(libc_home)))
-    if sys.platform == "linux":
-        passwd = tmp_path / "passwd"
-        entry = b"cx:x:%d:1:Example:%s:/bin/sh\n" % (os.getuid(), os.fsencode(account))
-        # Go skips a commented record and a NIS/invalid group entry before its UID lookup.
-        inactive = b" #old:x:%d:1:Old:%s:/bin/sh\n" % (os.getuid(), os.fsencode(other))
-        inactive += b"+old:x:%d:invalid:Old:%s:/bin/sh\n" % (os.getuid(), os.fsencode(other))
-        passwd.write_bytes(inactive + (entry if lookup == "passwd" else b""))
-        original_open = Path.open
-
-        def open_file(path, *args, **kwargs):
-            return original_open(passwd if str(path) == "/etc/passwd" else path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "open", open_file)
-
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *a, **kw: pytest.fail("unexpected cx invocation")
-    )
-    assert (
-        invoke(
-            monkeypatch,
-            "--source-root",
-            str(Path.cwd()),
-            "one",
-            ONE_SCAN,
-            "--cx",
-            executable(tmp_path, "cx"),
-        )
-        != 0
-    )
-    assert "CX_CONFIG_FILE_PATH" in capsys.readouterr().err
-    assert not list(capture_dir.iterdir())
-
-
 @pytest.mark.cross_platform
 def test_one_accepts_the_same_scan_uuid_in_server_spelling(
     capture_dir, monkeypatch, tmp_path, capsys
@@ -758,32 +711,31 @@ def test_cxsast_rejects_unselected_scope_before_vendor_lookup(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="exercises POSIX termination signals")
-@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize(
+    ("name", "vendor_exits"), [("SIGTERM", False), ("SIGHUP", False), ("SIGINT", True)]
+)
 @pytest.mark.native_macos
-def test_cancellation_reaps_vendor_and_removes_partial_report(
-    name, capture_dir, monkeypatch, tmp_path
+def test_cancellation_stops_vendor_and_helper_and_removes_partial_report(
+    name, vendor_exits, capture_dir, monkeypatch, tmp_path
 ):
-    # Run a native child that signals the active collector after creating its partial report.
-    native_popen = subprocess.Popen
+    popen = subprocess.Popen
     child = None
     signum = getattr(signal, name)
+    vendor = (
+        "import os, signal, subprocess, sys, time; from pathlib import Path; "
+        "subprocess.Popen([sys.executable, '-I', '-S', '-c', 'import sys; sys.stdin.read()']); "
+        "Path('cx_result.json').write_text('partial'); "
+    )
+    if not vendor_exits:
+        vendor += f"os.kill(os.getppid(), signal.{name}); time.sleep(30)"
 
     def start_child(_command, **kwargs):
         nonlocal child
-        child = native_popen(
-            [
-                sys.executable,
-                "-I",
-                "-S",
-                "-c",
-                (
-                    "import os, signal, time; from pathlib import Path; "
-                    "Path('cx_result.json').write_text('partial'); "
-                    f"os.kill(os.getppid(), signal.{name}); time.sleep(30)"
-                ),
-            ],
-            **kwargs,
-        )
+        kwargs.update(stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        child = popen([sys.executable, "-I", "-S", "-c", vendor], **kwargs)
+        if vendor_exits:
+            assert child.wait(timeout=10) == 0
+            signal.raise_signal(signum)
         return child
 
     monkeypatch.setattr(subprocess, "Popen", start_child)
@@ -792,13 +744,17 @@ def test_cancellation_reaps_vendor_and_removes_partial_report(
         assert (
             invoke(monkeypatch, "one", ONE_SCAN, "--cx", executable(tmp_path, "cx")) == 128 + signum
         )
-        assert child is not None and child.returncode == -signal.SIGKILL
+        assert child is not None and child.returncode == (0 if vendor_exits else -signal.SIGKILL)
+        # The waiting helper inherits stdout. EOF proves it exited as well.
+        assert select.select([child.stdout], [], [], 5)[0] and child.stdout.read(1) == b""
         assert not list(capture_dir.iterdir())
     finally:
         signal.signal(signum, previous)
         if child is not None:
+            child.stdin.close()  # Release the helper even if the collector failed to cancel it.
             child.kill()
             child.wait()
+            child.stdout.close()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="exercises POSIX termination signals")
@@ -916,12 +872,15 @@ def test_one_keeps_credentials_with_the_selected_login(capture_dir, tmp_path, mo
     if login in {"named-profile", "env-key"}:
         monkeypatch.setenv("CX_APIKEY", "synthetic-key")
 
-    def run(_args, *, cwd, env, **_kwargs):
+    def run(command, *, cwd, env, **_kwargs):
+        assert command[command.index("--config-file-path") + 1] == env["CX_CONFIG_FILE_PATH"]
         assert {"HTTP_PROXY", "http_proxy", "CX_HTTP_PROXY"}.isdisjoint(env)
         if login in {"named-profile", "default-profile"}:
             assert oauth.keys().isdisjoint(env) and "CX_APIKEY" not in env
             assert env.get("CX_CONFIG_FILE_PATH") == (
-                str(selected) if login == "named-profile" else None
+                str(selected)
+                if login == "named-profile"
+                else str(Path.home() / ".checkmarx" / "checkmarxcli.yaml")
             )
             assert env["CX_KEYRING_MODE"] == "required"
         else:
@@ -938,3 +897,34 @@ def test_one_keeps_credentials_with_the_selected_login(capture_dir, tmp_path, mo
     args = SimpleNamespace(product="one", cx=tmp_path / "cx", scan_id=ONE_SCAN)
     module["collect"](args, Path.cwd(), run)
     assert list(capture_dir.glob("*/*")) == list(capture_dir.glob("*/cx_result.json"))
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("reader_open", [True, False])
+def test_report_path_handoff_uses_utf8_on_a_redirected_pipe(capture_dir, monkeypatch, reader_open):
+    temp = capture_dir / "東京"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.setenv("CX_CONFIG_FILE_PATH", str(capture_dir / "profile.yaml"))
+    collector = runpy.run_path(str(SCRIPT))
+    args = SimpleNamespace(product="one", scan_id=ONE_SCAN, cx="unused")
+
+    def export(_command, *, cwd, **_kwargs):
+        Path(cwd, "cx_result.json").write_text(json.dumps({"scanID": ONE_SCAN}))
+        return 0
+
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb", buffering=0) as writer:
+        with io.TextIOWrapper(writer, encoding="cp1252") as stdout, monkeypatch.context() as patch:
+            patch.setattr(sys, "stdout", stdout)
+            if reader_open:
+                collector["collect"](args, None, export)
+            else:
+                reader.close()
+                with pytest.raises(OSError):
+                    collector["collect"](args, None, export)
+        if reader_open:
+            saved = next(temp.glob("checkmarx-report-*/cx_result.json"))
+            assert reader.read() == f"{saved}\n".encode("utf-8")
+        else:
+            assert not list(temp.iterdir())

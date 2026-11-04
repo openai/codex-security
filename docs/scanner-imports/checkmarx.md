@@ -9,6 +9,8 @@ environment where Codex or the CLI runs.
 export CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1
 ```
 
+If you already have a report, use its path in the [preview and import steps](#preview-import-and-verify).
+
 ## Collect an existing scan with Codex
 
 Ask the **publish-findings** skill to preview a particular scan in your checkout.
@@ -29,7 +31,9 @@ Request the full CxSAST scan when using automatic collection. CxFlow exports the
 full XML even when its issue-tracker profile filters by severity or query. For
 a subset, supply XML exported with the desired filters. Checkmarx One also
 retrieves every engine in the selected scan before import selects SAST results.
-You can supply a CLI JSON report exported to the desired scope.
+For a mixed-engine scan, its CLI can generate and download an SCA package
+report while assembling the JSON. You can supply a CLI JSON report exported to
+the desired scope.
 
 Use a trusted Codex session with your existing Checkmarx sign-in. If you
 started Codex from a build or IDE that loads libraries or shell startup files
@@ -41,31 +45,37 @@ Provide trusted absolute paths outside the source tree for the native Python
 3.10+ interpreter and vendor tools. For `cx` and Java, use native binaries or
 symlinks to them.
 
-For Checkmarx One, use your installed `cx` and existing sign-in. To select
-a saved profile, set `CX_CONFIG_FILE_PATH` to its trusted absolute path.
-The collector uses that profile with its stored credentials. Without an
-explicit profile, it uses a complete environment login if present, or the
-default saved profile. For an environment login, use `CX_APIKEY` or provide
-`CX_CLIENT_ID`, `CX_CLIENT_SECRET`, `CX_BASE_URI` and `CX_TENANT` together.
-For a separate OAuth server, also set `CX_BASE_AUTH_URI`. Confirm the tenant
-and server for that login before collecting. The collector keeps an
-environment login separate from credentials stored in a profile.
+Checkmarx One collection requires `cx` 2.3.23 or later. To use a saved
+sign-in, set `CX_CONFIG_FILE_PATH` to the trusted absolute path of its
+profile. Without an explicit path, the collector uses a complete environment
+login if present, or the usual `~/.checkmarx/checkmarxcli.yaml` profile. For
+another profile location or file format, supply its actual path. If your
+installation uses only a credential store with no profile file, or an older
+CLI, supply a JSON export from your signed-in CLI.
+
+For an environment login, use `CX_APIKEY` or provide `CX_CLIENT_ID`,
+`CX_CLIENT_SECRET`, `CX_BASE_URI` and `CX_TENANT` together. For a separate
+OAuth server, also set `CX_BASE_AUTH_URI`. Confirm the tenant and server
+before collection. The collector passes this login to a private, empty profile
+so saved credentials stay separate.
 
 For CxSAST, supply Java and a released CxFlow JAR, version 1.6.37 or later.
 The collector checks the JAR version before retrieving a named scan. For an
 older or unrecognized JAR, supply an XML export from the selected scan.
 [CxFlow 1.6.37 release notes](https://github.com/checkmarx-ltd/cx-flow/releases/tag/1.6.37)
 
-In a trusted SAST-only configuration, set the Checkmarx server address and
-enable the `CxXml` file writer. Keep
-the profile and everything it loads outside the source tree and under your
-control. CxFlow runs in a fresh environment. The collector forwards only three
-credential variables from your session (`CHECKMARX_USERNAME`, `CHECKMARX_PASSWORD`
-and `CHECKMARX_CLIENT_SECRET`). Set a custom `checkmarx.client-id` in the profile
-if your server requires one. [CxFlow credential settings](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Tutorials.md#L382-L390)
+For CxSAST, set the server address and enable the `CxXml` writer in a
+trusted SAST-only profile. Keep the profile and everything it loads outside
+the source tree and under your control. CxFlow starts with the profile's
+authentication. To use credentials from your session, confirm that they are
+intended for that server. Codex can then pass the supported variables you
+set (`CHECKMARX_USERNAME`, `CHECKMARX_PASSWORD`, `CHECKMARX_CLIENT_SECRET`). Set
+a custom `checkmarx.client-id` in the profile if your server requires one.
+[CxFlow credential settings](https://github.com/checkmarx-ltd/cx-flow/blob/v1.7.14/docs/Tutorials.md#L382-L390)
 
-The collector retrieves the existing scan in project mode, selects the XML file
-writer and writes logs in a private directory. If CxFlow cannot look up the
+The collector retrieves the selected scan in project mode with branch
+comparison disabled, selects the XML writer and writes logs in a private
+directory. If CxFlow cannot look up the
 exact project name, export XML from that project in CxSAST. This applies to
 project names containing Chinese, Japanese or Korean characters with CxFlow
 1.7.14. If CxFlow needs other environment variables or custom JVM options,

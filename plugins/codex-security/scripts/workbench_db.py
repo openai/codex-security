@@ -80,6 +80,7 @@ from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
+    loaded_plugin_version,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -139,6 +140,7 @@ from workbench_validation import (
     optional_text,
     parse_scan_cost,
     path_within_scope,
+    read_json_object,
     reject_non_finite_json,
     require_close_note,
     require_occurrence,
@@ -342,12 +344,7 @@ def workbench_completion_binding(
 ) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
-    plugin_manifest = read_json_object(
-        Path(__file__).resolve().parent.parent / ".codex-plugin" / "plugin.json"
-    )
-    plugin_version = plugin_manifest.get("version")
-    if not isinstance(plugin_version, str) or not plugin_version:
-        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
+    plugin_version = loaded_plugin_version()
     target: dict[str, Any] = {
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
@@ -659,7 +656,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
-            return workspace_state(connection, workspace["id"])
+            return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
         workspace_version = workspace["updated_at"]
         scan_id = str(uuid.uuid4())
         timestamp = now()
@@ -710,7 +707,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         if active is not None:
             if manages_transaction:
                 connection.commit()
-            return workspace_state(connection, workspace["id"])
+            return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
         if workspace["updated_at"] != workspace_version:
             raise SystemExit("Codex Security setup changed while the scan was starting. Try again.")
         current_target = require_remediation_target(str(target))
@@ -756,7 +753,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         if manages_transaction:
             connection.rollback()
         raise
-    return workspace_state(connection, workspace["id"])
+    return workspace_state(connection, workspace["id"], result_scan_id=scan_id)
 
 
 def _start_prompt_driven_scan(
@@ -1449,14 +1446,25 @@ def register_cli_scan(
         scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
+    surface = None
+    package_version = None
     if args.registration_json_stdin:
         registration = json.load(sys.stdin)
         recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
         user_context = registration.get("userContext")
         workflow_id = registration.get("workflowId")
+        if registration.get("surface") in ("cli", "sdk"):
+            surface = registration["surface"]
+        if isinstance(registration.get("packageVersion"), str):
+            package_version = registration["packageVersion"] or None
     else:
         recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
     recipe = parse_scan_recipe(recipe_json, repository)
+    launch_kind = "scan"
+    if isinstance(recipe.get("import"), dict):
+        launch_kind = "import"
+    elif recipe.get("mock") is True:
+        launch_kind = "mock"
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     recipe.pop("_codexSecurityFileScopes", None)
@@ -1581,6 +1589,9 @@ def register_cli_scan(
                 timestamp=timestamp,
                 handoff_status="delivered",
                 scan_dir=scan_dir,
+                surface=surface,
+                package_version=package_version,
+                launch_kind=launch_kind,
             )
             connection.execute(
                 "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
@@ -1593,14 +1604,19 @@ def register_cli_scan(
             )
             if workflow_id is not None:
                 register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
+            scan = connection.execute(
+                "SELECT scans.*, snapshot AS lifecycle_json FROM scans "
+                "JOIN scan_lifecycles ON scan_id = scans.id WHERE scans.id = ?",
+                (scan_id,),
+            ).fetchone()
             connection.commit()
     except BaseException:
         connection.rollback()
         raise
-    scan = require_scan(connection, scan_id)
     return {
         **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
         "contract": scan_contract(scan),
+        "lifecycle": json.loads(scan["lifecycle_json"]),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
@@ -2515,9 +2531,7 @@ def scan_result(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     backfill_legacy_finding_details(connection, scan)
-    progress = connection.execute(
-        "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
-    ).fetchone()
+    scan = scan_history.scan_with_progress(connection, scan["id"])
     artifact_rows = connection.execute(
         "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (scan["id"],)
     )
@@ -2567,26 +2581,26 @@ def scan_result(
         else None
     )
     progress_result = {
-        "candidates": {"reportable": progress["reportable_findings_count"]},
+        "candidates": {"reportable": scan["reportable_findings_count"]},
         "coverage": {
-            "closedRows": progress["review_items_completed"],
-            "filesTotal": progress["scope_file_count"],
-            "worklistRows": progress["review_items_total"],
+            "closedRows": scan["review_items_completed"],
+            "filesTotal": scan["scope_file_count"],
+            "worklistRows": scan["review_items_total"],
         },
         "phase": scan["phase"],
         "phaseProgress": {
-            "completed": progress["phase_items_completed"],
-            "total": progress["phase_items_total"],
-            "unit": progress["phase_progress_unit"],
+            "completed": scan["phase_items_completed"],
+            "total": scan["phase_items_total"],
+            "unit": scan["phase_progress_unit"],
         },
         "preflightProgress": {
-            "completed": progress["preflight_checks_completed"],
-            "total": progress["preflight_checks_total"],
+            "completed": scan["preflight_checks_completed"],
+            "total": scan["preflight_checks_total"],
         },
-        "preflightIssues": json.loads(progress["preflight_issues_json"]),
-        "reviewPass": progress["deep_review_pass"],
+        "preflightIssues": json.loads(scan["preflight_issues_json"]),
+        "reviewPass": scan["deep_review_pass"],
         "status": "canceled" if scan["canceled_at"] else scan["status"],
-        "updatedAt": progress["updated_at"],
+        "updatedAt": scan["progress_updated_at"],
     }
     review_updated_at = ""
     if independent_reviews is not None:
@@ -2605,6 +2619,7 @@ def scan_result(
         "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
         "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
+        "lifecycle": json.loads(scan["lifecycle_json"]),
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
             for row in occurrence_rows
@@ -2635,7 +2650,7 @@ def scan_result(
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
             scan["updated_at"],
-            progress["updated_at"],
+            scan["progress_updated_at"],
             review_updated_at,
             finding_management_updated_at(connection, scan["id"]) or "",
         ),
@@ -3106,19 +3121,6 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
                     "Scan output parent must not be group- or world-writable without the sticky bit."
                 )
     return scan_dir
-
-
-def read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"),
-            parse_constant=reject_non_finite_json,
-        )
-    except (OSError, ValueError) as exc:
-        raise SystemExit(f"{path.name}: invalid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise SystemExit(f"{path.name}: expected a JSON object.")
-    return payload
 
 
 _WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())

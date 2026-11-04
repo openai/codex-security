@@ -141,6 +141,44 @@ test.each([
   },
 );
 
+test("Wiz imports match Azure SSH remotes for their projected Checkmarx rows", async () => {
+  const url = "https://dev.azure.com/team/project/_git/repo";
+  const remote = "git@ssh.dev.azure.com:v3/team/project/repo";
+  await using fixture = await localReportFixture(
+    "wiz.json",
+    { provider: "wiz", sourceKey: "team/project" },
+    { remote },
+  );
+  const row = (url: string, scanner_origin: string | null = null) => ({
+    source_finding_id: url,
+    evidence: {
+      title: "Synthetic issue",
+      severity: "low" as const,
+      details: { kind: "sast" as const, scanner_origin, repository: { url } },
+    },
+  });
+  const prepare = (...findings: ReturnType<typeof row>[]) =>
+    fixture.prepareNormalized({
+      read: findings.length,
+      excluded: [],
+      findings,
+    });
+  expect((await prepare(row(url, "CxSAST"))).matchesRepositoryRemote).toBe(
+    true,
+  );
+  await expect(prepare(row(url + "-other", "CxSAST"))).rejects.toThrow(
+    /does not match a configured remote/,
+  );
+  fixture.git("remote", "add", "second", remote + "-other");
+  const sibling = {
+    ...row(url + "-other"),
+    source_finding_id: "blackduck-bom:" + "a".repeat(64),
+  };
+  await expect(prepare(row(url, "CxSAST"), sibling)).rejects.toThrow(
+    /repo-other.*does not match a configured remote/,
+  );
+});
+
 test("reads plain and gzipped UTF-16 CxSAST XML while keeping Checkmarx One JSON UTF-8", async () => {
   await using dir = await scopedTemporaryDirectory("checkmarx-encodings-");
   const file = join(dir.path, "report");

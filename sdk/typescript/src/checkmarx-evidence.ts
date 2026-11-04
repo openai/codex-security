@@ -2,7 +2,7 @@ import {
   type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
-import { text } from "./scanner-import.js";
+import { scannerSeverity, text } from "./scanner-import.js";
 
 interface CheckmarxOccurrence {
   format: "checkmarx-one-json" | "cxsast-xml";
@@ -18,28 +18,12 @@ interface CheckmarxOccurrence {
   sourceData: Record<string, unknown>;
 }
 
-function severity(value: unknown): string {
-  const level = text(value)?.toLowerCase();
-  switch (level) {
-    case "critical":
-    case "high":
-    case "medium":
-    case "low":
-      return level;
-    case "info":
-    case "information":
-    case "informational":
-      return "informational";
-    default:
-      return "unknown";
-  }
-}
-
 export function checkmarxEvidence(
   row: CheckmarxOccurrence,
   target: ExternalImportTarget,
 ) {
   const one = row.format === "checkmarx-one-json";
+  const severity = text(row.severity)?.toLowerCase();
   const cwe =
     typeof row.cwe === "number" || typeof row.cwe === "string"
       ? String(row.cwe)
@@ -47,7 +31,10 @@ export function checkmarxEvidence(
   return validateExternalEvidence(
     {
       title: row.title,
-      severity: severity(row.severity),
+      severity:
+        severity === "info" || severity === "information"
+          ? "informational"
+          : scannerSeverity(severity),
       description: row.description,
       source_scan_id: row.scanId,
       // Filenames are relative to the scanned sources, which can be a ZIP or subdirectory.
