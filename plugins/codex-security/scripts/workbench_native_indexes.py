@@ -227,7 +227,7 @@ def _indexed_findings(
         ),
         key=scan_history._scan_completion_order,
     )
-    latest_scan_by_repository = {scan_repository_group(row): row for row in completed_scans}
+    latest_scan_by_repository = {repository_group(row): row for row in completed_scans}
     selected_latest_scan_id = completed_scans[-1]["id"] if completed_scans else None
 
     grouped: dict[tuple[tuple[str, str], str], list[sqlite3.Row]] = {}
@@ -319,7 +319,7 @@ def _indexed_findings(
         component_latest_scan = max(
             (
                 latest_scan_by_repository[repository]
-                for repository in {scan_repository_group(row) for row in occurrences}
+                for repository in {repository_group(row) for row in occurrences}
                 if repository in latest_scan_by_repository
             ),
             key=scan_history._scan_completion_order,

@@ -2353,8 +2353,14 @@ def test_history_timestamp_preserves_fractional_order_and_ownership(workbench_ap
     birth = int((fraction + "1")[:9].ljust(9, "0"))
     assert birth <= timestamp < birth + 1
     scan = {"started_at": earlier, "created_at": earlier}
-    for birth_time, expected in ((birth, True), (birth + 1, False)):
-        identity = target_state.GitRepositoryIdentity("repository", ".", "common", 1, 2, birth_time)
+    for common_birth, object_birth, expected in (
+        (birth, birth, True),
+        (birth + 1, birth, False),
+        (birth, birth + 1, False),
+    ):
+        identity = target_state.GitRepositoryIdentity(
+            "repository", ".", "common", 1, 2, common_birth, object_birth
+        )
         assert target_state._repository_predates_history(identity, [scan]) is expected
 
 
@@ -2429,7 +2435,7 @@ def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
     legacy = next(
         finding for finding in global_findings if before["scanId"] in finding["knownScanIds"]
     )
-    assert legacy["confirmedInLatestScan"] is (not matched)
+    assert legacy["confirmedInLatestScan"] is False
     if matched:
         assert len(global_findings) == 1
         assert set(legacy["knownScanIds"]) == {before["scanId"], after["scanId"]}

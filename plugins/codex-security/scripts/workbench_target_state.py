@@ -217,6 +217,7 @@ class GitRepositoryIdentity:
     device: int | str
     inode: int | str
     birth_time_ns: int
+    object_birth_time_ns: int
     previous_value: str | None = None
 
     @property
@@ -302,7 +303,14 @@ def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | 
             "repository_v3_sha256_",
         )
     return GitRepositoryIdentity(
-        value, relative, canonical_directory, device, inode, birth_time_ns, previous_value
+        value,
+        relative,
+        canonical_directory,
+        device,
+        inode,
+        birth_time_ns,
+        object_birth_time_ns,
+        previous_value,
     )
 
 
@@ -849,9 +857,8 @@ def _repository_predates_history(
         if scans
         else [_timestamp_ns(empty_timestamp)]
     )
-    return all(value is not None for value in timestamps) and identity.birth_time_ns <= min(
-        timestamps
-    )
+    repository_birth = max(identity.birth_time_ns, identity.object_birth_time_ns)
+    return all(value is not None for value in timestamps) and repository_birth <= min(timestamps)
 
 
 def normalize_pre_release_repository_identities(connection: sqlite3.Connection) -> None:

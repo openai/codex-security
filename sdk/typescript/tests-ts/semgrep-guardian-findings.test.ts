@@ -180,6 +180,41 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
     locations: [],
     source_data: { finding: sca.structuredContent.findings[0] },
   });
+  await using wrongProvider = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "wiz", sourceKey: "test" },
+    { remote: "https://github.com/other/service" },
+  );
+  for (const input of [normalized, { ...normalized, report: undefined }]) {
+    await expect(wrongProvider.prepareNormalized(input)).rejects.toThrow(
+      /semgrep provider/,
+    );
+  }
+  const original = normalized.findings[0]!;
+  await using source = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const otherUrl = "https://github.com/other/service";
+  source.git("remote", "add", "upstream", otherUrl);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      report: { ...normalized.report, repositoryUrl: otherUrl },
+    }),
+  ).rejects.toThrow(/recorded selection/);
+  await expect(
+    source.prepareNormalized({
+      ...normalized,
+      findings: [
+        {
+          ...original,
+          source_finding_id: "semgrep-guardian:" + "0".repeat(64),
+        },
+      ],
+    }),
+  ).rejects.toThrow(/original Guardian finding/);
   expect(normalized.findings[0]!.evidence.packages ?? []).toEqual([]);
   expect(normalized.findings[0]!.source_finding_id).not.toBe(
     normalizeSemgrepFindings(capture, {}, "local").findings[0]!
@@ -197,6 +232,65 @@ test("Guardian Supply Chain retains its summary and checks the operator's checko
   await fixture.writeJson(sca);
   await expect(fixture.prepare()).rejects.toThrow(/configured remote/);
   expect(await fixture.read()).toHaveLength(0);
+});
+
+test("normalized Guardian imports verify the original finding against the selected scope", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  const original = normalized.findings[0]!;
+  for (const changed of [
+    { ...row, repository: { name: "other/service" } },
+    { ...row, ref: "refs/heads/other" },
+    { ...row, issueType: "ISSUE_TYPE_SCA" },
+  ]) {
+    await expect(
+      fixture.prepareNormalized({
+        ...normalized,
+        findings: [
+          {
+            ...original,
+            evidence: {
+              ...original.evidence,
+              source_data: {
+                ...original.evidence.source_data,
+                finding: changed,
+              },
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow(/does not match the selected/);
+  }
+});
+
+test("normalized Guardian repository claims use the checkout's HTTP port identity", async () => {
+  await using fixture = await isolatedGitReportFixture(
+    "guardian.json",
+    { provider: "semgrep", sourceKey: "test" },
+    { remote: sourceRepositoryUrl },
+  );
+  const normalized = normalizeSemgrepFindings(capture, {}, "local");
+  const withReportPort = (port: number) => ({
+    ...normalized,
+    report: {
+      ...normalized.report,
+      repositoryUrl: sourceRepositoryUrl.replace(
+        "github.com/",
+        `github.com:${port}/`,
+      ),
+    },
+  });
+  expect(
+    (await (await fixture.prepareNormalized(withReportPort(443))).import())
+      .counts.created,
+  ).toBe(1);
+  await expect(fixture.prepareNormalized(withReportPort(8443))).rejects.toThrow(
+    /recorded selection/,
+  );
 });
 
 test("SDK exports containing Guardian findings fail before Cloud credential lookup", async () => {
