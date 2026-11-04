@@ -71,6 +71,8 @@ export interface NativeScanSemanticInputs {
   config: JsonObject;
   modelSettings: ReturnType<typeof scanModelConfiguration>;
   instructionSettingsMatch: boolean;
+  modelInstructionsFileSha256: string | null;
+  compactPromptFileSha256: string | null;
 }
 
 export interface NativeScanInput {
@@ -235,26 +237,23 @@ export async function readNativeScanSemanticInputs(
     knowledgeBaseSnapshot,
     deepScanSettings,
     config,
-    instructionSettingsMatch:
-      config["developer_instructions"] ===
-        savedConfig["developer_instructions"] &&
-      config["model_instructions_file"] ===
-        savedConfig["model_instructions_file"] &&
-      (await promptFileDigest(
-        typeof config["model_instructions_file"] === "string"
-          ? config["model_instructions_file"]
-          : undefined,
-        signal,
-      )) ===
-        (savedRecipe?.scanInputs?.["modelInstructionsFileSha256"] ?? null) &&
-      config["experimental_compact_prompt_file"] ===
-        savedConfig["experimental_compact_prompt_file"] &&
-      (await promptFileDigest(
-        typeof config["experimental_compact_prompt_file"] === "string"
-          ? config["experimental_compact_prompt_file"]
-          : undefined,
-        signal,
-      )) === (savedRecipe?.scanInputs?.["compactPromptFileSha256"] ?? null),
+    instructionSettingsMatch: [
+      "developer_instructions",
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+    ].every((key) => config[key] === savedConfig[key]),
+    modelInstructionsFileSha256: await promptFileDigest(
+      typeof config["model_instructions_file"] === "string"
+        ? config["model_instructions_file"]
+        : undefined,
+      signal,
+    ),
+    compactPromptFileSha256: await promptFileDigest(
+      typeof config["experimental_compact_prompt_file"] === "string"
+        ? config["experimental_compact_prompt_file"]
+        : undefined,
+      signal,
+    ),
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

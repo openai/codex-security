@@ -1059,23 +1059,36 @@ export function createCodexSecurityServer(): McpServer {
           isJsonObject(begun.scan.progress) &&
           begun.scan.progress.status === "complete"
         ) {
+          const savedRecipe = isJsonObject(begun.recipe)
+            ? (begun.recipe as unknown as NativeScanInput["recipe"])
+            : undefined;
           semanticInputs = await readNativeScanSemanticInputs(
             modelSettings,
             abortSignalFromExtra(extra),
-            isJsonObject(begun.recipe)
-              ? (begun.recipe as unknown as NativeScanInput["recipe"])
-              : undefined,
+            savedRecipe,
             projectConfigPath !== undefined &&
               isJsonObject(begun.deepScanSettings)
               ? begun.deepScanSettings
               : undefined,
           );
+          // Profile-only instructions are compared in memory. Only readable recipe
+          // fields cross the workbench process boundary.
+          const savedConfig = savedRecipe?.config;
           begun = await begin([
             "--completed-inputs-json",
             JSON.stringify({
               completedScanId: semanticInputs.instructionSettingsMatch
                 ? begun.scan.scanId
                 : null,
+              developerInstructions:
+                savedConfig?.["developer_instructions"] ?? null,
+              modelInstructionsFile:
+                savedConfig?.["model_instructions_file"] ?? null,
+              modelInstructionsFileSha256:
+                semanticInputs.modelInstructionsFileSha256,
+              compactPromptFile:
+                savedConfig?.["experimental_compact_prompt_file"] ?? null,
+              compactPromptFileSha256: semanticInputs.compactPromptFileSha256,
               knowledgeBase: scanInputIdentity(
                 undefined,
                 semanticInputs.knowledgeBaseSnapshot,
@@ -1099,7 +1112,7 @@ export function createCodexSecurityServer(): McpServer {
           });
         }
         const terminal = await nativeScanTerminalResult(scan, nativeScans);
-        if (terminal) return terminal;
+        if (terminal) return withScanTarget(terminal, scan.scanId);
         await nativeScans.run(
           {
             scan,
@@ -1132,13 +1145,19 @@ export function createCodexSecurityServer(): McpServer {
           "--scan-id",
           scan.scanId,
         ]);
-        return nativeScanCompletedResult(
-          scan,
-          nativeCompletionMetadata(completed.scan),
+        return withScanTarget(
+          await nativeScanCompletedResult(
+            scan,
+            nativeCompletionMetadata(completed.scan),
+          ),
+          scan.scanId,
         );
       } catch (error: unknown) {
         if (error instanceof ScanPermissionError)
-          return toolErrorResult(deepScanInvocationFailureMessage(error));
+          return withScanTarget(
+            toolErrorResult(deepScanInvocationFailureMessage(error)),
+            startedScan?.scanId,
+          );
         if (startedScan) {
           const current = await runWorkbench([
             "get-scan",
@@ -1150,10 +1169,13 @@ export function createCodexSecurityServer(): McpServer {
               current.scan as unknown as ScanResults,
               nativeScans,
             );
-            if (terminal) return terminal;
+            if (terminal) return withScanTarget(terminal, startedScan.scanId);
           }
         }
-        return toolErrorResult(deepScanInvocationFailureMessage(error));
+        return withScanTarget(
+          toolErrorResult(deepScanInvocationFailureMessage(error)),
+          startedScan?.scanId,
+        );
       }
     },
   );
@@ -1181,15 +1203,27 @@ export function createCodexSecurityServer(): McpServer {
         throw error;
       }
     }
-    const result = isJsonObject(workspace.results)
+    const { canceledScanId, ...displayedWorkspace } = workspace;
+    const displayed = isJsonObject(workspace.results)
       ? workspace.results
       : undefined;
+    const replaced =
+      typeof displayed?.scanId === "string" && displayed.scanId !== scanId;
+    const saved = replaced
+      ? (await runWorkbench(["get-scan", "--scan-id", scanId])).scan
+      : displayed;
+    const result = isJsonObject(saved) ? saved : undefined;
+    const display = (retained: unknown) =>
+      workspaceResult(
+        (replaced ? displayedWorkspace : retained) as WorkspaceState,
+        canceledScanId === scanId ? scanId : undefined,
+      );
     const progress =
       result && isJsonObject(result.progress) ? result.progress : undefined;
     if (progress?.status === "complete") {
       await nativeScans.wait(scanId);
       const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
-      return workspaceResult(current.workspace as unknown as WorkspaceState);
+      return display(current.workspace);
     }
     let pending = stoppingScans.get(scanId);
     if (pending === undefined) {
@@ -1200,7 +1234,7 @@ export function createCodexSecurityServer(): McpServer {
       stoppingScans.set(scanId, pending);
     }
     const retained = await pending;
-    return workspaceResult(retained.workspace as unknown as WorkspaceState);
+    return display(retained.workspace);
   };
 
   server.registerTool(

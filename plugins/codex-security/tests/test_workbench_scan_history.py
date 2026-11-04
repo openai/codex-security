@@ -669,7 +669,7 @@ def test_migration_preserves_historical_worker_thread_associations(tmp_path: Pat
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("DROP TABLE scan_execution_threads")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 63")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 65")
     run_workbench(state_dir, "database-info")
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert detail["continuationThreadId"] is None

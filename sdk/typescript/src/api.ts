@@ -2465,7 +2465,7 @@ export class CodexSecurity {
               onCost: reportSavedCost,
             });
             await options.onRegisteredScan?.(registered.registration);
-            const { result, warnings } = await publishScan(
+            const { result, warnings, completedScan } = await publishScan(
               {
                 scanId: registered.scanId,
                 scanDir,
@@ -2481,6 +2481,13 @@ export class CodexSecurity {
               true,
             );
             reportWarnings(warnings);
+            notifyScanLifecycle(options, completedScan, true);
+            await finalizeScanUsage(
+              registered.scanId,
+              readOptions,
+              completedScan,
+              "completed",
+            );
             if (!options.deepScanPass)
               try {
                 result.repositoryFindings = (await listRepositoryFindings(
@@ -2990,7 +2997,15 @@ export class CodexSecurity {
           cost,
           true,
         );
+        activeScan = null;
         reportWarnings(published.warnings);
+        notifyScanLifecycle(options, published.completedScan, true);
+        await finalizeScanUsage(
+          scanId,
+          workbenchOptions,
+          published.completedScan,
+          "completed",
+        );
         if (!options.deepScanPass)
           published.result.repositoryFindings = (await listRepositoryFindings(
             (args) => workbench(workbenchOptions, args),

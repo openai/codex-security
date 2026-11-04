@@ -1452,32 +1452,32 @@ test("pre-release composition history moves without shadowing editable scan name
   const database = memory(t);
   applyMigrations(
     database,
-    migrations.filter((item) => item.version <= 43 || item.version >= 61),
+    migrations.filter((item) => item.version <= 43 || item.version >= 63),
   );
   database.exec(
     "DELETE FROM schema_migrations WHERE version = 42; ALTER TABLE scans DROP COLUMN name;",
   );
   for (const [from, to] of [
     [43, 42],
-    [61, 43],
-    [62, 44],
-    [63, 45],
-    [64, 46],
-    [65, 48],
-    [66, 49],
+    [63, 43],
+    [64, 44],
+    [65, 45],
+    [66, 46],
+    [67, 48],
+    [68, 49],
   ])
     database
       .prepare("UPDATE schema_migrations SET version = ? WHERE version = ?")
       .run(to, from);
   database.exec(
-    "INSERT INTO schema_migrations VALUES (61, 'synthetic conflicting history', 'created')",
+    "INSERT INTO schema_migrations VALUES (63, 'synthetic conflicting history', 'created')",
   );
   const history = () =>
     database.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
   const before = history();
   assert.throws(() => applyMigrations(database));
   assert.deepEqual(history(), before);
-  database.exec("DELETE FROM schema_migrations WHERE version = 61");
+  database.exec("DELETE FROM schema_migrations WHERE version = 63");
   applyMigrations(database);
   assertMigrationNames(
     database,
@@ -1496,6 +1496,8 @@ test("pre-release composition history moves without shadowing editable scan name
     64,
     65,
     66,
+    67,
+    68,
   );
   assert.ok(
     database

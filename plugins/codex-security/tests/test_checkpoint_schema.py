@@ -125,7 +125,14 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             if "source_scopes_json" not in original:
                 source_scopes = updated.pop("source_scopes_json")
                 assert source_scopes is None
-            assert updated.pop("parent_scan_role") is None
+            for field in (
+                "launch_surface",
+                "launch_package_version",
+                "launch_plugin_version",
+                "launch_kind",
+                "parent_scan_role",
+            ):
+                assert updated.pop(field) == original.pop(field, None)
             assert updated == original
 
         connection.execute(

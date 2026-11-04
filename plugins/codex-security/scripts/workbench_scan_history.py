@@ -116,7 +116,7 @@ def cli_scan_resume(
     recipe = wb.parse_scan_recipe(
         scan["recipe_json"], repository, require_existing_paths=producer_version is None
     )
-    result = scan_registration(connection, scan, wb.scan_contract)
+    result = scan_registration(scan, wb.scan_contract)
     result["recipe"] = recipe
     if producer_version is not None:
         result["sealedProducerVersion"] = producer_version
@@ -124,15 +124,13 @@ def cli_scan_resume(
 
 
 def scan_registration(
-    connection: sqlite3.Connection,
     scan: sqlite3.Row,
     scan_contract: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    scan = scan_with_progress(connection, scan["id"])
     return {
         "contract": scan_contract(scan),
-        "recipe": json.loads(scan["recipe_json"]),
         "lifecycle": json.loads(scan["lifecycle_json"]),
+        "recipe": json.loads(scan["recipe_json"]),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
         "scopeFileCount": scan["scope_file_count"],
@@ -183,13 +181,19 @@ def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) ->
     inputs = recipe.get("scanInputs") or {}
     config = recipe.get("config") or {}
     return (
-        scan["id"] == requested.get("completedScanId")
+        scan["id"] == requested.get("completedScanId", scan["id"])
         and "knowledgeBase" in inputs
         and inputs["knowledgeBase"] == requested["knowledgeBase"]
         and recipe.get("deepScan") == requested["deepScan"]
         and config.get("model") == requested["model"]
         and config.get("model_reasoning_effort") == requested["reasoningEffort"]
         and config.get("service_tier") == requested.get("serviceTier")
+        and config.get("developer_instructions") == requested.get("developerInstructions")
+        and config.get("model_instructions_file") == requested.get("modelInstructionsFile")
+        and inputs.get("modelInstructionsFileSha256")
+        == requested.get("modelInstructionsFileSha256")
+        and config.get("experimental_compact_prompt_file") == requested.get("compactPromptFile")
+        and inputs.get("compactPromptFileSha256") == requested.get("compactPromptFileSha256")
     )
 
 

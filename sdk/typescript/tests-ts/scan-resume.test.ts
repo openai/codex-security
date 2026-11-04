@@ -2412,9 +2412,13 @@ with sqlite3.connect(sys.argv[1]) as connection:
   await using client = resumeClient(f, () => {
     throw new Error("A sealed native scan must not create a model client");
   })({ pluginPath: PLUGIN_ROOT, codexOverrides: f.recipe.config });
+  const observed: string[] = [];
   const result = await client.run(f.repository, {
     mode: "deep",
     outputDir: f.scanDir,
+    onLifecycle: (scan) => {
+      observed.push(scan.status);
+    },
     registeredScan: {
       scanId: f.scanId,
       scanDir: f.scanDir,
@@ -2423,6 +2427,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     ...f.recipe.deepScan,
     requireCost: true,
   });
+  expect(observed).toEqual(["running", "completed"]);
   expect(result.cost).toEqual(cost);
   expect(result.threadId).toBe(f.threadId);
   expect(

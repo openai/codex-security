@@ -91,11 +91,11 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
     preserve = workbench.saved_results.preserve_stopped_results_after_transition
     replacement_id = None
 
-    def start_replacement(db, connection, canceled_id):
+    def start_replacement(db, connection, canceled_id, *, stop_children=False):
         nonlocal replacement_id
         assert canceled_id == scan_id
         replacement_id = start_scan_command(state_dir, workspace_id)["results"]["scanId"]
-        preserve(db, connection, canceled_id)
+        preserve(db, connection, canceled_id, stop_children=stop_children)
 
     monkeypatch.setattr(
         workbench.saved_results, "preserve_stopped_results_after_transition", start_replacement
