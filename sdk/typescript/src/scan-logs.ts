@@ -34,7 +34,7 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
-  lifecycle?: { startedAt: string };
+  lifecycle?: { startedAt: string; finishedAt?: string | null };
   progress?: { status?: string; updatedAt?: string };
 };
 
@@ -64,7 +64,7 @@ export function readSavedScanLogs(
         : scan.progress?.status === "complete" ||
             scan.progress?.status === "failed" ||
             scan.progress?.status === "canceled"
-          ? (scan.progress.updatedAt ?? "")
+          ? (scan.lifecycle?.finishedAt ?? scan.progress.updatedAt ?? "")
           : "",
   });
 }
@@ -152,10 +152,30 @@ export async function readScanLogs(options: ScanLogOptions) {
         : null
       : sessionStartedAt(options.startedAt);
   if (options.scanDirectory && startedAt !== null) {
+    const directories = [options.scanDirectory];
+    const name = basename(options.scanDirectory);
+    for (const marker of name.matchAll(/\.previous-/g)) {
+      if (!marker.index) continue;
+      const original = join(
+        dirname(options.scanDirectory),
+        name.slice(0, marker.index),
+      );
+      // A Desktop owner can work outside the scan directory. Its registered
+      // workers provide the same binding after archiving the output.
+      if (
+        (root?.workingDirectory != null &&
+          relative(original, root.workingDirectory) === "") ||
+        Array.from(traversed).some((threadId) => {
+          const cwd = logs.get(threadId)?.[0].workingDirectory;
+          return cwd != null && isScanArtifactDirectory(original, cwd);
+        })
+      )
+        directories.push(original);
+    }
     for (const session of children.get(null) ?? []) {
       if (
         session !== root &&
-        belongsToScan(session, root, startedAt, options)
+        belongsToScan(session, directories, startedAt, options.completedAt)
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
@@ -215,13 +235,11 @@ export async function readScanLogs(options: ScanLogOptions) {
 
 function belongsToScan(
   session: SessionLog,
-  root: SessionLog | undefined,
+  directories: string[],
   startedAt: number,
-  options: ScanLogOptions,
+  completedAt: string | null | undefined,
 ): boolean {
-  const { scanDirectory, completedAt } = options;
   if (
-    scanDirectory === undefined ||
     session.workingDirectory === null ||
     session.startedAt === null ||
     session.startedAt < startedAt
@@ -235,21 +253,7 @@ function belongsToScan(
     }
   }
 
-  const roots = [scanDirectory];
-  const name = basename(scanDirectory);
-  const marker = name.lastIndexOf(".previous-");
-  if (
-    marker > 0 &&
-    root?.workingDirectory != null &&
-    relative(
-      join(dirname(scanDirectory), name.slice(0, marker)),
-      root.workingDirectory,
-    ) === ""
-  ) {
-    roots.push(root.workingDirectory);
-  }
-
-  for (const directoryRoot of roots) {
+  for (const directoryRoot of directories) {
     if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {
       return true;
     }
