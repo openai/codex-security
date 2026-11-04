@@ -7743,12 +7743,14 @@ describe("patch change tracking", () => {
           "origin",
           `${kind === "required" ? "http://127.0.0.1:1" : proxy}/repository.git`,
         );
-        git("config", "remote.origin.proxy", kind === "required" ? proxy : "");
-        const globalConfig = join(directory, ".git", "global-config");
-        await writeFile(
-          globalConfig,
-          kind === "empty" ? "[http]\nproxy = http://127.0.0.1:1\n" : "",
+        const globalConfig = join(
+          await fixtures.create("patch-proxy-config-"),
+          "gitconfig",
         );
+        const setConfig = (key: string, value: string) =>
+          git("config", "--file", globalConfig, key, value);
+        setConfig("http.proxy", "http://127.0.0.1:1");
+        setConfig("remote.origin.proxy", kind === "required" ? proxy : "");
         const environment = {
           GIT_CONFIG_GLOBAL: globalConfig,
           GIT_CONFIG_NOSYSTEM: "1",
