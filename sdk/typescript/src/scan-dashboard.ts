@@ -664,25 +664,44 @@ export class ScanDashboard {
           isFileInventory(entry) &&
           isFileInventory(activity)),
     );
-    const previousRows =
-      this.#scrollOffset === 0 ? 0 : this.#activityLines(this.#width()).length;
     const recordedAt =
       existing < 0
         ? this.#options.clock.now()
         : this.#activities[existing]!.recordedAt;
     const entry = { ...activity, recordedAt };
+    if (this.#view === "activity" && this.#scrollOffset !== 0) {
+      const width = this.#width();
+      const newRows = this.#summaryLines(width, [entry]).length;
+      if (existing < 0) {
+        // Count the append before evicting the oldest entry.
+        this.#scrollOffset += newRows;
+      } else {
+        const oldRows = this.#summaryLines(width, [
+          this.#activities[existing]!,
+        ]).length;
+        if (newRows !== oldRows) {
+          const rowsAfter = this.#summaryLines(
+            width,
+            this.#activities.slice(existing + 1),
+          ).length;
+          const topFromEnd =
+            this.#scrollOffset +
+            this.#activityRows(this.#usageLayout().footer.length);
+          if (rowsAfter < topFromEnd) {
+            // Changes above the viewport move its index but not its distance from the end.
+            this.#scrollOffset = Math.max(
+              0,
+              this.#scrollOffset +
+                Math.max(newRows - oldRows, rowsAfter - topFromEnd),
+            );
+          }
+        }
+      }
+    }
     if (existing < 0) {
       this.#activities.push(entry);
     } else {
       this.#activities[existing] = entry;
-    }
-    // Count the added rows before dropping old entries above the view, so a
-    // scrolled view stays in place once history reaches its cap.
-    if (this.#scrollOffset !== 0) {
-      this.#scrollOffset += Math.max(
-        0,
-        this.#activityLines(this.#width()).length - previousRows,
-      );
     }
     if (this.#activities.length > MAX_HISTORY_ENTRIES) {
       this.#activities.splice(0, this.#activities.length - MAX_HISTORY_ENTRIES);
@@ -1239,6 +1258,13 @@ export class ScanDashboard {
       }
       return cache.lines;
     }
+    return this.#summaryLines(width, this.#activities);
+  }
+
+  #summaryLines(
+    width: number,
+    activities: readonly TimedScanActivity[],
+  ): DashboardActivityLine[] {
     const elapsed = Math.max(
       0,
       Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000),
@@ -1305,7 +1331,7 @@ export class ScanDashboard {
         }
       }
     };
-    for (const entry of this.#activities) {
+    for (const entry of activities) {
       const kind: DashboardActivityKind = entry.id.startsWith("scan-note-")
         ? /\b(?:warning|unavailable|interrupted|retrying)\b|could not be confirmed|capacity changed/iu.test(
             entry.description,
